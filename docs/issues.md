@@ -38,3 +38,7 @@ Verification reproduced an empty-composer crash after End followed by typing. Th
 ## KS-009. Native verification keyboard restart
 
 Status is open. A nested Sway restart after temporary `wtype` keyboard use hit GPUI 0.2.2's `keymap_state.as_mut().unwrap()` while handling a Wayland keyboard modifiers event, before a window appeared. Sending a fresh keyboard event through the driver before launch recovered that session. Virtual keyboard event ordering is the suspected cause. The exact dependency panic was observed by launching the app against the same disposable state and compositor. This is separate from snapshot restoration and the fixed composer geometry crash.
+
+## KS-010. GPUI 0.2.2 text ellipsis
+
+Status is open with a workaround. Native screenshots showed session titles rendered as a bare `...`, and a gallery label clipped without an ellipsis. GPUI 0.2.2's text element caches the first measured size of non-wrapping text and reuses it whatever width later layout passes offer, so `text_ellipsis` truncates to the first width it saw. `Label::truncate` in keystone-ui therefore clips to one line without an ellipsis. Revisit when upgrading GPUI. Evidence is in `.audit/verify-design-system-20261015T153154/0004.png`.

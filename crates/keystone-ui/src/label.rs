@@ -42,7 +42,8 @@ impl Label {
         self
     }
 
-    /// Clips to one line with an ellipsis. The parent must constrain the width.
+    /// Clips to one line. GPUI 0.2.2's `text_ellipsis` caches its first measurement, which can
+    /// leave only the ellipsis visible, so this clips without one. See KS-010.
     pub fn truncate(mut self) -> Self {
         self.truncate = true;
         self
@@ -61,7 +62,9 @@ impl RenderOnce for Label {
             .text_color(self.color.to_hsla(cx))
             .font_weight(self.weight)
             .when(self.mono, |d| d.font_family(cx.theme().fonts.mono.clone()))
-            .when(self.truncate, |d| d.w_full().min_w_0().truncate())
+            .when(self.truncate, |d| {
+                d.min_w_0().overflow_hidden().whitespace_nowrap()
+            })
             .child(self.text)
     }
 }
