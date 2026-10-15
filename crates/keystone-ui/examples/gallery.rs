@@ -210,7 +210,10 @@ impl Render for Gallery {
                     .child(Label::new("keystone-ui").size(TextSize::Title))
                     .child(section("BUTTONS", buttons))
                     .child(section("ICON BUTTONS", icon_buttons))
-                    .child(section("POPOVER MENU", div().h(px(150.)).child(menu)))
+                    .child(section(
+                        "POPOVER MENU",
+                        h_flex().h(px(150.)).items_start().child(menu),
+                    ))
                     .child(section("LIST ITEMS", list))
                     .child(section("LABELS", labels))
                     .child(section("ICONS", icons))
