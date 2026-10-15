@@ -5,6 +5,7 @@ Run from anywhere: python scripts/perf.py [--runs N] [--note TEXT] [--no-log]
 """
 import argparse
 import datetime
+import json
 import os
 import pathlib
 import re
@@ -16,7 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOG = ROOT / 'docs/perf-log.tsv'
 COLUMNS = ['date', 'commit', 'touch_desktop_s', 'touch_ui_s', 'desktop_debug_mb',
            'sidebar_draw_ms', 'note']
-BUILD = ['cargo', 'build', '-p', 'keystone-desktop', '--locked', '--offline', '-q']
+BUILD = ['cargo', 'build', '-p', 'keystone-desktop', '--locked', '-q']
 
 
 def run(cmd):
@@ -38,13 +39,19 @@ def sidebar_draw_ms(runs):
     for _ in range(runs):
         out = subprocess.run(
             ['cargo', 'test', '-p', 'keystone-desktop', '--features', 'ui-tests', '--locked',
-             '--offline', '-q', 'perf_', '--', '--ignored', '--nocapture'],
+             '-q', 'perf_', '--', '--ignored', '--nocapture'],
             cwd=ROOT, check=True, capture_output=True, text=True)
         match = re.search(r'PERF sidebar_draw_ms=([0-9.]+)', out.stdout + out.stderr)
         if not match:
             raise SystemExit('render benchmark printed no PERF line')
         samples.append(float(match.group(1)))
     return statistics.median(samples)
+
+
+def target_dir():
+    metadata = subprocess.run(['cargo', 'metadata', '--format-version', '1', '--no-deps'],
+                              cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    return pathlib.Path(json.loads(metadata)['target_directory'])
 
 
 def commit():
@@ -68,7 +75,7 @@ def main():
         'commit': commit(),
         'touch_desktop_s': f"{timed_rebuild('crates/keystone-desktop/src/main.rs', args.runs):.2f}",
         'touch_ui_s': f"{timed_rebuild('crates/keystone-ui/src/button.rs', args.runs):.2f}",
-        'desktop_debug_mb': f"{os.path.getsize(ROOT / 'target/debug/keystone-desktop') / 1e6:.0f}",
+        'desktop_debug_mb': f"{os.path.getsize(target_dir() / 'debug/keystone-desktop') / 1e6:.0f}",
         'sidebar_draw_ms': f'{sidebar_draw_ms(args.runs):.2f}',
         'note': args.note,
     }

@@ -2,8 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fmt --all --check
-if grep -rnE '\b(rgba?|hsla)\(' crates --include='*.rs' | grep -v '^crates/keystone-ui/src/theme.rs:'; then
-  echo 'Color literals belong in crates/keystone-ui/src/theme.rs. Use a theme token or Color.' >&2
+if grep -rnE '\b(rgba?|hsla|black|white|transparent_black|transparent_white|red|blue|green|yellow|opaque_grey)\(' crates --include='*.rs' | grep -v '^crates/keystone-ui/src/theme.rs:'; then
+  echo 'Colors belong in crates/keystone-ui/src/theme.rs. Use a theme token or Color.' >&2
   exit 1
 fi
 case "${1:-core}" in

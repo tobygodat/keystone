@@ -1,11 +1,11 @@
 # Design system
 
-`crates/keystone-ui` holds Keystone's theme, tokens, icons, and shared controls. The desktop app builds its interface from these components. It does not style controls inline.
+`crates/keystone-ui` holds Keystone's theme, tokens, icons, and shared controls. The desktop app builds its controls from these components. Layout containers in the app still use GPUI styling, with colors taken from theme tokens.
 
 ## Rules
 
-- Colors live only in `crates/keystone-ui/src/theme.rs`. `scripts/check.sh` fails on an `rgb(`, `rgba(`, or `hsla(` literal anywhere else.
-- Components read the theme through `cx.theme()` when they render. Call sites never pass colors or a theme.
+- Colors live only in `crates/keystone-ui/src/theme.rs`. `scripts/check.sh` fails on GPUI color constructors such as `rgb(`, `hsla(`, or `white(` anywhere else.
+- Components read the theme through `cx.theme()` when they render. Call sites pass semantic `Color` values, not raw colors.
 - Hover, press, and selection are translucent white washes over the parent surface, so one state color works on the rail, the sidebar, and popovers.
 - Interactive components accept `debug_selector`, so GPUI simulated-input tests can find them.
 - Disabled controls ignore clicks and show a not-allowed cursor.
