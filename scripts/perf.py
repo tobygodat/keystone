@@ -33,15 +33,18 @@ def timed_rebuild(path, runs):
     return statistics.median(samples)
 
 
-def sidebar_draw_ms():
-    out = subprocess.run(
-        ['cargo', 'test', '-p', 'keystone-desktop', '--features', 'ui-tests', '--locked',
-         '--offline', '-q', 'perf_', '--', '--ignored', '--nocapture'],
-        cwd=ROOT, check=True, capture_output=True, text=True)
-    match = re.search(r'PERF sidebar_draw_ms=([0-9.]+)', out.stdout + out.stderr)
-    if not match:
-        raise SystemExit('render benchmark printed no PERF line')
-    return float(match.group(1))
+def sidebar_draw_ms(runs):
+    samples = []
+    for _ in range(runs):
+        out = subprocess.run(
+            ['cargo', 'test', '-p', 'keystone-desktop', '--features', 'ui-tests', '--locked',
+             '--offline', '-q', 'perf_', '--', '--ignored', '--nocapture'],
+            cwd=ROOT, check=True, capture_output=True, text=True)
+        match = re.search(r'PERF sidebar_draw_ms=([0-9.]+)', out.stdout + out.stderr)
+        if not match:
+            raise SystemExit('render benchmark printed no PERF line')
+        samples.append(float(match.group(1)))
+    return statistics.median(samples)
 
 
 def main():
@@ -59,7 +62,7 @@ def main():
         'touch_desktop_s': f"{timed_rebuild('crates/keystone-desktop/src/main.rs', args.runs):.2f}",
         'touch_ui_s': f"{timed_rebuild('crates/keystone-ui/src/button.rs', args.runs):.2f}",
         'desktop_debug_mb': f"{os.path.getsize(ROOT / 'target/debug/keystone-desktop') / 1e6:.0f}",
-        'sidebar_draw_ms': f'{sidebar_draw_ms():.2f}',
+        'sidebar_draw_ms': f'{sidebar_draw_ms(args.runs):.2f}',
         'note': args.note,
     }
     print('\t'.join(f'{k}={row[k]}' for k in COLUMNS))

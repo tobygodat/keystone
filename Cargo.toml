@@ -11,3 +11,8 @@ publish = false
 [profile.dev]
 debug = 1
 
+
+# GPUI, taffy, and text shaping are slow unoptimized. Optimizing dependencies keeps
+# workspace crates fast to rebuild while making debug runs and tests render quickly.
+[profile.dev.package."*"]
+opt-level = 2
