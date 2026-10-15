@@ -397,7 +397,14 @@ impl Keystone {
                     )
             })
             .collect::<Vec<_>>();
-        let no_matches = sessions.is_empty();
+        let empty = match (
+            sessions.is_empty(),
+            self.store.workspace().sessions().is_empty(),
+        ) {
+            (false, _) => None,
+            (true, true) => Some("No sessions yet. Press + to start one."),
+            (true, false) => Some("No sessions match these filters"),
+        };
         v_flex()
             .w(px(256.))
             .flex_shrink_0()
@@ -481,13 +488,12 @@ impl Keystone {
                     .px_1p5()
                     .pt_1()
                     .gap(px(2.))
-                    .when(no_matches, |d| {
+                    .when_some(empty, |d, message| {
                         d.child(
-                            div().px_2().py_2().child(
-                                Label::new("No sessions match these filters")
-                                    .size(TextSize::Ui)
-                                    .color(Color::Muted),
-                            ),
+                            div()
+                                .px_2()
+                                .py_2()
+                                .child(Label::new(message).size(TextSize::Ui).color(Color::Muted)),
                         )
                     })
                     .children(sessions),
