@@ -1,10 +1,11 @@
 //! Child processes for providers: spawn, line framing, stdin writes, a stderr tail,
 //! and process-tree teardown. Drivers never touch any of this.
 //!
-//! Teardown never signals a bare PID that may have been reused. The leader and its
-//! process group are signalled only while the leader is unreaped, which reserves its
-//! PID. Descendants are signalled through pidfds, each checked against the process
-//! it was found as.
+//! Teardown never signals a bare PID that may have been reused. The leader is
+//! signalled only while unreaped. Its process group is signalled only while its ID is
+//! reserved: a sentinel child of Keystone sits in the group, unreaped, until teardown
+//! ends, so the kernel cannot hand that ID to anyone else. Descendants in other groups
+//! are signalled through pidfds, each re-checked as it is found.
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -38,13 +39,22 @@ pub struct Process {
 
 struct Life {
     pid: u32,
-    /// Set, under `lock`, just before the leader is reaped. Until then its PID and
-    /// process group ID cannot be reused.
+    /// Set, under `lock`, just before the leader is reaped. Until then its PID cannot
+    /// be reused.
     reaped: AtomicBool,
-    /// When the leader was reaped, in clock ticks since boot like `/proc` start times.
-    /// Zero until then.
-    reaped_at: std::sync::atomic::AtomicU64,
+    /// Keystone's own child in the provider's group. While it is unreaped, alive or a
+    /// zombie, the group ID stays reserved. Reaped only when teardown ends.
+    sentinel: Option<i32>,
+    sentinel_reaped: AtomicBool,
     lock: Mutex<()>,
+}
+
+impl Life {
+    /// Whether the process group ID still names this provider's group.
+    fn group_reserved(&self) -> bool {
+        !self.reaped.load(Ordering::SeqCst)
+            || (self.sentinel.is_some() && !self.sentinel_reaped.load(Ordering::SeqCst))
+    }
 }
 
 impl Process {
@@ -72,7 +82,8 @@ impl Process {
         let life = Arc::new(Life {
             pid: child.id(),
             reaped: AtomicBool::new(false),
-            reaped_at: std::sync::atomic::AtomicU64::new(0),
+            sentinel: spawn_sentinel(child.id()),
+            sentinel_reaped: AtomicBool::new(false),
             lock: Mutex::new(()),
         });
         let stdin = child.stdin.take().expect("piped stdin");
@@ -84,15 +95,20 @@ impl Process {
             .name("provider-stdin".into())
             .spawn(move || write_lines(stdin, rx))?;
 
+        // Each output reader reports when its stream closes.
+        let (done_tx, done_rx) = mpsc::channel::<()>();
         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL)));
         {
             let tail = tail.clone();
+            let done_tx = done_tx.clone();
             thread::Builder::new()
                 .name("provider-stderr".into())
-                .spawn(move || keep_tail(stderr, &tail))?;
+                .spawn(move || {
+                    keep_tail(stderr, &tail);
+                    let _ = done_tx.send(());
+                })?;
         }
 
-        let (done_tx, done_rx) = mpsc::channel::<()>();
         thread::Builder::new()
             .name("provider-stdout".into())
             .spawn(move || {
@@ -108,16 +124,15 @@ impl Process {
                 let code = {
                     let _guard = waiter.lock.lock().unwrap();
                     waiter.reaped.store(true, Ordering::SeqCst);
-                    #[cfg(target_os = "linux")]
-                    waiter
-                        .reaped_at
-                        .store(pidfd::uptime_ticks(), Ordering::SeqCst);
                     child.wait().ok().and_then(|status| status.code())
                 };
-                if done_rx.recv_timeout(DRAIN_GRACE).is_err() {
+                // Wait for both stdout and stderr to close, so the last lines and the
+                // stderr tail are complete.
+                let drained = |timeout| (0..2).all(|_| done_rx.recv_timeout(timeout).is_ok());
+                if !drained(DRAIN_GRACE) {
                     // Something the process started still holds its output open.
-                    terminate(&waiter);
-                    let _ = done_rx.recv_timeout(DRAIN_GRACE);
+                    terminate(&waiter, false);
+                    drained(DRAIN_GRACE);
                 }
                 let bytes: Vec<u8> = tail.lock().unwrap().iter().copied().collect();
                 on_exit(Exit {
@@ -140,8 +155,43 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        terminate(&self.life);
+        terminate(&self.life, true);
     }
+}
+
+/// Forks a child of Keystone into `group` that waits for a signal and holds nothing
+/// open. Linux only; elsewhere the group is signalled only while the leader lives.
+#[cfg(target_os = "linux")]
+fn spawn_sentinel(group: u32) -> Option<i32> {
+    // SAFETY: after fork the child calls only async-signal-safe functions: prctl,
+    // close_range, and pause.
+    unsafe {
+        let pid = libc::fork();
+        if pid == 0 {
+            // Die with Keystone, and keep none of its descriptors, such as the provider's
+            // stdin or the workspace lock.
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+            loop {
+                libc::pause();
+            }
+        }
+        if pid < 0 {
+            return None;
+        }
+        if libc::setpgid(pid, group as libc::pid_t) == 0 {
+            Some(pid)
+        } else {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_sentinel(_group: u32) -> Option<i32> {
+    None
 }
 
 fn write_lines(mut stdin: ChildStdin, rx: mpsc::Receiver<String>) {
@@ -210,14 +260,26 @@ fn wait_without_reaping(pid: u32) {
 #[cfg(not(unix))]
 fn wait_without_reaping(_pid: u32) {}
 
-/// SIGTERM to the process tree now and SIGKILL after a grace period.
-fn terminate(life: &Arc<Life>) {
+/// SIGTERM to the process tree now and SIGKILL after a grace period. The `last`
+/// teardown then reaps the sentinel, releasing the group ID.
+fn terminate(life: &Arc<Life>, last: bool) {
     let targets = Targets::collect(life);
     targets.signal(life, Signal::Term);
     let life = life.clone();
     thread::spawn(move || {
         thread::sleep(KILL_GRACE);
         targets.signal(&life, Signal::Kill);
+        #[cfg(unix)]
+        if last && let Some(sentinel) = life.sentinel {
+            let _guard = life.lock.lock().unwrap();
+            if !life.sentinel_reaped.swap(true, Ordering::SeqCst) {
+                // SAFETY: the sentinel is Keystone's own unreaped child.
+                unsafe {
+                    libc::kill(sentinel, libc::SIGKILL);
+                    libc::waitpid(sentinel, std::ptr::null_mut(), 0);
+                }
+            }
+        }
     });
 }
 
@@ -237,15 +299,15 @@ impl Targets {
     fn collect(life: &Life) -> Self {
         #[cfg(target_os = "linux")]
         {
-            // Holding the lock keeps the leader from being reaped during the scan, so
-            // its PID cannot be reused while it identifies the tree.
+            // Holding the lock keeps the leader and the sentinel from being reaped
+            // during the scan, so the PID and group ID it relies on stay reserved.
             let _guard = life.lock.lock().unwrap();
-            let reaped_at = life
-                .reaped
-                .load(Ordering::SeqCst)
-                .then(|| life.reaped_at.load(Ordering::SeqCst));
             Self {
-                descendants: pidfd::descendants(life.pid, reaped_at),
+                descendants: pidfd::descendants(
+                    life.pid,
+                    !life.reaped.load(Ordering::SeqCst),
+                    life.group_reserved(),
+                ),
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -263,12 +325,13 @@ impl Targets {
                 Signal::Kill => libc::SIGKILL,
             };
             let _guard = life.lock.lock().unwrap();
+            if life.group_reserved() {
+                // SAFETY: the group ID is reserved, so it names only this provider's group.
+                unsafe { libc::kill(-(life.pid as libc::pid_t), number) };
+            }
             if !life.reaped.load(Ordering::SeqCst) {
-                // SAFETY: the leader is unreaped, so its PID and group ID are still its own.
-                unsafe {
-                    libc::kill(-(life.pid as libc::pid_t), number);
-                    libc::kill(life.pid as libc::pid_t, number);
-                }
+                // SAFETY: the leader is unreaped, so its PID is still its own.
+                unsafe { libc::kill(life.pid as libc::pid_t, number) };
             }
             #[cfg(target_os = "linux")]
             for descendant in &self.descendants {
@@ -344,20 +407,8 @@ mod pidfd {
         })
     }
 
-    /// Clock ticks since boot, the unit of `/proc` start times.
-    pub fn uptime_ticks() -> u64 {
-        let seconds: f64 = std::fs::read_to_string("/proc/uptime")
-            .ok()
-            .and_then(|text| text.split_whitespace().next()?.parse().ok())
-            .unwrap_or(0.0);
-        // SAFETY: sysconf only reads a configuration value.
-        let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
-        (seconds * per_second) as u64
-    }
-
     /// The live processes to signal for `root`'s tree, each pinned by a pidfd.
-    /// `reaped_at` is when the root was reaped, if it has been.
-    pub fn descendants(root: u32, reaped_at: Option<u64>) -> Vec<Pidfd> {
+    pub fn descendants(root: u32, root_unreaped: bool, group_reserved: bool) -> Vec<Pidfd> {
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return Vec::new();
         };
@@ -367,7 +418,8 @@ mod pidfd {
             .collect();
         select(
             root,
-            reaped_at,
+            root_unreaped,
+            group_reserved,
             &all,
             |seen| {
                 let fd = Pidfd::open(seen.pid)?;
@@ -385,15 +437,16 @@ mod pidfd {
     /// `open` pins a scanned process and returns `None` unless it is still exactly as
     /// scanned. `alive` reports whether a pinned process is still running.
     ///
-    /// - Group members seed the walk. After the root is reaped, only members that
-    ///   started before that count, since a later group with the same ID is a stranger.
-    ///   Before reaping, the root's PID and group ID cannot be reused at all.
+    /// - Group members seed the walk while the group ID is reserved, whenever they
+    ///   started. Otherwise a group with that ID may be a stranger's.
+    /// - The root itself is walked only while unreaped, when its PID is still its own.
     /// - A child counts only if, after it is pinned and re-checked, its parent is still
     ///   alive through its own pin. Then the parent's PID meant that parent the whole
     ///   time, and the child is really its child.
     pub(super) fn select<F>(
         root: u32,
-        reaped_at: Option<u64>,
+        root_unreaped: bool,
+        group_reserved: bool,
         all: &[Stat],
         open: impl Fn(&Stat) -> Option<F>,
         alive: impl Fn(&F) -> bool,
@@ -404,15 +457,16 @@ mod pidfd {
             pin: Option<F>,
         }
         let mut nodes: Vec<Node<F>> = Vec::new();
-        if reaped_at.is_none() {
+        if root_unreaped {
             nodes.push(Node {
                 pid: root,
                 pin: None,
             });
         }
-        for member in all.iter().filter(|s| {
-            s.group == root && s.pid != root && reaped_at.is_none_or(|at| s.start <= at)
-        }) {
+        for member in all
+            .iter()
+            .filter(|s| group_reserved && s.group == root && s.pid != root)
+        {
             if let Some(pin) = open(member) {
                 nodes.push(Node {
                     pid: member.pid,
@@ -462,7 +516,8 @@ mod pidfd {
             let dead = RefCell::new(vec![20]);
             let chosen = select(
                 10,
-                Some(400),
+                false,
+                true,
                 &all,
                 |s| Some(s.pid),
                 |pid| !dead.borrow().contains(pid),
@@ -473,7 +528,7 @@ mod pidfd {
                 "only the scanned member itself, never the stranger's child"
             );
             dead.borrow_mut().clear();
-            let chosen = select(10, Some(400), &all, |s| Some(s.pid), |_| true);
+            let chosen = select(10, false, true, &all, |s| Some(s.pid), |_| true);
             assert_eq!(
                 chosen,
                 vec![20, 30],
@@ -482,16 +537,27 @@ mod pidfd {
         }
 
         #[test]
-        fn after_reaping_a_group_that_started_later_is_a_stranger() {
+        fn group_members_count_only_while_the_group_id_is_reserved() {
+            // Started long after the leader: still ours while the ID is reserved.
             let all = [proc(20, 1, 10, 900)];
-            assert!(select(10, Some(400), &all, |s| Some(s.pid), |_| true).is_empty());
-            assert_eq!(select(10, None, &all, |s| Some(s.pid), |_| true), vec![20]);
+            assert_eq!(
+                select(10, false, true, &all, |s| Some(s.pid), |_| true),
+                vec![20]
+            );
+            assert!(select(10, false, false, &all, |s| Some(s.pid), |_| true).is_empty());
         }
 
         #[test]
         fn a_process_that_changed_since_the_scan_is_skipped() {
             let all = [proc(20, 10, 20, 100), proc(21, 10, 21, 100)];
-            let chosen = select(10, None, &all, |s| (s.pid != 21).then_some(s.pid), |_| true);
+            let chosen = select(
+                10,
+                true,
+                true,
+                &all,
+                |s| (s.pid != 21).then_some(s.pid),
+                |_| true,
+            );
             assert_eq!(chosen, vec![20]);
         }
     }
@@ -601,6 +667,49 @@ mod tests {
         assert!(
             !alive(sleeper),
             "the separately grouped sleep {sleeper} survived"
+        );
+    }
+
+    #[test]
+    fn a_group_member_born_after_the_leader_exits_is_ended_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let (exit_tx, exit_rx) = channel();
+        let script = format!(
+            // The subshell outlives the leader without holding its output, then starts
+            // a sleep in the same group and exits, orphaning it.
+            "(sleep 0.3; sleep 30 & echo $! > {}) >/dev/null 2>&1 & exit 0",
+            pid_file.display()
+        );
+        let process = Process::spawn(
+            Path::new("/bin/sh"),
+            &["-c", &script],
+            Path::new("/"),
+            |_| {},
+            move |exit| exit_tx.send(exit.code).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            exit_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Some(0)
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let orphan = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|t| t.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "the orphan never started");
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert!(alive(orphan));
+        drop(process);
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            !alive(orphan),
+            "orphan {orphan} born after the leader exited survived"
         );
     }
 
