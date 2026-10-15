@@ -2,6 +2,7 @@
 //! desktop app is built from. Components read the theme from the `App` global
 //! that [`init`] installs, so call sites never pass colors or a theme.
 
+pub mod automation;
 mod button;
 mod color;
 mod icon;
@@ -38,6 +39,7 @@ pub fn set_theme(theme: Theme, cx: &mut gpui::App) {
 }
 
 pub mod prelude {
+    pub use crate::automation::AutomationExt;
     pub use crate::{
         ActiveTheme, Button, ButtonSize, ButtonStyle, Color, Elevation, Icon, IconButton, IconName,
         Kbd, Label, ListItem, MenuHeader, MenuItem, MenuSeparator, PopoverMenu, StyledExt,

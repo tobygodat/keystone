@@ -1,0 +1,122 @@
+diff --git i/src/api.rs w/src/api.rs
+index 5e2a2cd..05dbce2 100644
+--- i/src/api.rs
++++ w/src/api.rs
+@@ -16,6 +16,10 @@ pub struct SessionOptions {
+     /// Run applications in Bubblewrap instead of with the MCP server user's host access.
+     #[serde(default)]
+     pub sandbox: bool,
++    /// Render offscreen on a GPU-backed headless output instead of a host window.
++    /// The requested size is exact and capture does not depend on host visibility.
++    #[serde(default)]
++    pub headless: bool,
+ }
+ const fn default_width() -> u32 {
+     1280
+@@ -33,6 +37,7 @@ impl Default for SessionOptions {
+             height: default_height(),
+             xwayland: true,
+             sandbox: false,
++            headless: false,
+         }
+     }
+ }
+@@ -60,6 +65,7 @@ pub struct SessionInfo {
+     pub dbus_address: String,
+     pub xwayland: bool,
+     pub sandboxed: bool,
++    pub headless: bool,
+ }
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+@@ -266,6 +272,11 @@ mod tests {
+     #[test]
+     fn reject_unknown_fields() {
+         assert!(serde_json::from_str::<SessionOptions>(r#"{"widht":800}"#).is_err());
++        assert!(
++            serde_json::from_str::<SessionOptions>(r#"{"headless":true}"#)
++                .unwrap()
++                .headless
++        );
+         assert!(serde_json::from_str::<InputAction>(r#"{"action":"text","text":"你好"}"#).is_ok());
+     }
+     #[test]
+diff --git i/src/server.rs w/src/server.rs
+index ec195a9..faa9109 100644
+--- i/src/server.rs
++++ w/src/server.rs
+@@ -180,7 +180,7 @@ impl ComputerUse {
+     }
+ 
+     #[tool(
+-        description = "Create this connection's visible nested Wayland desktop. By default apps run directly with the MCP server user's full host access; set sandbox=true for Bubblewrap with private HOME. Preferred size defaults to 1280x720; tiling hosts may assign another size, returned as the actual initial dimensions. Lazy Xwayland enabled. Start once; stop when finished."
++        description = "Create this connection's nested Wayland desktop: a visible host window by default, or offscreen with headless=true. By default apps run directly with the MCP server user's full host access; set sandbox=true for Bubblewrap with private HOME. Preferred size defaults to 1280x720; tiling hosts may assign another size, returned as the actual initial dimensions. Lazy Xwayland enabled. Start once; stop when finished."
+     )]
+     async fn session_start(
+         &self,
+diff --git i/src/session.rs w/src/session.rs
+index ea3d11b..0370f37 100644
+--- i/src/session.rs
++++ w/src/session.rs
+@@ -230,6 +230,7 @@ impl Session {
+             dbus_address: format!("unix:path={}/bus/session", path.display()),
+             xwayland: options.xwayland,
+             sandboxed: options.sandbox,
++            headless: options.headless,
+         };
+         Ok(Self {
+             root: Some(root),
+@@ -245,7 +246,6 @@ impl Session {
+ 
+     async fn initialize(&mut self, options: SessionOptions) -> Result<()> {
+         let root = self.root.as_ref().unwrap().path().to_path_buf();
+-        let host_wayland = host_wayland_socket()?;
+         let config = format!(
+             "swaybg_command -\nswaynag_command -\nfont monospace 10\nxwayland {}\noutput * mode {}x{}\noutput * scale 1\nseat seat0 fallback true\ndefault_border pixel 1\nfocus_follows_mouse no\n",
+             if options.xwayland {
+@@ -264,10 +264,7 @@ impl Session {
+             .env("LANG", "C.UTF-8")
+             .env("HOME", root.join("compositor-home"))
+             .env("XDG_RUNTIME_DIR", root.join("sway-runtime"))
+-            .env("WAYLAND_DISPLAY", host_wayland)
+             .env("SWAYSOCK", &self.info.sway_socket)
+-            .env("WLR_BACKENDS", "wayland")
+-            .env("WLR_WL_OUTPUTS", "1")
+             // GLES2 exposes linux-dmabuf and enables accelerated Xwayland/DRI3.
+             // Pixman cannot host Vulkan/EGL presentation surfaces.
+             .env("WLR_RENDERER", "gles2")
+@@ -275,6 +272,18 @@ impl Session {
+             .current_dir(root.join("compositor-home"))
+             .arg("-c")
+             .arg(root.join("sway.conf"));
++        if options.headless {
++            // Offscreen output on the host GPU's render node: frames keep
++            // flowing while the host desktop hides or occludes nothing.
++            command
++                .env("WLR_BACKENDS", "headless")
++                .env("WLR_HEADLESS_OUTPUTS", "1");
++        } else {
++            command
++                .env("WAYLAND_DISPLAY", host_wayland_socket()?)
++                .env("WLR_BACKENDS", "wayland")
++                .env("WLR_WL_OUTPUTS", "1");
++        }
+         let compositor = OwnedProcess::spawn(command)?;
+         self.info.compositor_pid = compositor.child.id().context("missing compositor PID")?;
+         self.compositor = Some(compositor);
+@@ -1268,6 +1277,7 @@ mod tests {
+             height: 480,
+             xwayland: false,
+             sandbox: false,
++            headless: false,
+         })
+         .await
+         .unwrap();
+@@ -1411,6 +1421,7 @@ else:
+             height: 600,
+             xwayland: true,
+             sandbox: true,
++            headless: false,
+         })
+         .await
+         .unwrap();

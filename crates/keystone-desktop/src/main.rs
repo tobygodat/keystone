@@ -7,7 +7,7 @@ use gpui::{
     WindowOptions, div, prelude::*, px, size,
 };
 use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
-use keystone_ui::prelude::*;
+use keystone_ui::{automation, prelude::*};
 use std::path::PathBuf;
 use text_input::{Changed, InputMode, TextInput};
 
@@ -358,6 +358,7 @@ impl Keystone {
             .hairline_r(cx)
             .child(
                 IconButton::new("sidebar", IconName::Panel)
+                    .debug_selector(|| "rail-sidebar".into())
                     .size(ButtonSize::Large)
                     .tooltip(Tooltip::text(if self.sidebar {
                         "Hide sidebar"
@@ -371,6 +372,7 @@ impl Keystone {
             )
             .child(
                 IconButton::new("conversations", IconName::Chat)
+                    .debug_selector(|| "rail-conversations".into())
                     .size(ButtonSize::Large)
                     .selected(!self.settled_only)
                     .tooltip(Tooltip::text("Conversations"))
@@ -382,6 +384,7 @@ impl Keystone {
             )
             .child(
                 IconButton::new("search", IconName::Search)
+                    .debug_selector(|| "rail-search".into())
                     .size(ButtonSize::Large)
                     .tooltip(Tooltip::with_key("Search", "Ctrl+F"))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -392,6 +395,7 @@ impl Keystone {
             )
             .child(
                 IconButton::new("settled", IconName::Inbox)
+                    .debug_selector(|| "rail-settled".into())
                     .size(ButtonSize::Large)
                     .selected(self.settled_only)
                     .tooltip(Tooltip::text("Settled sessions"))
@@ -517,7 +521,7 @@ impl Keystone {
                 .child(
                     div()
                         .id("composer-field")
-                        .debug_selector(|| "composer-field".into())
+                        .automation_id("composer-field")
                         .min_h(px(28.))
                         .when(has_session, |d| d.child(self.composer.clone()))
                         .when(!has_session, |d| {
@@ -716,7 +720,13 @@ impl Render for SessionSidebar {
                     .pr_1p5()
                     .gap_2()
                     .child(Icon::new(IconName::Search).size(px(14.)))
-                    .child(div().flex_1().min_w_0().child(search))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .automation_id("search-field")
+                            .child(search),
+                    )
                     .child(
                         IconButton::new("filter", IconName::Filter)
                             .debug_selector(|| "filter".into())
@@ -820,7 +830,7 @@ impl Render for Keystone {
                         .child(
                             div()
                                 .id("welcome-heading")
-                                .debug_selector(|| "welcome-heading".into())
+                                .automation_id("welcome-heading")
                                 .px_3()
                                 .child(Label::new("What should we work on?").size(TextSize::Title)),
                         )
@@ -837,6 +847,9 @@ impl Render for Keystone {
             .text_color(text)
             .text_size(TextSize::Base.px())
             .track_focus(&self.focus)
+            .when(automation::enabled(), |d| {
+                d.child(automation::frame_writer())
+            })
             // Capture runs before the focused input, so Escape closes an open menu first.
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" && (this.new_menu || this.settings_menu) {
@@ -876,14 +889,18 @@ impl Render for Keystone {
                     .min_h_0()
                     .child(self.rail(cx))
                     .when(self.sidebar, |d| {
-                        d.child(
-                            AnyView::from(self.session_sidebar.clone()).cached(
-                                StyleRefinement::default()
-                                    .w(px(256.))
-                                    .flex_shrink_0()
-                                    .h_full(),
-                            ),
-                        )
+                        let sidebar = AnyView::from(self.session_sidebar.clone());
+                        let style = StyleRefinement::default()
+                            .w(px(256.))
+                            .flex_shrink_0()
+                            .h_full();
+                        // A reused cached view skips prepaint, so it would report no
+                        // element geometry. Verification trades that speed for names.
+                        if automation::enabled() {
+                            d.child(div().w(px(256.)).flex_shrink_0().h_full().child(sidebar))
+                        } else {
+                            d.child(sidebar.cached(style))
+                        }
                     })
                     .child(main),
             )

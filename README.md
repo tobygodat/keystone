@@ -14,7 +14,7 @@ The preview saves to `$XDG_DATA_HOME/keystone/workspace.json`, or `$HOME/.local/
 
 Use the [desktop verification skill](crates/keystone-desktop/.agents/skills/verify/SKILL.md) for a separate Sway desktop with screenshots, mouse clicks, keyboard input, and disposable state. It includes a four-feature verification map and exact launch, doctor, drive, and cleanup instructions. Run it from the desktop crate context to discover the package-local Codex skill, or read the linked file directly from the workspace root.
 
-The driver was proved against the actual GPUI binary. Keep its nested window visible during capture on Hyprland. See [the verification report](docs/verification-driver.md) for the tested journey and remaining coverage.
+The driver was proved against the actual GPUI binary. It runs as the `keystone-verify` MCP server and renders headless by default, so the host window does not need to stay visible. See [the verification report](docs/verification-driver.md) for the tested journey and remaining coverage.
 
 ## Run checks
 

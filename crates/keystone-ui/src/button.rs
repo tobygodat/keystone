@@ -86,7 +86,7 @@ impl Common {
             .rounded(radius::CONTROL)
             .when_some(rest, |d, bg| d.bg(bg));
         if let Some(selector) = self.debug_selector {
-            el = el.debug_selector(move || selector);
+            el = crate::automation::tag(el, selector);
         }
         if self.disabled {
             return el.opacity(0.4).cursor_not_allowed();
@@ -139,7 +139,7 @@ macro_rules! common_builders {
             self
         }
 
-        /// Names the element for GPUI's simulated-input tests.
+        /// Names the element for simulated-input tests and native verification.
         pub fn debug_selector(mut self, selector: impl FnOnce() -> String) -> Self {
             self.common.debug_selector = Some(selector());
             self

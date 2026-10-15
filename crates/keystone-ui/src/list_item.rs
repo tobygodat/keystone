@@ -78,7 +78,7 @@ impl RenderOnce for ListItem {
             .when(!self.selected, |d| d.hover(move |s| s.bg(hover_bg)))
             .children(self.children);
         if let Some(selector) = self.debug_selector {
-            el = el.debug_selector(move || selector);
+            el = crate::automation::tag(el, selector);
         }
         el.when_some(self.on_click, |d, handler| d.on_click(handler))
     }

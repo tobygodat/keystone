@@ -198,7 +198,7 @@ impl RenderOnce for MenuItem {
             )
             .when_some(self.kbd, |d, keys| d.child(Kbd::new(keys)));
         if let Some(selector) = self.debug_selector {
-            el = el.debug_selector(move || selector);
+            el = crate::automation::tag(el, selector);
         }
         el.when_some(self.on_click, |d, handler| {
             d.on_click(move |event, window, cx| {
