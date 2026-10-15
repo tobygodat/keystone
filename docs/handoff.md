@@ -1,29 +1,14 @@
 # Hand-off: Keystone design system and performance tracking
 
-Written 2026-10-15. Read this before you touch either checkout.
+Written 2026-10-15, updated after landing. Read this before starting new work.
 
-## Where things are
+## Status
 
-| Location | State |
-| --- | --- |
-| `~/Projects/keystone` on `main` | Holds the finished composer increment as **uncommitted** changes in 7 files. They were left uncommitted on purpose for review. Do not reset, stash, or overwrite them. |
-| `wip/composer-increment` branch, commit `54ac1a6` | A snapshot commit of that uncommitted work, made with `git commit-tree`. `main` is unchanged. |
-| `~/Projects/keystone-design-system` on `design-system` | A worktree with 12 commits on top of `54ac1a6`. All checks pass and the tree is clean at `32db123`. |
-| `refs/keystone/pre-design-system` | A safety ref to the uncommitted state before this work started. |
-| `.audit/` in the main checkout (gitignored) | The decision trail `design-system.tsv`, the todo list `design-system.todo.md`, the original sketch `design-system-sketch.md`, and native evidence in `verify-design-system-*/`. |
+The composer increment and the 12 design-system commits are on `main` and pushed to `origin` (`1d10977`). The `design-system` branch is merged and can be deleted. The `.audit/` directory, the Sway driver binary, and the worktrees named in earlier notes existed only on the original machine.
 
-There is no git remote, so no PR exists. The `/tmp/keystone-*` worktrees are prunable leftovers from an earlier session.
+After a fresh clone, the first build rebuilds every dependency, because dev builds optimize them. That took 205 s for the app and 70 s for the test build.
 
-## How to land it
-
-1. Commit the composer increment on `main`. Its content matches `54ac1a6`.
-2. Then rebase `design-system` onto `main` (`git rebase --onto main 54ac1a6 design-system`) or cherry-pick `54ac1a6..design-system`. It applies cleanly only after step 1.
-3. Run `bash scripts/check.sh`, `bash scripts/check.sh ui`, and `bash scripts/check.sh build`.
-4. Remove the worktree with `git worktree remove ../keystone-design-system`.
-
-The first build after landing rebuilds every dependency, because dev builds now optimize them. That took 205 s for the app and 70 s for the test build.
-
-## What the branch contains
+## What landed
 
 - **`crates/keystone-ui`.** A new component library with theme tokens (`Theme`, `Colors`, `Color`, `TextSize`, `Elevation`, `spacing`, `radius`), typed icons, `Button`, `IconButton`, `ListItem`, `PopoverMenu`, `MenuItem`, `MenuSeparator`, `Tooltip`, `Label`, and `Kbd`. See `docs/design-system.md`.
 - **Gallery.** `cargo run -p keystone-ui --example gallery` shows every component in every state.
@@ -57,14 +42,13 @@ The first build after landing rebuilds every dependency, because dev builds now 
 
 ## Open work, in priority order
 
-1. Land the two increments as described above.
-2. **Sidebar render cost.** Every composer keystroke redraws the whole window, including every session row. Make the sidebar a cached view or a virtualized list. Measure with `scripts/perf.py` before and after. This may also help KS-005, the rapid-typing stall, but that link is unproven.
-3. **Pending tokens.** A light theme, density, and font choice are in scope but not built. Token names are semantic, so each is additive.
-4. **Small polish.**
+1. **Sidebar render cost.** Every composer keystroke redraws the whole window, including every session row. Make the sidebar a cached view or a virtualized list. Measure with `scripts/perf.py` before and after. This may also help KS-005, the rapid-typing stall, but that link is unproven.
+2. **Pending tokens.** A light theme, density, and font choice are in scope but not built. Token names are semantic, so each is additive.
+3. **Small polish.**
    - Escape does not close the popover yet.
    - A selected `ListItem` shows no extra hover state.
    - The color check misses `Hsla { .. }` struct literals.
-5. **Prior open issues.** KS-002 partial, KS-004 partial, KS-005, KS-006, and KS-009 in `docs/issues.md`.
+4. **Prior open issues.** KS-002 partial, KS-004 partial, KS-005, KS-006, and KS-009 in `docs/issues.md`.
 
 ## Working preferences learned
 
