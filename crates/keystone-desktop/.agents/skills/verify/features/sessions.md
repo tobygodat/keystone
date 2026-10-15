@@ -16,25 +16,25 @@ Create a local Claude or Codex session and select it from the sidebar. These rec
 - Press Ctrl+N for Claude or Ctrl+Shift+N for Codex.
 - Click a session row in the sidebar to select it.
 
-## Driving it with native-driver
+## Driving it with keystone-verify
 
 Preconditions:
 
 - Doctor identifies the current owned window and binary.
-- Start from an empty workspace for each welcome-provider test. Stop and start a new controller to reset state.
+- Start from an empty workspace for each welcome-provider test. Call `stop` then `start` to reset state.
 
-- Capture `{"kind":"call","tool":"screenshot","arguments":{}}` and inspect it. Click the observed center of **Start with Claude Code** using `input` with one `click` action, `button:"left"`, and the observed `x` and `y`. The welcome buttons disappear and **New Claude session** appears in the sidebar and tab.
-- Send `{"kind":"workspace"}`. Require exactly one session with `provider:"Claude"`, `settled:false`, `draft:""`, and its ID selected.
+- Call `wait_for` with `{"id":"welcome-claude"}`, then `click` with `{"id":"welcome-claude"}`. Call `wait_for` with `{"id":"session-1"}`. Capture `screenshot` and require the welcome buttons gone and **New Claude session** in the sidebar and tab.
+- Call `workspace`. Require exactly one session with `provider:"Claude"`, `settled:false`, `draft:""`, and its ID selected.
 - Type a short draft without an extra focus click. Require the composer and state file to contain it. This proves the welcome action focused the editor.
-- For the keyboard entry, send `{"kind":"call","tool":"input","arguments":{"actions":[{"action":"keypress","keys":["ctrl","shift","n"]}]}}`. Require a second record with `provider:"Codex"` selected. Type a short draft without a focus click and require it in the composer and state file.
-- For the menu entry, capture and click the sidebar plus. Capture the open menu, then click the observed **New Claude session** or **New Codex session** row. Require exactly one additional record of that provider. Type a short draft without a focus click and require it in the composer and state file.
-- Capture and click the first session row. Require its title in the tab, its provider chip, its restored draft, and its ID in `workspace.selected`.
+- For the keyboard entry, call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","shift","n"]}]}`. Require a second record with `provider:"Codex"` selected. Type a short draft without a focus click and require it in the composer and state file.
+- For the menu entry, `click` `{"id":"new-session"}` and `wait_for` `{"id":"new-claude"}` or `{"id":"new-codex"}`. Capture the open menu, then `click` that id. Require exactly one additional record of that provider. Type a short draft without a focus click and require it in the composer and state file.
+- `click` the first row by its `session-<id>` from `workspace`. Require its title in the tab, its provider chip, its restored draft, and its ID in `workspace.selected`.
 - Preserve before/after screenshots and a state snapshot. Repeat the welcome journey in a fresh run for Codex before marking both provider buttons verified.
 
 ## Gotchas
 
 - Duplicate titles are allowed. Use state IDs and the screenshot row position to distinguish sessions.
 - The welcome chooser appears only when no session is selected. It is absent after creation.
-- GPUI IDs `welcome-claude`, `welcome-codex`, `new-claude`, and `session-1` are simulated-test selectors. They are not exported native selectors.
+- Named ids are `welcome-claude`, `welcome-codex`, `new-session`, `new-claude`, `new-codex`, `composer-field`, and `session-<id>`. The same ids serve GPUI simulated tests.
 - Every creation path focuses the composer: the welcome buttons, the sidebar menu, Ctrl+N, and Ctrl+Shift+N.
-- The nested window must be visible while you click a newly opened menu. A hidden window draws no frames, so the click lands on the previous frame and misses the menu.
+- Use `wait_for` on a menu item before clicking it. With `headless:false`, the nested window must stay visible. A hidden window draws no frames, so a click on a newly opened menu lands on the previous frame and misses.

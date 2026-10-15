@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-"""Own one nested desktop and accept newline-delimited JSON commands on stdin."""
+"""MCP server that drives the real Keystone binary on a private nested desktop.
+
+Each `start` owns one computer-use-mcp connection, one Sway desktop, one
+disposable workspace file, and one evidence directory. Every driver request
+and sanitized result goes to actions.jsonl; screenshots and state snapshots are
+kept beside it. The app reports named element geometry through
+KEYSTONE_AUTOMATION_PATH, so `click` and `wait_for` can target names.
+"""
 import argparse
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -14,6 +22,13 @@ import tempfile
 import threading
 import time
 
+PROTOCOL = '2025-03-26'
+
+
+class NotReady(RuntimeError):
+    """The app has not reported a frame yet. Retrying can succeed."""
+ROOT = Path(__file__).resolve().parent.parent
+
 
 def timestamp():
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -25,14 +40,15 @@ def digest(path):
 
 
 class Run:
-    def __init__(self, args):
-        self.binary = Path(args.root).resolve() / 'target/debug/keystone-desktop'
+    def __init__(self, driver, root, evidence):
+        self.binary = Path(root).resolve() / 'target/debug/keystone-desktop'
         self.binary_sha = digest(self.binary)
-        driver_sha = digest(args.driver)
-        self.evidence = Path(args.evidence).resolve()
+        driver_sha = digest(driver)
+        self.evidence = Path(evidence).resolve()
         self.evidence.mkdir(parents=True, exist_ok=False)
         self.scratch = Path(tempfile.mkdtemp(prefix='keystone-verify-'))
         self.state = self.scratch / 'workspace.json'
+        self.geometry = self.scratch / 'elements.json'
         self.sequence = 0
         self.images = 0
         self.app_pids = []
@@ -41,9 +57,9 @@ class Run:
         self.log = (self.evidence / 'actions.jsonl').open('a')
         self.stderr = (self.evidence / 'driver.stderr.log').open('w')
         try:
-            self.process = subprocess.Popen([str(Path(args.driver).resolve())], stdin=subprocess.PIPE,
+            self.process = subprocess.Popen([str(Path(driver).resolve())], stdin=subprocess.PIPE,
                                             stdout=subprocess.PIPE, stderr=self.stderr, text=True,
-                                            bufsize=1, cwd=args.root)
+                                            bufsize=1, cwd=root)
         except Exception as error:
             shutil.rmtree(self.scratch)
             self.record('cleanup', {'startup_error': str(error), 'scratch_retained': None,
@@ -53,7 +69,7 @@ class Run:
             raise
         threading.Thread(target=self.read_responses, daemon=True).start()
         self.record('identity', {'binary': str(self.binary), 'binary_sha256': self.binary_sha,
-                                'driver': str(Path(args.driver).resolve()),
+                                'driver': str(Path(driver).resolve()),
                                 'driver_sha256': driver_sha, 'scratch': str(self.scratch),
                                 'driver_pid': self.process.pid})
 
@@ -71,20 +87,24 @@ class Run:
         self.log.flush()
 
     def sanitize(self, value):
+        """Moves image payloads into numbered evidence files, in place."""
         if isinstance(value, dict):
             if value.get('type') == 'image' and 'data' in value:
                 self.images += 1
                 extension = '.png' if value.get('mimeType') == 'image/png' else '.bin'
                 path = self.evidence / f'{self.images:04d}{extension}'
                 path.write_bytes(base64.b64decode(value['data'], validate=True))
-                return {**{k: v for k, v in value.items() if k != 'data'},
-                        'path': str(path), 'sha256': digest(path)}
-            return {key: self.sanitize(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [self.sanitize(item) for item in value]
-        return value
+                value.pop('data')
+                value.update(path=str(path), sha256=digest(path))
+                return
+            for item in value.values():
+                self.sanitize(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.sanitize(item)
 
     def request(self, method, params=None):
+        """Returns the driver's raw result; the log gets a copy without image data."""
         self.sequence += 1
         request = {'jsonrpc': '2.0', 'id': self.sequence, 'method': method}
         if params is not None:
@@ -100,8 +120,9 @@ class Run:
             response = self.responses.get(timeout=remaining)
             if response is None or 'reader_error' in response:
                 raise RuntimeError(f'MCP stream closed: {response}')
-            response = self.sanitize(response)
-            self.record('response', response)
+            logged = copy.deepcopy(response)
+            self.sanitize(logged)
+            self.record('response', logged)
             if response.get('id') != self.sequence:
                 if 'id' in response and 'method' in response:
                     reply = {'jsonrpc': '2.0', 'id': response['id'],
@@ -113,31 +134,35 @@ class Run:
                 raise RuntimeError(json.dumps(response['error']))
             result = response.get('result', {})
             if result.get('isError'):
-                raise RuntimeError(json.dumps(result))
+                raise RuntimeError(json.dumps(logged.get('result')))
+            result['_evidence'] = logged.get('result', {})
             return result
 
     def call(self, tool, arguments=None):
         return self.request('tools/call', {'name': tool, 'arguments': arguments or {}})
 
-    def start(self, args):
-        self.request('initialize', {'protocolVersion': '2025-03-26', 'capabilities': {},
-                                   'clientInfo': {'name': 'keystone-verifier', 'version': '1'}})
+    def start(self, width, height, headless):
+        self.request('initialize', {'protocolVersion': PROTOCOL, 'capabilities': {},
+                                   'clientInfo': {'name': 'keystone-verifier', 'version': '2'}})
         self.process.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
         self.process.stdin.flush()
-        self.call('session_start', {'width': args.width, 'height': args.height,
-                                    'xwayland': True, 'sandbox': False})
-        return self.launch()
+        session = self.call('session_start', {'width': width, 'height': height, 'xwayland': True,
+                                              'sandbox': False, 'headless': headless})
+        return {'session': session.get('structuredContent'), 'launch': self.launch()}
 
     def launch(self):
-        result = self.call('app_launch', {'argv': ['/usr/bin/env', '-u', 'KEYSTONE_VISUAL_FIXTURE',
-                                                   f'KEYSTONE_STATE_PATH={self.state}', str(self.binary)]})
+        self.geometry.unlink(missing_ok=True)
+        result = self.call('app_launch', {'argv': [
+            '/usr/bin/env', '-u', 'KEYSTONE_VISUAL_FIXTURE', f'KEYSTONE_STATE_PATH={self.state}',
+            f'KEYSTONE_AUTOMATION_PATH={self.geometry}', str(self.binary)]})
         pid = result.get('structuredContent', {}).get('pid')
         if pid:
             self.app_pids.append(pid)
-        return result
+        return result.get('structuredContent')
 
     def doctor(self):
-        result = {name: self.call(name) for name in ('server_info', 'session_status', 'windows_list')}
+        result = {name: self.call(name).get('structuredContent')
+                  for name in ('server_info', 'session_status', 'windows_list')}
         identities = []
         for pid in self.app_pids:
             executable = Path(f'/proc/{pid}/exe')
@@ -152,6 +177,65 @@ class Run:
         result['binary_unchanged'] = result['binary_sha256_now'] == self.binary_sha
         self.record('doctor', result)
         return result
+
+    def window_origin(self, pid):
+        windows = self.call('windows_list').get('structuredContent', {})
+        for window in windows.get('windows', windows if isinstance(windows, list) else []):
+            if window.get('pid') == pid:
+                return window['rect']['x'], window['rect']['y']
+        raise RuntimeError(f'No window for app PID {pid}: {json.dumps(windows)}')
+
+    def elements(self):
+        """Named elements in desktop pixels, read from the live app's latest frame."""
+        if not self.geometry.exists():
+            raise NotReady('The app has not written element geometry yet')
+        frame = json.loads(self.geometry.read_text())
+        if frame['pid'] not in self.app_pids:
+            raise NotReady(f'Geometry is from PID {frame["pid"]}, not a launched app')
+        ox, oy = self.window_origin(frame['pid'])
+
+        def place(b):
+            return None if b is None else {'x': round(ox + b['x']), 'y': round(oy + b['y']),
+                                           'w': round(b['w']), 'h': round(b['h'])}
+
+        elements = []
+        for element in frame['elements']:
+            visible = place(element['visible'])
+            elements.append({'id': element['id'], 'bounds': place(element['bounds']),
+                             'visible': visible,
+                             'center': None if visible is None else
+                             {'x': visible['x'] + visible['w'] // 2,
+                              'y': visible['y'] + visible['h'] // 2}})
+        result = {'revision': frame['revision'], 'pid': frame['pid'], 'elements': elements}
+        self.record('elements', result)
+        return result
+
+    def find(self, element_id):
+        matches = [e for e in self.elements()['elements'] if e['id'] == element_id]
+        if not matches:
+            raise RuntimeError(f'No element named {element_id!r} in the current frame')
+        if len(matches) > 1:
+            raise RuntimeError(f'{len(matches)} elements are named {element_id!r}')
+        if matches[0]['center'] is None:
+            raise RuntimeError(f'{element_id!r} is laid out but fully clipped')
+        return matches[0]
+
+    def wait_for(self, element_id, present, timeout_ms):
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            # Absence counts only from an observed frame, never from a failed read.
+            try:
+                found = any(e['id'] == element_id and e['visible']
+                            for e in self.elements()['elements'])
+            except NotReady as error:
+                found, unready = None, error
+            if found == present:
+                return {'id': element_id, 'present': found}
+            if time.monotonic() >= deadline:
+                if found is None:
+                    raise TimeoutError(f'No observable frame after {timeout_ms} ms: {unready}')
+                raise TimeoutError(f'{element_id!r} present={found} after {timeout_ms} ms')
+            time.sleep(0.1)
 
     def snapshot(self):
         target = self.evidence / f'state-{self.sequence:04d}-{time.time_ns()}.json'
@@ -199,55 +283,174 @@ class Run:
         return result
 
 
+def schema(properties=None, required=()):
+    return {'type': 'object', 'properties': properties or {}, 'required': list(required),
+            'additionalProperties': False}
+
+
+ID = {'type': 'string', 'description': 'Element name, as listed by `elements`'}
+TOOLS = [
+    ('start', 'Build nothing; launch target/debug/keystone-desktop on a new private desktop with an '
+     'empty disposable workspace and a new evidence directory. One run at a time.',
+     schema({'width': {'type': 'integer', 'default': 1280}, 'height': {'type': 'integer', 'default': 900},
+             'headless': {'type': 'boolean', 'default': True,
+                          'description': 'false shows the desktop as a host window'}})),
+    ('doctor', 'Read desktop, window, and process identity. Require matches_launch and binary_unchanged.',
+     schema()),
+    ('screenshot', 'Capture the whole private desktop as a PNG and save it as evidence.', schema()),
+    ('elements', 'List named elements from the app\'s latest frame in desktop pixels. `visible` is the '
+     'unclipped part; menus that overlap an element are not subtracted. Unnamed controls need a screenshot.',
+     schema()),
+    ('click', 'Left-click the center of a named element, or explicit desktop pixels.',
+     schema({'id': ID, 'x': {'type': 'integer'}, 'y': {'type': 'integer'},
+             'button': {'type': 'string', 'enum': ['left', 'right', 'middle'], 'default': 'left'},
+             'count': {'type': 'integer', 'default': 1}})),
+    ('input', 'Pass ordered actions to the driver: keypress {keys}, type {text}, wait {duration_ms}, '
+     'scroll, drag, move. Re-observe after state changes rather than batching across them.',
+     schema({'actions': {'type': 'array', 'items': {'type': 'object'}}}, ['actions'])),
+    ('wait_for', 'Wait until a named element is visible, or gone with present=false.',
+     schema({'id': ID, 'present': {'type': 'boolean', 'default': True},
+             'timeout_ms': {'type': 'integer', 'default': 5000}}, ['id'])),
+    ('workspace', 'Read the real saved workspace file.', schema()),
+    ('snapshot', 'Copy the saved workspace file into the evidence directory.', schema()),
+    ('launch', 'Relaunch the app against the same workspace after it has quit. Never while it runs.',
+     schema()),
+    ('call', 'Call any computer-use-mcp tool directly, such as windows_list.',
+     schema({'tool': {'type': 'string'}, 'arguments': {'type': 'object'}}, ['tool'])),
+    ('stop', 'Stop the desktop and app, snapshot state, and remove the scratch directory. '
+     'Keeps evidence. Call it even after failures.', schema()),
+]
+
+
+class Server:
+    def __init__(self, args):
+        self.args = args
+        self.run = None
+        self.failures = 0
+
+    def require(self):
+        if self.run is None or self.run.closed:
+            raise RuntimeError('No active run; call start first')
+        return self.run
+
+    def handle(self, name, arguments):
+        if name == 'start':
+            if self.run is not None and not self.run.closed:
+                raise RuntimeError('A run is active; stop it first')
+            evidence = ROOT / '.audit' / f'verify-{time.strftime("%Y%m%dT%H%M%S")}-{os.getpid()}'
+            self.run = Run(self.args.driver, ROOT, evidence)
+            started = self.run.start(arguments.get('width', 1280), arguments.get('height', 900),
+                                     arguments.get('headless', True))
+            return {**started, 'evidence': str(evidence), 'state': str(self.run.state)}, None
+        run = self.require()
+        if name == 'doctor':
+            return run.doctor(), None
+        if name == 'screenshot':
+            result = run.call('screenshot')
+            image = next(c for c in result['content'] if c.get('type') == 'image')
+            saved = next(c for c in result['_evidence']['content'] if c.get('type') == 'image')
+            return {**result.get('structuredContent', {}), 'path': saved['path']}, image
+        if name == 'elements':
+            return run.elements(), None
+        if name == 'click':
+            if 'id' in arguments:
+                target = run.find(arguments['id'])['center']
+            elif 'x' in arguments and 'y' in arguments:
+                target = {'x': arguments['x'], 'y': arguments['y']}
+            else:
+                raise ValueError('Pass id, or both x and y')
+            action = {'action': 'click', 'x': target['x'], 'y': target['y'],
+                      'button': arguments.get('button', 'left'), 'count': arguments.get('count', 1)}
+            run.call('input', {'actions': [action]})
+            return {'clicked': arguments.get('id'), **target}, None
+        if name == 'input':
+            return run.call('input', {'actions': arguments['actions']}).get('structuredContent'), None
+        if name == 'wait_for':
+            return run.wait_for(arguments['id'], arguments.get('present', True),
+                                arguments.get('timeout_ms', 5000)), None
+        if name == 'workspace':
+            result = json.loads(run.state.read_text()) if run.state.exists() else {'state_absent': True}
+            run.record('workspace', result)
+            return result, None
+        if name == 'snapshot':
+            return run.snapshot(), None
+        if name == 'launch':
+            return run.launch(), None
+        if name == 'call':
+            result = run.call(arguments['tool'], arguments.get('arguments', {}))
+            images = [c for c in result.get('content', []) if c.get('type') == 'image']
+            return result['_evidence'], images[0] if images else None
+        if name == 'stop':
+            return run.stop(), None
+        raise ValueError(f'Unknown tool {name}')
+
+    def respond(self, message):
+        method, params = message.get('method'), message.get('params', {})
+        if method == 'initialize':
+            return {'protocolVersion': PROTOCOL, 'capabilities': {'tools': {}},
+                    'serverInfo': {'name': 'keystone-verify', 'version': '2'},
+                    'instructions': 'Read crates/keystone-desktop/.agents/skills/verify/SKILL.md first.'}
+        if method == 'ping':
+            return {}
+        if method == 'tools/list':
+            return {'tools': [{'name': n, 'description': d, 'inputSchema': s} for n, d, s in TOOLS]}
+        if method == 'tools/call':
+            try:
+                value, image = self.handle(params['name'], params.get('arguments') or {})
+                content = [{'type': 'text', 'text': json.dumps(value)}]
+                if image:
+                    content.append({k: image[k] for k in ('type', 'data', 'mimeType')})
+                return {'content': content, 'isError': False}
+            except Exception as error:
+                self.failures += 1
+                return {'content': [{'type': 'text', 'text': f'{type(error).__name__}: {error}'}],
+                        'isError': True}
+        raise LookupError(method)
+
+    def reply(self, message):
+        try:
+            message = json.loads(message)
+        except json.JSONDecodeError as error:
+            return {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32700, 'message': str(error)}}
+        if not isinstance(message, dict) or 'method' not in message:
+            return {'jsonrpc': '2.0', 'id': message.get('id') if isinstance(message, dict) else None,
+                    'error': {'code': -32600, 'message': 'Invalid request'}}
+        if 'id' not in message:
+            return None
+        try:
+            return {'jsonrpc': '2.0', 'id': message['id'], 'result': self.respond(message)}
+        except LookupError as error:
+            return {'jsonrpc': '2.0', 'id': message['id'],
+                    'error': {'code': -32601, 'message': f'Unknown method {error}'}}
+        except Exception as error:
+            return {'jsonrpc': '2.0', 'id': message['id'],
+                    'error': {'code': -32602, 'message': f'{type(error).__name__}: {error}'}}
+
+    def serve(self):
+        try:
+            for line in sys.stdin:
+                if line.strip() and (reply := self.reply(line)) is not None:
+                    sys.stdout.write(json.dumps(reply) + '\n')
+                    sys.stdout.flush()
+        finally:
+            self.cleanup()
+
+    def cleanup(self):
+        if self.run is not None and not self.run.closed:
+            try:
+                self.run.stop()
+            except Exception as error:
+                print(f'cleanup failed: {error}', file=sys.stderr)
+                self.failures += 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--driver', required=True)
-    parser.add_argument('--root', required=True)
-    parser.add_argument('--evidence', required=True, help='New directory; refuses an existing directory')
-    parser.add_argument('--width', type=int, default=1280)
-    parser.add_argument('--height', type=int, default=900)
+    parser.add_argument('--driver', default=str(ROOT / '.audit/tools/computer-use-mcp'))
     args = parser.parse_args()
-    run = None
-    failed = False
-    try:
-        run = Run(args)
-        print(json.dumps({'ok': True, 'started': run.start(args), 'state': str(run.state)}), flush=True)
-        for line in sys.stdin:
-            try:
-                command = json.loads(line)
-                kind = command['kind']
-                if kind == 'call':
-                    result = run.call(command['tool'], command.get('arguments', {}))
-                elif kind == 'doctor':
-                    result = run.doctor()
-                elif kind == 'workspace':
-                    result = json.loads(run.state.read_text()) if run.state.exists() else {'state_absent': True}
-                    run.record('workspace', result)
-                elif kind == 'snapshot':
-                    result = run.snapshot()
-                elif kind == 'launch':
-                    result = run.launch()
-                elif kind == 'stop':
-                    result = run.stop()
-                else:
-                    raise ValueError(f'Unknown command kind {kind}')
-                print(json.dumps({'ok': True, 'result': result}), flush=True)
-                if kind == 'stop':
-                    break
-            except Exception as error:
-                failed = True
-                print(json.dumps({'ok': False, 'error': str(error)}), flush=True)
-    except Exception as error:
-        failed = True
-        print(json.dumps({'ok': False, 'error': str(error)}), flush=True)
-    finally:
-        if run and not run.closed:
-            try:
-                print(json.dumps({'ok': True, 'cleanup': run.stop()}), flush=True)
-            except Exception as error:
-                failed = True
-                print(json.dumps({'ok': False, 'cleanup_error': str(error)}), flush=True)
-    return int(failed)
+    server = Server(args)
+    server.serve()
+    return int(server.failures > 0)
 
 
 if __name__ == '__main__':

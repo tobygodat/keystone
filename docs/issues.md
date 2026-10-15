@@ -27,7 +27,7 @@ On 2026-10-15 the 10 ms check passed natively on Hyprland 0.56.2 with dependenci
 
 ## KS-006. Nested desktop capture depends on host visibility
 
-Status is open with a documented workaround. The pinned computer-use-mcp driver timed out capturing a nested Sway window while it was offscreen in Hyprland. The same running session captured successfully after its observed host window was focused. A subsequent complete visible-window run passed. Keep the nested desktop visible during verification. Fully background capture remains unverified. Failed-run evidence is in `.audit/verify-nested-002/`; passing evidence is in `.audit/verify-nested-003/`.
+Status is resolved. The pinned computer-use-mcp driver ran its private Sway as a host window, and Hyprland stops drawing hidden windows, so capture timed out and fresh menus missed clicks while it was offscreen. `scripts/patches/computer-use-mcp-headless.patch` adds a headless backend, now the verification default. A run from a shell with no host Wayland display rendered at exactly 1280 by 900 and accepted input. Failed-run evidence is in `.audit/verify-nested-002/`; headless evidence is in `.audit/verify-headless-001/` and `.audit/verify-20261015T172005-206124/`. `headless:false` still has the original limitation.
 
 ## KS-007. Verification controller startup cleanup
 

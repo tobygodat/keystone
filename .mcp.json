@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "keystone-verify": {
+      "command": "python3",
+      "args": ["scripts/native-driver.py"]
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # Native verification driver proof
 
-The project-local [verify skill](../crates/keystone-desktop/.agents/skills/verify/SKILL.md) drives the real Rust GPUI executable through computer-use-mcp and a nested Sway desktop. It includes four feature maps for sessions, drafts and restart, settlement, and search. The controller uses stdio and needs no global MCP registration.
+The project-local [verify skill](../crates/keystone-desktop/.agents/skills/verify/SKILL.md) drives the real Rust GPUI executable through computer-use-mcp and a private Sway desktop. It includes four feature maps for sessions, drafts and restart, settlement, and search. The `keystone-verify` MCP server in `.mcp.json` wraps the driver, records evidence, and resolves named elements.
 
 ## Verified journey
 
@@ -20,11 +20,21 @@ The supplied MonoCode screenshot and this native capture both show a flat charco
 
 The test desktop was 1782 by 1075 pixels, assigned by Hyprland despite a 1280 by 900 request. The supplied reference was 2048 by 1234. This supports a structural visual comparison only. No pixel-difference score or exact visual parity is claimed. Small-window clipping is not covered by this run.
 
+## Headless desktop and named elements
+
+The first proof below ran the nested desktop as a Hyprland window. Verification now defaults to a headless Sway with the GLES2 renderer, from a local patch to the same driver commit. The app also reports the bounds of each named element when `KEYSTONE_AUTOMATION_PATH` is set in a debug build. The server maps them into desktop pixels for `elements`, `click`, and `wait_for`.
+
+The run in `.audit/verify-20261015T172005-206124/` used only names for mouse input. It clicked **Start with Claude Code**, typed a draft, opened the new-session menu, and clicked **New Codex session** inside that popover. The saved workspace held both sessions and the typed draft. After Ctrl+Q and relaunch, `0002.png` shows both sessions restored. Cleanup reported no errors. The run came from an agent shell with no host Wayland display, which the previous driver could not use at all.
+
+Element geometry is clip-aware but not occlusion-aware. While the new-session menu was open, the covered first session row still reported as visible. Under verification the session sidebar renders without view caching, because a reused cached view skips the prepaint that reports geometry.
+
+Cua Driver was evaluated as an alternative and not adopted. Its semantic route on Linux is AT-SPI, which GPUI 0.2.2 does not expose. Its native Wayland lane was experimental as of upstream issue 1922. On Keystone it would offer the same pixel route this driver already has.
+
 ## Failed attempts and limitations
 
 Run 001 could not connect to the host Wayland socket from the restricted shell. It cleaned up and retained the failure log. The permitted run used graphical-session and GPU access.
 
-Run 002 captured the welcome and created-session states, then encountered two capture timeouts while the nested window was offscreen. Capture recovered after the owned host window was focused. That run exited 1 and remains failure evidence. Run 003 completed without tool errors while the nested window remained visible. KS-006 tracks background-capture reliability.
+Run 002 captured the welcome and created-session states, then encountered two capture timeouts while the nested window was offscreen. Capture recovered after the owned host window was focused. That run exited 1 and remains failure evidence. Run 003 completed without tool errors while the nested window remained visible. The headless backend resolved this as KS-006.
 
 Independent review corrected a nonexistent search-toolbar route in the map and a scratch-directory leak on driver execution failure. The failure regression attempt is retained in `.audit/verify-driver-exec-failure/`. A fresh review approved the resulting source and instructions.
 

@@ -15,18 +15,18 @@ Find local sessions by title or provider and recover the full list after clearin
 - Type a provider or title. Select all and delete to clear.
 - Click the sidebar icon at the top of the left rail to hide or restore the sidebar.
 
-## Driving it with native-driver
+## Driving it with keystone-verify
 
 Preconditions:
 
 - At least one Claude session and one Codex session.
 - Settled-only filtering is off.
 
-- Send `{"kind":"call","tool":"input","arguments":{"actions":[{"action":"keypress","keys":["ctrl","f"]},{"action":"type","text":"Codex"}]}}`. Capture and require only Codex rows. Read `workspace` and require both providers still exist.
+- Call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","f"]},{"action":"type","text":"Codex"}]}`. Capture and require only Codex rows. Read `workspace` and require both providers still exist.
 - Send Ctrl+A while search has focus, then type `no-such-session`. Require **No sessions match these filters**.
 - Send Ctrl+A then BackSpace through `keypress`. Capture and require the full list to return.
-- Capture and click the sidebar toggle. Require the session list to disappear and the composer to remain usable. Press Ctrl+F and require the sidebar and focused search to return.
-- Test each mouse search entry from a fresh screenshot. Type `Claude` and require the Claude result. Clear after each route.
+- `click` `{"id":"rail-sidebar"}`. Call `wait_for` with `{"id":"search-field","present":false}`. Capture and require the session list to disappear and the composer to remain usable. Press Ctrl+F and require the sidebar and focused search to return.
+- Test each mouse search entry separately: `click` `{"id":"search-field"}` and `click` `{"id":"rail-search"}`. Type `Claude` and require the Claude result. Clear after each route.
 
 ## Gotchas
 

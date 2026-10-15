@@ -16,7 +16,7 @@ GPUI's `#[gpui::test]` supports simulated platform input and deterministic async
 
 Run a small native smoke suite for launch, input focus, keyboard shortcuts, window close and reopen, and saved state. Capture screenshots and process logs on failure. Do not call a headless model test desktop E2E. Native automation must be demonstrated on the target Linux session before declaring it supported.
 
-Use the [project verification skill](../crates/keystone-desktop/.agents/skills/verify/SKILL.md) for nested Wayland control. The controller stores action logs, screenshots, and copies of the actual workspace file. Keep the nested desktop visible during capture. The host can throttle hidden windows. Review [the feature map](../crates/keystone-desktop/.agents/skills/verify/features/README.md) so a shortcut check does not silently substitute for an untested mouse entry point.
+Use the [project verification skill](../crates/keystone-desktop/.agents/skills/verify/SKILL.md) for nested Wayland control. The `keystone-verify` MCP server starts a headless private desktop, clicks and waits on named elements from the app's frame, and stores action logs, screenshots, and copies of the actual workspace file. A named click does not prove the visual result. Inspect the screenshot. Review [the feature map](../crates/keystone-desktop/.agents/skills/verify/features/README.md) so a shortcut check does not silently substitute for an untested mouse entry point.
 
 ## Provider checks
 

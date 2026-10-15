@@ -34,8 +34,8 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 
 ## Verification notes
 
-- Native checks use the nested Sway driver in `crates/keystone-desktop/.agents/skills/verify/`. The driver binary is at `.audit/tools/computer-use-mcp` in the main checkout. Run the controller with `--root` pointing at the checkout whose binary you built.
-- **The nested window must be visible.** A hidden window times out screenshots and also stops GPUI from drawing frames. A click on a menu that just opened then lands on the previous frame and misses. Run each journey as one scripted burst with the nested window focused, then restore the user's previous Hyprland focus.
+- Native checks use the `keystone-verify` MCP server (`scripts/native-driver.py`, registered in `.mcp.json`). See `crates/keystone-desktop/.agents/skills/verify/`. The server drives the `target/debug` binary of the checkout that contains the script, and defaults `--driver` to that checkout's `.audit/tools/computer-use-mcp`. In a worktree without its own driver, pass `--driver` with the main checkout's path.
+- `start` is headless by default. The private Sway desktop renders offscreen at the requested size, so host focus and visibility no longer matter (KS-006). Named elements from the app's frame drive `click` and `wait_for`. With `headless:false`, the nested window must stay visible, or GPUI stops drawing frames and clicks on new menus miss.
 - Find the nested window with `pgrep -x sway` and match that PID in `hyprctl clients -j`. `pgrep -f` matches your own shell.
 - The final native run (`.audit/verify-design-system-20261015T153837`) had zero failures. Earlier runs confirmed restart restoration, the tooltip, menu hover, and the gallery.
 - SSH to `desk`, which the user suggested for heavy work, was blocked by the permission classifier. Everything ran locally on 22 cores.
@@ -48,7 +48,7 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 1. **KS-005 confirmation.** The sidebar is now a cached view (see `docs/performance.md`). The 10 ms native typing check passed on 2026-10-15 both before and after that change, so the dependency optimization is the more likely fix. Repeat it several times before closing KS-005.
 2. **Appearance follow-ups.** The light theme, density, and font settings are built and saved in the workspace file. The interface font list only offers installed fonts from a fixed candidate list. Text size and the monospace font are not configurable yet. System mode follows GPUI's reported window appearance. On Hyprland with the portal reporting `prefer-dark`, it opened dark. A light desktop setting and switching while the app runs have not been tested.
 3. **Small polish.** Escape closes menus, selected rows have a hover state, and the color check catches `Hsla { .. }` literals. Nothing else is queued.
-4. **Prior open issues.** KS-002 partial, KS-004 partial, KS-005, KS-006, and KS-009 in `docs/issues.md`.
+4. **Prior open issues.** KS-002 partial, KS-004 partial, KS-005, and KS-009 in `docs/issues.md`.
 
 ## Working preferences learned
 
