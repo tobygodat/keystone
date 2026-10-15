@@ -1,6 +1,6 @@
 # Provider integration design
 
-Status: proposal, 2026-10-15. Nothing here is implemented. Decisions marked **Decide** need approval before work starts.
+Status: proposal, 2026-10-15. Nothing here is implemented. Decisions marked **Decide** need approval before work starts. The spike results below have been folded in.
 
 Keystone drives the user's own installed `claude` and `codex` programs. This document says how, and where it deliberately differs from Zeron (MIT, Rust, studied at commit `3b2f780`) and T3 Code. Protocol facts were checked against Claude Code 2.1.300 and codex-cli 0.162.1 on 2026-10-15.
 
@@ -14,7 +14,7 @@ Keystone is one local process with one window owner. It does not need multi-devi
 
 | Concern | Zeron | T3 Code | Keystone (proposed) |
 | --- | --- | --- | --- |
-| Claude transport | `claude -p` stream-json, undocumented `--permission-prompt-tool stdio` | Official Agent SDK in Node | `claude -p` stream-json, documented `--permission-prompts host` |
+| Claude transport | `claude -p` stream-json with `--permission-prompt-tool stdio` | Official Agent SDK in Node | `claude -p` stream-json with the same flags the official SDKs pass |
 | Codex transport | One `codex app-server` per chat, plus probe processes | `codex app-server` | One shared `codex app-server` for all sessions |
 | Driver shape | Async tasks mixing IO, timers, and protocol logic; 1,500–2,500 lines per driver | Effect-TS adapters | Pure state machines with no IO; one shared process host |
 | Per text delta | Line `String` → `Value` → typed struct → event → journal write → broadcast copy → fold | SDK objects → event store | Line bytes → one typed decode → append to the live item; nothing else |
@@ -23,7 +23,7 @@ Keystone is one local process with one window owner. It does not need multi-devi
 | Tool output | Not stored for Claude or Codex | Stored | Stored, capped at head and tail |
 | Approvals | Every Claude tool auto-allowed; Codex forced to `never` and full access | Surfaced | Surfaced as items; provider settings respected |
 | Turn end | Native end plus lifecycle tracking, 3 s and 30 s fallback timers, retired watchdogs | Provider events | Native end only; process exit synthesizes a failed end |
-| Version safety | `--version` read, no minimum enforced | SDK version pin | Tested range enforced as a warning, plus feature detection |
+| Version safety | `--version` read, no minimum enforced | SDK version pin | Tested range shown as a warning, plus capability detection |
 | Session import | None | Not checked | One-time import from provider transcripts |
 
 ## Design
@@ -84,14 +84,14 @@ There are no watchdogs, heartbeats, or quiet-period timers. Zeron added and late
 ### 5. Process topology
 
 **Decide.**
-- **Codex:** one shared `codex app-server` for the whole app. Threads are multiplexed by ID, model listing uses the same process, and probe processes go away. If it crashes, a supervisor restarts it and resumes the threads that were loaded. The docs imply concurrent turns on several threads but do not state it; the first spike verifies it before anything depends on it.
-- **Claude:** one process per active session, as the protocol requires. Idle processes with no background tasks are stopped after 10 minutes and resumed lazily. When the user starts typing in a new Claude session, Keystone may start the process early to hide startup; measure before keeping that.
+- **Codex:** one shared `codex app-server` for the whole app. Threads are multiplexed by ID, model listing uses the same process, and probe processes go away. If it crashes, a supervisor restarts it and resumes the threads that were loaded. The spike confirmed two threads running turns at the same time in one process. Memory decides it: an idle app-server with one thread used about 650 MB across 4 processes, and each extra thread added about 150 MB (three helper processes from the user's Codex configuration). Six sessions measured 1.4 GB shared, against about 3.9 GB estimated for six separate processes. Startup is not a reason; a cold app-server answered `initialize` in 0.09 s. Keystone unsubscribes threads that have been idle, so Codex unloads them and their helpers.
+- **Claude:** one process per active session, as the protocol requires. An idle process measured 256 MB and answered `initialize` in 0.29 s. Idle processes with no background tasks are stopped after 10 minutes and resumed lazily. When the user starts typing in a new Claude session, Keystone may start the process early to hide startup; measure before keeping that.
 
 Children start in their own process group. Teardown sends the protocol interrupt, then SIGINT, SIGTERM, and SIGKILL with short grace periods, then kills descendants found through `/proc`. Agents put shells in separate groups, so the group alone is not enough. Zeron learned this; Keystone avoids spawning `ps` to do it.
 
 ### 6. Permissions are real
 
-- **Claude:** Keystone uses the documented `--permission-prompts host` (2.1.259 and later). It does not use the undocumented `--permission-prompt-tool stdio`. Each `can_use_tool` control request becomes an `Approval` item.
+- **Claude:** Keystone passes `--permission-prompts host --permission-prompt-tool stdio`. The spike showed that `--permission-prompts host` alone does not reach Keystone: Claude denied the tool itself and emitted `system/permission_denied`. The `stdio` value is undocumented, but the official Python SDK passes it whenever a permission callback is set (`types.py:2288-2304`), so Anthropic's own SDKs depend on it. Each `can_use_tool` control request becomes an `Approval` item.
 - **Codex:** Keystone sends the user's own approval policy and sandbox settings. It does not force `never` and full access. Its approval requests also become `Approval` items.
 - **Inbox:** an approval blocks its turn and appears in the attention inbox. Settlement never answers it, which the scope requires.
 - **Unknown requests:** any control request or server request Keystone does not handle gets an explicit error response, so the agent never waits forever. Zeron leaves unknown Claude control requests unanswered.
@@ -100,17 +100,17 @@ Children start in their own process group. Teardown sends the protocol interrupt
 
 Each line is decoded once into typed, tagged structs that borrow from the line where possible. Fields Keystone does not show are skipped without being built. Large tool output is read through a capped field, so it is never fully allocated. Unknown message types are counted and, in debug builds, logged raw; they are never fatal.
 
-Codex's `optOutNotificationMethods` turns off notifications Keystone does not render, so they are never sent at all.
+Codex's `optOutNotificationMethods` turns off notifications Keystone does not render, so they are never sent at all. The spike saw `remoteControl/status/changed`, `account/updated`, and per-thread `mcpServer/startupStatus/updated` alongside the turn traffic.
 
 The message types are written by hand for the subset Keystone uses. A test validates them against the JSON schema generated by the pinned Codex version.
 
 ### 8. Steering and interrupt
 
 Steering follows the scope: a message sent during a turn steers that turn, and there is no follow-up queue.
-- **Claude:** a user message with priority `now`, or `next` while a tool is running, because `now` aborts a running MCP call. Zeron found this rule; credit it.
-- **Codex:** `turn/steer` with the expected turn ID. If the turn already ended, the message starts the next turn.
+- **Claude:** a user message with priority `now`, or `next` while a tool is running, because `now` aborts a running MCP call. Zeron found this rule; credit it. In the spike, a `now` steer ended the current response with a `result` (`terminal_reason: aborted_streaming`), then a second `result` followed with the steered reply. Keystone shows both as one user-visible turn.
+- **Codex:** `turn/steer` with the expected turn ID. In the spike, the same turn continued and completed with the steered reply. If the turn already ended, the message starts the next turn.
 
-Interrupt uses Claude's `interrupt` with `cancel_queued` when the `interrupt_cancel_queued_v1` capability is present, or Codex's `turn/interrupt`. Interrupting a turn does not stop background tasks. Stopping the runtime does, and asks first when background work is live.
+Interrupt uses Claude's `interrupt` with `cancel_queued` when the `interrupt_cancel_queued_v1` capability is present, or Codex's `turn/interrupt`. In the spike, Claude ended with `result` subtype `error_during_execution` and stayed running; Codex ended with `turn/completed` status `interrupted`. Interrupting a turn does not stop background tasks. Stopping the runtime does, and asks first when background work is live.
 
 ### 9. Version safety
 
@@ -121,6 +121,38 @@ A table lists the tested version range for each provider. Keystone reads `--vers
 A new `keystone-agent` crate holds items, drivers, the session lifecycle, the process host, and the log store. It does not depend on GPUI, so its tests compile without the graphics stack. The desktop crate only renders and sends commands.
 
 The process host uses one blocking reader thread per child process for stdout and one for stderr, plus a writer thread with a bounded queue. That is a few threads per active session and no async runtime in Keystone's own code. `async-process` and `smol` are already compiled through GPUI if that changes.
+
+## Spike results, 2026-10-15
+
+Run in a disposable repository with Claude Code 2.1.300 (`--model haiku`) and codex-cli 0.162.1 (`effort: low`). Raw logs are in `.audit/spike-20261015/`. They stay out of git because the Claude `initialize` response lists the user's own skills.
+
+| Question | Result |
+| --- | --- |
+| Concurrent turns on one Codex app-server | Yes. Both turns started at 0.79 s and completed at 3.34 s and 3.61 s. |
+| Codex approval round trip | `item/commandExecution/requestApproval` arrived under `untrusted`; accepting created the file. |
+| Codex steer and interrupt | Steer kept the turn and produced `STEERED`. Interrupt ended with status `interrupted`. |
+| Claude permission with `--permission-prompts host` only | No. The tool was denied without a `can_use_tool` request. |
+| Claude permission with `--permission-prompt-tool stdio` added | Yes. `can_use_tool` arrived for Bash; allowing it created the file. |
+| Claude steer | Two `result` messages: the aborted response, then the steered reply. |
+| Claude interrupt | `error_during_execution`, process still running. |
+| Claude capabilities on 2.1.300 | `interrupt_receipt_v1`, `interrupt_cancel_queued_v1`, `interrupt_send_now_v1`, `msg_lifecycle_v1`, `request_marker_lists_v1`, `sdk_mcp_tools_list_changed`, `sdk_mcp_manifests`, `mcp_read_resource_v1`, `mcp_tool_ui_meta_v1`, `ui_surface_v1`. |
+| Footprint | Codex: 650 MB idle with one thread, plus about 150 MB per extra thread. Claude: 256 MB per idle session process. |
+
+## Limitations
+
+These are the costs of the choices above, and what would make each one wrong.
+
+1. **Claude's control protocol has no published spec.** Keystone uses the same flags and messages as the official SDKs, which lowers the risk but does not remove it. A Claude Code release can change behavior with no notice to third parties. The official SDKs absorb that because they ship in lockstep with the CLI; Keystone does not. Mitigation: capability detection, a tested version range, recorded fixtures, and the opt-in live check. If this proves too fragile, the fallback is a small Node helper around the official Agent SDK, as T3 Code does, at the cost of a Node runtime.
+2. **Pure drivers still need time-based behavior somewhere.** Interrupt escalation and idle shutdown need timers. They live in the process host, not the drivers. A driver cannot say "no answer within 3 seconds", which Zeron uses after a stop request. Keystone accepts a stop as pending until the provider ends the turn, and offers a forced stop after a visible delay.
+3. **One shared Codex process is one failure domain.** A crash or hang interrupts every running Codex session at once, and a memory leak in one thread affects all of them. Restarting resumes the threads, but in-flight turns are lost. One process also means one global Codex configuration. Per-session `-c` overrides at launch are not possible; anything that differs per session must go through `thread/start` and `turn/start` parameters.
+4. **Claude memory scales with sessions.** At 256 MB each, ten active Claude sessions use about 2.5 GB. Idle shutdown limits this, but resuming then costs a fresh process start.
+5. **Keystone's log is a partial copy.** It stores completed items and capped tool output, not every provider event. Detail the provider keeps but Keystone does not render (for example raw thinking signatures or hook events) is only in the provider's own transcript. Claude deletes transcripts after 30 days by default, so for old sessions Keystone's log may be the only record left, and resume will fail.
+6. **Two copies can disagree.** If the user also continues a session in the plain CLI, the provider's transcript moves ahead of Keystone's log. Reconciliation fills the gap on resume, but for Claude it reads an internal format that may have changed. Keystone must show when reconciliation was partial.
+7. **Coalescing hides per-token timing.** Rendering once per frame is invisible at 60 Hz, but Keystone keeps no record of when each delta arrived. A future "replay this turn" feature would need provider timestamps.
+8. **Capped tool output loses the middle.** A 10 MB build log keeps its first and last 32 KB. That covers most needs; the full output exists only in the provider's records, if anywhere.
+9. **Not using the official SDK has a policy dimension.** Anthropic's terms are written around the Agent SDK. Driving the CLI directly with the user's own login matches the allowance for the unmodified binary, but it is a judgment call, and Codex says app-server authentication was never permitted for commercial services. Both are fine for a local, personal tool and need review before any commercial release.
+10. **Approvals change the experience.** Respecting the provider's permission settings means more prompts than Zeron's auto-approve. That is the scope's choice, but sessions will pause until the user answers, and the inbox must make that obvious.
+11. **Linux first.** Process-tree teardown through `/proc` and the measurements above are Linux-specific. macOS and Windows need their own teardown paths.
 
 ## Terms
 
@@ -136,7 +168,7 @@ These are added to `scripts/perf.py` before the drivers are tuned:
 
 ## Plan
 
-1. **Spike, about 1 day.** Confirm concurrent turns on one Codex app-server. Confirm that `--permission-prompts host` delivers `can_use_tool` on 2.1.300. Record one short transcript of each provider covering streaming, a tool call, an approval, an interrupt, and a steer. This consumes a small amount of the user's subscription. **Decide.**
+1. **Spike, done 2026-10-15.** See the results above. Redacted fixtures still need to be cut from the raw logs.
 2. **Codex first.** The `keystone-agent` crate, the Codex driver with fixture tests, the process host, the log store, and a desktop transcript with submit, stream, and interrupt.
 3. **Claude driver,** against the same item model and fixtures.
 4. **Approvals and steering** in the UI and inbox, then resume, crash reconciliation, and import.
