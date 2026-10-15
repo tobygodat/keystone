@@ -126,3 +126,25 @@ fn preferences_survive_restart_and_default_for_older_files() {
         &preferences
     );
 }
+
+#[test]
+fn provider_thread_survives_restart_and_is_absent_in_older_files() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let mut store = Store::open(&path).unwrap();
+    let id = store.create(Provider::Codex).unwrap().value;
+    assert_eq!(store.workspace().sessions()[0].provider_thread(), None);
+    assert!(
+        !fs::read_to_string(&path)
+            .unwrap()
+            .contains("provider_thread")
+    );
+
+    store.set_provider_thread(id, "thread-123".into()).unwrap();
+    drop(store);
+    let restored = Store::open(&path).unwrap();
+    assert_eq!(
+        restored.workspace().sessions()[0].provider_thread(),
+        Some("thread-123")
+    );
+}

@@ -41,6 +41,7 @@ def digest(path):
 
 class Run:
     def __init__(self, driver, root, evidence):
+        self.env = {}
         self.binary = Path(root).resolve() / 'target/debug/keystone-desktop'
         self.binary_sha = digest(self.binary)
         driver_sha = digest(driver)
@@ -141,20 +142,22 @@ class Run:
     def call(self, tool, arguments=None):
         return self.request('tools/call', {'name': tool, 'arguments': arguments or {}})
 
-    def start(self, width, height, headless):
+    def start(self, width, height, headless, env=None):
         self.request('initialize', {'protocolVersion': PROTOCOL, 'capabilities': {},
                                    'clientInfo': {'name': 'keystone-verifier', 'version': '2'}})
         self.process.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
         self.process.stdin.flush()
         session = self.call('session_start', {'width': width, 'height': height, 'xwayland': True,
                                               'sandbox': False, 'headless': headless})
+        self.env = app_env(env)
         return {'session': session.get('structuredContent'), 'launch': self.launch()}
 
     def launch(self):
         self.geometry.unlink(missing_ok=True)
+        extra = [f'{key}={value}' for key, value in sorted(self.env.items())]
         result = self.call('app_launch', {'argv': [
             '/usr/bin/env', '-u', 'KEYSTONE_VISUAL_FIXTURE', f'KEYSTONE_STATE_PATH={self.state}',
-            f'KEYSTONE_AUTOMATION_PATH={self.geometry}', str(self.binary)]})
+            f'KEYSTONE_AUTOMATION_PATH={self.geometry}', *extra, str(self.binary)]})
         pid = result.get('structuredContent', {}).get('pid')
         if pid:
             self.app_pids.append(pid)
@@ -283,6 +286,18 @@ class Run:
         return result
 
 
+# Variables a run may pass to the app. The state and automation paths stay owned by the run.
+APP_ENV = {'KEYSTONE_CODEX_PATH', 'KEYSTONE_PROJECT_DIR', 'KEYSTONE_FAKE_CODEX_DELAY_MS'}
+
+
+def app_env(env):
+    env = env or {}
+    unknown = sorted(set(env) - APP_ENV)
+    if unknown:
+        raise ValueError(f'env may only set {sorted(APP_ENV)}; got {unknown}')
+    return {key: str(value) for key, value in env.items()}
+
+
 def schema(properties=None, required=()):
     return {'type': 'object', 'properties': properties or {}, 'required': list(required),
             'additionalProperties': False}
@@ -294,7 +309,10 @@ TOOLS = [
      'empty disposable workspace and a new evidence directory. One run at a time.',
      schema({'width': {'type': 'integer', 'default': 1280}, 'height': {'type': 'integer', 'default': 900},
              'headless': {'type': 'boolean', 'default': True,
-                          'description': 'false shows the desktop as a host window'}})),
+                          'description': 'false shows the desktop as a host window'},
+             'env': {'type': 'object', 'additionalProperties': {'type': 'string'},
+                     'description': 'App variables for this run and its relaunches: '
+                                    + ', '.join(sorted(APP_ENV))}})),
     ('doctor', 'Read desktop, window, and process identity. Require matches_launch and binary_unchanged.',
      schema()),
     ('screenshot', 'Capture the whole private desktop as a PNG and save it as evidence.', schema()),
@@ -340,7 +358,7 @@ class Server:
             evidence = ROOT / '.audit' / f'verify-{time.strftime("%Y%m%dT%H%M%S")}-{os.getpid()}'
             self.run = Run(self.args.driver, ROOT, evidence)
             started = self.run.start(arguments.get('width', 1280), arguments.get('height', 900),
-                                     arguments.get('headless', True))
+                                     arguments.get('headless', True), arguments.get('env'))
             return {**started, 'evidence': str(evidence), 'state': str(self.run.state)}, None
         run = self.require()
         if name == 'doctor':

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/keystone-core", "crates/keystone-desktop", "crates/keystone-ui"]
+members = ["crates/keystone-agent", "crates/keystone-core", "crates/keystone-desktop", "crates/keystone-ui"]
 default-members = ["crates/keystone-core"]
 resolver = "2"
 
