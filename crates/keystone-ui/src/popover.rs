@@ -184,7 +184,12 @@ impl RenderOnce for MenuItem {
         if let Some(selector) = self.debug_selector {
             el = el.debug_selector(move || selector);
         }
-        el.when_some(self.on_click, |d, handler| d.on_click(handler))
+        el.when_some(self.on_click, |d, handler| {
+            d.on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                handler(event, window, cx)
+            })
+        })
     }
 }
 

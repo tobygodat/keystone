@@ -445,18 +445,18 @@ impl Keystone {
                                 .icon(IconName::Chat)
                                 .kbd("Ctrl+N")
                                 .debug_selector(|| "new-claude".into())
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.create(Provider::Claude, cx)),
-                                ),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.start(Provider::Claude, window, cx)
+                                })),
                         )
                         .child(
                             MenuItem::new("new-codex", "New Codex session")
                                 .icon(IconName::Chat)
                                 .kbd("Ctrl+Shift+N")
                                 .debug_selector(|| "new-codex".into())
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.create(Provider::Codex, cx)),
-                                ),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.start(Provider::Codex, window, cx)
+                                })),
                         ),
                     ),
             )
@@ -694,8 +694,14 @@ impl Render for Keystone {
                     cx.quit();
                 }
             }))
-            .on_action(cx.listener(|this, _: &NewClaude, _, cx| this.create(Provider::Claude, cx)))
-            .on_action(cx.listener(|this, _: &NewCodex, _, cx| this.create(Provider::Codex, cx)))
+            .on_action(cx.listener(|this, _: &NewClaude, window, cx| {
+                this.start(Provider::Claude, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &NewCodex, window, cx| {
+                    this.start(Provider::Codex, window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &ToggleSettle, _, cx| this.toggle_settle(cx)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 this.composer.focus_handle(cx).focus(window)
@@ -774,6 +780,28 @@ mod tests {
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].draft(),
             "Draft from the welcome composer\n第二行 😀\n"
+        );
+    }
+
+    #[gpui::test]
+    fn menu_created_session_receives_typed_draft(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let store = Store::open(&path).unwrap();
+        cx.update(keystone_ui::init);
+        let (_view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        for selector in ["new-session", "new-claude"] {
+            let bounds = cx.debug_bounds(selector).expect("control rendered");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+        }
+        cx.simulate_input("Menu draft");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(
+            Store::open(&path).unwrap().workspace().sessions()[0].draft(),
+            "Menu draft"
         );
     }
 

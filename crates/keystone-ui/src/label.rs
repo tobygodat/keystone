@@ -61,7 +61,7 @@ impl RenderOnce for Label {
             .text_color(self.color.to_hsla(cx))
             .font_weight(self.weight)
             .when(self.mono, |d| d.font_family(cx.theme().fonts.mono.clone()))
-            .when(self.truncate, |d| d.min_w_0().truncate())
+            .when(self.truncate, |d| d.w_full().min_w_0().truncate())
             .child(self.text)
     }
 }
