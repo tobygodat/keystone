@@ -94,6 +94,7 @@ Children start in their own process group. Teardown sends the protocol interrupt
 - **Claude:** Keystone passes `--permission-prompts host --permission-prompt-tool stdio`. The spike showed that `--permission-prompts host` alone does not reach Keystone: Claude denied the tool itself and emitted `system/permission_denied`. The `stdio` value is undocumented, but the official Python SDK passes it whenever a permission callback is set (`types.py:2288-2304`), so Anthropic's own SDKs depend on it. Each `can_use_tool` control request becomes an `Approval` item.
 - **Codex:** Keystone sends the user's own approval policy and sandbox settings. It does not force `never` and full access. Its approval requests also become `Approval` items.
 - **Inbox:** an approval blocks its turn and appears in the attention inbox. Settlement never answers it, which the scope requires.
+- **Approval modes:** each session has a mode the user can change at any time, mapped to the provider's own settings. Claude takes `--permission-mode` at launch (`manual`, `acceptEdits`, `auto`, `dontAsk`, `plan`, `bypassPermissions` on 2.1.300) and the `set_permission_mode` control request mid-session. Codex takes `approvalPolicy` (`untrusted`, `on-request`, `never`) and a sandbox on every `turn/start`, so a change applies from the next turn. Keystone shows an approval only when the chosen mode asks for one. The default is whatever the user's own Claude and Codex configuration says.
 - **Unknown requests:** any control request or server request Keystone does not handle gets an explicit error response, so the agent never waits forever. Zeron leaves unknown Claude control requests unanswered.
 
 ### 7. Parsing
@@ -144,15 +145,44 @@ These are the costs of the choices above, and what would make each one wrong.
 
 1. **Claude's control protocol has no published spec.** Keystone uses the same flags and messages as the official SDKs, which lowers the risk but does not remove it. A Claude Code release can change behavior with no notice to third parties. The official SDKs absorb that because they ship in lockstep with the CLI; Keystone does not. Mitigation: capability detection, a tested version range, recorded fixtures, and the opt-in live check. If this proves too fragile, the fallback is a small Node helper around the official Agent SDK, as T3 Code does, at the cost of a Node runtime.
 2. **Pure drivers still need time-based behavior somewhere.** Interrupt escalation and idle shutdown need timers. They live in the process host, not the drivers. A driver cannot say "no answer within 3 seconds", which Zeron uses after a stop request. Keystone accepts a stop as pending until the provider ends the turn, and offers a forced stop after a visible delay.
-3. **One shared Codex process is one failure domain.** A crash or hang interrupts every running Codex session at once, and a memory leak in one thread affects all of them. Restarting resumes the threads, but in-flight turns are lost. One process also means one global Codex configuration. Per-session `-c` overrides at launch are not possible; anything that differs per session must go through `thread/start` and `turn/start` parameters.
+3. **One shared Codex process is one failure domain.** If the `codex app-server` process itself dies (a Codex bug, out of memory, or killed), every Codex turn running at that moment stops. Conversations are not lost: Codex has saved them, and Keystone restarts the process and resumes each thread, but the user has to resend the interrupted turns. Failures inside a session, such as a failed shell command, a crashed MCP helper, or a model error, stay in that session. A hang is worse than a crash, because Keystone must detect it before restarting. One process also means one global Codex configuration: anything that differs per session must go through `thread/start` and `turn/start` parameters. If crashes prove common, Keystone can cap threads per process or give each project its own app-server.
 4. **Claude memory scales with sessions.** At 256 MB each, ten active Claude sessions use about 2.5 GB. Idle shutdown limits this, but resuming then costs a fresh process start.
 5. **Keystone's log is a partial copy.** It stores completed items and capped tool output, not every provider event. Detail the provider keeps but Keystone does not render (for example raw thinking signatures or hook events) is only in the provider's own transcript. Claude deletes transcripts after 30 days by default, so for old sessions Keystone's log may be the only record left, and resume will fail.
 6. **Two copies can disagree.** If the user also continues a session in the plain CLI, the provider's transcript moves ahead of Keystone's log. Reconciliation fills the gap on resume, but for Claude it reads an internal format that may have changed. Keystone must show when reconciliation was partial.
 7. **Coalescing hides per-token timing.** Rendering once per frame is invisible at 60 Hz, but Keystone keeps no record of when each delta arrived. A future "replay this turn" feature would need provider timestamps.
 8. **Capped tool output loses the middle.** A 10 MB build log keeps its first and last 32 KB. That covers most needs; the full output exists only in the provider's records, if anywhere.
 9. **Not using the official SDK has a policy dimension.** Anthropic's terms are written around the Agent SDK. Driving the CLI directly with the user's own login matches the allowance for the unmodified binary, but it is a judgment call, and Codex says app-server authentication was never permitted for commercial services. Both are fine for a local, personal tool and need review before any commercial release.
-10. **Approvals change the experience.** Respecting the provider's permission settings means more prompts than Zeron's auto-approve. That is the scope's choice, but sessions will pause until the user answers, and the inbox must make that obvious.
-11. **Linux first.** Process-tree teardown through `/proc` and the measurements above are Linux-specific. macOS and Windows need their own teardown paths.
+10. **Approvals depend on the chosen mode.** In a manual mode, sessions pause until the user answers, and the inbox must make that obvious. Auto modes avoid the pauses. Keystone never auto-approves on the provider's behalf; it changes the provider's own mode, so the provider's safety checks still apply.
+11. **Linux first.** Process-tree teardown through `/proc` and the measurements above are Linux-specific. See the platform section below.
+
+## Platforms
+
+Keystone targets Linux first, with macOS and Windows later. GPUI supports all three. The provider layer keeps platform code in one module of the process host so the drivers never change.
+
+| Concern | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Kill a whole process tree | Own process group, then descendants from `/proc` | Own process group, then descendants from `libproc` | Job object with kill-on-close; this covers every descendant |
+| Find `claude` and `codex` | `PATH`, plus common install directories | Apps launched from Finder do not get the shell's `PATH`; read the login shell's `PATH` once | `.cmd` and `.ps1` npm shims, `%APPDATA%\npm`, and native installers |
+| Graceful interrupt | Protocol interrupt, then SIGINT | Same | Protocol interrupt, then terminate; there is no SIGINT for pipes |
+| Provider data | `~/.claude`, `~/.codex` | Same | `%USERPROFILE%\.claude`, `%USERPROFILE%\.codex` |
+
+Other platform work outside the provider layer: the workspace store syncs its parent directory after writes (KS-001), which Windows does not allow, so that step needs a Windows path. Native verification uses nested Sway and is Linux-only; macOS and Windows need their own checks. There is no CI yet. A build and test matrix on all three platforms should come before the first non-Linux release.
+
+## Signing in
+
+Keystone does not handle credentials by default. It uses whatever login the user's `claude` and `codex` already have.
+
+OpenAI's **Sign in with ChatGPT** is an option for Codex. The user signs in through the browser and grants "ChatGPT plan usage". Keystone receives OAuth tokens and passes the access token to `codex app-server` in an environment variable, with a `model_provider` configuration pointing at the Responses API ([codex app-server guide](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)). It is available now for open-source projects and personal projects that run locally; paid or hosted apps join a waitlist ([cookbook, 2026-09-28](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)). It needs a Plus or Pro plan.
+
+What it would change:
+- Users would not need to run `codex login`, and their usage appears under ChatGPT settings for the app.
+- Keystone would hold refresh tokens, so it must store them in the OS keychain and own the browser sign-in flow (PKCE, a loopback callback, and an installation host ID). OpenAI's devkit is TypeScript, so Keystone would implement this in Rust.
+- A new access token requires restarting `codex app-server`. With one shared process, Keystone starts a new process with the new token and moves each thread over when its turn ends, so no running turn is cut off.
+- `model/list` returns a bundled catalog in this mode, so a model is confirmed only by a successful turn.
+
+Claude has no equivalent. Anthropic does not allow third-party apps to offer claude.ai login, so Claude always uses the user's own `claude` login.
+
+Recommendation: ship with the existing CLI logins, and add Sign in with ChatGPT as an optional Codex account choice once the core works. It is also the sanctioned path if Keystone is ever distributed.
 
 ## Terms
 
