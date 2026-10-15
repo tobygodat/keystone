@@ -41,6 +41,9 @@ struct Life {
     /// Set, under `lock`, just before the leader is reaped. Until then its PID and
     /// process group ID cannot be reused.
     reaped: AtomicBool,
+    /// When the leader was reaped, in clock ticks since boot like `/proc` start times.
+    /// Zero until then.
+    reaped_at: std::sync::atomic::AtomicU64,
     lock: Mutex<()>,
 }
 
@@ -69,6 +72,7 @@ impl Process {
         let life = Arc::new(Life {
             pid: child.id(),
             reaped: AtomicBool::new(false),
+            reaped_at: std::sync::atomic::AtomicU64::new(0),
             lock: Mutex::new(()),
         });
         let stdin = child.stdin.take().expect("piped stdin");
@@ -104,6 +108,10 @@ impl Process {
                 let code = {
                     let _guard = waiter.lock.lock().unwrap();
                     waiter.reaped.store(true, Ordering::SeqCst);
+                    #[cfg(target_os = "linux")]
+                    waiter
+                        .reaped_at
+                        .store(pidfd::uptime_ticks(), Ordering::SeqCst);
                     child.wait().ok().and_then(|status| status.code())
                 };
                 if done_rx.recv_timeout(DRAIN_GRACE).is_err() {
@@ -232,8 +240,12 @@ impl Targets {
             // Holding the lock keeps the leader from being reaped during the scan, so
             // its PID cannot be reused while it identifies the tree.
             let _guard = life.lock.lock().unwrap();
+            let reaped_at = life
+                .reaped
+                .load(Ordering::SeqCst)
+                .then(|| life.reaped_at.load(Ordering::SeqCst));
             Self {
-                descendants: pidfd::descendants(life.pid, life.reaped.load(Ordering::SeqCst)),
+                descendants: pidfd::descendants(life.pid, reaped_at),
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -284,6 +296,20 @@ mod pidfd {
             (fd >= 0).then(|| Self(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
         }
 
+        /// Whether the pinned process is still running. Signal 0 checks without sending.
+        pub fn is_alive(&self) -> bool {
+            // SAFETY: the descriptor is valid for the lifetime of `self`.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.0.as_raw_fd(),
+                    0,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                ) == 0
+            }
+        }
+
         pub fn signal(&self, signal: libc::c_int) {
             // SAFETY: the descriptor is valid for the lifetime of `self`.
             unsafe {
@@ -298,8 +324,8 @@ mod pidfd {
         }
     }
 
-    #[derive(Clone, Copy, PartialEq)]
-    struct Stat {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(super) struct Stat {
         pid: u32,
         ppid: u32,
         group: u32,
@@ -318,10 +344,20 @@ mod pidfd {
         })
     }
 
-    /// Descendants of `root` by parent link while it is unreaped, plus members of its
-    /// process group. Each is pinned with a pidfd and re-checked, so a PID reused after
-    /// the scan is never included.
-    pub fn descendants(root: u32, root_reaped: bool) -> Vec<Pidfd> {
+    /// Clock ticks since boot, the unit of `/proc` start times.
+    pub fn uptime_ticks() -> u64 {
+        let seconds: f64 = std::fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|text| text.split_whitespace().next()?.parse().ok())
+            .unwrap_or(0.0);
+        // SAFETY: sysconf only reads a configuration value.
+        let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+        (seconds * per_second) as u64
+    }
+
+    /// The live processes to signal for `root`'s tree, each pinned by a pidfd.
+    /// `reaped_at` is when the root was reaped, if it has been.
+    pub fn descendants(root: u32, reaped_at: Option<u64>) -> Vec<Pidfd> {
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return Vec::new();
         };
@@ -329,46 +365,135 @@ mod pidfd {
             .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
             .filter_map(stat)
             .collect();
-        // After reaping, a process holding the root's PID is a stranger, and so is a
-        // group led by it.
-        if root_reaped && all.iter().any(|s| s.pid == root) {
-            return Vec::new();
-        }
-        let mut found: Vec<Stat> = all
-            .iter()
-            .copied()
-            .filter(|s| s.group == root && s.pid != root)
-            .collect();
-        // Walk children from the root and from every group member, so a shell in a
-        // group of its own below a group member is found too. Visits are tracked apart
-        // from targets, so a group member's children are still walked.
-        let mut frontier: Vec<u32> = found.iter().map(|s| s.pid).collect();
-        if !root_reaped {
-            frontier.push(root);
-        }
-        let mut visited = std::collections::HashSet::new();
-        while let Some(parent) = frontier.pop() {
-            if !visited.insert(parent) {
-                continue;
-            }
-            for s in &all {
-                if s.ppid == parent && s.pid != root {
-                    if !found.iter().any(|f| f.pid == s.pid) {
-                        found.push(*s);
-                    }
-                    frontier.push(s.pid);
-                }
-            }
-        }
-        found
-            .into_iter()
-            .filter_map(|seen| {
+        select(
+            root,
+            reaped_at,
+            &all,
+            |seen| {
                 let fd = Pidfd::open(seen.pid)?;
                 // The pidfd now pins whatever holds this PID. Keep it only if that is
                 // still the process the scan found.
-                (stat(seen.pid)?.start == seen.start).then_some(fd)
-            })
-            .collect()
+                (stat(seen.pid)? == *seen).then_some(fd)
+            },
+            Pidfd::is_alive,
+        )
+    }
+
+    /// Chooses targets from a non-atomic `/proc` scan without trusting a PID that may
+    /// have been reused during it.
+    ///
+    /// `open` pins a scanned process and returns `None` unless it is still exactly as
+    /// scanned. `alive` reports whether a pinned process is still running.
+    ///
+    /// - Group members seed the walk. After the root is reaped, only members that
+    ///   started before that count, since a later group with the same ID is a stranger.
+    ///   Before reaping, the root's PID and group ID cannot be reused at all.
+    /// - A child counts only if, after it is pinned and re-checked, its parent is still
+    ///   alive through its own pin. Then the parent's PID meant that parent the whole
+    ///   time, and the child is really its child.
+    pub(super) fn select<F>(
+        root: u32,
+        reaped_at: Option<u64>,
+        all: &[Stat],
+        open: impl Fn(&Stat) -> Option<F>,
+        alive: impl Fn(&F) -> bool,
+    ) -> Vec<F> {
+        struct Node<F> {
+            pid: u32,
+            /// `None` only for the unreaped root, which cannot be replaced.
+            pin: Option<F>,
+        }
+        let mut nodes: Vec<Node<F>> = Vec::new();
+        if reaped_at.is_none() {
+            nodes.push(Node {
+                pid: root,
+                pin: None,
+            });
+        }
+        for member in all.iter().filter(|s| {
+            s.group == root && s.pid != root && reaped_at.is_none_or(|at| s.start <= at)
+        }) {
+            if let Some(pin) = open(member) {
+                nodes.push(Node {
+                    pid: member.pid,
+                    pin: Some(pin),
+                });
+            }
+        }
+        let mut next = 0;
+        while next < nodes.len() {
+            let parent = nodes[next].pid;
+            for child in all.iter().filter(|s| s.ppid == parent && s.pid != root) {
+                if nodes.iter().any(|n| n.pid == child.pid) {
+                    continue;
+                }
+                let Some(pin) = open(child) else { continue };
+                if nodes[next].pin.as_ref().is_none_or(&alive) {
+                    nodes.push(Node {
+                        pid: child.pid,
+                        pin: Some(pin),
+                    });
+                }
+            }
+            next += 1;
+        }
+        nodes.into_iter().filter_map(|n| n.pin).collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::RefCell;
+
+        fn proc(pid: u32, ppid: u32, group: u32, start: u64) -> Stat {
+            Stat {
+                pid,
+                ppid,
+                group,
+                start,
+            }
+        }
+
+        /// The reviewer's interleaving: the scan saw group member 20, which then died;
+        /// its PID went to a stranger, whose child 30 the same scan also saw.
+        #[test]
+        fn a_child_of_a_replaced_parent_is_not_selected() {
+            let all = [proc(20, 1, 10, 100), proc(30, 20, 30, 500)];
+            let dead = RefCell::new(vec![20]);
+            let chosen = select(
+                10,
+                Some(400),
+                &all,
+                |s| Some(s.pid),
+                |pid| !dead.borrow().contains(pid),
+            );
+            assert_eq!(
+                chosen,
+                vec![20],
+                "only the scanned member itself, never the stranger's child"
+            );
+            dead.borrow_mut().clear();
+            let chosen = select(10, Some(400), &all, |s| Some(s.pid), |_| true);
+            assert_eq!(
+                chosen,
+                vec![20, 30],
+                "with the parent alive, its child is ours"
+            );
+        }
+
+        #[test]
+        fn after_reaping_a_group_that_started_later_is_a_stranger() {
+            let all = [proc(20, 1, 10, 900)];
+            assert!(select(10, Some(400), &all, |s| Some(s.pid), |_| true).is_empty());
+            assert_eq!(select(10, None, &all, |s| Some(s.pid), |_| true), vec![20]);
+        }
+
+        #[test]
+        fn a_process_that_changed_since_the_scan_is_skipped() {
+            let all = [proc(20, 10, 20, 100), proc(21, 10, 21, 100)];
+            let chosen = select(10, None, &all, |s| (s.pid != 21).then_some(s.pid), |_| true);
+            assert_eq!(chosen, vec![20]);
+        }
     }
 }
 
