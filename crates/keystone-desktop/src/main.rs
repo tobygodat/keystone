@@ -784,6 +784,37 @@ mod tests {
     }
 
     #[gpui::test]
+    #[ignore = "benchmark; run through scripts/perf.py"]
+    fn perf_sidebar_draw(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        for index in 0..200 {
+            let provider = if index % 2 == 0 {
+                Provider::Claude
+            } else {
+                Provider::Codex
+            };
+            store.create(provider).unwrap();
+        }
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        let mut total = std::time::Duration::ZERO;
+        let frames = 30;
+        for _ in 0..frames {
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let start = std::time::Instant::now();
+                window.draw(cx).clear();
+                total += start.elapsed();
+            });
+        }
+        eprintln!(
+            "PERF sidebar_draw_ms={:.2}",
+            total.as_secs_f64() * 1000. / frames as f64
+        );
+    }
+
+    #[gpui::test]
     fn menu_created_session_receives_typed_draft(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
