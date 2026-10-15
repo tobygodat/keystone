@@ -31,12 +31,12 @@ pub enum ButtonSize {
 }
 
 impl ButtonSize {
-    fn height(self) -> Pixels {
-        px(match self {
+    fn height(self, cx: &App) -> Pixels {
+        cx.theme().density.control(px(match self {
             ButtonSize::Compact => 24.,
             ButtonSize::Default => 28.,
             ButtonSize::Large => 32.,
-        })
+        }))
     }
 }
 
@@ -82,7 +82,7 @@ impl Common {
             .flex_shrink_0()
             .items_center()
             .justify_center()
-            .h(self.size.height())
+            .h(self.size.height(cx))
             .rounded(radius::CONTROL)
             .when_some(rest, |d, bg| d.bg(bg));
         if let Some(selector) = self.debug_selector {
@@ -218,7 +218,7 @@ impl IconButton {
 
 impl RenderOnce for IconButton {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let side = self.common.size.height();
+        let side = self.common.size.height(cx);
         let color = if self.common.selected {
             Color::Default
         } else {

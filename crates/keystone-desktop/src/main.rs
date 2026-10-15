@@ -1,3 +1,4 @@
+mod settings;
 mod text_input;
 
 use gpui::{
@@ -5,7 +6,7 @@ use gpui::{
     IntoElement, Render, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
     WindowOptions, div, prelude::*, px, size,
 };
-use keystone_core::{Durability, Provider, Store};
+use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
 use keystone_ui::prelude::*;
 use std::path::PathBuf;
 use text_input::{Changed, InputMode, TextInput};
@@ -43,13 +44,14 @@ struct Keystone {
     draft_save_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
     new_menu: bool,
+    settings_menu: bool,
     settled_only: bool,
     sidebar: bool,
     fixture: bool,
 }
 
 impl Keystone {
-    fn new(store: Store, fixture: bool, cx: &mut Context<Self>) -> Self {
+    fn new(store: Store, fixture: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| TextInput::new("Write a draft…", InputMode::Multiline, cx));
         let search =
             cx.new(|cx| TextInput::new("Search conversations…", InputMode::SingleLine, cx));
@@ -66,6 +68,7 @@ impl Keystone {
                 cx.notify();
             }),
             cx.subscribe(&search, |this, _, _: &Changed, cx| this.refresh(cx)),
+            cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
         ];
         let app = cx.weak_entity();
         let session_sidebar = cx.new(|_| SessionSidebar { app });
@@ -79,12 +82,37 @@ impl Keystone {
             draft_save_task: None,
             focus: cx.focus_handle(),
             new_menu: false,
+            settings_menu: false,
             settled_only: false,
             sidebar: true,
             fixture,
         };
         result.sync_draft(cx);
+        result.apply_theme(window, cx);
         result
+    }
+
+    fn apply_theme(&self, window: &Window, cx: &mut App) {
+        keystone_ui::set_theme(
+            settings::theme_for(self.store.workspace().preferences(), window),
+            cx,
+        );
+    }
+
+    fn update_preferences(
+        &mut self,
+        change: impl FnOnce(&mut Preferences),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut preferences = self.store.workspace().preferences().clone();
+        change(&mut preferences);
+        self.error = match self.store.set_preferences(preferences) {
+            Ok(applied) => durability_warning(applied.durability),
+            Err(error) => Some(format!("Settings not saved. {error}")),
+        };
+        self.apply_theme(window, cx);
+        self.refresh(cx);
     }
 
     /// Notifies this view and the cached sidebar. Use it for any change the sidebar shows.
@@ -267,9 +295,9 @@ impl Keystone {
     }
 
     fn titlebar(&self, title: String, cx: &mut Context<Self>) -> impl IntoElement {
-        let tab_bg = cx.theme().colors.element_selected;
+        let (tab_bg, density) = (cx.theme().colors.element_selected, cx.theme().density);
         h_flex()
-            .h(px(38.))
+            .h(density.control(px(38.)))
             .flex_shrink_0()
             .pr_1()
             .hairline_b(cx)
@@ -373,6 +401,77 @@ impl Keystone {
                         this.refresh(cx);
                     })),
             )
+            .child(div().flex_1())
+            .child(self.settings_menu(cx))
+    }
+
+    fn settings_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let preferences = self.store.workspace().preferences().clone();
+        let fonts = if self.settings_menu {
+            settings::font_choices(&preferences, cx)
+        } else {
+            Vec::new()
+        };
+        let themes = [
+            (ThemeMode::System, "System", "theme-system"),
+            (ThemeMode::Light, "Light", "theme-light"),
+            (ThemeMode::Dark, "Dark", "theme-dark"),
+        ];
+        let densities = [
+            (Density::Compact, "Compact", "density-compact"),
+            (Density::Default, "Default", "density-default"),
+            (Density::Spacious, "Spacious", "density-spacious"),
+        ];
+        let font_items = std::iter::once(None)
+            .chain(fonts.into_iter().map(Some))
+            .enumerate()
+            .map(|(index, font)| {
+                let checked = font == preferences.ui_font;
+                let label = font.clone().unwrap_or_else(|| "Default".into());
+                MenuItem::new(("font", index), label)
+                    .checked(checked)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let font = font.clone();
+                        this.update_preferences(|p| p.ui_font = font, window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+        PopoverMenu::new(
+            "settings-menu",
+            IconButton::new("settings", IconName::Settings)
+                .size(ButtonSize::Large)
+                .debug_selector(|| "settings".into())
+                .selected(self.settings_menu)
+                .tooltip(Tooltip::text("Settings")),
+        )
+        .anchor(Corner::BottomLeft)
+        .open(self.settings_menu)
+        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+            this.settings_menu = *open;
+            cx.notify();
+        }))
+        .child(MenuHeader::new("Theme"))
+        .children(themes.map(|(mode, label, selector)| {
+            MenuItem::new(selector, label)
+                .checked(preferences.theme == mode)
+                .debug_selector(|| selector.into())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.update_preferences(|p| p.theme = mode, window, cx)
+                }))
+        }))
+        .child(MenuSeparator)
+        .child(MenuHeader::new("Density"))
+        .children(densities.map(|(density, label, selector)| {
+            MenuItem::new(selector, label)
+                .checked(preferences.density == density)
+                .debug_selector(|| selector.into())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.update_preferences(|p| p.density = density, window, cx)
+                }))
+        }))
+        .child(MenuSeparator)
+        .child(MenuHeader::new("Font"))
+        .children(font_items)
     }
 
     fn composer(&self, current: Option<(String, bool)>, cx: &mut Context<Self>) -> gpui::Div {
@@ -531,6 +630,7 @@ impl Render for SessionSidebar {
         };
         let (settled_only, new_menu, search) =
             (this.settled_only, this.new_menu, this.search.clone());
+        let density = cx.theme().density;
         let listener = |f: fn(&mut Keystone, &mut Window, &mut Context<Keystone>)| {
             let app = app.downgrade();
             move |_: &_, window: &mut Window, cx: &mut App| {
@@ -564,7 +664,7 @@ impl Render for SessionSidebar {
             .hairline_r(cx)
             .child(
                 h_flex()
-                    .h(px(40.))
+                    .h(density.control(px(40.)))
                     .pl_3()
                     .pr_1p5()
                     .hairline_b(cx)
@@ -611,7 +711,7 @@ impl Render for SessionSidebar {
             )
             .child(
                 h_flex()
-                    .h(px(36.))
+                    .h(density.control(px(36.)))
                     .pl_3()
                     .pr_1p5()
                     .gap_2()
@@ -654,10 +754,11 @@ impl Render for SessionSidebar {
 impl Render for Keystone {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (background, text, ui_font) = (
+        let (background, text, ui_font, density) = (
             theme.colors.background,
             theme.colors.text,
             theme.fonts.ui.clone(),
+            theme.density,
         );
         let current = self
             .store
@@ -736,6 +837,15 @@ impl Render for Keystone {
             .text_color(text)
             .text_size(TextSize::Base.px())
             .track_focus(&self.focus)
+            // Capture runs before the focused input, so Escape closes an open menu first.
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && (this.new_menu || this.settings_menu) {
+                    this.new_menu = false;
+                    this.settings_menu = false;
+                    this.refresh(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &Quit, _, cx| {
                 if this.save_draft(cx) {
                     cx.quit();
@@ -779,7 +889,7 @@ impl Render for Keystone {
             )
             .child(
                 h_flex()
-                    .h(px(26.))
+                    .h(density.control(px(26.)))
                     .flex_shrink_0()
                     .px_3()
                     .hairline_t(cx)
@@ -810,7 +920,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
-        let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         assert!(cx.debug_bounds("welcome-heading").is_some());
         assert!(cx.debug_bounds("welcome-codex").is_some());
 
@@ -853,7 +963,7 @@ mod tests {
             store.create(provider).unwrap();
         }
         cx.update(keystone_ui::init);
-        let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         // A composer keystroke notifies only the root view. A session change also
         // invalidates the cached sidebar, so it rebuilds every row.
         for (metric, sidebar_changed) in [("sidebar_draw_ms", false), ("sidebar_refresh_ms", true)]
@@ -888,7 +998,7 @@ mod tests {
         store.create(Provider::Claude).unwrap();
         store.create(Provider::Codex).unwrap();
         cx.update(keystone_ui::init);
-        let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         // GPUI 0.2.2 keeps debug bounds for elements that are no longer drawn, so check
         // which row sits at the top of the list instead of which rows exist.
         let top = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("session-1").unwrap().origin;
@@ -937,7 +1047,7 @@ mod tests {
         }
         store.select(1).unwrap();
         cx.update(keystone_ui::init);
-        let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         view.update_in(cx, |this, window, cx| {
             this.focus.focus(window);
             this.settled_only = true;
@@ -953,12 +1063,53 @@ mod tests {
     }
 
     #[gpui::test]
+    fn settings_menu_applies_and_persists_appearance(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let store = Store::open(&path).unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let settings_height =
+            |cx: &mut gpui::VisualTestContext| cx.debug_bounds("settings").unwrap().size.height;
+        assert_eq!(settings_height(cx), px(32.));
+
+        for selector in ["settings", "theme-dark", "density-compact"] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("settings control rendered");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+        }
+        cx.update(|_, cx| {
+            assert_eq!(cx.theme().appearance, keystone_ui::Appearance::Dark);
+            assert_eq!(cx.theme().density, keystone_ui::Density::Compact);
+        });
+        assert_eq!(settings_height(cx), px(28.));
+
+        let bounds = cx.debug_bounds("theme-light").unwrap();
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(cx.theme().appearance, keystone_ui::Appearance::Light));
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |view, _| assert!(!view.settings_menu));
+        let saved = Store::open(&path)
+            .unwrap()
+            .workspace()
+            .preferences()
+            .clone();
+        assert_eq!(
+            (saved.theme, saved.density),
+            (ThemeMode::Light, Density::Compact)
+        );
+    }
+
+    #[gpui::test]
     fn menu_created_session_receives_typed_draft(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
-        let (_view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         for selector in ["new-session", "new-claude"] {
             let bounds = cx.debug_bounds(selector).expect("control rendered");
             cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -980,7 +1131,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
-        let (_view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         for selector in [
             "new-session",
             "new-claude",
@@ -1019,7 +1170,7 @@ mod tests {
         store.create(Provider::Claude).unwrap();
         store.create(Provider::Codex).unwrap();
         cx.update(keystone_ui::init);
-        let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         std::fs::rename(&state_dir, dir.path().join("backup")).unwrap();
         let bounds = cx.debug_bounds("composer-field").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -1126,6 +1277,7 @@ fn main() {
                         let view = Keystone::new(
                             store,
                             std::env::var_os("KEYSTONE_VISUAL_FIXTURE").is_some(),
+                            window,
                             cx,
                         );
                         view.focus.focus(window);

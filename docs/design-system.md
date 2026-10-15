@@ -6,7 +6,8 @@
 
 - Colors live only in `crates/keystone-ui/src/theme.rs`. `scripts/check.sh` fails on GPUI color constructors such as `rgb(`, `hsla(`, or `white(` anywhere else.
 - Components read the theme through `cx.theme()` when they render. Call sites pass semantic `Color` values, not raw colors.
-- Hover, press, and selection are translucent white washes over the parent surface, so one state color works on the rail, the sidebar, and popovers.
+- Hover, press, and selection are translucent washes over the parent surface, white in the dark theme and black in the light theme. One state color works on the rail, the sidebar, and popovers.
+- Components size controls and rows through `cx.theme().density`, not fixed heights. Use `Density::control` for heights and `Density::pad` for row padding.
 - Interactive components accept `debug_selector`, so GPUI simulated-input tests can find them.
 - Disabled controls ignore clicks and show a not-allowed cursor.
 
@@ -14,17 +15,18 @@
 
 | Item | Use |
 | --- | --- |
-| `Theme`, `Colors`, `Fonts`, `ActiveTheme` | The installed palette and fonts. `keystone_ui::init` installs the dark theme. |
+| `Theme`, `Colors`, `Fonts`, `ActiveTheme` | The installed palette, density, and fonts. `keystone_ui::init` installs the dark theme. `keystone_ui::set_theme` replaces it and redraws every window. |
+| `Appearance`, `Density` | `Light` or `Dark`, and `Compact`, `Default`, or `Spacious`. `Theme::new` combines them with `Fonts`. |
 | `Color`, `TextSize`, `Elevation`, `spacing`, `radius` | Semantic tokens. Prefer these to raw pixels and colors. |
 | `StyledExt` | `surface(elevation, cx)` for backgrounds, borders, and shadows, and `hairline_*` for separators. |
 | `IconName`, `Icon`, `Icons` | Typed icon names and the asset source that serves them. |
 | `Label`, `Kbd` | Text with a size, a color, and optional truncation or monospace. `Kbd` shows a shortcut hint. |
 | `Button`, `IconButton` | `ButtonStyle::{Ghost, Subtle, Filled}`, `ButtonSize::{Compact, Default, Large}`, selected and disabled states, and tooltips. |
 | `ListItem` | A selectable row for lists such as the session sidebar. |
-| `PopoverMenu`, `MenuItem`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. |
+| `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group. |
 | `Tooltip` | A hover card with an optional shortcut. |
 
-Run `cargo run -p keystone-ui --example gallery` to see every component in every state.
+Run `cargo run -p keystone-ui --example gallery` to see every component in every state. Its header switches between themes and densities.
 
 ## Adding a component
 
@@ -36,4 +38,6 @@ The component shapes follow Zed's `ui` crate, and the visual values follow Zeron
 
 ## Known limits
 
-GPUI 0.2.2 cannot render a reliable text ellipsis, so `Label::truncate` clips. See KS-010 in [the issue list](issues.md). Light theme, density, and font choice are in scope but not built. The token names are semantic, so each can be added without changing call sites.
+GPUI 0.2.2 cannot render a reliable text ellipsis, so `Label::truncate` clips. See KS-010 in [the issue list](issues.md).
+
+Text sizes and the monospace font do not change with density or font choice yet. The default fonts, Inter and GeistMono Nerd Font Mono, are not bundled. GPUI falls back to a system font when they are missing.

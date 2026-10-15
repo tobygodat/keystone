@@ -1,4 +1,5 @@
 use crate::button::ClickHandler;
+use crate::color::Color;
 use crate::icon::{Icon, IconName};
 use crate::kbd::Kbd;
 use crate::label::Label;
@@ -122,6 +123,7 @@ pub struct MenuItem {
     id: ElementId,
     label: SharedString,
     icon: Option<IconName>,
+    checked: Option<bool>,
     kbd: Option<SharedString>,
     on_click: Option<ClickHandler>,
     debug_selector: Option<String>,
@@ -133,6 +135,7 @@ impl MenuItem {
             id: id.into(),
             label: label.into(),
             icon: None,
+            checked: None,
             kbd: None,
             on_click: None,
             debug_selector: None,
@@ -141,6 +144,13 @@ impl MenuItem {
 
     pub fn icon(mut self, icon: IconName) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Makes this one choice in a group. A checked row shows a check mark, and an
+    /// unchecked row keeps the same space so labels stay aligned.
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = Some(checked);
         self
     }
 
@@ -165,16 +175,22 @@ impl MenuItem {
 
 impl RenderOnce for MenuItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let hover = cx.theme().colors.element_hover;
+        let theme = cx.theme();
+        let hover = theme.colors.element_hover;
         let mut el = h_flex()
             .id(self.id)
-            .h(px(28.))
+            .h(theme.density.control(px(28.)))
             .px(px(8.))
             .gap_2()
             .rounded(radius::MENU_ROW)
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .when_some(self.icon, |d, icon| d.child(Icon::new(icon).size(px(14.))))
+            .when_some(self.checked, |d, checked| {
+                d.child(div().size(px(14.)).flex_shrink_0().when(checked, |d| {
+                    d.child(Icon::new(IconName::Check).size(px(14.)))
+                }))
+            })
             .child(
                 div()
                     .flex_1()
@@ -204,5 +220,29 @@ impl RenderOnce for MenuSeparator {
             .my(px(2.))
             .h(px(1.))
             .bg(cx.theme().colors.border)
+    }
+}
+
+/// A small heading above a group of menu rows.
+#[derive(IntoElement)]
+pub struct MenuHeader {
+    label: SharedString,
+}
+
+impl MenuHeader {
+    pub fn new(label: impl Into<SharedString>) -> Self {
+        Self {
+            label: label.into(),
+        }
+    }
+}
+
+impl RenderOnce for MenuHeader {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().px(px(8.)).pt(px(6.)).pb(px(2.)).child(
+            Label::new(self.label)
+                .size(TextSize::Sm)
+                .color(Color::Faint),
+        )
     }
 }

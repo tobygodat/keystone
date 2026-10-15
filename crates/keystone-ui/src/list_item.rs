@@ -55,19 +55,26 @@ impl ParentElement for ListItem {
 
 impl RenderOnce for ListItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let colors = &cx.theme().colors;
-        let (selected_bg, hover_bg) = (colors.element_selected, colors.element_hover);
+        let theme = cx.theme();
+        let colors = &theme.colors;
+        let (selected_bg, hover_bg, active_bg) = (
+            colors.element_selected,
+            colors.element_hover,
+            colors.element_active,
+        );
         let mut el = div()
             .id(self.id)
             .flex()
             .flex_col()
             .min_w_0()
             .px(px(10.))
-            .py(px(7.))
+            .py(theme.density.pad(px(7.)))
             .gap(px(3.))
             .rounded(radius::ROW)
             .cursor_pointer()
-            .when(self.selected, |d| d.bg(selected_bg))
+            .when(self.selected, |d| {
+                d.bg(selected_bg).hover(move |s| s.bg(active_bg))
+            })
             .when(!self.selected, |d| d.hover(move |s| s.bg(hover_bg)))
             .children(self.children);
         if let Some(selector) = self.debug_selector {

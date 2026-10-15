@@ -69,10 +69,39 @@ impl Session {
     }
 }
 
+/// Which palette to use. `System` follows the window's light or dark appearance.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Density {
+    Compact,
+    #[default]
+    Default,
+    Spacious,
+}
+
+/// Appearance settings. Missing fields load as defaults, so older state files stay valid.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct Preferences {
+    pub theme: ThemeMode,
+    pub density: Density,
+    /// The interface font family. `None` uses the built-in default.
+    pub ui_font: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Workspace {
     sessions: Vec<Session>,
     selected: Option<u64>,
+    #[serde(default)]
+    preferences: Preferences,
 }
 
 impl Workspace {
@@ -82,6 +111,10 @@ impl Workspace {
 
     pub fn selected(&self) -> Option<u64> {
         self.selected
+    }
+
+    pub fn preferences(&self) -> &Preferences {
+        &self.preferences
     }
 }
 
@@ -173,6 +206,15 @@ impl Store {
 
     pub fn set_settled(&mut self, id: u64, settled: bool) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.settled = settled)
+    }
+
+    pub fn set_preferences(&mut self, preferences: Preferences) -> StoreResult<Applied<()>> {
+        if self.workspace.preferences == preferences {
+            return Ok(self.finish_sync());
+        }
+        let mut next = self.workspace.clone();
+        next.preferences = preferences;
+        self.commit(next, self.next_id)
     }
 
     pub fn set_draft(&mut self, id: u64, text: String) -> StoreResult<Applied<()>> {

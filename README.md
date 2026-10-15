@@ -6,7 +6,7 @@ This is a native UI preview styled after the supplied MonoCode reference. Create
 
 ## Run the preview
 
-Run `cargo run -p keystone-desktop --locked` in a Linux graphical session. Press Ctrl+Q to quit. Ctrl+N creates a Claude session, Ctrl+Shift+N creates a Codex session, Ctrl+L focuses the composer, Ctrl+F focuses search, and Ctrl+Shift+S toggles settlement.
+Run `cargo run -p keystone-desktop --locked` in a Linux graphical session. Press Ctrl+Q to quit. The gear at the bottom of the left rail chooses the theme (System, Light, or Dark), the density, and the interface font. Escape closes an open menu. Ctrl+N creates a Claude session, Ctrl+Shift+N creates a Codex session, Ctrl+L focuses the composer, Ctrl+F focuses search, and Ctrl+Shift+S toggles settlement.
 
 The preview saves to `$XDG_DATA_HOME/keystone/workspace.json`, or `$HOME/.local/share/keystone/workspace.json`. Set `KEYSTONE_STATE_PATH` to use an isolated state file. A file lock prevents concurrent desktop processes from writing the same workspace. Draft writes wait 250 ms after typing stops. Session changes and normal window close flush the visible draft immediately; failed saves keep the session open.
 

@@ -1,4 +1,4 @@
-use keystone_core::{Provider, Store};
+use keystone_core::{Density, Preferences, Provider, Store, ThemeMode};
 use std::fs;
 use tempfile::tempdir;
 
@@ -100,4 +100,29 @@ fn save_failure_keeps_visible_state_unchanged() {
     assert!(store.set_draft(1, "unwritten".into()).is_err());
     assert_eq!(store.workspace().sessions()[0].draft(), "");
     assert!(path.is_dir());
+}
+
+#[test]
+fn preferences_survive_restart_and_default_for_older_files() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    fs::write(
+        &path,
+        r#"{"version":1,"next_id":1,"workspace":{"sessions":[],"selected":null}}"#,
+    )
+    .unwrap();
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.workspace().preferences(), &Preferences::default());
+
+    let preferences = Preferences {
+        theme: ThemeMode::Light,
+        density: Density::Compact,
+        ui_font: Some("Noto Sans".into()),
+    };
+    store.set_preferences(preferences.clone()).unwrap();
+    drop(store);
+    assert_eq!(
+        Store::open(&path).unwrap().workspace().preferences(),
+        &preferences
+    );
 }

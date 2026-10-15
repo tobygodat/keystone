@@ -6,6 +6,7 @@ use gpui::{
     Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use keystone_ui::prelude::*;
+use keystone_ui::{Appearance, Density, Fonts, Theme, set_theme};
 
 struct Gallery {
     menu_open: bool,
@@ -31,10 +32,12 @@ fn row(items: impl IntoIterator<Item = AnyElement>) -> impl IntoElement {
 impl Render for Gallery {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (background, text, ui_font) = (
+        let (background, text, ui_font, theme_appearance, theme_density) = (
             theme.colors.background,
             theme.colors.text,
             theme.fonts.ui.clone(),
+            theme.appearance,
+            theme.density,
         );
         let styles = [
             (ButtonStyle::Ghost, "Ghost"),
@@ -183,6 +186,10 @@ impl Render for Gallery {
                 .kbd("Ctrl+Shift+N"),
         )
         .child(MenuSeparator)
+        .child(MenuHeader::new("Density"))
+        .child(MenuItem::new("compact", "Compact").checked(false))
+        .child(MenuItem::new("default", "Default").checked(true))
+        .child(MenuSeparator)
         .child(MenuItem::new("settings", "Settings").icon(IconName::Settings));
         let surfaces = row([Elevation::Surface, Elevation::Raised, Elevation::Overlay]
             .into_iter()
@@ -207,12 +214,41 @@ impl Render for Gallery {
                 v_flex()
                     .p_6()
                     .gap_8()
-                    .child(Label::new("keystone-ui").size(TextSize::Title))
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(Label::new("keystone-ui").size(TextSize::Title))
+                            .child(div().flex_1())
+                            .children([Appearance::Dark, Appearance::Light].map(|appearance| {
+                                Button::new(
+                                    SharedString::from(format!("{appearance:?}")),
+                                    format!("{appearance:?}"),
+                                )
+                                .style(ButtonStyle::Subtle)
+                                .selected(theme_appearance == appearance)
+                                .on_click(move |_, _, cx| {
+                                    let density = cx.theme().density;
+                                    set_theme(Theme::new(appearance, density, Fonts::default()), cx)
+                                })
+                            }))
+                            .children(Density::ALL.map(|density| {
+                                Button::new(
+                                    SharedString::from(format!("{density:?}")),
+                                    format!("{density:?}"),
+                                )
+                                .style(ButtonStyle::Subtle)
+                                .selected(theme_density == density)
+                                .on_click(move |_, _, cx| {
+                                    let appearance = cx.theme().appearance;
+                                    set_theme(Theme::new(appearance, density, Fonts::default()), cx)
+                                })
+                            })),
+                    )
                     .child(section("BUTTONS", buttons))
                     .child(section("ICON BUTTONS", icon_buttons))
                     .child(section(
                         "POPOVER MENU",
-                        h_flex().h(px(150.)).items_start().child(menu),
+                        h_flex().h(px(260.)).items_start().child(menu),
                     ))
                     .child(section("LIST ITEMS", list))
                     .child(section("LABELS", labels))

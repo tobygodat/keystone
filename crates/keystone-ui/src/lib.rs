@@ -20,9 +20,9 @@ pub use icon::{Icon, IconName, Icons};
 pub use kbd::Kbd;
 pub use label::Label;
 pub use list_item::ListItem;
-pub use popover::{MenuItem, MenuSeparator, PopoverMenu};
+pub use popover::{MenuHeader, MenuItem, MenuSeparator, PopoverMenu};
 pub use styled_ext::{StyledExt, h_flex, v_flex};
-pub use theme::{ActiveTheme, Colors, Fonts, Theme};
+pub use theme::{ActiveTheme, Appearance, Colors, Density, Fonts, Theme};
 pub use tokens::{Elevation, TextSize, radius, spacing};
 pub use tooltip::Tooltip;
 
@@ -31,10 +31,16 @@ pub fn init(cx: &mut gpui::App) {
     cx.set_global(Theme::dark());
 }
 
+/// Replaces the active theme and redraws every window, including cached views.
+pub fn set_theme(theme: Theme, cx: &mut gpui::App) {
+    cx.set_global(theme);
+    cx.refresh_windows();
+}
+
 pub mod prelude {
     pub use crate::{
         ActiveTheme, Button, ButtonSize, ButtonStyle, Color, Elevation, Icon, IconButton, IconName,
-        Kbd, Label, ListItem, MenuItem, MenuSeparator, PopoverMenu, StyledExt, TextSize, Tooltip,
-        h_flex, radius, spacing, v_flex,
+        Kbd, Label, ListItem, MenuHeader, MenuItem, MenuSeparator, PopoverMenu, StyledExt,
+        TextSize, Tooltip, h_flex, radius, spacing, v_flex,
     };
 }

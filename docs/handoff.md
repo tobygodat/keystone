@@ -43,11 +43,8 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 ## Open work, in priority order
 
 1. **KS-005 confirmation.** The sidebar is now a cached view (see `docs/performance.md`). The 10 ms native typing check passed on 2026-10-15 both before and after that change, so the dependency optimization is the more likely fix. Repeat it several times before closing KS-005.
-2. **Pending tokens.** A light theme, density, and font choice are in scope but not built. Token names are semantic, so each is additive.
-3. **Small polish.**
-   - Escape does not close the popover yet.
-   - A selected `ListItem` shows no extra hover state.
-   - The color check misses `Hsla { .. }` struct literals.
+2. **Appearance follow-ups.** The light theme, density, and font settings are built and saved in the workspace file. The interface font list only offers installed fonts from a fixed candidate list. Text size and the monospace font are not configurable yet. System mode follows GPUI's reported window appearance. On Hyprland with the portal reporting `prefer-dark`, it opened dark. A light desktop setting and switching while the app runs have not been tested.
+3. **Small polish.** Escape closes menus, selected rows have a hover state, and the color check catches `Hsla { .. }` literals. Nothing else is queued.
 4. **Prior open issues.** KS-002 partial, KS-004 partial, KS-005, KS-006, and KS-009 in `docs/issues.md`.
 
 ## Working preferences learned
