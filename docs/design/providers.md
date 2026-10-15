@@ -1,6 +1,6 @@
 # Provider integration design
 
-Status: proposal, 2026-10-15. Nothing here is implemented. Decisions marked **Decide** need approval before work starts. The spike results below have been folded in.
+Status: Codex is implemented as described, in `crates/keystone-agent` (2026-10-15). Claude Code is not built yet. The spike results below have been folded in.
 
 Keystone drives the user's own installed `claude` and `codex` programs. This document says how, and where it deliberately differs from Zeron (MIT, Rust, studied at commit `3b2f780`) and T3 Code. Protocol facts were checked against Claude Code 2.1.300 and codex-cli 0.162.1 on 2026-10-15.
 
@@ -99,7 +99,7 @@ Children start in their own process group. Teardown sends the protocol interrupt
 
 ### 7. Parsing
 
-Each line is decoded once into typed, tagged structs that borrow from the line where possible. Fields Keystone does not show are skipped without being built. Large tool output is read through a capped field, so it is never fully allocated. Unknown message types are counted and, in debug builds, logged raw; they are never fatal.
+Each line gets a cheap first pass that reads only its method and ID, skipping the body, then one typed decode of the parts Keystone uses. Fields Keystone does not show are skipped without being built. Large tool output is read through a capped field, so it is never fully allocated. Unknown message types are counted and, in debug builds, logged raw; they are never fatal.
 
 Codex's `optOutNotificationMethods` turns off notifications Keystone does not render, so they are never sent at all. The spike saw `remoteControl/status/changed`, `account/updated`, and per-thread `mcpServer/startupStatus/updated` alongside the turn traffic.
 

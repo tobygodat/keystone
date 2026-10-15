@@ -45,6 +45,9 @@ pub struct Session {
     provider: Provider,
     settled: bool,
     draft: String,
+    /// The provider's own conversation ID, used to resume after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_thread: Option<String>,
 }
 
 impl Session {
@@ -66,6 +69,10 @@ impl Session {
 
     pub fn draft(&self) -> &str {
         &self.draft
+    }
+
+    pub fn provider_thread(&self) -> Option<&str> {
+        self.provider_thread.as_deref()
     }
 }
 
@@ -166,6 +173,11 @@ impl Store {
         &self.workspace
     }
 
+    /// The workspace file this store saves to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn create(&mut self, provider: Provider) -> StoreResult<Applied<u64>> {
         let id = self.next_id;
         let next_id = id
@@ -178,6 +190,7 @@ impl Store {
             provider,
             settled: false,
             draft: String::new(),
+            provider_thread: None,
         });
         next.selected = Some(id);
         let applied = self.commit(next, next_id)?;
@@ -215,6 +228,10 @@ impl Store {
         let mut next = self.workspace.clone();
         next.preferences = preferences;
         self.commit(next, self.next_id)
+    }
+
+    pub fn set_provider_thread(&mut self, id: u64, thread: String) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.provider_thread = Some(thread))
     }
 
     pub fn set_draft(&mut self, id: u64, text: String) -> StoreResult<Applied<()>> {

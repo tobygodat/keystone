@@ -8,8 +8,10 @@ if grep -rnP '\b(rgba?|hsla|black|white|transparent_black|transparent_white|red|
   exit 1
 fi
 case "${1:-core}" in
-  core) cargo test -p keystone-core --locked ;;
-  ui) cargo test -p keystone-desktop -p keystone-ui --features keystone-desktop/ui-tests,keystone-ui/ui-tests --locked ;;
+  core) cargo test -p keystone-core -p keystone-agent --locked ;;
+  ui)
+    cargo build -p keystone-agent --bins --locked
+    cargo test -p keystone-desktop -p keystone-ui --features keystone-desktop/ui-tests,keystone-ui/ui-tests --locked ;;
   build)
     cargo build -p keystone-desktop --locked
     cargo build -p keystone-ui --example gallery --locked

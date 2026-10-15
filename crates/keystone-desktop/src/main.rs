@@ -1,14 +1,21 @@
+mod conversation;
 mod settings;
 mod text_input;
 
+use conversation::{Conversation, Row};
+use futures::StreamExt;
 use gpui::{
     AnyView, App, Application, Bounds, Context, Corner, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, Render, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, size,
+    IntoElement, Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
+use keystone_agent::codex::Command;
+use keystone_agent::{CodexConnection, ItemKind, ItemStatus, TurnStatus, Wake};
 use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
 use keystone_ui::{automation, prelude::*};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use text_input::{Changed, InputMode, TextInput};
 
 gpui::actions!(
@@ -19,7 +26,8 @@ gpui::actions!(
         NewCodex,
         ToggleSettle,
         FocusComposer,
-        FocusSearch
+        FocusSearch,
+        SendMessage
     ]
 );
 
@@ -48,6 +56,15 @@ struct Keystone {
     settled_only: bool,
     sidebar: bool,
     fixture: bool,
+    /// The shared Codex app-server connection, created on the first message.
+    codex: Option<CodexConnection>,
+    conversations: HashMap<u64, Conversation>,
+    /// Where each session's log of completed items is kept.
+    sessions_dir: PathBuf,
+    /// The directory agents work in.
+    project_dir: PathBuf,
+    wake: Wake,
+    transcript_scroll: ScrollHandle,
 }
 
 impl Keystone {
@@ -72,6 +89,29 @@ impl Keystone {
         ];
         let app = cx.weak_entity();
         let session_sidebar = cx.new(|_| SessionSidebar { app });
+        // Reader threads wake this task when provider events arrive. Each wake-up drains
+        // everything that arrived, so a burst of streamed text costs one update.
+        let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
+        cx.spawn(async move |this, cx| {
+            while wake_rx.next().await.is_some() {
+                if this.update(cx, |this, cx| this.pump(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let wake: Wake = Arc::new(move || {
+            let _ = wake_tx.unbounded_send(());
+        });
+        let sessions_dir = store
+            .path()
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("sessions");
+        let project_dir = std::env::var_os("KEYSTONE_PROJECT_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
         let mut result = Self {
             store,
             error: None,
@@ -86,6 +126,12 @@ impl Keystone {
             settled_only: false,
             sidebar: true,
             fixture,
+            codex: None,
+            conversations: HashMap::new(),
+            sessions_dir,
+            project_dir,
+            wake,
+            transcript_scroll: ScrollHandle::new(),
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -284,6 +330,7 @@ impl Keystone {
             Err(error) => Some(error.to_string()),
         };
         self.sync_draft(cx);
+        self.transcript_scroll.scroll_to_bottom();
         self.refresh(cx);
     }
 
@@ -478,10 +525,30 @@ impl Keystone {
         .children(font_items)
     }
 
-    fn composer(&self, current: Option<(String, bool)>, cx: &mut Context<Self>) -> gpui::Div {
+    fn composer(&self, current: Option<(Provider, bool)>, cx: &mut Context<Self>) -> gpui::Div {
         let colors = cx.theme().colors;
         let has_session = current.is_some();
-        let meta = |text: &'static str| Label::new(text).size(TextSize::Ui).color(Color::Muted);
+        let conversation = self
+            .store
+            .workspace()
+            .selected()
+            .and_then(|id| self.conversations.get(&id));
+        let running = conversation.is_some_and(|c| c.running);
+        let waiting = conversation.is_some_and(|c| c.approval.is_some());
+        let codex = matches!(current, Some((Provider::Codex, _)));
+        let status = match current {
+            None => "Choose a provider to start",
+            Some((Provider::Claude, _)) => {
+                "Claude Code is not connected yet · Enter for a new line"
+            }
+            Some(_) if waiting => "Waiting for your approval",
+            Some(_) if running => "Working · Ctrl+Enter steers this turn",
+            Some(_) => "Ctrl+Enter to send · Enter for a new line",
+        };
+        let project = self.project_dir.file_name().map_or_else(
+            || self.project_dir.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
         div().w_full().max_w(px(CONTENT_WIDTH)).px_3().child(
             v_flex()
                 .surface(Elevation::Surface, cx)
@@ -492,9 +559,15 @@ impl Keystone {
                     h_flex()
                         .gap_2()
                         .child(Icon::new(IconName::Folder).size(px(14.)))
-                        .child(meta("Current checkout"))
-                        .child(Icon::new(IconName::Branch).size(px(14.)))
-                        .child(meta("No project selected"))
+                        .child(
+                            div()
+                                .id("project")
+                                .automation_id("project")
+                                .child(Label::new(project).size(TextSize::Ui).color(Color::Muted))
+                                .tooltip(
+                                    Tooltip::text(self.project_dir.display().to_string()).builder(),
+                                ),
+                        )
                         .child(div().flex_1())
                         .when_some(current.as_ref(), |d, (_, settled)| {
                             d.child(
@@ -540,15 +613,42 @@ impl Keystone {
                                     .py_0p5()
                                     .rounded(radius::CONTROL)
                                     .bg(colors.element_hover)
-                                    .child(Label::new(provider.clone()).size(TextSize::Sm)),
+                                    .child(Label::new(provider.to_string()).size(TextSize::Sm)),
                             )
                         })
-                        .child(
-                            Label::new("Provider not connected · Enter for a new line")
-                                .size(TextSize::Sm)
-                                .color(Color::Muted),
-                        )
+                        .child(Label::new(status).size(TextSize::Sm).color(Color::Muted))
                         .child(div().flex_1())
+                        .when(codex && running, |d| {
+                            d.child(
+                                Button::new("stop", "Stop")
+                                    .style(ButtonStyle::Subtle)
+                                    .icon(IconName::Square)
+                                    .debug_selector(|| "stop".into())
+                                    .tooltip(Tooltip::text("Stop this turn"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.stop_turn(window, cx)
+                                    })),
+                            )
+                        })
+                        .when(codex, |d| {
+                            d.child(
+                                Button::new("send", if running { "Steer" } else { "Send" })
+                                    .style(ButtonStyle::Filled)
+                                    .icon(IconName::Up)
+                                    .debug_selector(|| "send".into())
+                                    .tooltip(Tooltip::with_key(
+                                        if running {
+                                            "Send to the running turn"
+                                        } else {
+                                            "Send to Codex"
+                                        },
+                                        "Ctrl+Enter",
+                                    ))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.send_message(window, cx)
+                                    })),
+                            )
+                        })
                         .when(!has_session, |d| {
                             d.child(
                                 Button::new("welcome-claude", "Start with Claude Code")
@@ -573,6 +673,315 @@ impl Keystone {
                         }),
                 ),
         )
+    }
+
+    fn conversation(&mut self, session: u64) -> &mut Conversation {
+        let dir = &self.sessions_dir;
+        let scroll = &self.transcript_scroll;
+        self.conversations.entry(session).or_insert_with(|| {
+            // Open a conversation at its latest message.
+            scroll.scroll_to_bottom();
+            Conversation::load(dir, session)
+        })
+    }
+
+    /// Applies every provider event that arrived since the last wake-up.
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        let Some(codex) = &self.codex else { return };
+        let events = codex.drain();
+        if events.is_empty() {
+            return;
+        }
+        let dir = self.sessions_dir.clone();
+        for (session, event) in events {
+            let thread = self.conversation(session).apply(&dir, session, event);
+            if let Some(thread) = thread {
+                let known = self
+                    .store
+                    .workspace()
+                    .sessions()
+                    .iter()
+                    .any(|s| s.id() == session && s.provider_thread() == Some(thread.as_str()));
+                if !known && let Err(error) = self.store.set_provider_thread(session, thread) {
+                    self.error = Some(format!("Could not save the Codex thread. {error}"));
+                }
+            }
+        }
+        self.transcript_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn codex(&mut self) -> Result<&CodexConnection, String> {
+        if self.codex.is_none() {
+            let program = std::env::var_os("KEYSTONE_CODEX_PATH")
+                .map(PathBuf::from)
+                .or_else(|| keystone_agent::find::program("codex"))
+                .ok_or("Codex is not installed. Install the codex CLI and run `codex login`.")?;
+            self.codex = Some(CodexConnection::new(
+                program,
+                env!("CARGO_PKG_VERSION"),
+                self.wake.clone(),
+            ));
+        }
+        Ok(self.codex.as_ref().expect("set above"))
+    }
+
+    /// Sends the composer text: a new turn, or a steer for the running one.
+    fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.store.workspace().selected().and_then(|id| {
+            self.store
+                .workspace()
+                .sessions()
+                .iter()
+                .find(|s| s.id() == id)
+                .cloned()
+        }) else {
+            return;
+        };
+        let text = self.composer.read(cx).value().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        if session.provider() != Provider::Codex {
+            self.error = Some("Claude Code is not connected yet. Codex sessions can send.".into());
+            cx.notify();
+            return;
+        }
+        let id = session.id();
+        let cwd = self.project_dir.to_string_lossy().into_owned();
+        let resume = session.provider_thread().map(str::to_owned);
+        let result = self.codex().and_then(|codex| {
+            if !codex.is_open(id) {
+                codex
+                    .command(Command::Open {
+                        session: id,
+                        cwd,
+                        resume,
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+            codex
+                .command(Command::Send {
+                    session: id,
+                    text: text.clone(),
+                })
+                .map_err(|e| {
+                    format!(
+                        "Could not start Codex at {}. {e}",
+                        codex.program().display()
+                    )
+                })
+        });
+        match result {
+            Ok(()) => {
+                self.error = None;
+                let dir = self.sessions_dir.clone();
+                self.conversation(id).push_local(&dir, id, &text);
+                self.composer
+                    .update(cx, |input, cx| input.set_value(String::new(), cx));
+                self.save_draft(cx);
+                self.transcript_scroll.scroll_to_bottom();
+                // Clicking Send moves focus off the composer; put it back for the next message.
+                self.composer.focus_handle(cx).focus(window);
+            }
+            Err(message) => self.error = Some(message),
+        }
+        cx.notify();
+    }
+
+    fn stop_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.focus_handle(cx).focus(window);
+        let (Some(id), Some(codex)) = (self.store.workspace().selected(), &self.codex) else {
+            return;
+        };
+        if let Err(error) = codex.command(Command::Interrupt { session: id }) {
+            self.error = Some(format!("Could not stop the turn. {error}"));
+        }
+        cx.notify();
+    }
+
+    fn answer(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The buttons take focus from the composer; give it back for the next message.
+        self.composer.focus_handle(cx).focus(window);
+        let Some(id) = self.store.workspace().selected() else {
+            return;
+        };
+        let dir = self.sessions_dir.clone();
+        let Some(approval) = self.conversation(id).decide(&dir, id, allow) else {
+            return;
+        };
+        if let Some(codex) = &self.codex
+            && let Err(error) = codex.command(Command::Answer {
+                session: id,
+                request: approval.request,
+                allow,
+            })
+        {
+            self.error = Some(format!("Could not send the answer. {error}"));
+        }
+        cx.notify();
+    }
+
+    fn conversation_view(&self, session: u64, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(conversation) = self.conversations.get(&session) else {
+            return v_flex();
+        };
+        let colors = cx.theme().colors;
+        let mono = cx.theme().fonts.mono.clone();
+        let mut view = v_flex()
+            .gap_4()
+            .text_size(TextSize::Body.px())
+            .line_height(px(22.));
+        for row in conversation
+            .rows
+            .iter()
+            .filter(|row| conversation::visible(row))
+        {
+            view = view.child(match row {
+                Row::Item(item) => match &item.kind {
+                    ItemKind::UserMessage => v_flex().items_end().child(
+                        div()
+                            .max_w(px(620.))
+                            .px_3()
+                            .py_2()
+                            .rounded(radius::ROW)
+                            .bg(colors.element_selected)
+                            .child(item.text.clone()),
+                    ),
+                    ItemKind::AgentMessage => div().child(item.text.clone()),
+                    ItemKind::Reasoning => div()
+                        .text_size(TextSize::Ui.px())
+                        .text_color(colors.text_muted)
+                        .child(item.text.clone()),
+                    ItemKind::Command { command, exit_code } => {
+                        let status = match (item.status, exit_code) {
+                            (ItemStatus::InProgress, _) => "Running".to_owned(),
+                            (ItemStatus::Declined, _) => "Not run".to_owned(),
+                            (ItemStatus::Failed, None) => "Stopped".to_owned(),
+                            (_, Some(code)) => format!("Exit {code}"),
+                            (_, None) => String::new(),
+                        };
+                        v_flex()
+                            .surface(Elevation::Raised, cx)
+                            .overflow_hidden()
+                            .child(
+                                h_flex()
+                                    .px_3()
+                                    .py_2()
+                                    .gap_2()
+                                    .hairline_b(cx)
+                                    .font_family(mono.clone())
+                                    .text_size(TextSize::Ui.px())
+                                    .child(div().flex_1().min_w_0().child(format!("$ {command}")))
+                                    .child(
+                                        Label::new(status).size(TextSize::Sm).color(Color::Muted),
+                                    ),
+                            )
+                            .when(!item.text.trim_end().is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .font_family(mono.clone())
+                                        .text_size(TextSize::Ui.px())
+                                        .text_color(colors.text_muted)
+                                        .child(item.text.trim_end().to_owned()),
+                                )
+                            })
+                    }
+                    ItemKind::FileChange { paths } => div()
+                        .text_size(TextSize::Ui.px())
+                        .text_color(colors.text_muted)
+                        .child(format!("Changed {}", paths.join(", "))),
+                    ItemKind::Tool { name } | ItemKind::Other { name } => div()
+                        .text_size(TextSize::Ui.px())
+                        .text_color(colors.text_muted)
+                        .child(format!("Used {name}")),
+                },
+                Row::TurnEnded { status, error } => {
+                    let (text, color) = match status {
+                        TurnStatus::Interrupted => ("Stopped", Color::Muted),
+                        _ => ("Failed", Color::Danger),
+                    };
+                    let text = match error {
+                        Some(error) => format!("{text}: {error}"),
+                        None => text.to_owned(),
+                    };
+                    div().child(Label::new(text).size(TextSize::Ui).color(color))
+                }
+                Row::Decision { action, allowed } => div().child(
+                    Label::new(format!(
+                        "{} {action}",
+                        if *allowed { "Allowed:" } else { "Denied:" }
+                    ))
+                    .size(TextSize::Ui)
+                    .color(Color::Muted),
+                ),
+            });
+        }
+        if let Some(approval) = &conversation.approval {
+            view = view.child(
+                v_flex()
+                    .id("approval")
+                    .automation_id("approval")
+                    .surface(Elevation::Raised, cx)
+                    .border_color(colors.border_focused)
+                    .p_3()
+                    .gap_2()
+                    .child(
+                        Label::new("Codex wants to run")
+                            .size(TextSize::Ui)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        div()
+                            .font_family(mono.clone())
+                            .text_size(TextSize::Ui.px())
+                            .child(approval.action.clone()),
+                    )
+                    .when_some(approval.detail.clone(), |d, detail| {
+                        d.child(Label::new(detail).size(TextSize::Sm).color(Color::Muted))
+                    })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("approve", "Allow")
+                                    .style(ButtonStyle::Filled)
+                                    .icon(IconName::Check)
+                                    .debug_selector(|| "approve".into())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.answer(true, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("deny", "Deny")
+                                    .style(ButtonStyle::Subtle)
+                                    .icon(IconName::Close)
+                                    .debug_selector(|| "deny".into())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.answer(false, window, cx)
+                                    })),
+                            ),
+                    ),
+            );
+        } else if conversation.running {
+            view = view.child(
+                div().id("turn-status").automation_id("turn-status").child(
+                    Label::new("Working…")
+                        .size(TextSize::Ui)
+                        .color(Color::Muted),
+                ),
+            );
+        }
+        if let Some(error) = &conversation.error {
+            view = view.child(
+                Label::new(error.clone())
+                    .size(TextSize::Ui)
+                    .color(Color::Danger),
+            );
+        }
+        view
     }
 
     fn error_line(&self) -> Option<impl IntoElement> {
@@ -779,9 +1188,16 @@ impl Render for Keystone {
         let title = current
             .map(|s| s.title().to_owned())
             .unwrap_or_else(|| "Workspace".into());
-        let current = current.map(|s| (s.provider().to_string(), s.settled()));
+        let selected = current.map(|s| s.id());
+        let current = current.map(|s| (s.provider(), s.settled()));
+        if let Some(id) = selected {
+            self.conversation(id);
+        }
+        let has_conversation = selected
+            .and_then(|id| self.conversations.get(&id))
+            .is_some_and(|c| !c.is_empty());
         let composer = self.composer(current, cx);
-        let main = if self.fixture {
+        let main = if self.fixture || has_conversation {
             v_flex()
                 .flex_1()
                 .min_w_0()
@@ -790,10 +1206,12 @@ impl Render for Keystone {
                 .child(
                     v_flex()
                         .id("conversation")
+                        .automation_id("conversation")
                         .flex_1()
                         .min_h_0()
                         .w_full()
                         .overflow_y_scroll()
+                        .track_scroll(&self.transcript_scroll)
                         .items_center()
                         .child(
                             div()
@@ -801,7 +1219,10 @@ impl Render for Keystone {
                                 .max_w(px(CONTENT_WIDTH))
                                 .px_3()
                                 .py_6()
-                                .child(self.transcript(cx)),
+                                .when(self.fixture, |d| d.child(self.transcript(cx)))
+                                .when_some(selected.filter(|_| !self.fixture), |d, id| {
+                                    d.child(self.conversation_view(id, cx))
+                                }),
                         ),
                 )
                 .when_some(self.error_line(), |d, error| {
@@ -876,6 +1297,9 @@ impl Render for Keystone {
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 this.composer.focus_handle(cx).focus(window)
             }))
+            .on_action(
+                cx.listener(|this, _: &SendMessage, window, cx| this.send_message(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.sidebar = true;
                 this.search.focus_handle(cx).focus(window);
@@ -1120,6 +1544,138 @@ mod tests {
         );
     }
 
+    /// Runs the app's tasks, with real time passing, until `done` holds. Provider
+    /// output arrives from a real child process, so simulated time alone cannot reach it.
+    fn wait_until(
+        cx: &mut gpui::VisualTestContext,
+        view: &Entity<Keystone>,
+        done: impl Fn(&Keystone) -> bool,
+    ) {
+        cx.executor().allow_parking();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| done(view)) {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                view.read_with(cx, |view, _| {
+                    let state: Vec<_> = view
+                        .conversations
+                        .iter()
+                        .map(|(id, c)| {
+                            (
+                                id,
+                                c.running,
+                                c.rows.clone(),
+                                c.error.clone(),
+                                c.approval.clone(),
+                            )
+                        })
+                        .collect();
+                    panic!(
+                        "timed out; error {:?}; conversations {state:#?}",
+                        view.error
+                    );
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn fake_codex() -> PathBuf {
+        // Test binaries live in target/<profile>/deps; the scripted app-server is one
+        // level up. `scripts/check.sh ui` builds it first.
+        let exe = std::env::current_exe().unwrap();
+        let path = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("keystone-fake-codex");
+        assert!(
+            path.exists(),
+            "build it with `cargo build -p keystone-agent --bins`"
+        );
+        path
+    }
+
+    #[gpui::test]
+    fn codex_session_streams_asks_approval_and_restores_from_its_log(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        // SAFETY: only this test reads these variables, and it sets them before any
+        // thread that could read them starts.
+        unsafe {
+            std::env::set_var("KEYSTONE_CODEX_PATH", fake_codex());
+            std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "2");
+        }
+        let store = Store::open(&path).unwrap();
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let bounds = cx.debug_bounds("welcome-codex").unwrap();
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("hello");
+        let bounds = cx.debug_bounds("send").unwrap();
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+
+        let finished = |view: &Keystone| {
+            view.conversations.get(&1).is_some_and(|c| {
+                !c.running
+                    && c.rows.iter().any(|row| matches!(row, Row::Item(item)
+                        if item.kind == ItemKind::AgentMessage && item.status == ItemStatus::Completed))
+            })
+        };
+        wait_until(cx, &view, finished);
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.composer.read(cx).value(), "");
+            let rows = &view.conversations[&1].rows;
+            assert!(matches!(&rows[0], Row::Item(item) if item.kind == ItemKind::UserMessage && item.text == "hello"));
+            assert!(rows.iter().any(|row| matches!(row, Row::Item(item) if item.text.contains("You wrote: hello"))));
+        });
+        assert_eq!(
+            Store::open(&path).unwrap().workspace().sessions()[0].provider_thread(),
+            Some("fake-thread-1")
+        );
+
+        // The shortcut sends too. A command waits for approval.
+        cx.simulate_input("please run it");
+        cx.simulate_keystrokes("ctrl-enter");
+        wait_until(cx, &view, |view| view.conversations[&1].approval.is_some());
+        let bounds = cx.debug_bounds("approve").expect("approval card rendered");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        // Answering hands focus back to the composer.
+        cx.simulate_input("next");
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.composer.read(cx).value(), "next")
+        });
+        wait_until(cx, &view, |view| {
+            let c = &view.conversations[&1];
+            !c.running
+                && c.rows.iter().any(|row| {
+                    matches!(row, Row::Item(item)
+                if matches!(item.kind, ItemKind::Command { exit_code: Some(0), .. }))
+                })
+        });
+
+        // A fresh window reads the conversation back from the session's log.
+        let store = Store::open(&path).unwrap();
+        let (restored, cx) =
+            cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        cx.run_until_parked();
+        restored.read_with(cx, |view, _| {
+            let rows = &view.conversations[&1].rows;
+            assert!(rows.contains(&Row::Decision { action: "echo scripted".into(), allowed: true }));
+            assert!(rows.iter().any(|row| matches!(row, Row::Item(item) if item.text.contains("You wrote: please run it"))));
+        });
+    }
+
     #[gpui::test]
     fn menu_created_session_receives_typed_draft(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1229,6 +1785,20 @@ mod tests {
         );
     }
 }
+/// The app's keyboard shortcuts, shared by `main` and the GPUI tests.
+fn bind_keys(cx: &mut App) {
+    TextInput::bind_keys(cx);
+    cx.bind_keys([
+        gpui::KeyBinding::new("ctrl-q", Quit, None),
+        gpui::KeyBinding::new("ctrl-n", NewClaude, None),
+        gpui::KeyBinding::new("ctrl-shift-n", NewCodex, None),
+        gpui::KeyBinding::new("ctrl-shift-s", ToggleSettle, None),
+        gpui::KeyBinding::new("ctrl-l", FocusComposer, None),
+        gpui::KeyBinding::new("ctrl-f", FocusSearch, None),
+        gpui::KeyBinding::new("ctrl-enter", SendMessage, None),
+    ]);
+}
+
 fn state_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("KEYSTONE_STATE_PATH") {
         return Ok(path.into());
@@ -1272,15 +1842,7 @@ fn main() {
         .with_assets(keystone_ui::Icons)
         .run(move |cx: &mut App| {
             keystone_ui::init(cx);
-            TextInput::bind_keys(cx);
-            cx.bind_keys([
-                gpui::KeyBinding::new("ctrl-q", Quit, None),
-                gpui::KeyBinding::new("ctrl-n", NewClaude, None),
-                gpui::KeyBinding::new("ctrl-shift-n", NewCodex, None),
-                gpui::KeyBinding::new("ctrl-shift-s", ToggleSettle, None),
-                gpui::KeyBinding::new("ctrl-l", FocusComposer, None),
-                gpui::KeyBinding::new("ctrl-f", FocusSearch, None),
-            ]);
+            bind_keys(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
             let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
             cx.open_window(
