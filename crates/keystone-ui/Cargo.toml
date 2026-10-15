@@ -1,0 +1,12 @@
+[package]
+name = "keystone-ui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui = "=0.2.2"
+anyhow = "1"
+
+[features]
+ui-tests = ["gpui/test-support"]

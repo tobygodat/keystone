@@ -2910,6 +2910,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "keystone-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
