@@ -5,9 +5,9 @@ use gpui::{
     App, Application, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, Render,
     Subscription, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size, svg,
 };
-use keystone_core::{Provider, Store};
+use keystone_core::{Durability, Provider, Store};
 use std::path::PathBuf;
-use text_input::{Changed, RejectedMultiline, TextInput};
+use text_input::{Changed, InputMode, TextInput};
 
 gpui::actions!(
     keystone,
@@ -24,6 +24,15 @@ gpui::actions!(
 const BG: u32 = 0x171717;
 const BORDER: u32 = 0x2b2b2b;
 const MUTED: u32 = 0x858585;
+
+fn durability_warning(durability: Durability) -> Option<String> {
+    match durability {
+        Durability::Synced => None,
+        Durability::DirectorySyncPending(error) => Some(format!(
+            "Change saved, but crash durability is unconfirmed. Retry saving before leaving. {error}"
+        )),
+    }
+}
 
 fn icon(name: &'static str) -> gpui::Svg {
     svg().path(name).size(px(16.)).text_color(rgb(MUTED))
@@ -58,8 +67,9 @@ struct Keystone {
 
 impl Keystone {
     fn new(store: Store, fixture: bool, cx: &mut Context<Self>) -> Self {
-        let composer = cx.new(|cx| TextInput::new("Write a single-line draft…", cx));
-        let search = cx.new(|cx| TextInput::new("Search conversations…", cx));
+        let composer = cx.new(|cx| TextInput::new("Write a draft…", InputMode::Multiline, cx));
+        let search =
+            cx.new(|cx| TextInput::new("Search conversations…", InputMode::SingleLine, cx));
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
                 this.draft_save_task = Some(cx.spawn(async move |this, cx| {
@@ -73,13 +83,6 @@ impl Keystone {
                 cx.notify();
             }),
             cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify()),
-            cx.subscribe(&composer, |this, _, _: &RejectedMultiline, cx| {
-                this.error = Some(
-                    "This preview supports single-line drafts. Multiline text was not inserted."
-                        .into(),
-                );
-                cx.notify();
-            }),
         ];
         let mut result = Self {
             store,
@@ -112,24 +115,23 @@ impl Keystone {
     }
 
     fn save_draft(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(session) = self
-            .store
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| Some(s.id()) == self.store.workspace().selected())
-        else {
-            return true;
+        let session_id = self.store.workspace().selected();
+        let result = if let Some(id) = session_id {
+            let draft = self.composer.read(cx).value().to_owned();
+            self.store
+                .set_draft(id, draft)
+                .map(|applied| applied.durability)
+        } else {
+            self.store
+                .sync_pending()
+                .map(|()| Durability::Synced)
+                .map_err(Into::into)
         };
-        let draft = self.composer.read(cx).value().to_owned();
-        if session.draft() == draft {
-            return true;
-        }
-        match self.store.set_draft(session.id(), draft) {
-            Ok(()) => {
-                self.error = None;
+        match result {
+            Ok(durability) => {
+                self.error = durability_warning(durability);
                 cx.notify();
-                true
+                self.error.is_none()
             }
             Err(error) => {
                 self.error = Some(format!(
@@ -145,7 +147,10 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
-        self.error = self.store.create(provider).err().map(|e| e.to_string());
+        self.error = match self.store.create(provider) {
+            Ok(applied) => durability_warning(applied.durability),
+            Err(error) => Some(error.to_string()),
+        };
         self.new_menu = false;
         self.settled_only = false;
         self.sync_draft(cx);
@@ -163,11 +168,10 @@ impl Keystone {
             .iter()
             .find(|s| Some(s.id()) == self.store.workspace().selected())
         {
-            self.error = self
-                .store
-                .set_settled(session.id(), !session.settled())
-                .err()
-                .map(|e| e.to_string());
+            self.error = match self.store.set_settled(session.id(), !session.settled()) {
+                Ok(applied) => durability_warning(applied.durability),
+                Err(error) => Some(error.to_string()),
+            };
         }
         cx.notify();
     }
@@ -283,7 +287,10 @@ impl Render for Keystone {
                         if !this.save_draft(cx) {
                             return;
                         }
-                        this.error = this.store.select(id).err().map(|e| e.to_string());
+                        this.error = match this.store.select(id) {
+                            Ok(applied) => durability_warning(applied.durability),
+                            Err(error) => Some(error.to_string()),
+                        };
                         this.sync_draft(cx);
                         cx.notify();
                     }))
@@ -372,7 +379,7 @@ impl Render for Keystone {
                         .child(
                             div()
                                 .text_color(rgb(MUTED))
-                                .child("Provider not connected · single-line draft"),
+                                .child("Provider not connected · Enter for a new line"),
                         )
                         .child(div().flex_1())
                         .when(!has_session, |d| {
@@ -768,7 +775,7 @@ mod tests {
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         assert_eq!(Store::open(&path).unwrap().workspace().selected(), Some(1));
-        cx.simulate_input("Draft from the welcome composer");
+        cx.simulate_input("Draft from the welcome composer\n第二行 😀\n");
         cx.run_until_parked();
 
         for selector in ["new-session", "new-codex", "session-1"] {
@@ -780,12 +787,12 @@ mod tests {
             assert_eq!(view.store.workspace().selected(), Some(1));
             assert_eq!(
                 view.composer.read(cx).value(),
-                "Draft from the welcome composer"
+                "Draft from the welcome composer\n第二行 😀\n"
             );
         });
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].draft(),
-            "Draft from the welcome composer"
+            "Draft from the welcome composer\n第二行 😀\n"
         );
     }
 
@@ -865,9 +872,12 @@ mod tests {
         });
         cx.simulate_keystrokes("ctrl-v");
         cx.run_until_parked();
+        let bounds = cx.debug_bounds("session-2").unwrap();
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].draft(),
-            ""
+            "first line\nsecond line"
         );
     }
 }

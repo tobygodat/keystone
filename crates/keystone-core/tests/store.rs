@@ -10,12 +10,14 @@ fn sessions_and_drafts_survive_restart() {
     assert!(store.workspace().sessions().is_empty());
     assert_eq!(store.workspace().selected(), None);
 
-    let claude = store.create(Provider::Claude).unwrap();
-    let codex = store.create(Provider::Codex).unwrap();
+    let claude = store.create(Provider::Claude).unwrap().value;
+    let codex = store.create(Provider::Codex).unwrap().value;
     assert_eq!((claude, codex), (1, 2));
     store.select(claude).unwrap();
     store.set_settled(codex, true).unwrap();
-    store.set_draft(claude, "a saved thought".into()).unwrap();
+    store
+        .set_draft(claude, "First paragraph 🥔\n\n第二段\n".into())
+        .unwrap();
     drop(store);
 
     let mut restored = Store::open(&path).unwrap();
@@ -31,7 +33,7 @@ fn sessions_and_drafts_survive_restart() {
     assert_eq!(sessions[0].title(), "New Claude session");
     assert_eq!(sessions[0].provider(), Provider::Claude);
     assert!(!sessions[0].settled());
-    assert_eq!(sessions[0].draft(), "a saved thought");
+    assert_eq!(sessions[0].draft(), "First paragraph 🥔\n\n第二段\n");
     assert_eq!(sessions[1].title(), "New Codex session");
     assert_eq!(sessions[1].provider(), Provider::Codex);
     assert!(sessions[1].settled());
@@ -39,7 +41,7 @@ fn sessions_and_drafts_survive_restart() {
 
     restored.set_settled(codex, false).unwrap();
     assert!(!Store::open(&path).unwrap().workspace().sessions()[1].settled());
-    assert_eq!(restored.create(Provider::Claude).unwrap(), 3);
+    assert_eq!(restored.create(Provider::Claude).unwrap().value, 3);
 }
 
 #[test]
@@ -87,7 +89,7 @@ fn save_failure_keeps_visible_state_unchanged() {
     assert_eq!(store.workspace().selected(), None);
 
     fs::create_dir(path.parent().unwrap()).unwrap();
-    assert_eq!(store.create(Provider::Claude).unwrap(), 1);
+    assert_eq!(store.create(Provider::Claude).unwrap().value, 1);
     assert_eq!(
         Store::open(&path).unwrap().workspace().sessions()[0].id(),
         1

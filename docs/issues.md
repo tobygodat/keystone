@@ -1,8 +1,10 @@
 # Open engineering issues
 
-## KS-001. Snapshot replacement is not power-loss durable
+## KS-001. Snapshot replacement durability
 
-Status is open. `Store::commit` syncs the temporary file before rename but does not sync the parent directory afterward. The current tests cover ordinary process restarts, not system crashes or power loss. Resolve directory-sync error semantics before promising crash-durable saves or integrating live execution.
+Snapshot replacement now syncs the temporary file before rename and the existing parent directory afterward. A failed directory sync returns an applied result with a durability warning. Memory follows the installed file, and retry syncs only the directory. A deterministic fault test checks the installed file, memory, returned ID, and retry without duplicate creation. Pre-rename failures retain the previous state.
+
+Durability of newly created ancestor directories remains open. These checks do not simulate system crashes or power loss.
 
 ## KS-002. Native desktop smoke automation
 
@@ -15,7 +17,7 @@ Status is resolved in the visual pass. Navigation, creation, settlement, and app
 
 ## KS-004. Full composer input
 
-Status is open. The preview explicitly supports single-line drafts and rejects multiline insertion. Full multiline composition, attachments, and provider submission remain accepted MVP work. Horizontal cursor-follow scrolling is implemented for the current field.
+Status is partially resolved. The composer accepts multiline drafts and normalizes pasted line endings. Text wraps, grows to eight visible rows, and scrolls vertically. Search remains single-line. Attachments and provider submission remain accepted MVP work. Native IME coverage remains open.
 
 ## KS-005. Native long-input stall
 
@@ -28,3 +30,11 @@ Status is open with a documented workaround. The pinned computer-use-mcp driver 
 ## KS-007. Verification controller startup cleanup
 
 Status is resolved. Independent review found that driver execution failure could leave a temporary state directory before the controller was assigned. The constructor now records the failure and removes its scratch state. A real non-executable driver attempt returned exit 1, retained its cleanup record, and left no new state directory. Evidence is in `.audit/verify-driver-exec-failure/`.
+
+## KS-008. Placeholder and stale editor geometry
+
+Verification reproduced an empty-composer crash after End followed by typing. The placeholder supplied byte offsets that did not belong to the empty draft. Independent review also found that edits could leave navigation using geometry for the previous buffer. Status is resolved. Placeholder layout is now paint-only, replacements invalidate editable geometry, and navigation before repaint uses current logical line boundaries. The regression failed before the fix and passed afterward. Native End followed by typing also passed.
+
+## KS-009. Native verification keyboard restart
+
+Status is open. A nested Sway restart after temporary `wtype` keyboard use hit GPUI 0.2.2's `keymap_state.as_mut().unwrap()` while handling a Wayland keyboard modifiers event, before a window appeared. Sending a fresh keyboard event through the driver before launch recovered that session. Virtual keyboard event ordering is the suspected cause. The exact dependency panic was observed by launching the app against the same disposable state and compositor. This is separate from snapshot restoration and the fixed composer geometry crash.

@@ -11,6 +11,18 @@ type StoreResult<T> = Result<T, Box<dyn Error>>;
 
 const FORMAT_VERSION: u32 = 1;
 
+#[derive(Debug)]
+pub struct Applied<T> {
+    pub value: T,
+    pub durability: Durability,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum Durability {
+    Synced,
+    DirectorySyncPending(String),
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Provider {
     Claude,
@@ -26,7 +38,7 @@ impl fmt::Display for Provider {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Session {
     id: u64,
     title: String,
@@ -57,7 +69,7 @@ impl Session {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct Workspace {
     sessions: Vec<Session>,
     selected: Option<u64>,
@@ -84,6 +96,9 @@ pub struct Store {
     path: PathBuf,
     workspace: Workspace,
     next_id: u64,
+    pending_directory: Option<File>,
+    #[cfg(test)]
+    sync_directory: fn(&File) -> io::Result<()>,
 }
 
 impl Store {
@@ -96,6 +111,9 @@ impl Store {
                     path,
                     workspace: Workspace::default(),
                     next_id: 1,
+                    pending_directory: None,
+                    #[cfg(test)]
+                    sync_directory: File::sync_all,
                 });
             }
             Err(error) => return Err(error.into()),
@@ -105,6 +123,9 @@ impl Store {
             path,
             workspace: snapshot.workspace,
             next_id: snapshot.next_id,
+            pending_directory: None,
+            #[cfg(test)]
+            sync_directory: File::sync_all,
         })
     }
 
@@ -112,7 +133,7 @@ impl Store {
         &self.workspace
     }
 
-    pub fn create(&mut self, provider: Provider) -> StoreResult<u64> {
+    pub fn create(&mut self, provider: Provider) -> StoreResult<Applied<u64>> {
         let id = self.next_id;
         let next_id = id
             .checked_add(1)
@@ -126,11 +147,14 @@ impl Store {
             draft: String::new(),
         });
         next.selected = Some(id);
-        self.commit(next, next_id)?;
-        Ok(id)
+        let applied = self.commit(next, next_id)?;
+        Ok(Applied {
+            value: id,
+            durability: applied.durability,
+        })
     }
 
-    pub fn select(&mut self, id: u64) -> StoreResult<()> {
+    pub fn select(&mut self, id: u64) -> StoreResult<Applied<()>> {
         if !self
             .workspace
             .sessions
@@ -140,22 +164,26 @@ impl Store {
             return Err(invalid(format!("unknown session ID {id}")).into());
         }
         if self.workspace.selected == Some(id) {
-            return Ok(());
+            return Ok(self.finish_sync());
         }
         let mut next = self.workspace.clone();
         next.selected = Some(id);
         self.commit(next, self.next_id)
     }
 
-    pub fn set_settled(&mut self, id: u64, settled: bool) -> StoreResult<()> {
+    pub fn set_settled(&mut self, id: u64, settled: bool) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.settled = settled)
     }
 
-    pub fn set_draft(&mut self, id: u64, text: String) -> StoreResult<()> {
+    pub fn set_draft(&mut self, id: u64, text: String) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.draft = text)
     }
 
-    fn update_session(&mut self, id: u64, change: impl FnOnce(&mut Session)) -> StoreResult<()> {
+    fn update_session(
+        &mut self,
+        id: u64,
+        change: impl FnOnce(&mut Session),
+    ) -> StoreResult<Applied<()>> {
         let mut next = self.workspace.clone();
         let session = next
             .sessions
@@ -163,10 +191,34 @@ impl Store {
             .find(|session| session.id == id)
             .ok_or_else(|| invalid(format!("unknown session ID {id}")))?;
         change(session);
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
         self.commit(next, self.next_id)
     }
 
-    fn commit(&mut self, workspace: Workspace, next_id: u64) -> StoreResult<()> {
+    pub fn sync_pending(&mut self) -> io::Result<()> {
+        if let Some(directory) = &self.pending_directory {
+            #[cfg(test)]
+            (self.sync_directory)(directory)?;
+            #[cfg(not(test))]
+            directory.sync_all()?;
+            self.pending_directory = None;
+        }
+        Ok(())
+    }
+
+    fn finish_sync(&mut self) -> Applied<()> {
+        Applied {
+            value: (),
+            durability: match self.sync_pending() {
+                Ok(()) => Durability::Synced,
+                Err(error) => Durability::DirectorySyncPending(error.to_string()),
+            },
+        }
+    }
+
+    fn commit(&mut self, workspace: Workspace, next_id: u64) -> StoreResult<Applied<()>> {
         let snapshot = Snapshot {
             version: FORMAT_VERSION,
             next_id,
@@ -177,6 +229,7 @@ impl Store {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
+        let directory = File::open(parent)?;
         let mut file = NamedTempFile::new_in(parent)?;
         serde_json::to_writer(&mut file, &snapshot)?;
         file.flush()?;
@@ -184,7 +237,8 @@ impl Store {
         file.persist(&self.path)?;
         self.workspace = snapshot.workspace;
         self.next_id = snapshot.next_id;
-        Ok(())
+        self.pending_directory = Some(directory);
+        Ok(self.finish_sync())
     }
 }
 
@@ -217,4 +271,51 @@ fn validate(snapshot: &Snapshot) -> StoreResult<()> {
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_sync_failure_keeps_applied_snapshot_and_retry_does_not_duplicate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+
+        let created = store.create(Provider::Claude).unwrap();
+        assert_eq!(created.value, 1);
+        assert_eq!(
+            created.durability,
+            Durability::DirectorySyncPending("directory sync unavailable".into())
+        );
+        assert_eq!(store.workspace().selected(), Some(1));
+        assert_eq!(store.workspace().sessions().len(), 1);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.workspace().selected(), Some(1));
+        assert_eq!(reopened.workspace().sessions()[0].id(), 1);
+        assert_eq!(reopened.workspace().sessions().len(), 1);
+        assert_eq!(reopened.next_id, 2);
+        assert!(matches!(
+            store.select(1).unwrap().durability,
+            Durability::DirectorySyncPending(_)
+        ));
+        assert!(matches!(
+            store.set_draft(1, String::new()).unwrap().durability,
+            Durability::DirectorySyncPending(_)
+        ));
+        let before_retry = std::fs::read(&path).unwrap();
+        assert!(store.sync_pending().is_err());
+        store.sync_directory = File::sync_all;
+        store.sync_pending().unwrap();
+        store.sync_pending().unwrap();
+        assert!(store.pending_directory.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), before_retry);
+        assert_eq!(store.workspace().sessions().len(), 1);
+        let next = store.create(Provider::Codex).unwrap();
+        assert_eq!(next.value, 2);
+        assert_eq!(next.durability, Durability::Synced);
+        assert_eq!(Store::open(&path).unwrap().workspace().sessions().len(), 2);
+    }
 }

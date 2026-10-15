@@ -1,6 +1,6 @@
 # Drafts and restart
 
-Write a single-line draft, switch sessions, and reopen Keystone without losing the saved text.
+Write a multiline draft, switch sessions, and reopen Keystone without losing the saved text.
 
 ## Sub-features
 
@@ -8,7 +8,7 @@ Write a single-line draft, switch sessions, and reopen Keystone without losing t
 - `draft-autosave` persists typed text after the debounce.
 - `draft-switch` keeps each session's draft separately.
 - `draft-restart` restores saved text and selection after a normal quit.
-- `draft-multiline` rejects multiline paste with a visible explanation.
+- `draft-multiline` accepts Enter and multiline paste, wraps text, and scrolls after eight visible rows.
 
 ## How to get to it (user POV)
 
@@ -30,6 +30,8 @@ Preconditions:
 - Press Ctrl+Q through `input`. Poll `windows_list` until empty. Run Doctor and require the app PID to have exited.
 - Send `{"kind":"launch"}`. Run Doctor, capture the window, and require the original selection and visible draft to match the saved snapshot.
 - Focus the restored composer and append ` Again.`. Require the file and screenshot to show the combined text. This distinguishes a restored usable editor from a static image.
+- Insert a new line with Enter and type a second paragraph. Require a literal newline in the saved draft. Click a later row and insert a marker. Check its exact position in the saved text.
+- Paste a draft longer than eight visual rows through a native clipboard route. Inspect wrapping, scrolling, selection, and caret visibility at a narrow window width.
 - Test window close separately using `window_action` with `action:"close"` and the observed window ID. Do not claim that Ctrl+Q proves the close-control path.
 
 ## Gotchas
@@ -37,5 +39,6 @@ Preconditions:
 - Autosave waits 250 ms after changes. Observe the file instead of assuming a fixed wait always suffices.
 - `stop` forcibly ends remaining apps. It does not prove graceful-save behavior. Quit through the UI first.
 - Very rapid long text input has a known rendering issue. A short passing draft does not resolve it.
-- `type` sends native key events. It is not clipboard paste and cannot prove multiline-paste rejection. That entry point remains unverified until a real paste route is available.
+- `type` sends native key events. It is not clipboard paste. Use a native clipboard owner such as `wl-copy` on the observed nested Wayland socket before Ctrl+V. Keep the nested window visible during input and capture.
+- Temporary virtual keyboard use can affect later GPUI startup in the same nested desktop. Record failures separately from restoration. A clean restart run that uses only the driver's persistent keyboard passed. See KS-009 in `docs/issues.md`.
 - Storage-failure close blocking requires fault injection in the disposable state path and is not covered by this normal-save journey.

@@ -2,7 +2,7 @@
 
 A Rust and GPUI desktop workspace for Claude Code and Codex.
 
-This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, filter settled sessions, save single-line drafts, settle and un-settle them, and restore them on restart. Provider execution is not connected. The application does not send prompts. The optional visual fixture is labeled as sample content.
+This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, filter settled sessions, save multiline drafts, settle and un-settle them, and restore them on restart. Provider execution is not connected. The application does not send prompts. The optional visual fixture is labeled as sample content.
 
 ## Run the preview
 
@@ -25,7 +25,7 @@ The driver was proved against the actual GPUI binary. Keep its nested window vis
 
 Set `KEYSTONE_VISUAL_FIXTURE=1` to show a labeled sample transcript with a table and code block. It uses the same window and layout as the normal preview. Set `KEYSTONE_CAPTURE_DIR` to choose a separate native evidence directory. On the current Hyprland Lua profile, `KEYSTONE_TEST_CLOSE=1` also checks that failed storage blocks a compositor close request. Native typing defaults to 100 ms per character. The 10 ms stress case remains an open rendering issue.
 
-The composer is single-line in this increment. Multiline paste is rejected with a visible explanation rather than flattened. Full multiline composition and live providers remain work for the next increment.
+The composer supports multiline drafts. Enter and Shift+Enter insert a new line. Text wraps to the available width, grows to eight visible rows, and scrolls vertically for longer drafts. Home and End move within a visual row. Ctrl+Home and Ctrl+End move to the beginning and end of the draft. Search remains single-line. Live providers and attachments remain future work.
 
 GPUI input tests do not establish native rendering correctness. Native window checks and live provider checks are separate.
 
