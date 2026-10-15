@@ -1,3 +1,5 @@
-date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	note
-2026-10-15T19:40:33Z	7bf19af	1.56	1.47	334	101.46	baseline: debug=1, deps unoptimized
-2026-10-15T19:46:26Z	7bf19af+dirty	1.04	1.13	264	8.22	deps opt-level=2 in dev profile
+date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_refresh_ms	note
+2026-10-15T19:40:33Z	7bf19af	1.56	1.47	334	101.46		baseline: debug=1, deps unoptimized
+2026-10-15T19:46:26Z	7bf19af+dirty	1.04	1.13	264	8.22		deps opt-level=2 in dev profile
+2026-10-15T20:19:09Z	6e1c99b	0.56	0.64	262	4.78		baseline on this machine before sidebar caching
+2026-10-15T20:23:35Z	6e1c99b+dirty	0.55	0.64	262	0.42	0.50	sidebar as a cached GPUI view

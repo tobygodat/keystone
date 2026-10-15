@@ -1,9 +1,9 @@
 mod text_input;
 
 use gpui::{
-    App, Application, Bounds, Context, Corner, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, Render, Subscription, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    size,
+    AnyView, App, Application, Bounds, Context, Corner, Entity, FocusHandle, Focusable, FontWeight,
+    IntoElement, Render, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, size,
 };
 use keystone_core::{Durability, Provider, Store};
 use keystone_ui::prelude::*;
@@ -38,6 +38,7 @@ struct Keystone {
     error: Option<String>,
     composer: Entity<TextInput>,
     search: Entity<TextInput>,
+    session_sidebar: Entity<SessionSidebar>,
     _subscriptions: Vec<Subscription>,
     draft_save_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
@@ -64,13 +65,16 @@ impl Keystone {
                 }));
                 cx.notify();
             }),
-            cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify()),
+            cx.subscribe(&search, |this, _, _: &Changed, cx| this.refresh(cx)),
         ];
+        let app = cx.weak_entity();
+        let session_sidebar = cx.new(|_| SessionSidebar { app });
         let mut result = Self {
             store,
             error: None,
             composer,
             search,
+            session_sidebar,
             _subscriptions: subscriptions,
             draft_save_task: None,
             focus: cx.focus_handle(),
@@ -81,6 +85,13 @@ impl Keystone {
         };
         result.sync_draft(cx);
         result
+    }
+
+    /// Notifies this view and the cached sidebar. Use it for any change the sidebar shows.
+    /// Composer typing and draft saves notify only this view, so they reuse the sidebar.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+        self.session_sidebar.update(cx, |_, cx| cx.notify());
     }
 
     fn sync_draft(&mut self, cx: &mut Context<Self>) {
@@ -136,7 +147,7 @@ impl Keystone {
         self.new_menu = false;
         self.settled_only = false;
         self.sync_draft(cx);
-        cx.notify();
+        self.refresh(cx);
     }
 
     fn toggle_settle(&mut self, cx: &mut Context<Self>) {
@@ -155,7 +166,7 @@ impl Keystone {
                 Err(error) => Some(error.to_string()),
             };
         }
-        cx.notify();
+        self.refresh(cx);
     }
 
     fn transcript(&self, cx: &App) -> gpui::Div {
@@ -245,7 +256,7 @@ impl Keystone {
             Err(error) => Some(error.to_string()),
         };
         self.sync_draft(cx);
-        cx.notify();
+        self.refresh(cx);
     }
 
     fn start(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
@@ -327,7 +338,7 @@ impl Keystone {
                     }))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.sidebar = !this.sidebar;
-                        cx.notify();
+                        this.refresh(cx);
                     })),
             )
             .child(
@@ -338,7 +349,7 @@ impl Keystone {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.settled_only = false;
                         this.sidebar = true;
-                        cx.notify();
+                        this.refresh(cx);
                     })),
             )
             .child(
@@ -348,7 +359,7 @@ impl Keystone {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.sidebar = true;
                         this.search.focus_handle(cx).focus(window);
-                        cx.notify();
+                        this.refresh(cx);
                     })),
             )
             .child(
@@ -359,144 +370,8 @@ impl Keystone {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.settled_only = true;
                         this.sidebar = true;
-                        cx.notify();
+                        this.refresh(cx);
                     })),
-            )
-    }
-
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.store.workspace().selected();
-        let query = self.search.read(cx).value().to_lowercase();
-        let sessions = self
-            .store
-            .workspace()
-            .sessions()
-            .iter()
-            .filter(|s| {
-                (!self.settled_only || s.settled())
-                    && format!("{} {}", s.title(), s.provider())
-                        .to_lowercase()
-                        .contains(&query)
-            })
-            .map(|session| {
-                let id = session.id();
-                let state = if session.settled() {
-                    "Settled"
-                } else {
-                    "Draft"
-                };
-                ListItem::new(("session", id))
-                    .debug_selector(move || format!("session-{id}"))
-                    .selected(Some(id) == selected)
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx)))
-                    .child(Label::new(session.title().to_owned()).truncate())
-                    .child(
-                        Label::new(format!("{} · {state}", session.provider()))
-                            .size(TextSize::Sm)
-                            .color(Color::Muted),
-                    )
-            })
-            .collect::<Vec<_>>();
-        let empty = match (
-            sessions.is_empty(),
-            self.store.workspace().sessions().is_empty(),
-        ) {
-            (false, _) => None,
-            (true, true) => Some("No sessions yet. Press + to start one."),
-            (true, false) => Some("No sessions match these filters"),
-        };
-        v_flex()
-            .w(px(256.))
-            .flex_shrink_0()
-            .h_full()
-            .hairline_r(cx)
-            .child(
-                h_flex()
-                    .h(px(40.))
-                    .pl_3()
-                    .pr_1p5()
-                    .hairline_b(cx)
-                    .child(
-                        div().flex_1().child(
-                            Label::new(if self.settled_only {
-                                "Settled sessions"
-                            } else {
-                                "Workspace"
-                            })
-                            .weight(FontWeight::MEDIUM),
-                        ),
-                    )
-                    .child(
-                        PopoverMenu::new(
-                            "new-session-menu",
-                            IconButton::new("new-session", IconName::Plus)
-                                .debug_selector(|| "new-session".into())
-                                .selected(self.new_menu)
-                                .tooltip(Tooltip::text("New session")),
-                        )
-                        .anchor(Corner::TopRight)
-                        .open(self.new_menu)
-                        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
-                            this.new_menu = *open;
-                            cx.notify();
-                        }))
-                        .child(
-                            MenuItem::new("new-claude", "New Claude session")
-                                .icon(IconName::Chat)
-                                .kbd("Ctrl+N")
-                                .debug_selector(|| "new-claude".into())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.start(Provider::Claude, window, cx)
-                                })),
-                        )
-                        .child(
-                            MenuItem::new("new-codex", "New Codex session")
-                                .icon(IconName::Chat)
-                                .kbd("Ctrl+Shift+N")
-                                .debug_selector(|| "new-codex".into())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.start(Provider::Codex, window, cx)
-                                })),
-                        ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .h(px(36.))
-                    .pl_3()
-                    .pr_1p5()
-                    .gap_2()
-                    .child(Icon::new(IconName::Search).size(px(14.)))
-                    .child(div().flex_1().min_w_0().child(self.search.clone()))
-                    .child(
-                        IconButton::new("filter", IconName::Filter)
-                            .size(ButtonSize::Compact)
-                            .selected(self.settled_only)
-                            .tooltip(Tooltip::text("Show settled only"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settled_only = !this.settled_only;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .id("session-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_1p5()
-                    .pt_1()
-                    .gap(px(2.))
-                    .when_some(empty, |d, message| {
-                        d.child(
-                            div()
-                                .px_2()
-                                .py_2()
-                                .child(Label::new(message).size(TextSize::Ui).color(Color::Muted)),
-                        )
-                    })
-                    .children(sessions),
             )
     }
 
@@ -601,6 +476,178 @@ impl Keystone {
         self.error
             .clone()
             .map(|error| Label::new(error).size(TextSize::Ui).color(Color::Danger))
+    }
+}
+
+/// The session list, rendered as its own cached view. GPUI reuses its last layout and paint
+/// until this entity is notified, so composer keystrokes skip every session row.
+/// [`Keystone::refresh`] notifies it whenever the sessions, filters, or menu change.
+struct SessionSidebar {
+    app: WeakEntity<Keystone>,
+}
+
+struct SessionRow {
+    id: u64,
+    title: String,
+    detail: String,
+}
+
+impl Render for SessionSidebar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(app) = self.app.upgrade() else {
+            return div();
+        };
+        let this = app.read(cx);
+        let workspace = this.store.workspace();
+        let selected = workspace.selected();
+        let query = this.search.read(cx).value().to_lowercase();
+        let rows = workspace
+            .sessions()
+            .iter()
+            .filter(|s| {
+                (!this.settled_only || s.settled())
+                    && format!("{} {}", s.title(), s.provider())
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .map(|session| SessionRow {
+                id: session.id(),
+                title: session.title().to_owned(),
+                detail: format!(
+                    "{} · {}",
+                    session.provider(),
+                    if session.settled() {
+                        "Settled"
+                    } else {
+                        "Draft"
+                    }
+                ),
+            })
+            .collect::<Vec<_>>();
+        let empty = match (rows.is_empty(), workspace.sessions().is_empty()) {
+            (false, _) => None,
+            (true, true) => Some("No sessions yet. Press + to start one."),
+            (true, false) => Some("No sessions match these filters"),
+        };
+        let (settled_only, new_menu, search) =
+            (this.settled_only, this.new_menu, this.search.clone());
+        let listener = |f: fn(&mut Keystone, &mut Window, &mut Context<Keystone>)| {
+            let app = app.downgrade();
+            move |_: &_, window: &mut Window, cx: &mut App| {
+                let _ = app.update(cx, |this, cx| f(this, window, cx));
+            }
+        };
+        let sessions = rows.into_iter().map(|row| {
+            let SessionRow { id, title, detail } = row;
+            let app = app.downgrade();
+            ListItem::new(("session", id))
+                .debug_selector(move || format!("session-{id}"))
+                .selected(Some(id) == selected)
+                .on_click(move |_, _, cx| {
+                    let _ = app.update(cx, |this, cx| this.select(id, cx));
+                })
+                .child(Label::new(title).truncate())
+                .child(Label::new(detail).size(TextSize::Sm).color(Color::Muted))
+        });
+        let set_menu = {
+            let app = app.downgrade();
+            move |open: &bool, _: &mut Window, cx: &mut App| {
+                let open = *open;
+                let _ = app.update(cx, |this, cx| {
+                    this.new_menu = open;
+                    this.refresh(cx);
+                });
+            }
+        };
+        v_flex()
+            .size_full()
+            .hairline_r(cx)
+            .child(
+                h_flex()
+                    .h(px(40.))
+                    .pl_3()
+                    .pr_1p5()
+                    .hairline_b(cx)
+                    .child(
+                        div().flex_1().child(
+                            Label::new(if settled_only {
+                                "Settled sessions"
+                            } else {
+                                "Workspace"
+                            })
+                            .weight(FontWeight::MEDIUM),
+                        ),
+                    )
+                    .child(
+                        PopoverMenu::new(
+                            "new-session-menu",
+                            IconButton::new("new-session", IconName::Plus)
+                                .debug_selector(|| "new-session".into())
+                                .selected(new_menu)
+                                .tooltip(Tooltip::text("New session")),
+                        )
+                        .anchor(Corner::TopRight)
+                        .open(new_menu)
+                        .on_open_change(set_menu)
+                        .child(
+                            MenuItem::new("new-claude", "New Claude session")
+                                .icon(IconName::Chat)
+                                .kbd("Ctrl+N")
+                                .debug_selector(|| "new-claude".into())
+                                .on_click(listener(|this, window, cx| {
+                                    this.start(Provider::Claude, window, cx)
+                                })),
+                        )
+                        .child(
+                            MenuItem::new("new-codex", "New Codex session")
+                                .icon(IconName::Chat)
+                                .kbd("Ctrl+Shift+N")
+                                .debug_selector(|| "new-codex".into())
+                                .on_click(listener(|this, window, cx| {
+                                    this.start(Provider::Codex, window, cx)
+                                })),
+                        ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .h(px(36.))
+                    .pl_3()
+                    .pr_1p5()
+                    .gap_2()
+                    .child(Icon::new(IconName::Search).size(px(14.)))
+                    .child(div().flex_1().min_w_0().child(search))
+                    .child(
+                        IconButton::new("filter", IconName::Filter)
+                            .debug_selector(|| "filter".into())
+                            .size(ButtonSize::Compact)
+                            .selected(settled_only)
+                            .tooltip(Tooltip::text("Show settled only"))
+                            .on_click(listener(|this, _, cx| {
+                                this.settled_only = !this.settled_only;
+                                this.refresh(cx);
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("session-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_1p5()
+                    .pt_1()
+                    .gap(px(2.))
+                    .when_some(empty, |d, message| {
+                        d.child(
+                            div()
+                                .px_2()
+                                .py_2()
+                                .child(Label::new(message).size(TextSize::Ui).color(Color::Muted)),
+                        )
+                    })
+                    .children(sessions),
+            )
     }
 }
 
@@ -709,7 +756,7 @@ impl Render for Keystone {
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.sidebar = true;
                 this.search.focus_handle(cx).focus(window);
-                cx.notify();
+                this.refresh(cx);
             }))
             .child(self.titlebar(title, cx))
             .child(
@@ -718,7 +765,16 @@ impl Render for Keystone {
                     .flex_1()
                     .min_h_0()
                     .child(self.rail(cx))
-                    .when(self.sidebar, |d| d.child(self.sidebar(cx)))
+                    .when(self.sidebar, |d| {
+                        d.child(
+                            AnyView::from(self.session_sidebar.clone()).cached(
+                                StyleRefinement::default()
+                                    .w(px(256.))
+                                    .flex_shrink_0()
+                                    .h_full(),
+                            ),
+                        )
+                    })
                     .child(main),
             )
             .child(
@@ -798,20 +854,102 @@ mod tests {
         }
         cx.update(keystone_ui::init);
         let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
-        let mut total = std::time::Duration::ZERO;
-        let frames = 30;
-        for _ in 0..frames {
-            view.update(cx, |_, cx| cx.notify());
-            cx.update(|window, cx| {
-                let start = std::time::Instant::now();
-                window.draw(cx).clear();
-                total += start.elapsed();
-            });
+        // A composer keystroke notifies only the root view. A session change also
+        // invalidates the cached sidebar, so it rebuilds every row.
+        for (metric, sidebar_changed) in [("sidebar_draw_ms", false), ("sidebar_refresh_ms", true)]
+        {
+            let mut total = std::time::Duration::ZERO;
+            let frames = 30;
+            for _ in 0..frames {
+                view.update(cx, |this, cx| {
+                    if sidebar_changed {
+                        this.refresh(cx);
+                    } else {
+                        cx.notify();
+                    }
+                });
+                cx.update(|window, cx| {
+                    let start = std::time::Instant::now();
+                    window.draw(cx).clear();
+                    total += start.elapsed();
+                });
+            }
+            eprintln!(
+                "PERF {metric}={:.2}",
+                total.as_secs_f64() * 1000. / frames as f64
+            );
         }
-        eprintln!(
-            "PERF sidebar_draw_ms={:.2}",
-            total.as_secs_f64() * 1000. / frames as f64
-        );
+    }
+
+    #[gpui::test]
+    fn cached_sidebar_follows_search_settlement_and_filters(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Claude).unwrap();
+        store.create(Provider::Codex).unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        // GPUI 0.2.2 keeps debug bounds for elements that are no longer drawn, so check
+        // which row sits at the top of the list instead of which rows exist.
+        let top = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("session-1").unwrap().origin;
+        let second =
+            |cx: &mut gpui::VisualTestContext| cx.debug_bounds("session-2").unwrap().origin;
+        let (first_row, second_row) = (top(cx), second(cx));
+        assert!(second_row.y > first_row.y);
+
+        // Typing in the composer reuses the cached sidebar.
+        view.update_in(cx, |this, window, cx| {
+            this.composer.focus_handle(cx).focus(window)
+        });
+        cx.simulate_input("Draft text");
+        cx.run_until_parked();
+        assert_eq!(second(cx), second_row);
+
+        view.update_in(cx, |this, window, cx| {
+            this.search.focus_handle(cx).focus(window)
+        });
+        cx.simulate_input("codex");
+        cx.run_until_parked();
+        assert_eq!(second(cx), first_row);
+
+        view.update_in(cx, |this, _, cx| {
+            this.search
+                .update(cx, |input, cx| input.set_value(String::new(), cx))
+        });
+        cx.run_until_parked();
+        assert_eq!(second(cx), second_row);
+
+        for selector in ["settle", "filter"] {
+            let bounds = cx.debug_bounds(selector).expect("control rendered");
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+        }
+        assert_eq!(second(cx), first_row);
+    }
+
+    #[gpui::test]
+    fn shortcut_settlement_invalidates_cached_sidebar(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        for provider in [Provider::Claude, Provider::Codex] {
+            let id = store.create(provider).unwrap().value;
+            store.set_settled(id, true).unwrap();
+        }
+        store.select(1).unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
+        view.update_in(cx, |this, window, cx| {
+            this.focus.focus(window);
+            this.settled_only = true;
+            this.refresh(cx);
+        });
+        cx.run_until_parked();
+        let first_row = cx.debug_bounds("session-1").unwrap().origin;
+
+        // No focus change or pointer event re-renders the sidebar here, only the refresh.
+        cx.dispatch_action(ToggleSettle);
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("session-2").unwrap().origin, first_row);
     }
 
     #[gpui::test]

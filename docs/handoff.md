@@ -42,7 +42,7 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 
 ## Open work, in priority order
 
-1. **Sidebar render cost.** Every composer keystroke redraws the whole window, including every session row. Make the sidebar a cached view or a virtualized list. Measure with `scripts/perf.py` before and after. This may also help KS-005, the rapid-typing stall, but that link is unproven.
+1. **KS-005 confirmation.** The sidebar is now a cached view (see `docs/performance.md`). The 10 ms native typing check passed on 2026-10-15 both before and after that change, so the dependency optimization is the more likely fix. Repeat it several times before closing KS-005.
 2. **Pending tokens.** A light theme, density, and font choice are in scope but not built. Token names are semantic, so each is additive.
 3. **Small polish.**
    - Escape does not close the popover yet.

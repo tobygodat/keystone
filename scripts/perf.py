@@ -16,7 +16,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOG = ROOT / 'docs/perf-log.tsv'
 COLUMNS = ['date', 'commit', 'touch_desktop_s', 'touch_ui_s', 'desktop_debug_mb',
-           'sidebar_draw_ms', 'note']
+           'sidebar_draw_ms', 'sidebar_refresh_ms', 'note']
 BUILD = ['cargo', 'build', '-p', 'keystone-desktop', '--locked', '-q']
 
 
@@ -34,18 +34,20 @@ def timed_rebuild(path, runs):
     return statistics.median(samples)
 
 
-def sidebar_draw_ms(runs):
-    samples = []
+def render_ms(runs):
+    """Return the median of each PERF metric printed by the ignored render benchmarks."""
+    samples = {}
     for _ in range(runs):
         out = subprocess.run(
             ['cargo', 'test', '-p', 'keystone-desktop', '--features', 'ui-tests', '--locked',
              '-q', 'perf_', '--', '--ignored', '--nocapture'],
             cwd=ROOT, check=True, capture_output=True, text=True)
-        match = re.search(r'PERF sidebar_draw_ms=([0-9.]+)', out.stdout + out.stderr)
-        if not match:
-            raise SystemExit('render benchmark printed no PERF line')
-        samples.append(float(match.group(1)))
-    return statistics.median(samples)
+        for name, value in re.findall(r'PERF (\w+)=([0-9.]+)', out.stdout + out.stderr):
+            samples.setdefault(name, []).append(float(value))
+    for name in ('sidebar_draw_ms', 'sidebar_refresh_ms'):
+        if name not in samples:
+            raise SystemExit(f'render benchmark printed no {name} line')
+    return {name: f'{statistics.median(values):.2f}' for name, values in samples.items()}
 
 
 def target_dir():
@@ -70,13 +72,15 @@ def main():
     args = parser.parse_args()
 
     run(BUILD)
+    render = render_ms(args.runs)
     row = {
         'date': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'commit': commit(),
         'touch_desktop_s': f"{timed_rebuild('crates/keystone-desktop/src/main.rs', args.runs):.2f}",
         'touch_ui_s': f"{timed_rebuild('crates/keystone-ui/src/button.rs', args.runs):.2f}",
         'desktop_debug_mb': f"{os.path.getsize(target_dir() / 'debug/keystone-desktop') / 1e6:.0f}",
-        'sidebar_draw_ms': f'{sidebar_draw_ms(args.runs):.2f}',
+        'sidebar_draw_ms': render['sidebar_draw_ms'],
+        'sidebar_refresh_ms': render['sidebar_refresh_ms'],
         'note': args.note,
     }
     print('\t'.join(f'{k}={row[k]}' for k in COLUMNS))
