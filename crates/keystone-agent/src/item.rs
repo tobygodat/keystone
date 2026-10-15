@@ -92,6 +92,10 @@ pub enum Event {
     Failed {
         message: String,
     },
+    /// Something went wrong that does not end the turn, such as a rejected steer.
+    Warning {
+        message: String,
+    },
 }
 
 /// Bytes kept from each end of long tool output.

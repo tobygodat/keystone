@@ -149,3 +149,24 @@ fn two_sessions_share_one_process() {
     done.sort();
     assert_eq!(done, vec![1, 2]);
 }
+
+#[test]
+fn dropping_the_connection_stops_codex() {
+    let (conn, wake) = connect();
+    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    until(&conn, &wake, |e| matches!(e, Event::ThreadReady { .. }));
+    let pid = conn.pid().expect("app-server running");
+    drop(conn);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        if state
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "app-server {pid} still running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

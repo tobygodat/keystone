@@ -103,6 +103,9 @@ fn recorded_thread_produces_turns_items_and_an_approval() {
         events.iter().any(|e| matches!(e,
         Event::ItemCompleted(item) if item.kind == ItemKind::AgentMessage && item.text == "ALPHA"))
     );
+    // Agent messages carry no status on the wire; a started one is in progress.
+    assert!(events.iter().any(|e| matches!(e,
+        Event::ItemStarted(item) if item.kind == ItemKind::AgentMessage && item.status == ItemStatus::InProgress)));
     assert!(events.contains(&Event::TurnCompleted {
         status: TurnStatus::Completed,
         error: None
@@ -188,8 +191,32 @@ fn denying_uses_cancel_when_codex_offers_no_decline() {
     assert!(out.writes.is_empty());
 }
 
+fn started(turn: &str) -> String {
+    format!(
+        r#"{{"method":"turn/started","params":{{"threadId":"{THREAD}","turn":{{"id":"{turn}"}}}}}}"#
+    )
+}
+
+fn completed(turn: &str) -> String {
+    format!(
+        r#"{{"method":"turn/completed","params":{{"threadId":"{THREAD}","turn":{{"id":"{turn}","status":"completed"}}}}}}"#
+    )
+}
+
+fn methods(out: &Outputs) -> Vec<String> {
+    out.writes
+        .iter()
+        .map(|w| {
+            serde_json::from_str::<Value>(w).unwrap()["method"]
+                .as_str()
+                .unwrap_or("response")
+                .to_owned()
+        })
+        .collect()
+}
+
 #[test]
-fn a_message_during_a_turn_steers_and_falls_back_to_a_new_turn() {
+fn a_message_during_a_turn_steers_and_starts_a_new_turn_if_that_turn_ended() {
     let mut driver = opened();
     let mut out = Outputs::default();
     driver.command(
@@ -199,14 +226,10 @@ fn a_message_during_a_turn_steers_and_falls_back_to_a_new_turn() {
         },
         &mut out,
     );
-    let start: Value = serde_json::from_str(&out.writes[0]).unwrap();
-    assert_eq!(start["method"], "turn/start");
+    assert_eq!(methods(&out), ["turn/start"]);
 
     let mut out = Outputs::default();
-    let started = format!(
-        r#"{{"method":"turn/started","params":{{"threadId":"{THREAD}","turn":{{"id":"T1"}}}}}}"#
-    );
-    driver.on_line(started.as_bytes(), &mut out);
+    driver.on_line(started("T1").as_bytes(), &mut out);
     driver.command(
         Command::Send {
             session: SESSION,
@@ -218,8 +241,9 @@ fn a_message_during_a_turn_steers_and_falls_back_to_a_new_turn() {
     assert_eq!(steer["method"], "turn/steer");
     assert_eq!(steer["params"]["expectedTurnId"], "T1");
 
-    // The turn ended before the steer arrived, so the message starts the next turn.
+    // Codex reports the turn's end before rejecting a steer for it.
     let mut out = Outputs::default();
+    driver.on_line(completed("T1").as_bytes(), &mut out);
     let rejected = format!(
         r#"{{"id":{},"error":{{"code":-32600,"message":"no active turn"}}}}"#,
         steer["id"]
@@ -228,6 +252,136 @@ fn a_message_during_a_turn_steers_and_falls_back_to_a_new_turn() {
     let next: Value = serde_json::from_str(&out.writes[0]).unwrap();
     assert_eq!(next["method"], "turn/start");
     assert_eq!(next["params"]["input"][0]["text"], "second");
+}
+
+#[test]
+fn a_steer_rejected_while_the_turn_runs_is_a_warning_and_the_turn_continues() {
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "first".into(),
+        },
+        &mut out,
+    );
+    driver.on_line(started("T1").as_bytes(), &mut out);
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "second".into(),
+        },
+        &mut out,
+    );
+    let steer: Value = serde_json::from_str(&out.writes[0]).unwrap();
+    let mut out = Outputs::default();
+    let rejected = format!(
+        r#"{{"id":{},"error":{{"code":-32000,"message":"busy"}}}}"#,
+        steer["id"]
+    );
+    driver.on_line(rejected.as_bytes(), &mut out);
+    assert!(out.writes.is_empty());
+    assert!(
+        matches!(&out.events[..], [(_, Event::Warning { message })] if message.contains("busy"))
+    );
+    assert!(driver.is_running(SESSION));
+}
+
+#[test]
+fn messages_and_a_stop_sent_during_startup_are_kept_in_order() {
+    // Two messages before the thread exists: the first starts the turn, the second
+    // waits for the turn's ID and then steers.
+    let mut out = Outputs::default();
+    let mut driver = CodexDriver::new("0.0.0-test", &mut out);
+    driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Open {
+            session: SESSION,
+            cwd: "/tmp/repo".into(),
+            resume: None,
+        },
+        &mut out,
+    );
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "one".into(),
+        },
+        &mut out,
+    );
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "two".into(),
+        },
+        &mut out,
+    );
+    assert_eq!(methods(&out), ["thread/start"]);
+    let mut out = Outputs::default();
+    driver.on_line(
+        format!(r#"{{"id":2,"result":{{"thread":{{"id":"{THREAD}"}}}}}}"#).as_bytes(),
+        &mut out,
+    );
+    assert_eq!(methods(&out), ["turn/start"]);
+    // A stop before the turn has an ID is remembered, and a third message is dropped.
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "three".into(),
+        },
+        &mut out,
+    );
+    assert_eq!(methods(&out), ["turn/start"]);
+    let mut out = Outputs::default();
+    driver.on_line(started("T1").as_bytes(), &mut out);
+    assert_eq!(
+        methods(&out),
+        ["turn/interrupt"],
+        "the stop goes out once the turn has an ID"
+    );
+}
+
+#[test]
+fn a_stop_while_opening_ends_the_turn_and_drops_the_message() {
+    let mut out = Outputs::default();
+    let mut driver = CodexDriver::new("0.0.0-test", &mut out);
+    driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Open {
+            session: SESSION,
+            cwd: "/tmp/repo".into(),
+            resume: None,
+        },
+        &mut out,
+    );
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "one".into(),
+        },
+        &mut out,
+    );
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert_eq!(
+        out.events,
+        vec![(
+            SESSION,
+            Event::TurnCompleted {
+                status: TurnStatus::Interrupted,
+                error: None
+            }
+        )]
+    );
+    let mut out = Outputs::default();
+    driver.on_line(
+        format!(r#"{{"id":2,"result":{{"thread":{{"id":"{THREAD}"}}}}}}"#).as_bytes(),
+        &mut out,
+    );
+    assert!(methods(&out).is_empty(), "nothing starts after the stop");
 }
 
 #[test]
@@ -268,7 +422,7 @@ fn unknown_server_requests_get_an_error_and_exit_fails_the_running_turn() {
 }
 
 #[test]
-fn a_thread_that_cannot_resume_starts_fresh() {
+fn a_thread_that_cannot_resume_reports_it_instead_of_starting_fresh() {
     let mut out = Outputs::default();
     let mut driver = CodexDriver::new("0.0.0-test", &mut out);
     driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
@@ -281,13 +435,20 @@ fn a_thread_that_cannot_resume_starts_fresh() {
         },
         &mut out,
     );
-    let resume: Value = serde_json::from_str(&out.writes[0]).unwrap();
-    assert_eq!(resume["method"], "thread/resume");
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "hi".into(),
+        },
+        &mut out,
+    );
+    assert_eq!(methods(&out), ["thread/resume"]);
     let mut out = Outputs::default();
     driver.on_line(
         br#"{"id":2,"error":{"code":-32600,"message":"thread not found"}}"#,
         &mut out,
     );
-    let start: Value = serde_json::from_str(&out.writes[0]).unwrap();
-    assert_eq!(start["method"], "thread/start");
+    assert!(out.writes.is_empty(), "no fresh thread and no turn");
+    assert!(matches!(&out.events[..], [(_, Event::Failed { message })]
+        if message.contains("Could not resume") && message.contains("thread not found")));
 }

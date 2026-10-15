@@ -62,7 +62,6 @@ enum Pending {
     Initialize,
     Thread {
         session: u64,
-        cwd: String,
         resume: bool,
     },
     TurnStart {
@@ -71,17 +70,30 @@ enum Pending {
     Steer {
         session: u64,
         text: String,
+        turn: String,
     },
     Ignore,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Turn {
+    #[default]
+    Idle,
+    /// `turn/start` was sent; the turn has no ID to steer or stop yet.
+    Starting,
+    Running(String),
 }
 
 #[derive(Default)]
 struct Session {
     thread: Option<String>,
     opening: bool,
-    turn: Option<String>,
-    /// A message sent before the thread existed.
-    queued: Option<String>,
+    turn: Turn,
+    /// Messages accepted but not yet delivered, in order: sent before the thread
+    /// existed, or while a turn was starting and had no ID to steer.
+    waiting: Vec<String>,
+    /// Stop was asked while the turn was starting. It is sent once the turn has an ID.
+    stop_requested: bool,
     /// Open approval requests and the decision that denies each one.
     approvals: HashMap<RequestId, &'static str>,
 }
@@ -131,7 +143,7 @@ impl CodexDriver {
     pub fn is_running(&self, session: u64) -> bool {
         self.sessions
             .get(&session)
-            .is_some_and(|s| s.turn.is_some())
+            .is_some_and(|s| s.turn != Turn::Idle)
     }
 
     pub fn command(&mut self, command: Command, out: &mut Outputs) {
@@ -145,22 +157,7 @@ impl CodexDriver {
                 self.open_thread(session, cwd, resume, out);
             }
             Command::Send { session, text } => self.send(session, text, out),
-            Command::Interrupt { session } => {
-                let Some(state) = self.sessions.get(&session) else {
-                    return;
-                };
-                // Before `turn/started` the turn has no ID yet, and there is nothing to stop.
-                if let (Some(thread), Some(turn)) = (state.thread.clone(), state.turn.clone())
-                    && !turn.is_empty()
-                {
-                    let line = self.request(
-                        "turn/interrupt",
-                        json!({"threadId": thread, "turnId": turn}),
-                        Pending::Ignore,
-                    );
-                    self.write(line, out);
-                }
-            }
+            Command::Interrupt { session } => self.interrupt(session, out),
             Command::Answer {
                 session,
                 request,
@@ -200,7 +197,7 @@ impl CodexDriver {
     /// opened again in a new process.
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
         for (&session, state) in &mut self.sessions {
-            if state.turn.take().is_some() {
+            if std::mem::take(&mut state.turn) != Turn::Idle {
                 out.event(
                     session,
                     Event::TurnCompleted {
@@ -208,7 +205,7 @@ impl CodexDriver {
                         error: Some(reason.to_owned()),
                     },
                 );
-            } else if state.opening || state.queued.is_some() {
+            } else if state.opening || !state.waiting.is_empty() {
                 out.event(
                     session,
                     Event::Failed {
@@ -256,40 +253,99 @@ impl CodexDriver {
             params,
             Pending::Thread {
                 session,
-                cwd,
                 resume: resume.is_some(),
             },
         );
         self.write(line, out);
     }
 
+    /// Delivers a message: a new turn when idle, a steer while a turn runs, or a
+    /// place in line while the thread opens or the turn starts.
     fn send(&mut self, session: u64, text: String, out: &mut Outputs) {
         let state = self.sessions.entry(session).or_default();
-        let input = json!([{"type": "text", "text": text}]);
         match (state.thread.clone(), state.turn.clone()) {
-            (None, _) => state.queued = Some(text),
-            (Some(thread), Some(turn)) => {
+            (None, _) if !state.opening => out.event(
+                session,
+                Event::Failed {
+                    message: "This conversation is not open in Codex".into(),
+                },
+            ),
+            (None, _) | (Some(_), Turn::Starting) => state.waiting.push(text),
+            (Some(thread), Turn::Running(turn)) => {
                 let line = self.request(
                     "turn/steer",
-                    json!({"threadId": thread, "expectedTurnId": turn, "input": input}),
-                    Pending::Steer { session, text },
+                    json!({"threadId": thread, "expectedTurnId": turn, "input": text_input(&text)}),
+                    Pending::Steer {
+                        session,
+                        text,
+                        turn,
+                    },
                 );
                 self.write(line, out);
             }
-            (Some(thread), None) => self.start_turn(session, thread, input, out),
+            (Some(thread), Turn::Idle) => {
+                // Starting, so further messages wait for the ID instead of starting a
+                // parallel turn.
+                state.turn = Turn::Starting;
+                let line = self.request(
+                    "turn/start",
+                    json!({"threadId": thread, "input": text_input(&text)}),
+                    Pending::TurnStart { session },
+                );
+                self.write(line, out);
+            }
         }
     }
 
-    fn start_turn(&mut self, session: u64, thread: String, input: Value, out: &mut Outputs) {
-        // Mark the turn as running now, so a second message steers instead of
-        // starting a parallel turn. `turn/started` fills in the real ID.
-        self.sessions.entry(session).or_default().turn = Some(String::new());
-        let line = self.request(
-            "turn/start",
-            json!({"threadId": thread, "input": input}),
-            Pending::TurnStart { session },
-        );
-        self.write(line, out);
+    fn interrupt(&mut self, session: u64, out: &mut Outputs) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        state.waiting.clear();
+        match (state.thread.clone(), state.turn.clone()) {
+            (Some(thread), Turn::Running(turn)) => {
+                let line = self.request(
+                    "turn/interrupt",
+                    json!({"threadId": thread, "turnId": turn}),
+                    Pending::Ignore,
+                );
+                self.write(line, out);
+            }
+            // A running turn always has a thread.
+            (None, Turn::Running(_)) => {}
+            // Remembered, and sent once `turn/started` gives the turn an ID.
+            (_, Turn::Starting) => state.stop_requested = true,
+            // Nothing reached Codex yet; the dropped messages end the turn here.
+            (_, Turn::Idle) => out.event(
+                session,
+                Event::TurnCompleted {
+                    status: TurnStatus::Interrupted,
+                    error: None,
+                },
+            ),
+        }
+    }
+
+    /// Delivers what was waiting for the thread or the turn ID, and a pending stop.
+    fn flush(&mut self, session: u64, out: &mut Outputs) {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        if state.thread.is_none() {
+            return;
+        }
+        if let Turn::Running(_) = state.turn
+            && std::mem::take(&mut state.stop_requested)
+        {
+            return self.interrupt(session, out);
+        }
+        if state.turn == Turn::Starting {
+            return;
+        }
+        let waiting = std::mem::take(&mut state.waiting);
+        for text in waiting {
+            self.send(session, text, out);
+        }
     }
 
     fn on_response(&mut self, id: Value, error: Option<RpcError>, line: &[u8], out: &mut Outputs) {
@@ -303,37 +359,37 @@ impl CodexDriver {
                 out.writes.push(r#"{"method":"initialized"}"#.to_owned());
                 out.writes.append(&mut self.before_ready);
             }
-            Pending::Thread {
-                session,
-                cwd,
-                resume,
-            } => {
+            Pending::Thread { session, resume } => {
                 let thread = serde_json::from_slice::<Response<ThreadResult>>(line)
                     .ok()
                     .and_then(|r| r.result)
                     .map(|r| r.thread.id);
-                match (thread, error) {
-                    (Some(thread), _) => self.thread_ready(session, thread, out),
-                    // A thread that can no longer be resumed starts fresh.
-                    (None, _) if resume => self.open_thread(session, cwd, None, out),
-                    (None, error) => {
+                match thread {
+                    Some(thread) => self.thread_ready(session, thread, out),
+                    // Never fall back to a fresh thread on its own: the user would see the
+                    // old conversation while Codex had none of it.
+                    None => {
                         let state = self.sessions.entry(session).or_default();
                         state.opening = false;
-                        state.queued = None;
-                        out.event(
-                            session,
-                            Event::Failed {
-                                message: error
-                                    .map_or("Codex did not start a thread".into(), |e| e.message),
-                            },
-                        );
+                        state.waiting.clear();
+                        let reason = error.map_or("no thread in the reply".into(), |e| e.message);
+                        let message = if resume {
+                            format!(
+                                "Could not resume this Codex conversation: {reason}. Start a new Codex session to continue."
+                            )
+                        } else {
+                            format!("Codex did not start a conversation: {reason}")
+                        };
+                        out.event(session, Event::Failed { message });
                     }
                 }
             }
             Pending::TurnStart { session } => {
                 if let Some(error) = error {
                     if let Some(state) = self.sessions.get_mut(&session) {
-                        state.turn = None;
+                        state.turn = Turn::Idle;
+                        state.waiting.clear();
+                        state.stop_requested = false;
                     }
                     out.event(
                         session,
@@ -344,12 +400,27 @@ impl CodexDriver {
                     );
                 }
             }
-            // The turn ended before the steer arrived, so the message starts the next turn.
-            Pending::Steer { session, text } => {
-                if error.is_some() {
-                    if let Some(state) = self.sessions.get_mut(&session) {
-                        state.turn = None;
-                    }
+            Pending::Steer {
+                session,
+                text,
+                turn,
+            } => {
+                let Some(error) = error else { return };
+                let still_running = self
+                    .sessions
+                    .get(&session)
+                    .is_some_and(|s| s.turn == Turn::Running(turn.clone()));
+                if still_running {
+                    // A real failure while the turn goes on. Report it; the turn continues.
+                    out.event(
+                        session,
+                        Event::Warning {
+                            message: format!("Could not steer the running turn: {}", error.message),
+                        },
+                    );
+                } else {
+                    // Codex reports `turn/completed` before rejecting a steer for that
+                    // turn, so the turn has ended: the message starts the next one.
                     self.send(session, text, out);
                 }
             }
@@ -362,11 +433,11 @@ impl CodexDriver {
         let state = self.sessions.entry(session).or_default();
         state.opening = false;
         state.thread = Some(thread.clone());
-        let queued = state.queued.take();
         out.event(session, Event::ThreadReady { thread_id: thread });
-        if let Some(text) = queued {
-            self.send(session, text, out);
+        if std::mem::take(&mut state.stop_requested) {
+            state.waiting.clear();
         }
+        self.flush(session, out);
     }
 
     fn session_for(&self, thread: &str) -> Option<u64> {
@@ -381,9 +452,10 @@ impl CodexDriver {
                 };
                 if let Some(session) = self.session_for(&note.thread_id) {
                     if let Some(state) = self.sessions.get_mut(&session) {
-                        state.turn = Some(note.turn.id);
+                        state.turn = Turn::Running(note.turn.id);
                     }
                     out.event(session, Event::TurnStarted);
+                    self.flush(session, out);
                 }
             }
             "turn/completed" => {
@@ -392,7 +464,8 @@ impl CodexDriver {
                 };
                 if let Some(session) = self.session_for(&note.thread_id) {
                     if let Some(state) = self.sessions.get_mut(&session) {
-                        state.turn = None;
+                        state.turn = Turn::Idle;
+                        state.stop_requested = false;
                         // Requests from this turn can no longer be answered.
                         for request in state.approvals.drain().map(|(r, _)| r) {
                             out.event(session, Event::ApprovalResolved { request });
@@ -405,6 +478,8 @@ impl CodexDriver {
                     };
                     let error = note.turn.error.map(|e| e.message);
                     out.event(session, Event::TurnCompleted { status, error });
+                    // Messages that waited for this turn's ID start the next turn.
+                    self.flush(session, out);
                 }
             }
             "item/started" | "item/completed" => {
@@ -412,7 +487,7 @@ impl CodexDriver {
                     return self.unknown += 1;
                 };
                 if let Some(session) = self.session_for(&note.thread_id) {
-                    let item = note.item.into_item();
+                    let item = note.item.into_item(method == "item/started");
                     out.event(
                         session,
                         if method == "item/started" {
@@ -524,6 +599,10 @@ impl CodexDriver {
             }),
         );
     }
+}
+
+fn text_input(text: &str) -> Value {
+    json!([{"type": "text", "text": text}])
 }
 
 fn params<'a, T: Deserialize<'a>>(line: &'a [u8]) -> Option<T> {
@@ -655,11 +734,14 @@ struct Change {
 }
 
 impl WireItem {
-    fn into_item(self) -> Item {
+    /// `started` items are in progress even when, like agent messages, they carry no
+    /// status of their own.
+    fn into_item(self, started: bool) -> Item {
         let status = match self.status.as_deref() {
             Some("inProgress") => ItemStatus::InProgress,
             Some("failed") => ItemStatus::Failed,
             Some("declined") => ItemStatus::Declined,
+            _ if started => ItemStatus::InProgress,
             _ => ItemStatus::Completed,
         };
         let (kind, text) = match self.kind.as_str() {

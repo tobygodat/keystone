@@ -534,7 +534,7 @@ impl Keystone {
             .selected()
             .and_then(|id| self.conversations.get(&id));
         let running = conversation.is_some_and(|c| c.running);
-        let waiting = conversation.is_some_and(|c| c.approval.is_some());
+        let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
         let codex = matches!(current, Some((Provider::Codex, _)));
         let status = match current {
             None => "Choose a provider to start",
@@ -748,23 +748,14 @@ impl Keystone {
             return;
         }
         let id = session.id();
+        // Apply anything that already arrived, such as the end of the last turn, so
+        // the message is shown in the right turn.
+        self.pump(cx);
         let cwd = self.project_dir.to_string_lossy().into_owned();
         let resume = session.provider_thread().map(str::to_owned);
         let result = self.codex().and_then(|codex| {
-            if !codex.is_open(id) {
-                codex
-                    .command(Command::Open {
-                        session: id,
-                        cwd,
-                        resume,
-                    })
-                    .map_err(|e| e.to_string())?;
-            }
             codex
-                .command(Command::Send {
-                    session: id,
-                    text: text.clone(),
-                })
+                .send(id, &cwd, resume.as_deref(), text.clone())
                 .map_err(|e| {
                     format!(
                         "Could not start Codex at {}. {e}",
@@ -919,7 +910,7 @@ impl Keystone {
                 ),
             });
         }
-        if let Some(approval) = &conversation.approval {
+        if let Some(approval) = conversation.approvals.first() {
             view = view.child(
                 v_flex()
                     .id("approval")
@@ -929,9 +920,12 @@ impl Keystone {
                     .p_3()
                     .gap_2()
                     .child(
-                        Label::new("Codex wants to run")
-                            .size(TextSize::Ui)
-                            .color(Color::Muted),
+                        Label::new(match conversation.approvals.len() {
+                            1 => "Codex wants to run".to_owned(),
+                            n => format!("Codex wants to run · {} more waiting", n - 1),
+                        })
+                        .size(TextSize::Ui)
+                        .color(Color::Muted),
                     )
                     .child(
                         div()
@@ -974,7 +968,7 @@ impl Keystone {
                 ),
             );
         }
-        if let Some(error) = &conversation.error {
+        for error in conversation.error.iter().chain(&conversation.save_error) {
             view = view.child(
                 Label::new(error.clone())
                     .size(TextSize::Ui)
@@ -1569,7 +1563,7 @@ mod tests {
                                 c.running,
                                 c.rows.clone(),
                                 c.error.clone(),
-                                c.approval.clone(),
+                                c.approvals.clone(),
                             )
                         })
                         .collect();
@@ -1647,7 +1641,9 @@ mod tests {
         // The shortcut sends too. A command waits for approval.
         cx.simulate_input("please run it");
         cx.simulate_keystrokes("ctrl-enter");
-        wait_until(cx, &view, |view| view.conversations[&1].approval.is_some());
+        wait_until(cx, &view, |view| {
+            !view.conversations[&1].approvals.is_empty()
+        });
         let bounds = cx.debug_bounds("approve").expect("approval card rendered");
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         // Answering hands focus back to the composer.

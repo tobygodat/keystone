@@ -212,9 +212,8 @@ fn run_turn(
     let mut steer = None;
     let message_id = format!("msg-{turn_id}");
     let streamed = stream(out, &with, &message_id, &words, turn, delay, &mut steer);
+    // Like real Codex, an interrupted message gets no completion, only the turn's end.
     if turn.interrupt.load(Ordering::Relaxed) {
-        let item = json!({"type": "agentMessage", "id": message_id, "text": streamed});
-        notify(out, "item/completed", with(json!({"item": item})));
         return finish(out, thread, turn_id, "interrupted");
     }
     let item = json!({"type": "agentMessage", "id": message_id, "text": streamed});

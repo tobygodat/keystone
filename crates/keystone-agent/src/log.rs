@@ -6,7 +6,7 @@
 use crate::item::{Item, TurnStatus};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -37,10 +37,22 @@ pub fn path(dir: &Path, session: u64) -> PathBuf {
 impl SessionLog {
     pub fn open(dir: &Path, session: u64) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(path(dir, session))?;
+        // A crash can leave a torn last line. End it, so the next entry starts on a
+        // line of its own instead of being swallowed by the torn one.
+        let len = file.metadata()?.len();
+        if len > 0 {
+            let mut last = [0];
+            file.seek(SeekFrom::Start(len - 1))?;
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                file.write_all(b"\n")?;
+            }
+        }
         Ok(Self { file })
     }
 
@@ -99,8 +111,16 @@ mod tests {
 
         assert_eq!(
             read(dir.path(), 7).unwrap(),
-            vec![Entry::TurnStarted, Entry::Item { item }]
+            vec![Entry::TurnStarted, Entry::Item { item: item.clone() }]
         );
         assert!(read(dir.path(), 8).unwrap().is_empty());
+
+        // Reopening after the tear keeps the next entry.
+        let mut log = SessionLog::open(dir.path(), 7).unwrap();
+        log.append(&Entry::TurnStarted).unwrap();
+        assert_eq!(
+            read(dir.path(), 7).unwrap(),
+            vec![Entry::TurnStarted, Entry::Item { item }, Entry::TurnStarted]
+        );
     }
 }

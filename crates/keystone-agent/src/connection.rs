@@ -44,6 +44,16 @@ impl CodexConnection {
         &self.program
     }
 
+    /// The app-server's process ID while it runs.
+    pub fn pid(&self) -> Option<u32> {
+        self.shared
+            .lock()
+            .unwrap()
+            .process
+            .as_ref()
+            .map(Process::pid)
+    }
+
     /// Whether the session's conversation is open in the current process.
     pub fn is_open(&self, session: u64) -> bool {
         let shared = self.shared.lock().unwrap();
@@ -58,18 +68,48 @@ impl CodexConnection {
             .is_some_and(|d| d.is_running(session))
     }
 
+    /// Opens the session's conversation if this process has not, then sends `text`,
+    /// all under one lock so a process restart cannot fall between the two.
+    pub fn send(
+        &self,
+        session: u64,
+        cwd: &str,
+        resume: Option<&str>,
+        text: String,
+    ) -> io::Result<()> {
+        self.with_driver(|driver, out| {
+            if !driver.is_open(session) {
+                driver.command(
+                    Command::Open {
+                        session,
+                        cwd: cwd.to_owned(),
+                        resume: resume.map(str::to_owned),
+                    },
+                    out,
+                );
+            }
+            driver.command(Command::Send { session, text }, out);
+        })
+    }
+
     /// Sends a command, starting the app-server first if it is not running.
     pub fn command(&self, command: Command) -> io::Result<()> {
+        self.with_driver(|driver, out| driver.command(command, out))
+    }
+
+    fn with_driver(&self, act: impl FnOnce(&mut CodexDriver, &mut Outputs)) -> io::Result<()> {
         let mut shared = self.shared.lock().unwrap();
         if shared.process.is_none() {
             self.start(&mut shared)?;
         }
         let mut out = Outputs::default();
-        shared
-            .driver
-            .as_mut()
-            .expect("driver exists while the process runs")
-            .command(command, &mut out);
+        act(
+            shared
+                .driver
+                .as_mut()
+                .expect("driver exists while the process runs"),
+            &mut out,
+        );
         deliver(&mut shared, out);
         let wake = !shared.inbox.is_empty();
         drop(shared);
@@ -94,6 +134,11 @@ impl CodexConnection {
             let wake = self.wake.clone();
             move |line: &[u8]| {
                 let mut guard = shared.lock().unwrap();
+                // Output that arrives after this process was replaced is not for the
+                // new driver.
+                if guard.generation != generation {
+                    return;
+                }
                 let was_empty = guard.inbox.is_empty();
                 let mut out = Outputs::default();
                 if let Some(driver) = guard.driver.as_mut() {
@@ -136,6 +181,20 @@ impl CodexConnection {
         shared.process = Some(process);
         deliver(shared, out);
         Ok(())
+    }
+}
+
+impl Drop for CodexConnection {
+    /// The reader threads keep the shared state alive, so the process must be ended
+    /// here rather than when the last reference goes.
+    fn drop(&mut self) {
+        let process = {
+            let mut shared = self.shared.lock().unwrap();
+            shared.generation += 1;
+            shared.driver = None;
+            shared.process.take()
+        };
+        drop(process);
     }
 }
 
