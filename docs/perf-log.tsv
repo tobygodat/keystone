@@ -1,3 +1,3 @@
 date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	note
-2026-10-15T19:40:33Z	98ecc83	1.56	1.47	334	101.46	baseline: debug=1, deps unoptimized
-2026-10-15T19:46:26Z	98ecc83	1.04	1.13	264	8.22	deps opt-level=2 in dev profile
+2026-10-15T19:40:33Z	7bf19af	1.56	1.47	334	101.46	baseline: debug=1, deps unoptimized
+2026-10-15T19:46:26Z	7bf19af+dirty	1.04	1.13	264	8.22	deps opt-level=2 in dev profile

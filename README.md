@@ -18,9 +18,10 @@ The driver was proved against the actual GPUI binary. Keep its nested window vis
 
 ## Run checks
 
-- Run `bash scripts/check.sh` for formatting and core behavior tests.
-- Run `bash scripts/check.sh ui` for GPUI simulated-input tests.
-- Run `bash scripts/check.sh build` to compile the native application.
+- Run `bash scripts/check.sh` for formatting, the theme color check, and core behavior tests.
+- Run `bash scripts/check.sh ui` for GPUI simulated-input tests of the app and its components.
+- Run `bash scripts/check.sh build` to compile the native application and the component gallery.
+- Run `python scripts/perf.py --note "what changed"` to record build and render timings. See [performance](docs/performance.md).
 - Run `python scripts/native-smoke.py` on Hyprland with the Lua dispatcher API to exercise native keyboard creation, settlement, draft entry, and restart with isolated state. It captures empty, populated, and restored screenshots. It restores the previous window focus and stops its own preview process.
 
 Set `KEYSTONE_VISUAL_FIXTURE=1` to show a labeled sample transcript with a table and code block. It uses the same window and layout as the normal preview. Set `KEYSTONE_CAPTURE_DIR` to choose a separate native evidence directory. On the current Hyprland Lua profile, `KEYSTONE_TEST_CLOSE=1` also checks that failed storage blocks a compositor close request. Native typing defaults to 100 ms per character. The 10 ms stress case remains an open rendering issue.
@@ -30,5 +31,7 @@ The composer supports multiline drafts. Enter and Shift+Enter insert a new line.
 GPUI input tests do not establish native rendering correctness. Native window checks and live provider checks are separate.
 
 Cargo.lock pins libc 0.2.186 because GPUI 0.2.2 depends on xattr 0.2.3, which references the Linux ENOATTR constant removed in newer libc releases. Recheck this compatibility when upgrading GPUI.
+
+The interface is built from the `keystone-ui` component library. Run `cargo run -p keystone-ui --example gallery` to see every component. See [the design system](docs/design-system.md).
 
 See [the accepted product scope](docs/scope.md) and [the test strategy](docs/testing.md). Most accepted features are not implemented yet.

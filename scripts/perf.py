@@ -47,6 +47,14 @@ def sidebar_draw_ms(runs):
     return statistics.median(samples)
 
 
+def commit():
+    head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT,
+                          capture_output=True, text=True).stdout.strip()
+    dirty = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=ROOT,
+                           capture_output=True, text=True).stdout.strip()
+    return f'{head}+dirty' if dirty else head
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--runs', type=int, default=3)
@@ -57,8 +65,7 @@ def main():
     run(BUILD)
     row = {
         'date': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        'commit': subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT,
-                                 capture_output=True, text=True).stdout.strip(),
+        'commit': commit(),
         'touch_desktop_s': f"{timed_rebuild('crates/keystone-desktop/src/main.rs', args.runs):.2f}",
         'touch_ui_s': f"{timed_rebuild('crates/keystone-ui/src/button.rs', args.runs):.2f}",
         'desktop_debug_mb': f"{os.path.getsize(ROOT / 'target/debug/keystone-desktop') / 1e6:.0f}",
