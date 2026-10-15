@@ -6,12 +6,13 @@ publish.workspace = true
 
 [dependencies]
 keystone-core = { path = "../keystone-core" }
+keystone-ui = { path = "../keystone-ui" }
 gpui = "=0.2.2"
 anyhow = "1"
 unicode-segmentation = "1"
 
 [features]
-ui-tests = ["gpui/test-support"]
+ui-tests = ["gpui/test-support", "keystone-ui/ui-tests"]
 
 [dev-dependencies]
 tempfile = "3"

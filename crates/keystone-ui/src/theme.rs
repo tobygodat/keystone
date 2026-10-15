@@ -18,6 +18,7 @@ impl ActiveTheme for App {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Colors {
     pub background: Hsla,
     pub rail: Hsla,

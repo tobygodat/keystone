@@ -2905,6 +2905,7 @@ dependencies = [
  "anyhow",
  "gpui",
  "keystone-core",
+ "keystone-ui",
  "tempfile",
  "unicode-segmentation",
 ]

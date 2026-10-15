@@ -3,11 +3,12 @@ use std::ops::Range;
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, SharedString, Style, TextRun,
-    TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    Focusable, GlobalElementId, Hsla, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, SharedString, Style,
+    TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill,
+    point, prelude::*, px, relative, size,
 };
+use keystone_ui::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -763,10 +764,11 @@ fn shape_layout(
     width: Pixels,
     style: &TextStyle,
     line_height: Pixels,
+    placeholder: Hsla,
     window: &mut Window,
 ) -> TextLayout {
     let color = if input.content.is_empty() {
-        rgb(0x858585).into()
+        placeholder
     } else {
         style.color
     };
@@ -881,6 +883,7 @@ impl Element for TextElement {
                     _ => px(400.),
                 })
                 .max(px(1.));
+            let placeholder = cx.theme().colors.text_placeholder;
             let input = input.read(cx);
             let layout = shape_layout(
                 input,
@@ -888,6 +891,7 @@ impl Element for TextElement {
                 width,
                 &measured_style,
                 line_height,
+                placeholder,
                 window,
             );
             let height = if input.mode == InputMode::Multiline {
@@ -909,6 +913,9 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> PrepaintState {
+        let colors = &cx.theme().colors;
+        let (placeholder, selection_color, caret) =
+            (colors.text_placeholder, colors.selection, colors.caret);
         let input = self.input.read(cx);
         let layout = shape_layout(
             input,
@@ -916,6 +923,7 @@ impl Element for TextElement {
             bounds.size.width,
             &state.0,
             state.1,
+            placeholder,
             window,
         );
         let placeholder_layout = input.content.is_empty().then(|| {
@@ -925,6 +933,7 @@ impl Element for TextElement {
                 bounds.size.width,
                 &state.0,
                 state.1,
+                placeholder,
                 window,
             )
         });
@@ -961,7 +970,7 @@ impl Element for TextElement {
             .map(|rect| {
                 fill(
                     Bounds::new(bounds.origin + rect.origin - scroll, rect.size),
-                    rgba(0x467bb070),
+                    selection_color,
                 )
             })
             .collect();
@@ -971,7 +980,7 @@ impl Element for TextElement {
                     bounds.origin + cursor_position - scroll,
                     size(px(1.), layout.line_height),
                 ),
-                rgb(0xc9c9c9),
+                caret,
             )
         });
         PrepaintState {
@@ -1079,7 +1088,7 @@ impl Render for TextInput {
             .overflow_hidden()
             .text_size(px(13.))
             .line_height(px(20.))
-            .text_color(rgb(0xc9c9c9))
+            .text_color(cx.theme().colors.text)
             .child(TextElement { input: cx.entity() })
     }
 }
@@ -1097,6 +1106,7 @@ mod tests {
     #[gpui::test]
     fn multiline_editing_uses_visual_rows_and_unicode(cx: &mut gpui::TestAppContext) {
         cx.update(TextInput::bind_keys);
+        cx.update(keystone_ui::init);
         let (input, cx) = cx.add_window_view(|window, cx| {
             let input = TextInput::new("Draft", InputMode::Multiline, cx);
             window.focus(&input.focus_handle);
@@ -1195,6 +1205,7 @@ mod tests {
     #[gpui::test]
     fn search_rejects_multiline_without_losing_selection(cx: &mut gpui::TestAppContext) {
         cx.update(TextInput::bind_keys);
+        cx.update(keystone_ui::init);
         let (input, cx) = cx.add_window_view(|window, cx| {
             let input = TextInput::new("Search", InputMode::SingleLine, cx);
             window.focus(&input.focus_handle);

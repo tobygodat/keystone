@@ -1,11 +1,12 @@
-mod icons;
 mod text_input;
 
 use gpui::{
-    App, Application, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, Render,
-    Subscription, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size, svg,
+    App, Application, Bounds, Context, Corner, Entity, FocusHandle, Focusable, FontWeight,
+    IntoElement, Render, Subscription, Window, WindowBounds, WindowOptions, div, prelude::*, px,
+    size,
 };
 use keystone_core::{Durability, Provider, Store};
+use keystone_ui::prelude::*;
 use std::path::PathBuf;
 use text_input::{Changed, InputMode, TextInput};
 
@@ -21,9 +22,7 @@ gpui::actions!(
     ]
 );
 
-const BG: u32 = 0x171717;
-const BORDER: u32 = 0x2b2b2b;
-const MUTED: u32 = 0x858585;
+const CONTENT_WIDTH: f32 = 884.;
 
 fn durability_warning(durability: Durability) -> Option<String> {
     match durability {
@@ -32,23 +31,6 @@ fn durability_warning(durability: Durability) -> Option<String> {
             "Change saved, but crash durability is unconfirmed. Retry saving before leaving. {error}"
         )),
     }
-}
-
-fn icon(name: &'static str) -> gpui::Svg {
-    svg().path(name).size(px(16.)).text_color(rgb(MUTED))
-}
-
-fn icon_button(id: &'static str, name: &'static str) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .size(px(30.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(0x2b2b2b)))
-        .child(icon(name))
 }
 
 struct Keystone {
@@ -176,13 +158,8 @@ impl Keystone {
         cx.notify();
     }
 
-    fn transcript(&self) -> gpui::Div {
-        let mut table = div()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(0x353535))
-            .bg(rgb(0x232323))
-            .overflow_hidden();
+    fn transcript(&self, cx: &App) -> gpui::Div {
+        let mut table = v_flex().surface(Elevation::Raised, cx).overflow_hidden();
         for (index, cells) in [
             ["Check", "Command", "When"],
             [
@@ -210,56 +187,185 @@ impl Keystone {
         .enumerate()
         {
             table = table.child(
-                div()
-                    .flex()
+                h_flex()
                     .py_2()
                     .px_3()
-                    .when(index > 0, |d| d.border_t_1().border_color(rgb(0x353535)))
+                    .when(index > 0, |d| d.hairline_t(cx))
                     .children(cells.into_iter().enumerate().map(|(i, cell)| {
-                        div()
-                            .flex_1()
-                            .text_size(px(12.))
-                            .when(i == 1 && index > 0, |d| {
-                                d.font_family("monospace").text_size(px(11.))
-                            })
-                            .child(cell)
+                        let label = if index == 0 {
+                            Label::new(cell).size(TextSize::Ui).color(Color::Muted)
+                        } else if i == 1 {
+                            Label::new(cell).size(TextSize::Sm).mono()
+                        } else {
+                            Label::new(cell).size(TextSize::Ui)
+                        };
+                        div().flex_1().child(label)
                     })),
             );
         }
-        div().flex().flex_col().gap_5().text_size(px(14.)).line_height(px(24.))
-            .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child("Interface preview · sample transcript"))
-            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("A local workspace for Claude Code and Codex."))
+        let code = v_flex()
+            .surface(Elevation::Raised, cx)
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .hairline_b(cx)
+                    .child(Icon::new(IconName::File).size(px(14.)))
+                    .child(Label::new("bash").size(TextSize::Ui).color(Color::Muted)),
+            )
+            .child(
+                div().p_4().child(
+                    Label::new("cargo run -p keystone-desktop --locked")
+                        .size(TextSize::Ui)
+                        .color(Color::Custom(cx.theme().colors.code_text))
+                        .mono(),
+                ),
+            );
+        v_flex().gap_5().text_size(TextSize::Body.px()).line_height(px(24.))
+            .child(Label::new("Interface preview · sample transcript").size(TextSize::Ui).color(Color::Muted))
+            .child(Label::new("A local workspace for Claude Code and Codex.").size(TextSize::Body).weight(FontWeight::SEMIBOLD))
             .child("This sample shows the conversation layout. The current preview saves sessions and drafts locally. Agent execution is not connected yet.")
             .child("The testing loop is ready.")
             .child(table)
             .child("Use behavior-focused integration tests for rapid iteration, plus a small native E2E suite. Keep live provider tests separate from deterministic UI checks.")
             .child("The workspace stays focused on conversations. Session selection, draft editing, search, and settle controls are available in this preview.")
             .child("Run the preview with the command below.")
-            .child(div().rounded_lg().border_1().border_color(rgb(0x353535)).bg(rgb(0x232323)).overflow_hidden()
-                .child(div().px_3().py_2().border_b_1().border_color(rgb(0x353535)).text_color(rgb(MUTED)).text_size(px(12.)).child("⌘  bash"))
-                .child(div().p_4().font_family("monospace").text_size(px(12.)).text_color(rgb(0x82a9ce)).child("cargo run -p keystone-desktop --locked")))
+            .child(code)
             .child("This is a visual fixture, not an agent response. No model request is made.")
     }
-}
 
-impl Render for Keystone {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn select(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.save_draft(cx) {
+            return;
+        }
+        self.error = match self.store.select(id) {
+            Ok(applied) => durability_warning(applied.durability),
+            Err(error) => Some(error.to_string()),
+        };
+        self.sync_draft(cx);
+        cx.notify();
+    }
+
+    fn start(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
+        self.create(provider, cx);
+        if self.error.is_none() && self.store.workspace().selected().is_some() {
+            self.composer.focus_handle(cx).focus(window);
+        }
+    }
+
+    fn titlebar(&self, title: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab_bg = cx.theme().colors.element_selected;
+        h_flex()
+            .h(px(38.))
+            .flex_shrink_0()
+            .pr_1()
+            .hairline_b(cx)
+            .child(
+                div()
+                    .w(px(if self.sidebar { 302. } else { 46. }))
+                    .flex_shrink_0(),
+            )
+            .child(
+                h_flex()
+                    .h(px(28.))
+                    .w(px(220.))
+                    .px_2p5()
+                    .gap_2()
+                    .rounded(radius::CONTROL)
+                    .bg(tab_bg)
+                    .child(Icon::new(IconName::Chat).size(px(14.)))
+                    .child(Label::new(title).truncate()),
+            )
+            .child(
+                div().flex_1().flex().justify_center().child(
+                    Label::new("keystone")
+                        .size(TextSize::Sm)
+                        .color(Color::Faint),
+                ),
+            )
+            .child(
+                IconButton::new("minimize", IconName::Minus)
+                    .tooltip(Tooltip::text("Minimize"))
+                    .on_click(|_, window, _| window.minimize_window()),
+            )
+            .child(
+                IconButton::new("maximize", IconName::Square)
+                    .tooltip(Tooltip::text("Maximize"))
+                    .on_click(|_, window, _| window.zoom_window()),
+            )
+            .child(
+                IconButton::new("close", IconName::Close)
+                    .tooltip(Tooltip::with_key("Close window", "Ctrl+Q"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.save_draft(cx) {
+                            window.remove_window();
+                        }
+                    })),
+            )
+    }
+
+    fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rail_bg = cx.theme().colors.rail;
+        v_flex()
+            .w(px(46.))
+            .flex_shrink_0()
+            .h_full()
+            .items_center()
+            .py_2()
+            .gap_1()
+            .bg(rail_bg)
+            .hairline_r(cx)
+            .child(
+                IconButton::new("sidebar", IconName::Panel)
+                    .size(ButtonSize::Large)
+                    .tooltip(Tooltip::text(if self.sidebar {
+                        "Hide sidebar"
+                    } else {
+                        "Show sidebar"
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sidebar = !this.sidebar;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                IconButton::new("conversations", IconName::Chat)
+                    .size(ButtonSize::Large)
+                    .selected(!self.settled_only)
+                    .tooltip(Tooltip::text("Conversations"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settled_only = false;
+                        this.sidebar = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                IconButton::new("search", IconName::Search)
+                    .size(ButtonSize::Large)
+                    .tooltip(Tooltip::with_key("Search", "Ctrl+F"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.sidebar = true;
+                        this.search.focus_handle(cx).focus(window);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                IconButton::new("settled", IconName::Inbox)
+                    .size(ButtonSize::Large)
+                    .selected(self.settled_only)
+                    .tooltip(Tooltip::text("Settled sessions"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settled_only = true;
+                        this.sidebar = true;
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.store.workspace().selected();
-        let current = self
-            .store
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| Some(s.id()) == selected);
-        let title = current
-            .map(|s| s.title().to_owned())
-            .unwrap_or_else(|| "Workspace".into());
-        let provider = current
-            .map(|s| s.provider().to_string())
-            .unwrap_or_else(|| "Choose a session".into());
-        let settled = current.is_some_and(|s| s.settled());
-        let has_session = current.is_some();
-        let has_transcript = self.fixture;
         let query = self.search.read(cx).value().to_lowercase();
         let sessions = self
             .store
@@ -274,77 +380,157 @@ impl Render for Keystone {
             })
             .map(|session| {
                 let id = session.id();
-                div()
-                    .id(("session", id))
-                    .debug_selector(move || format!("session-{id}").into())
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(rgb(if Some(id) == selected { 0x292929 } else { BG }))
-                    .hover(|s| s.bg(rgb(0x242424)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.save_draft(cx) {
-                            return;
-                        }
-                        this.error = match this.store.select(id) {
-                            Ok(applied) => durability_warning(applied.durability),
-                            Err(error) => Some(error.to_string()),
-                        };
-                        this.sync_draft(cx);
-                        cx.notify();
-                    }))
-                    .child(div().text_size(px(13.)).child(session.title().to_owned()))
+                let state = if session.settled() {
+                    "Settled"
+                } else {
+                    "Draft"
+                };
+                ListItem::new(("session", id))
+                    .debug_selector(move || format!("session-{id}"))
+                    .selected(Some(id) == selected)
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx)))
+                    .child(Label::new(session.title().to_owned()).truncate())
                     .child(
-                        div()
-                            .mt_1()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
-                            .child(format!(
-                                "{} · {}",
-                                session.provider(),
-                                if session.settled() {
-                                    "Settled"
-                                } else {
-                                    "Draft"
-                                }
-                            )),
+                        Label::new(format!("{} · {state}", session.provider()))
+                            .size(TextSize::Sm)
+                            .color(Color::Muted),
                     )
             })
             .collect::<Vec<_>>();
         let no_matches = sessions.is_empty();
-        let composer = div().w_full().max_w(px(884.)).px_3().child(
-            div()
-                .rounded_lg()
-                .border_1()
-                .border_color(rgb(0x393939))
-                .bg(rgb(0x1e1e1e))
+        v_flex()
+            .w(px(256.))
+            .flex_shrink_0()
+            .h_full()
+            .hairline_r(cx)
+            .child(
+                h_flex()
+                    .h(px(40.))
+                    .pl_3()
+                    .pr_1p5()
+                    .hairline_b(cx)
+                    .child(
+                        div().flex_1().child(
+                            Label::new(if self.settled_only {
+                                "Settled sessions"
+                            } else {
+                                "Workspace"
+                            })
+                            .weight(FontWeight::MEDIUM),
+                        ),
+                    )
+                    .child(
+                        PopoverMenu::new(
+                            "new-session-menu",
+                            IconButton::new("new-session", IconName::Plus)
+                                .debug_selector(|| "new-session".into())
+                                .selected(self.new_menu)
+                                .tooltip(Tooltip::text("New session")),
+                        )
+                        .anchor(Corner::TopRight)
+                        .open(self.new_menu)
+                        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                            this.new_menu = *open;
+                            cx.notify();
+                        }))
+                        .child(
+                            MenuItem::new("new-claude", "New Claude session")
+                                .icon(IconName::Chat)
+                                .kbd("Ctrl+N")
+                                .debug_selector(|| "new-claude".into())
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.create(Provider::Claude, cx)),
+                                ),
+                        )
+                        .child(
+                            MenuItem::new("new-codex", "New Codex session")
+                                .icon(IconName::Chat)
+                                .kbd("Ctrl+Shift+N")
+                                .debug_selector(|| "new-codex".into())
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.create(Provider::Codex, cx)),
+                                ),
+                        ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .h(px(36.))
+                    .pl_3()
+                    .pr_1p5()
+                    .gap_2()
+                    .child(Icon::new(IconName::Search).size(px(14.)))
+                    .child(div().flex_1().min_w_0().child(self.search.clone()))
+                    .child(
+                        IconButton::new("filter", IconName::Filter)
+                            .size(ButtonSize::Compact)
+                            .selected(self.settled_only)
+                            .tooltip(Tooltip::text("Show settled only"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settled_only = !this.settled_only;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("session-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_1p5()
+                    .pt_1()
+                    .gap(px(2.))
+                    .when(no_matches, |d| {
+                        d.child(
+                            div().px_2().py_2().child(
+                                Label::new("No sessions match these filters")
+                                    .size(TextSize::Ui)
+                                    .color(Color::Muted),
+                            ),
+                        )
+                    })
+                    .children(sessions),
+            )
+    }
+
+    fn composer(&self, current: Option<(String, bool)>, cx: &mut Context<Self>) -> gpui::Div {
+        let colors = cx.theme().colors;
+        let has_session = current.is_some();
+        let meta = |text: &'static str| Label::new(text).size(TextSize::Ui).color(Color::Muted);
+        div().w_full().max_w(px(CONTENT_WIDTH)).px_3().child(
+            v_flex()
+                .surface(Elevation::Surface, cx)
+                .border_color(colors.border_strong)
                 .p_3()
-                .flex()
-                .flex_col()
-                .gap_4()
+                .gap_3()
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
+                    h_flex()
                         .gap_2()
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .child(icon("folder"))
-                        .child("Current checkout")
-                        .child(icon("branch"))
-                        .child("No project selected")
+                        .child(Icon::new(IconName::Folder).size(px(14.)))
+                        .child(meta("Current checkout"))
+                        .child(Icon::new(IconName::Branch).size(px(14.)))
+                        .child(meta("No project selected"))
                         .child(div().flex_1())
-                        .when(has_session, |d| {
+                        .when_some(current.as_ref(), |d, (_, settled)| {
                             d.child(
-                                div()
-                                    .id("settle")
-                                    .debug_selector(|| "settle".into())
-                                    .px_2()
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(rgb(0xdddddd)))
-                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settle(cx)))
-                                    .child(if settled { "Un-settle" } else { "Settle" }),
+                                Button::new(
+                                    "settle",
+                                    if *settled { "Un-settle" } else { "Settle" },
+                                )
+                                .size(ButtonSize::Compact)
+                                .icon(IconName::Check)
+                                .selected(*settled)
+                                .debug_selector(|| "settle".into())
+                                .tooltip(Tooltip::with_key(
+                                    if *settled {
+                                        "Return to active work"
+                                    } else {
+                                        "Move out of active work"
+                                    },
+                                    "Ctrl+Shift+S",
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_settle(cx))),
                             )
                         }),
                 )
@@ -355,85 +541,147 @@ impl Render for Keystone {
                         .min_h(px(28.))
                         .when(has_session, |d| d.child(self.composer.clone()))
                         .when(!has_session, |d| {
-                            d.text_color(rgb(MUTED))
+                            d.text_color(colors.text_placeholder)
                                 .child("Choose a provider to write a draft…")
                         }),
                 )
                 .child(
-                    div()
-                        .flex()
+                    h_flex()
                         .flex_wrap()
-                        .items_center()
                         .gap_2()
-                        .text_size(px(11.))
-                        .when(has_session, |d| {
+                        .when_some(current.as_ref(), |d, (provider, _)| {
                             d.child(
                                 div()
                                     .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(rgb(0x2c2c2c))
-                                    .child(provider),
+                                    .py_0p5()
+                                    .rounded(radius::CONTROL)
+                                    .bg(colors.element_hover)
+                                    .child(Label::new(provider.clone()).size(TextSize::Sm)),
                             )
                         })
                         .child(
-                            div()
-                                .text_color(rgb(MUTED))
-                                .child("Provider not connected · Enter for a new line"),
+                            Label::new("Provider not connected · Enter for a new line")
+                                .size(TextSize::Sm)
+                                .color(Color::Muted),
                         )
                         .child(div().flex_1())
                         .when(!has_session, |d| {
                             d.child(
-                                div()
-                                    .id("welcome-claude")
+                                Button::new("welcome-claude", "Start with Claude Code")
+                                    .style(ButtonStyle::Filled)
+                                    .icon(IconName::Plus)
                                     .debug_selector(|| "welcome-claude".into())
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x343434))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0x434343)))
+                                    .tooltip(Tooltip::with_key("New Claude session", "Ctrl+N"))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.create(Provider::Claude, cx);
-                                        if this.error.is_none()
-                                            && this.store.workspace().selected().is_some()
-                                        {
-                                            this.composer.focus_handle(cx).focus(window);
-                                        }
-                                    }))
-                                    .child("Start with Claude Code"),
+                                        this.start(Provider::Claude, window, cx)
+                                    })),
                             )
                             .child(
-                                div()
-                                    .id("welcome-codex")
+                                Button::new("welcome-codex", "Start with Codex")
+                                    .style(ButtonStyle::Filled)
+                                    .icon(IconName::Plus)
                                     .debug_selector(|| "welcome-codex".into())
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(0x343434))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0x434343)))
+                                    .tooltip(Tooltip::with_key("New Codex session", "Ctrl+Shift+N"))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.create(Provider::Codex, cx);
-                                        if this.error.is_none()
-                                            && this.store.workspace().selected().is_some()
-                                        {
-                                            this.composer.focus_handle(cx).focus(window);
-                                        }
-                                    }))
-                                    .child("Start with Codex"),
+                                        this.start(Provider::Codex, window, cx)
+                                    })),
                             )
                         }),
                 ),
+        )
+    }
+
+    fn error_line(&self) -> Option<impl IntoElement> {
+        self.error
+            .clone()
+            .map(|error| Label::new(error).size(TextSize::Ui).color(Color::Danger))
+    }
+}
+
+impl Render for Keystone {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (background, text, ui_font) = (
+            theme.colors.background,
+            theme.colors.text,
+            theme.fonts.ui.clone(),
         );
-        div()
+        let current = self
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| Some(s.id()) == self.store.workspace().selected());
+        let title = current
+            .map(|s| s.title().to_owned())
+            .unwrap_or_else(|| "Workspace".into());
+        let current = current.map(|s| (s.provider().to_string(), s.settled()));
+        let composer = self.composer(current, cx);
+        let main = if self.fixture {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .items_center()
+                .child(
+                    v_flex()
+                        .id("conversation")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_y_scroll()
+                        .items_center()
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(px(CONTENT_WIDTH))
+                                .px_3()
+                                .py_6()
+                                .child(self.transcript(cx)),
+                        ),
+                )
+                .when_some(self.error_line(), |d, error| {
+                    d.child(
+                        div()
+                            .w_full()
+                            .max_w(px(CONTENT_WIDTH))
+                            .px_4()
+                            .pb_2()
+                            .child(error),
+                    )
+                })
+                .child(composer.pb_2())
+        } else {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(CONTENT_WIDTH))
+                        .gap_5()
+                        .child(
+                            div()
+                                .id("welcome-heading")
+                                .debug_selector(|| "welcome-heading".into())
+                                .px_3()
+                                .child(Label::new("What should we work on?").size(TextSize::Title)),
+                        )
+                        .child(composer)
+                        .when_some(self.error_line(), |d, error| {
+                            d.child(div().px_4().child(error))
+                        }),
+                )
+        };
+        v_flex()
             .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(BG))
-            .font_family("Inter")
-            .text_color(rgb(0xc9c9c9))
-            .text_size(px(13.))
+            .bg(background)
+            .font_family(ui_font)
+            .text_color(text)
+            .text_size(TextSize::Base.px())
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Quit, _, cx| {
                 if this.save_draft(cx) {
@@ -451,307 +699,33 @@ impl Render for Keystone {
                 this.search.focus_handle(cx).focus(window);
                 cx.notify();
             }))
+            .child(self.titlebar(title, cx))
             .child(
                 div()
-                    .h(px(38.))
                     .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .w(px(if self.sidebar { 302. } else { 46. }))
-                            .flex_shrink_0(),
-                    )
-                    .child(
-                        div()
-                            .h(px(30.))
-                            .w(px(220.))
-                            .px_3()
-                            .rounded_md()
-                            .bg(rgb(0x2c2c2c))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(icon("chat"))
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_center()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x626262))
-                            .child("keystone"),
-                    )
-                    .child(
-                        icon_button("minimize", "minus")
-                            .on_click(|_, window, _| window.minimize_window()),
-                    )
-                    .child(
-                        icon_button("maximize", "square")
-                            .on_click(|_, window, _| window.zoom_window()),
-                    )
-                    .child(icon_button("close", "close").on_click(cx.listener(
-                        |this, _, window, cx| {
-                            if this.save_draft(cx) {
-                                window.remove_window();
-                            }
-                        },
-                    ))),
-            )
-            .child(
-                div()
                     .flex_1()
                     .min_h_0()
-                    .flex()
-                    .child(
-                        div()
-                            .w(px(46.))
-                            .flex_shrink_0()
-                            .h_full()
-                            .border_r_1()
-                            .border_color(rgb(BORDER))
-                            .bg(rgb(0x141414))
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .py_2()
-                            .gap_2()
-                            .child(icon_button("sidebar", "panel").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.sidebar = !this.sidebar;
-                                    cx.notify();
-                                },
-                            )))
-                            .child(
-                                icon_button("conversations", "chat")
-                                    .bg(rgb(if self.settled_only {
-                                        0x141414
-                                    } else {
-                                        0x2b2b2b
-                                    }))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settled_only = false;
-                                        this.sidebar = true;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(icon_button("search", "search").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.sidebar = true;
-                                    this.search.focus_handle(cx).focus(window);
-                                    cx.notify();
-                                },
-                            )))
-                            .child(
-                                icon_button("settled", "inbox")
-                                    .bg(rgb(if self.settled_only {
-                                        0x2b2b2b
-                                    } else {
-                                        0x141414
-                                    }))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settled_only = true;
-                                        this.sidebar = true;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(div().flex_1()),
-                    )
-                    .when(self.sidebar, |d| {
-                        d.child(
-                            div()
-                                .w(px(256.))
-                                .flex_shrink_0()
-                                .h_full()
-                                .border_r_1()
-                                .border_color(rgb(BORDER))
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .h(px(40.))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .border_b_1()
-                                        .border_color(rgb(BORDER))
-                                        .child(div().flex_1().child(if self.settled_only {
-                                            "Settled sessions"
-                                        } else {
-                                            "Workspace"
-                                        }))
-                                        .child(
-                                            icon_button("new-session", "plus")
-                                                .debug_selector(|| "new-session".into())
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.new_menu = !this.new_menu;
-                                                    cx.notify();
-                                                })),
-                                        ),
-                                )
-                                .when(self.new_menu, |d| {
-                                    d.child(
-                                        div()
-                                            .mx_2()
-                                            .mt_2()
-                                            .p_1()
-                                            .rounded_md()
-                                            .border_1()
-                                            .border_color(rgb(BORDER))
-                                            .bg(rgb(0x232323))
-                                            .child(
-                                                div()
-                                                    .id("new-claude")
-                                                    .debug_selector(|| "new-claude".into())
-                                                    .p_2()
-                                                    .cursor_pointer()
-                                                    .hover(|s| s.bg(rgb(0x333333)))
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.create(Provider::Claude, cx)
-                                                    }))
-                                                    .child("New Claude session"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("new-codex")
-                                                    .debug_selector(|| "new-codex".into())
-                                                    .p_2()
-                                                    .cursor_pointer()
-                                                    .hover(|s| s.bg(rgb(0x333333)))
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.create(Provider::Codex, cx)
-                                                    }))
-                                                    .child("New Codex session"),
-                                            ),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .h(px(36.))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(icon("search"))
-                                        .child(div().flex_1().min_w_0().child(self.search.clone()))
-                                        .child(icon_button("filter", "filter").on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.settled_only = !this.settled_only;
-                                                cx.notify();
-                                            }),
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .id("session-list")
-                                        .flex_1()
-                                        .min_h_0()
-                                        .overflow_y_scroll()
-                                        .px_2()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .when(no_matches, |d| {
-                                            d.child(
-                                                div()
-                                                    .px_1()
-                                                    .py_2()
-                                                    .text_size(px(12.))
-                                                    .text_color(rgb(MUTED))
-                                                    .child("No sessions match these filters"),
-                                            )
-                                        })
-                                        .children(sessions),
-                                ),
-                        )
-                    })
-                    .child(if has_transcript {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .child(
-                                div()
-                                    .id("conversation")
-                                    .flex_1()
-                                    .min_h_0()
-                                    .w_full()
-                                    .overflow_y_scroll()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .max_w(px(884.))
-                                            .px_3()
-                                            .pt_6()
-                                            .pb_6()
-                                            .child(self.transcript()),
-                                    ),
-                            )
-                            .when_some(self.error.clone(), |d, error| {
-                                d.child(
-                                    div()
-                                        .w_full()
-                                        .max_w(px(884.))
-                                        .px_4()
-                                        .pb_2()
-                                        .text_color(rgb(0xea9990))
-                                        .child(error),
-                                )
-                            })
-                            .child(composer.pb_2())
-                    } else {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(884.))
-                                    .flex()
-                                    .flex_col()
-                                    .gap_5()
-                                    .child(
-                                        div()
-                                            .id("welcome-heading")
-                                            .debug_selector(|| "welcome-heading".into())
-                                            .px_3()
-                                            .text_size(px(20.))
-                                            .child("What should we work on?"),
-                                    )
-                                    .child(composer)
-                                    .when_some(self.error.clone(), |d, error| {
-                                        d.child(div().px_4().text_color(rgb(0xea9990)).child(error))
-                                    }),
-                            )
-                    }),
+                    .child(self.rail(cx))
+                    .when(self.sidebar, |d| d.child(self.sidebar(cx)))
+                    .child(main),
             )
             .child(
-                div()
+                h_flex()
                     .h(px(26.))
                     .flex_shrink_0()
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
                     .px_3()
-                    .flex()
-                    .items_center()
-                    .text_size(px(10.))
-                    .text_color(rgb(MUTED))
-                    .child("Local workspace")
+                    .hairline_t(cx)
+                    .child(
+                        Label::new("Local workspace")
+                            .size(TextSize::Xs)
+                            .color(Color::Muted),
+                    )
                     .child(div().flex_1())
-                    .child("Claude Code + Codex · preview"),
+                    .child(
+                        Label::new("Claude Code + Codex · preview")
+                            .size(TextSize::Xs)
+                            .color(Color::Muted),
+                    ),
             )
     }
 }
@@ -767,6 +741,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
+        cx.update(keystone_ui::init);
         let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
         assert!(cx.debug_bounds("welcome-heading").is_some());
         assert!(cx.debug_bounds("welcome-codex").is_some());
@@ -801,6 +776,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
+        cx.update(keystone_ui::init);
         let (_view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
         for selector in [
             "new-session",
@@ -839,6 +815,7 @@ mod tests {
         let mut store = Store::open(&path).unwrap();
         store.create(Provider::Claude).unwrap();
         store.create(Provider::Codex).unwrap();
+        cx.update(keystone_ui::init);
         let (view, cx) = cx.add_window_view(|_, cx| Keystone::new(store, false, cx));
         std::fs::rename(&state_dir, dir.path().join("backup")).unwrap();
         let bounds = cx.debug_bounds("composer-field").unwrap();
@@ -921,8 +898,9 @@ fn main() {
         }
     };
     Application::new()
-        .with_assets(icons::Icons)
+        .with_assets(keystone_ui::Icons)
         .run(move |cx: &mut App| {
+            keystone_ui::init(cx);
             TextInput::bind_keys(cx);
             cx.bind_keys([
                 gpui::KeyBinding::new("ctrl-q", Quit, None),
