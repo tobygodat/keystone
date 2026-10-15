@@ -1,0 +1,18 @@
+[package]
+name = "keystone-desktop"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+keystone-core = { path = "../keystone-core" }
+gpui = "=0.2.2"
+anyhow = "1"
+unicode-segmentation = "1"
+
+[features]
+ui-tests = ["gpui/test-support"]
+
+[dev-dependencies]
+tempfile = "3"
+
