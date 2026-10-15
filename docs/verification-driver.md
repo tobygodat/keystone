@@ -30,6 +30,23 @@ Independent review corrected a nonexistent search-toolbar route in the map and a
 
 Only the Claude welcome entry, short text, Ctrl+L, and Ctrl+Q restart journey were exercised in the clean run. The other mapped entry points remain for later runs. Provider execution, long-input stress, clipboard paste, IME composition, and exact screenshot parity are not proved here. Existing GPUI and core checks remain separate.
 
+## Settings run, 2026-10-15
+
+Run `.audit/verify-20261015T165545-settings` drove the settings menu natively with mouse input. Screenshots came from `grim` because of KS-011. It exercised these entry points:
+
+| Feature | Entry point | Observed |
+| --- | --- | --- |
+| Sessions | "Start with Claude Code" welcome button | Session created, composer focused, typed draft shown (`grim-02`). |
+| Settings | Rail gear | Menu opened upward with System, Default, and Default checked (`grim-03`). |
+| Settings | Light, then Compact | Window, sidebar, and menu switched live (`grim-04`). |
+| Settings | Noto Sans | Interface font changed (`grim-05`). |
+| Settings | Escape | Menu closed (`grim-06`). |
+| Sessions | Sidebar "+" menu, New Codex session | Second row appeared in the cached sidebar (`grim-07`, `grim-08`). |
+| Sessions | Click first row | Selection moved and the Claude draft returned (`grim-09`). |
+| Restart | Ctrl+Q, launch | Theme, density, font, sessions, selection, and draft restored (`grim-10`). |
+
+The saved state snapshot recorded `{"theme": "Light", "density": "Compact", "ui_font": "Noto Sans"}`. Cleanup reported no errors and no retained scratch state. System theme switching, Spacious density, and the settled filter were not exercised in this run.
+
 ## Maintenance
 
 Use `/maintain-verification-skill` when the app's user paths change. Update the feature map and re-run the affected entries. Keep failed evidence alongside successful evidence.

@@ -39,6 +39,9 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 - Find the nested window with `pgrep -x sway` and match that PID in `hyprctl clients -j`. `pgrep -f` matches your own shell.
 - The final native run (`.audit/verify-design-system-20261015T153837`) had zero failures. Earlier runs confirmed restart restoration, the tooltip, menu hover, and the gallery.
 - SSH to `desk`, which the user suggested for heavy work, was blocked by the permission classifier. Everything ran locally on 22 cores.
+- On this machine, Sway 1.12 is installed and the driver was rebuilt at the pinned commit. Driver screenshots fail with `unsupported SHM pixel format` (KS-011), so capture with `grim` against the nested socket. Mouse actions need `"button":"left"`.
+- An agent shell may not inherit the Hyprland session. Set `HYPRLAND_INSTANCE_SIGNATURE` from `/run/user/1000/hypr/` and `WAYLAND_DISPLAY=wayland-1` before running native checks.
+- The settings run (`.audit/verify-20261015T165545-settings`) verified the settings menu, mouse session creation, and restart natively. See `docs/verification-driver.md`.
 
 ## Open work, in priority order
 

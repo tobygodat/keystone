@@ -51,9 +51,9 @@ Capture before choosing a click target:
 {"kind":"call","tool":"screenshot","arguments":{}}
 ```
 
-Inspect the returned PNG with the image-viewing tool. Coordinates are pixels within the nested desktop. Use the latest capture dimensions and observed button center. The host may resize Sway. Never reuse coordinates from a different screenshot size. GPUI debug selectors used by simulated tests are not native accessibility selectors.
+Inspect the returned PNG with the image-viewing tool. If the driver returns `unsupported SHM pixel format` (KS-011), capture with `grim` instead. Point it at the run's nested socket, `WAYLAND_DISPLAY=/tmp/computer-use-*/sway-runtime/wayland-1 XDG_RUNTIME_DIR=/tmp/computer-use-*/sway-runtime grim "$EVIDENCE/grim-NN-name.png"`, using the run's actual directory. Save each capture in the evidence directory and record that it came from `grim`. Coordinates are pixels within the nested desktop. Use the latest capture dimensions and observed button center. The host may resize Sway. Never reuse coordinates from a different screenshot size. GPUI debug selectors used by simulated tests are not native accessibility selectors.
 
-Prefer the application's existing keyboard shortcuts for deterministic journeys:
+Mouse actions require a button, for example `{"action":"click","x":24,"y":970,"button":"left"}`. Prefer the application's existing keyboard shortcuts for deterministic journeys:
 
 ```json
 {"kind":"call","tool":"input","arguments":{"actions":[{"action":"keypress","keys":["ctrl","n"]}]}}

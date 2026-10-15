@@ -44,3 +44,8 @@ Status is open. A nested Sway restart after temporary `wtype` keyboard use hit G
 ## KS-010. GPUI 0.2.2 text ellipsis
 
 Status is open with a workaround. Native screenshots showed session titles rendered as a bare `...`, and a gallery label clipped without an ellipsis. GPUI 0.2.2's text element caches the first measured size of non-wrapping text and reuses it whatever width later layout passes offer, so `text_ellipsis` truncates to the first width it saw. `Label::truncate` in keystone-ui therefore clips to one line without an ellipsis. Revisit when upgrading GPUI. Evidence is in `.audit/verify-design-system-20261015T153154/0004.png`.
+
+## KS-011. Driver screenshots reject the nested output's pixel format
+
+Status is open with a workaround. On 2026-10-15, with Sway 1.12 nested in Hyprland 0.56.2, every driver `screenshot` call returned `unsupported SHM pixel format`. The pinned driver accepts only 8-bit ARGB, XRGB, ABGR, and XBGR buffers. Setting `render_bit_depth 8` on the nested output through `swaymsg` did not change the result. `grim` captured the same nested output successfully when pointed at the run's Wayland socket, so run screenshots through `grim` and keep using the driver for input. See the setup notes in the verification skill. The failed calls are recorded in `.audit/verify-20261015T165545-settings/actions.jsonl`.
+
