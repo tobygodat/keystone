@@ -752,7 +752,14 @@ impl Keystone {
         // the message is shown in the right turn.
         self.pump(cx);
         let cwd = self.project_dir.to_string_lossy().into_owned();
-        let resume = session.provider_thread().map(str::to_owned);
+        // Read after pumping: the pump may have just saved a newer thread ID.
+        let resume = self
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| s.id() == id)
+            .and_then(|s| s.provider_thread().map(str::to_owned));
         let result = self.codex().and_then(|codex| {
             codex
                 .send(id, &cwd, resume.as_deref(), text.clone())

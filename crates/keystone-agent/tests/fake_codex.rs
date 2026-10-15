@@ -170,3 +170,34 @@ fn dropping_the_connection_stops_codex() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+fn after_a_crash_the_latest_thread_is_resumed_even_if_the_caller_has_none() {
+    let (conn, wake) = connect();
+    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    let events = until(&conn, &wake, completed);
+    let Some(Event::ThreadReady { thread_id: first }) = events.first() else {
+        panic!("expected a thread first, got {events:?}");
+    };
+    let first = first.clone();
+    let pid = conn.pid().unwrap();
+    std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while conn.pid().is_some() {
+        assert!(Instant::now() < deadline, "exit not noticed");
+        let _ = wake.recv_timeout(Duration::from_millis(100));
+        conn.drain();
+    }
+    // The caller passes no saved thread, as if the ID never reached its storage.
+    conn.send(1, "/tmp", None, "again".into()).unwrap();
+    let events = until(&conn, &wake, completed);
+    assert!(
+        events.contains(&Event::ThreadReady {
+            thread_id: first.clone()
+        }),
+        "expected a resume of {first}, got {events:?}"
+    );
+}

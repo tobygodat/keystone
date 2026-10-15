@@ -339,14 +339,24 @@ mod pidfd {
             .copied()
             .filter(|s| s.group == root && s.pid != root)
             .collect();
+        // Walk children from the root and from every group member, so a shell in a
+        // group of its own below a group member is found too. Visits are tracked apart
+        // from targets, so a group member's children are still walked.
+        let mut frontier: Vec<u32> = found.iter().map(|s| s.pid).collect();
         if !root_reaped {
-            let mut frontier = vec![root];
-            while let Some(parent) = frontier.pop() {
-                for s in &all {
-                    if s.ppid == parent && !found.iter().any(|f| f.pid == s.pid) {
+            frontier.push(root);
+        }
+        let mut visited = std::collections::HashSet::new();
+        while let Some(parent) = frontier.pop() {
+            if !visited.insert(parent) {
+                continue;
+            }
+            for s in &all {
+                if s.ppid == parent && s.pid != root {
+                    if !found.iter().any(|f| f.pid == s.pid) {
                         found.push(*s);
-                        frontier.push(s.pid);
                     }
+                    frontier.push(s.pid);
                 }
             }
         }
@@ -441,6 +451,32 @@ mod tests {
         for child in children {
             assert!(!alive(child), "child {child} survived");
         }
+    }
+
+    #[test]
+    fn teardown_reaches_a_separate_group_below_a_group_member() {
+        let (line_tx, line_rx) = channel();
+        let process = Process::spawn(
+            Path::new("/bin/sh"),
+            // The inner shell stays in the group; setsid moves the sleep into a session
+            // and group of its own, as agents do with the shells they start.
+            &["-c", "sh -c 'setsid sleep 30 & echo $!; wait' & wait"],
+            Path::new("/"),
+            move |line| {
+                let _ = line_tx.send(String::from_utf8_lossy(line).trim().parse::<u32>().unwrap());
+            },
+            |_| {},
+        )
+        .unwrap();
+        let sleeper = line_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        thread::sleep(Duration::from_millis(200));
+        assert!(alive(sleeper));
+        drop(process);
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            !alive(sleeper),
+            "the separately grouped sleep {sleeper} survived"
+        );
     }
 
     #[test]

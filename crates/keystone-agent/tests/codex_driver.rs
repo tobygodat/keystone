@@ -289,6 +289,46 @@ fn a_steer_rejected_while_the_turn_runs_is_a_warning_and_the_turn_continues() {
 }
 
 #[test]
+fn a_steer_rejected_after_stop_does_not_start_a_new_turn() {
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "first".into(),
+        },
+        &mut out,
+    );
+    driver.on_line(started("T1").as_bytes(), &mut out);
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "steer".into(),
+        },
+        &mut out,
+    );
+    let steer: Value = serde_json::from_str(&out.writes[0]).unwrap();
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    let mut out = Outputs::default();
+    let interrupted = format!(
+        r#"{{"method":"turn/completed","params":{{"threadId":"{THREAD}","turn":{{"id":"T1","status":"interrupted"}}}}}}"#
+    );
+    driver.on_line(interrupted.as_bytes(), &mut out);
+    let rejected = format!(
+        r#"{{"id":{},"error":{{"code":-32600,"message":"no active turn"}}}}"#,
+        steer["id"]
+    );
+    driver.on_line(rejected.as_bytes(), &mut out);
+    assert!(
+        methods(&out).is_empty(),
+        "Stop must not be undone: {:?}",
+        out.writes
+    );
+    assert!(!driver.is_running(SESSION));
+}
+
+#[test]
 fn messages_and_a_stop_sent_during_startup_are_kept_in_order() {
     // Two messages before the thread exists: the first starts the turn, the second
     // waits for the turn's ID and then steers.

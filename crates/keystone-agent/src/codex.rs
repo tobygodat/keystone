@@ -71,6 +71,8 @@ enum Pending {
         session: u64,
         text: String,
         turn: String,
+        /// The session's stop count when the steer was sent.
+        epoch: u64,
     },
     Ignore,
 }
@@ -94,6 +96,8 @@ struct Session {
     waiting: Vec<String>,
     /// Stop was asked while the turn was starting. It is sent once the turn has an ID.
     stop_requested: bool,
+    /// Counts stops. A steer sent before a stop must not start a turn after it.
+    epoch: u64,
     /// Open approval requests and the decision that denies each one.
     approvals: HashMap<RequestId, &'static str>,
 }
@@ -272,6 +276,7 @@ impl CodexDriver {
             ),
             (None, _) | (Some(_), Turn::Starting) => state.waiting.push(text),
             (Some(thread), Turn::Running(turn)) => {
+                let epoch = state.epoch;
                 let line = self.request(
                     "turn/steer",
                     json!({"threadId": thread, "expectedTurnId": turn, "input": text_input(&text)}),
@@ -279,6 +284,7 @@ impl CodexDriver {
                         session,
                         text,
                         turn,
+                        epoch,
                     },
                 );
                 self.write(line, out);
@@ -302,6 +308,7 @@ impl CodexDriver {
             return;
         };
         state.waiting.clear();
+        state.epoch += 1;
         match (state.thread.clone(), state.turn.clone()) {
             (Some(thread), Turn::Running(turn)) => {
                 let line = self.request(
@@ -404,13 +411,22 @@ impl CodexDriver {
                 session,
                 text,
                 turn,
+                epoch,
             } => {
                 let Some(error) = error else { return };
-                let still_running = self
-                    .sessions
-                    .get(&session)
-                    .is_some_and(|s| s.turn == Turn::Running(turn.clone()));
-                if still_running {
+                let Some(state) = self.sessions.get(&session) else {
+                    return;
+                };
+                let still_running = state.turn == Turn::Running(turn.clone());
+                if state.epoch != epoch {
+                    // The user stopped the turn after sending this; never restart work.
+                    out.event(
+                        session,
+                        Event::Warning {
+                            message: "A message sent before Stop was not delivered".into(),
+                        },
+                    );
+                } else if still_running {
                     // A real failure while the turn goes on. Report it; the turn continues.
                     out.event(
                         session,

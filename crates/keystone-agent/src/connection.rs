@@ -26,6 +26,9 @@ struct Shared {
     driver: Option<CodexDriver>,
     process: Option<Process>,
     inbox: Vec<(u64, Event)>,
+    /// The latest thread per session, kept across process restarts. A thread opened
+    /// just before a crash may not have reached the caller's saved state yet.
+    threads: std::collections::HashMap<u64, String>,
     /// Incremented per process, so a late exit from an old one is ignored.
     generation: u64,
 }
@@ -77,13 +80,17 @@ impl CodexConnection {
         resume: Option<&str>,
         text: String,
     ) -> io::Result<()> {
-        self.with_driver(|driver, out| {
+        self.with_driver(|driver, threads, out| {
             if !driver.is_open(session) {
+                let resume = threads
+                    .get(&session)
+                    .cloned()
+                    .or_else(|| resume.map(str::to_owned));
                 driver.command(
                     Command::Open {
                         session,
                         cwd: cwd.to_owned(),
-                        resume: resume.map(str::to_owned),
+                        resume,
                     },
                     out,
                 );
@@ -94,20 +101,25 @@ impl CodexConnection {
 
     /// Sends a command, starting the app-server first if it is not running.
     pub fn command(&self, command: Command) -> io::Result<()> {
-        self.with_driver(|driver, out| driver.command(command, out))
+        self.with_driver(|driver, _, out| driver.command(command, out))
     }
 
-    fn with_driver(&self, act: impl FnOnce(&mut CodexDriver, &mut Outputs)) -> io::Result<()> {
+    fn with_driver(
+        &self,
+        act: impl FnOnce(&mut CodexDriver, &std::collections::HashMap<u64, String>, &mut Outputs),
+    ) -> io::Result<()> {
         let mut shared = self.shared.lock().unwrap();
         if shared.process.is_none() {
             self.start(&mut shared)?;
         }
         let mut out = Outputs::default();
+        let shared_ref = &mut *shared;
         act(
-            shared
+            shared_ref
                 .driver
                 .as_mut()
                 .expect("driver exists while the process runs"),
+            &shared_ref.threads,
             &mut out,
         );
         deliver(&mut shared, out);
@@ -202,6 +214,11 @@ fn deliver(shared: &mut Shared, mut out: Outputs) {
     if let Some(process) = &shared.process {
         for line in out.writes.drain(..) {
             process.send(line);
+        }
+    }
+    for (session, event) in &out.events {
+        if let Event::ThreadReady { thread_id } = event {
+            shared.threads.insert(*session, thread_id.clone());
         }
     }
     shared.inbox.append(&mut out.events);
