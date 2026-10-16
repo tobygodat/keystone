@@ -561,9 +561,15 @@ fn a_stop_is_reported_by_its_own_turn_only() {
 }
 
 #[test]
-fn a_stop_after_the_turn_already_ended_marks_only_the_stop() {
+fn a_stop_after_the_turn_already_ended_leaves_that_end_alone() {
     let mut driver = opened();
     let mut out = Outputs::default();
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert!(
+        out.events.is_empty() && out.writes.is_empty(),
+        "nothing to stop"
+    );
+
     driver.command(
         Command::Send {
             session: SESSION,
@@ -572,11 +578,17 @@ fn a_stop_after_the_turn_already_ended_marks_only_the_stop() {
         &mut out,
     );
     feed(&mut driver, &[started("a")]);
-    assert_eq!(stopped(&feed(&mut driver, &[completed("a")])), Some(false));
-    // The user pressed Stop before the end reached them.
+    let failed = format!(
+        r#"{{"method":"turn/completed","params":{{"threadId":"{THREAD}","turn":{{"id":"a","status":"failed","error":{{"message":"boom"}}}}}}}}"#
+    );
+    assert_eq!(stopped(&feed(&mut driver, &[failed])), Some(false));
+    // The user pressed Stop before the failure reached them.
     let mut out = Outputs::default();
     driver.command(Command::Interrupt { session: SESSION }, &mut out);
-    assert_eq!(stopped(&out), Some(true));
+    assert!(
+        out.events.is_empty() && out.writes.is_empty(),
+        "a second end would hide the failure"
+    );
 
     driver.command(
         Command::Send {

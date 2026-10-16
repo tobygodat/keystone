@@ -312,7 +312,7 @@ impl CodexDriver {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        state.waiting.clear();
+        let dropped = !std::mem::take(&mut state.waiting).is_empty();
         state.epoch += 1;
         match (state.thread.clone(), state.turn.clone()) {
             (Some(thread), Turn::Running(turn)) => {
@@ -328,8 +328,9 @@ impl CodexDriver {
             (None, Turn::Running(_)) => {}
             // Remembered, and sent once `turn/started` gives the turn an ID.
             (_, Turn::Starting) => state.stop_requested = true,
-            // Nothing reached Codex yet; the dropped messages end the turn here.
-            (_, Turn::Idle) => out.event(
+            // Nothing reached Codex yet; the dropped messages end the turn here. With
+            // none, the last turn already ended and must keep its own end.
+            (_, Turn::Idle) if dropped => out.event(
                 session,
                 Event::TurnCompleted {
                     status: TurnStatus::Interrupted,
@@ -337,6 +338,7 @@ impl CodexDriver {
                     stopped: true,
                 },
             ),
+            (_, Turn::Idle) => {}
         }
     }
 

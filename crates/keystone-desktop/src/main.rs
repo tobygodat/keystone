@@ -3532,6 +3532,25 @@ mod tests {
         assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
     }
 
+    #[gpui::test]
+    fn a_late_stop_keeps_the_failure_it_arrived_after(cx: &mut gpui::TestAppContext) {
+        let (_dir, view, cx, release) = held_history(cx);
+        load(&view, cx, &release);
+        let mut codex = Codex::open();
+        codex.send("a");
+        codex.end("a", "failed");
+        deliver(&view, cx, &mut codex);
+        let rows = view.read_with(cx, |this, _| this.conversations[&1].rows.len());
+        // The user pressed Stop before the failure reached them.
+        codex.stop();
+        deliver(&view, cx, &mut codex);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+        assert_eq!(
+            view.read_with(cx, |this, _| this.conversations[&1].rows.len()),
+            rows
+        );
+    }
+
     #[test]
     fn excerpt_is_the_first_written_line_or_the_provider() {
         assert_eq!(
