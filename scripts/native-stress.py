@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -130,6 +131,11 @@ class Stress:
         typing = subprocess.Popen(['wtype', '-d', str(self.args.delay_ms), '--', text],
                                   env=dict(os.environ, WAYLAND_DISPLAY=self.socket),
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        # Timestamp wtype's exit as it happens; the polling below can lag by 250 ms.
+        exited = []
+        waiter = threading.Thread(target=lambda: (typing.wait(), exited.append(time.monotonic())),
+                                  daemon=True)
+        waiter.start()
         while typing.poll() is None:
             if not alive(self.app()):
                 typing.kill()
@@ -141,15 +147,17 @@ class Stress:
             time.sleep(0.25)
         if typing.returncode:
             raise RuntimeError(f'wtype failed: {typing.stdout.read()}')
-        typed = time.monotonic()
+        waiter.join()
+        typed = exited[0]
         result['typing_s'] = round(typed - began, 2)
         wait('typed draft persisted', lambda: not alive(self.app()) or self.draft() == text,
              self.args.settle_timeout)
         if not alive(self.app()):
             raise RuntimeError(f'App {self.ended(self.app())} after typing')
         # The app saves 250 ms after the last edit, so a key backlog shows here.
-        lag = result['persist_lag_s'] = round(time.monotonic() - typed, 2)
-        if lag > self.args.max_persist_lag:
+        elapsed = time.monotonic() - typed
+        lag = result['persist_lag_s'] = round(elapsed, 2)
+        if elapsed > self.args.max_persist_lag:
             raise RuntimeError(f'KS-005: draft saved {lag} s after the last key, over the '
                                f'{self.args.max_persist_lag} s limit')
         self.check(f'{len(text)} characters persisted exactly, {lag} s after the last key')
