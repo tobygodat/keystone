@@ -861,3 +861,58 @@ fn an_unconfirmed_mode_fails_the_turn_and_the_next_message_replaces_claude() {
     assert!(reply(&events).unwrap().contains("again"));
     assert_ne!(conn.pid(1), Some(pid));
 }
+
+/// Review round 3, finding 1. A Claude that never answers `initialize` fails the turn
+/// at the deadline, and the next message starts a new process.
+#[test]
+fn an_unanswered_initialize_fails_the_turn_and_the_next_message_replaces_claude() {
+    let dir = project("init-timeout", &[("ignore-initialize", "all")]);
+    let (conn, wake) = connect();
+    conn.set_mode_timeout(Duration::from_millis(300));
+    conn.send(1, &dir, None, NO_MODE, "never sent".into())
+        .unwrap();
+    let events = until(&conn, &wake, completed);
+    assert!(
+        matches!(events.last(), Some(Event::TurnCompleted { status: TurnStatus::Failed, error: Some(error), stopped: false })
+        if error.contains("did not start")),
+        "{events:?}"
+    );
+    let pid = conn.pid(1).unwrap();
+    std::fs::remove_file(PathBuf::from(&dir).join(".fake-claude-ignore-initialize")).unwrap();
+    conn.send(1, &dir, None, NO_MODE, "again".into()).unwrap();
+    let events = until(&conn, &wake, completed);
+    assert!(reply(&events).unwrap().contains("again"));
+    assert_ne!(conn.pid(1), Some(pid));
+    gate::gone(pid);
+}
+
+/// Review round 3, finding 2. The process that reads the user's own mode belongs to
+/// the connection: dropping the connection ends it, even while it hangs.
+#[test]
+fn dropping_ends_a_hung_settings_probe() {
+    use keystone_core::ApprovalMode::*;
+    let dir = project("probe-hang", &[("ignore-initialize", "probe")]);
+    let (conn, wake) = connect();
+    conn.send(1, &dir, None, mode(ReadOnly), "first".into())
+        .unwrap();
+    until(&conn, &wake, completed);
+    kill(&conn, &wake, 1);
+    conn.send(1, &dir, None, mode(Provider), "second".into())
+        .unwrap();
+    let path = std::path::Path::new(&dir);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let probe = loop {
+        if let [_, probe] = started_in(path)[..] {
+            break probe;
+        }
+        assert!(Instant::now() < deadline, "the probe never started");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // Let the probe receive its request.
+    std::thread::sleep(Duration::from_millis(200));
+    let started = Instant::now();
+    drop(conn);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    gate::gone(probe);
+    assert_eq!(started_in(path).len(), 2, "nothing started after the drop");
+}

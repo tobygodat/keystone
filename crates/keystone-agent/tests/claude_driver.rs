@@ -1061,10 +1061,13 @@ fn an_unanswered_mode_request_fails_the_turn_and_marks_the_process() {
     configure(&mut driver, ApprovalMode::Auto);
     let mut out = Outputs::default();
     driver.command(send(1), &mut out);
-    let [request] = &driver.take_mode_requests()[..] else {
-        panic!("one request to time")
+    // The answered `initialize` is timed too, and its timeout changes nothing.
+    let [initialize, request] = &driver.take_timed_requests()[..] else {
+        panic!("two requests to time")
     };
-    driver.mode_request_timed_out(request, &mut out);
+    driver.request_timed_out(initialize, &mut out);
+    assert!(!driver.needs_restart());
+    driver.request_timed_out(request, &mut out);
     assert_eq!(turn_ends(&out), [TurnStatus::Failed]);
     assert_eq!(user_writes(&out), 0);
     assert!(driver.needs_restart());

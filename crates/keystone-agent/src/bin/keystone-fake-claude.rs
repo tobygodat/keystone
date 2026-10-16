@@ -19,7 +19,9 @@
 //! and `init` report the mode, and each reply names the mode it ran under.
 //! `KEYSTONE_FAKE_CLAUDE_HOLD_MODE_MS` delays answers to `set_permission_mode`. That
 //! and the user's mode can also be set for one working directory, in its
-//! `.fake-claude-hold-mode-ms` and `.fake-claude-user-mode` files.
+//! `.fake-claude-hold-mode-ms` and `.fake-claude-user-mode` files. A
+//! `.fake-claude-ignore-initialize` file holding `all` leaves every `initialize`
+//! unanswered, and `probe` only Keystone's settings probe (`keystone-probe`).
 //!
 //! A prompt containing "exit plan" asks to approve `ExitPlanMode` first, as Claude does
 //! in plan mode. Approved, the mode returns to the one before plan mode, as Claude
@@ -155,6 +157,7 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
     );
+    let ignore_initialize = setting("ignore-initialize");
     let shared = Arc::new(Shared {
         state: Mutex::default(),
         bypass: launch_mode.as_deref() == Some("bypassPermissions"),
@@ -190,6 +193,10 @@ fn main() {
                     )
                 };
                 match message["request"]["subtype"].as_str() {
+                    Some("initialize")
+                        if ignore_initialize.as_deref() == Some("all")
+                            || (ignore_initialize.as_deref() == Some("probe")
+                                && id == "keystone-probe") => {}
                     Some("initialize") => reply(json!({"commands": [],
                         "current_permission_mode": *shared.mode.lock().unwrap()})),
                     Some("set_permission_mode") => {

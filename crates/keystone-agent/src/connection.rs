@@ -513,8 +513,8 @@ pub struct ClaudeConnection {
 
 type Workers = Arc<Mutex<HashMap<u64, Worker>>>;
 
-/// How long Claude may take to answer `set_permission_mode` before the messages
-/// waiting for it fail and its process is replaced.
+/// How long Claude may take to answer `initialize` or `set_permission_mode` before
+/// the messages waiting for it fail and its process is replaced.
 const MODE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long Claude may take to report the user's own permission mode.
@@ -548,6 +548,9 @@ struct Live {
     driver: ClaudeDriver,
     /// `None` while the process starts.
     process: Option<Process>,
+    /// The process reading the user's own permission mode while it runs, here so
+    /// dropping the connection ends it too.
+    probe: Option<Process>,
     /// Lines written, and events, from before the process could take them. Events
     /// wait too, so a start that fails reports only the failure.
     pending: Outputs,
@@ -701,7 +704,7 @@ impl ClaudeConnection {
         self.starter.shared.lock().unwrap().before_start = Some(hook);
     }
 
-    /// Shortens how long Claude may take to confirm a permission mode.
+    /// Shortens how long Claude may take to start or confirm a permission mode.
     #[doc(hidden)]
     pub fn set_mode_timeout(&self, timeout: Duration) {
         self.starter.shared.lock().unwrap().mode_timeout = Some(timeout);
@@ -737,8 +740,8 @@ impl ClaudeStarter {
     }
 
     /// Delivers the driver's outputs ([`claude_deliver`]), then, without the lock,
-    /// wakes the UI, times new `set_permission_mode` requests, and queues the
-    /// process's replacement when a waiting turn needs one.
+    /// wakes the UI, times new `initialize` and `set_permission_mode` requests, and
+    /// queues the process's replacement when a waiting turn needs one.
     fn deliver(&self, mut shared: MutexGuard<'_, ClaudeShared>, session: u64, out: Outputs) {
         let wake = claude_deliver(&mut shared, &self.inbox, session, out);
         let timeout = shared.mode_timeout.unwrap_or(MODE_TIMEOUT);
@@ -748,7 +751,7 @@ impl ClaudeStarter {
         if let Some(live) = shared.live.get_mut(&session)
             && live.process.is_some()
         {
-            timed = live.driver.take_mode_requests();
+            timed = live.driver.take_timed_requests();
             generation = live.generation;
             if live.driver.wants_restart() && !live.replacing {
                 live.replacing = true;
@@ -770,7 +773,7 @@ impl ClaudeStarter {
                 let mut out = Outputs::default();
                 match shared.live.get_mut(&session) {
                     Some(live) if live.generation == generation => {
-                        live.driver.mode_request_timed_out(&id, &mut out)
+                        live.driver.request_timed_out(&id, &mut out)
                     }
                     _ => return,
                 }
@@ -873,6 +876,7 @@ impl ClaudeStarter {
             Live {
                 driver,
                 process: None,
+                probe: None,
                 pending,
                 exited: None,
                 generation,
@@ -966,7 +970,7 @@ impl ClaudeStarter {
             }
         };
         let baseline = if probe {
-            Some(probe_permission_mode(&program, cwd)?)
+            Some(self.probe_permission_mode(session, generation, &program, cwd)?)
         } else {
             None
         };
@@ -1022,42 +1026,74 @@ impl ClaudeStarter {
         Process::spawn(&program, &args, cwd, on_line, on_exit)
             .map_err(|e| format!("Could not start Claude Code at {}. {e}", program.display()))
     }
-}
 
-/// The permission mode the user's own settings give a new conversation in `cwd`, as
-/// a fresh `claude` reports it in its `initialize` answer. It is closed at once, with
-/// no message sent.
-fn probe_permission_mode(program: &Path, cwd: &Path) -> Result<String, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let on_line = move |line: &[u8]| {
-        let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
-            return;
+    /// The permission mode the user's own settings give a new conversation in `cwd`,
+    /// as a fresh `claude` reports it in its `initialize` answer. It is closed at once,
+    /// with no message sent. The probe is kept with the session's start, so a replaced
+    /// start or a dropped connection ends it, and then this fails at once.
+    fn probe_permission_mode(
+        &self,
+        session: u64,
+        generation: u64,
+        program: &Path,
+        cwd: &Path,
+    ) -> Result<String, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let on_line = move |line: &[u8]| {
+            let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
+                return;
+            };
+            let response = &message["response"];
+            if message["type"] == "control_response" && response["request_id"] == "keystone-probe" {
+                let _ = tx.send(
+                    response["response"]["current_permission_mode"]
+                        .as_str()
+                        .map(str::to_owned),
+                );
+            }
         };
-        let response = &message["response"];
-        if message["type"] == "control_response" && response["request_id"] == "keystone-probe" {
-            let _ = tx.send(
-                response["response"]["current_permission_mode"]
-                    .as_str()
-                    .map(str::to_owned),
-            );
+        let failed = |reason: &str| {
+            format!(
+                "Could not read your Claude Code approval settings to restore them ({reason}). Choose an approval mode to continue."
+            )
+        };
+        let process = Process::spawn(program, &claude::ARGS, cwd, on_line, |_| {})
+            .map_err(|e| failed(&e.to_string()))?;
+        process.send(
+            serde_json::json!({"type": "control_request", "request_id": "keystone-probe",
+                "request": {"subtype": "initialize"}})
+            .to_string(),
+        );
+        {
+            let mut shared = self.shared.lock().unwrap();
+            let closed = shared.closed;
+            match shared.live.get_mut(&session) {
+                Some(live) if live.generation == generation && !closed => {
+                    live.probe = Some(process);
+                }
+                _ => {
+                    drop(shared);
+                    drop(process);
+                    return Err(failed("Keystone closed the session"));
+                }
+            }
         }
-    };
-    let failed = |reason: &str| {
-        format!(
-            "Could not read your Claude Code approval settings to restore them ({reason}). Choose an approval mode to continue."
-        )
-    };
-    let process = Process::spawn(program, &claude::ARGS, cwd, on_line, |_| {})
-        .map_err(|e| failed(&e.to_string()))?;
-    process.send(
-        serde_json::json!({"type": "control_request", "request_id": "keystone-probe",
-            "request": {"subtype": "initialize"}})
-        .to_string(),
-    );
-    match rx.recv_timeout(PROBE_TIMEOUT) {
-        Ok(Some(mode)) => Ok(mode),
-        Ok(None) => Err(failed("Claude Code did not report it")),
-        Err(_) => Err(failed("Claude Code did not answer")),
+        let answer = rx.recv_timeout(PROBE_TIMEOUT);
+        let process = {
+            let mut shared = self.shared.lock().unwrap();
+            match shared.live.get_mut(&session) {
+                Some(live) if live.generation == generation => live.probe.take(),
+                _ => None,
+            }
+        };
+        let ended = process.is_none();
+        drop(process);
+        match answer {
+            _ if ended => Err(failed("Keystone closed the session")),
+            Ok(Some(mode)) => Ok(mode),
+            Ok(None) => Err(failed("Claude Code did not report it")),
+            Err(_) => Err(failed("Claude Code did not answer")),
+        }
     }
 }
 

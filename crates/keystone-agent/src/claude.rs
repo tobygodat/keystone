@@ -153,11 +153,12 @@ pub struct ClaudeDriver {
     /// Whether the user allowed `ExitPlanMode` in the running turn. Claude's mode is
     /// then unknown until the turn ends, so steers wait for the next turn.
     leaving_plan: bool,
-    /// Whether a `set_permission_mode` went unanswered too long. The process's mode
-    /// is unknown, so it is replaced before anything else is written to it.
+    /// Whether `initialize` or a `set_permission_mode` failed or went unanswered too
+    /// long. The process cannot be relied on, so it is replaced before anything else
+    /// is written to it.
     untrusted: bool,
-    /// `set_permission_mode` requests sent since the connection last asked, so it can
-    /// time them ([`ClaudeDriver::take_mode_requests`]).
+    /// `initialize` and `set_permission_mode` requests sent since the connection last
+    /// asked, so it can time them ([`ClaudeDriver::take_timed_requests`]).
     timed: Vec<String>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
@@ -256,23 +257,27 @@ impl ClaudeDriver {
         self.pump(out);
     }
 
-    /// The `set_permission_mode` requests sent since the last call, by ID.
-    pub fn take_mode_requests(&mut self) -> Vec<String> {
+    /// The `initialize` and `set_permission_mode` requests sent since the last call,
+    /// by ID.
+    pub fn take_timed_requests(&mut self) -> Vec<String> {
         std::mem::take(&mut self.timed)
     }
 
-    /// A `set_permission_mode` request went unanswered too long. If Claude has still
-    /// not answered it, the process's mode is unknown: nothing more is written to it,
-    /// and the messages waiting for it fail.
-    pub fn mode_request_timed_out(&mut self, id: &str, out: &mut Outputs) {
-        if !matches!(self.requests.get(id), Some(Request::SetMode { .. })) {
-            return;
-        }
+    /// A timed request went unanswered too long. If Claude has still not answered it,
+    /// the process is not usable: nothing more is written to it, and the messages
+    /// waiting for it fail.
+    pub fn request_timed_out(&mut self, id: &str, out: &mut Outputs) {
+        let reason = match self.requests.get(id) {
+            Some(Request::Initialize) => {
+                "Claude Code did not start in time, so nothing was sent. Send again to restart it."
+            }
+            Some(Request::SetMode { .. }) => {
+                "Claude Code did not confirm the approval mode in time, so nothing was sent. Send again to restart it."
+            }
+            _ => return,
+        };
         self.untrusted = true;
-        self.fail_held(
-            "Claude Code did not confirm the approval mode in time, so nothing was sent. Send again to restart it.",
-            out,
-        );
+        self.fail_held(reason, out);
     }
 
     /// Why a message sent now could not steer the running turn, if it could not.
@@ -413,7 +418,7 @@ impl ClaudeDriver {
     fn request(&mut self, request: Value, purpose: Request) -> String {
         self.next_request += 1;
         let id = format!("keystone-{}", self.next_request);
-        if let Request::SetMode { .. } = purpose {
+        if let Request::Initialize | Request::SetMode { .. } = purpose {
             self.timed.push(id.clone());
         }
         let line =
@@ -1039,6 +1044,7 @@ impl ClaudeDriver {
         let message = format!("{failed}: {error}");
         match purpose {
             Request::Initialize => {
+                self.untrusted = true;
                 if self.turn.is_some() {
                     self.finish(TurnStatus::Failed, Some(message.clone()), out);
                 }
