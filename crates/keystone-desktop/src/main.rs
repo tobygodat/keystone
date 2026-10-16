@@ -1433,6 +1433,84 @@ mod tests {
         }
     }
 
+    /// Writes a session log with `turns` completed turns: a question, a command, and a
+    /// several-line reply each.
+    fn seed_long_session(dir: &Path, session: u64, turns: usize) {
+        use keystone_agent::Item;
+        use keystone_agent::log::{Entry, SessionLog};
+        let mut log = SessionLog::open(dir, session).unwrap();
+        for turn in 0..turns {
+            let item = |id: &str, kind: ItemKind, text: String| Entry::Item {
+                item: Item {
+                    id: format!("{id}-{turn}"),
+                    kind,
+                    text,
+                    status: ItemStatus::Completed,
+                },
+            };
+            log.append(&Entry::TurnStarted).unwrap();
+            log.append(&item(
+                "u",
+                ItemKind::UserMessage,
+                format!("Question {turn}"),
+            ))
+            .unwrap();
+            log.append(&item(
+                "c",
+                ItemKind::Command {
+                    command: "cargo test".into(),
+                    exit_code: Some(0),
+                },
+                "running 12 tests\ntest result: ok".into(),
+            ))
+            .unwrap();
+            log.append(&item(
+                "a",
+                ItemKind::AgentMessage,
+                format!("Reply {turn}. ").repeat(40),
+            ))
+            .unwrap();
+            log.append(&Entry::TurnEnded {
+                status: TurnStatus::Completed,
+                error: None,
+            })
+            .unwrap();
+        }
+        log.sync().unwrap();
+    }
+
+    #[gpui::test]
+    #[ignore = "benchmark; run through scripts/perf.py"]
+    fn perf_transcript_draw(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 1000);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 3000)
+        });
+        // A composer keystroke notifies the root view, which rebuilds the transcript.
+        let mut total = std::time::Duration::ZERO;
+        let frames = 30;
+        for _ in 0..frames {
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let start = std::time::Instant::now();
+                window.draw(cx).clear();
+                total += start.elapsed();
+            });
+        }
+        eprintln!(
+            "PERF transcript_draw_ms={:.2}",
+            total.as_secs_f64() * 1000. / frames as f64
+        );
+    }
+
     #[gpui::test]
     fn cached_sidebar_follows_search_settlement_and_filters(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();

@@ -16,7 +16,8 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOG = ROOT / 'docs/perf-log.tsv'
 COLUMNS = ['date', 'commit', 'touch_desktop_s', 'touch_ui_s', 'desktop_debug_mb',
-           'sidebar_draw_ms', 'sidebar_refresh_ms', 'note']
+           'sidebar_draw_ms', 'sidebar_refresh_ms', 'note', 'transcript_draw_ms',
+           'transcript_stream_ms']
 BUILD = ['cargo', 'build', '-p', 'keystone-desktop', '--locked', '-q']
 
 
@@ -44,7 +45,7 @@ def render_ms(runs):
             cwd=ROOT, check=True, capture_output=True, text=True)
         for name, value in re.findall(r'PERF (\w+)=([0-9.]+)', out.stdout + out.stderr):
             samples.setdefault(name, []).append(float(value))
-    for name in ('sidebar_draw_ms', 'sidebar_refresh_ms'):
+    for name in ('sidebar_draw_ms', 'sidebar_refresh_ms', 'transcript_draw_ms'):
         if name not in samples:
             raise SystemExit(f'render benchmark printed no {name} line')
     return {name: f'{statistics.median(values):.2f}' for name, values in samples.items()}
@@ -82,6 +83,9 @@ def main():
         'sidebar_draw_ms': render['sidebar_draw_ms'],
         'sidebar_refresh_ms': render['sidebar_refresh_ms'],
         'note': args.note,
+        'transcript_draw_ms': render['transcript_draw_ms'],
+        # Added with the virtualized transcript; earlier code has no streaming benchmark.
+        'transcript_stream_ms': render.get('transcript_stream_ms', ''),
     }
     print('\t'.join(f'{k}={row[k]}' for k in COLUMNS))
     if not args.no_log:
