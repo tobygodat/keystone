@@ -114,7 +114,8 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
         events.last(),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Interrupted,
-            error: None
+            error: None,
+            stopped: true,
         })
     );
 
@@ -228,7 +229,7 @@ fn a_missing_conversation_fails_with_a_clear_error() {
     conn.send(1, "/tmp", Some("missing"), "hello".into())
         .unwrap();
     let events = until(&conn, &wake, completed);
-    let Some(Event::TurnCompleted { status, error }) = events.last() else {
+    let Some(Event::TurnCompleted { status, error, .. }) = events.last() else {
         unreachable!()
     };
     assert_eq!(*status, TurnStatus::Failed);
@@ -288,7 +289,8 @@ fn stale_answers_after_stop_and_restart_are_not_applied() {
     let events = until(&conn, &wake, completed);
     assert!(events.contains(&Event::TurnCompleted {
         status: TurnStatus::Interrupted,
-        error: None
+        error: None,
+        stopped: true,
     }));
     deny(&stopped.request);
 
@@ -472,7 +474,8 @@ fn stop_and_answers_reach_a_session_while_another_is_starting() {
         events.last(),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Interrupted,
-            error: None
+            error: None,
+            stopped: true,
         })
     );
 

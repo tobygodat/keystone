@@ -56,6 +56,7 @@ struct Turn {
     unrun: bool,
     /// The latest result's status and error. A later result replaces it.
     result: Option<(TurnStatus, Option<String>)>,
+    /// The user stopped this turn. Its end reports it, so it never reaches another turn.
     stopping: bool,
 }
 
@@ -314,7 +315,8 @@ impl ClaudeDriver {
     }
 
     fn finish(&mut self, status: TurnStatus, error: Option<String>, out: &mut Outputs) {
-        self.turn = None;
+        // Only Stop ends a Claude turn early: a denial lets the turn go on.
+        let stopped = self.turn.take().is_some_and(|turn| turn.stopping);
         self.message = None;
         self.blocks.clear();
         self.tools.clear();
@@ -323,7 +325,14 @@ impl ClaudeDriver {
         for request in std::mem::take(&mut self.approvals).into_keys() {
             out.event(self.session, Event::ApprovalResolved { request });
         }
-        out.event(self.session, Event::TurnCompleted { status, error });
+        out.event(
+            self.session,
+            Event::TurnCompleted {
+                status,
+                error,
+                stopped,
+            },
+        );
     }
 
     fn on_init(&mut self, line: &[u8], out: &mut Outputs) {

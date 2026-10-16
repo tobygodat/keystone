@@ -108,11 +108,15 @@ fn recorded_session_produces_turns_items_and_approvals() {
     );
 
     // Steers join the turn they steer: four messages make one turn at the end, and
-    // Stop ends it as interrupted with no error.
+    // Stop ends it as interrupted with no error, ended by the user.
     let ends: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            Event::TurnCompleted { status, error } => Some((*status, error.clone())),
+            Event::TurnCompleted {
+                status,
+                error,
+                stopped,
+            } => Some((*status, error.clone(), *stopped)),
             _ => None,
         })
         .collect();
@@ -120,11 +124,11 @@ fn recorded_session_produces_turns_items_and_approvals() {
     assert_eq!(
         ends,
         [
-            (Completed, None),
-            (Completed, None),
-            (Completed, None),
-            (Completed, None),
-            (Interrupted, None)
+            (Completed, None, false),
+            (Completed, None, false),
+            (Completed, None, false),
+            (Completed, None, false),
+            (Interrupted, None, true)
         ]
     );
     let starts = events.iter().filter(|e| **e == Event::TurnStarted).count();
@@ -303,7 +307,8 @@ fn a_resumed_conversation_keeps_its_id() {
         events.last(),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Completed,
-            error: None
+            error: None,
+            stopped: false,
         })
     );
 }
@@ -318,7 +323,7 @@ fn a_conversation_claude_no_longer_has_fails_instead_of_starting_fresh() {
         br#"{"type":"result","subtype":"error_during_execution","duration_ms":0,"is_error":true,"num_turns":0,"session_id":"00000000-0000-4000-8000-000000000000","errors":["No conversation found with session ID: 00000000-0000-4000-8000-000000000000"]}"#,
         &mut out,
     );
-    let Some((_, Event::TurnCompleted { status, error })) = out.events.last() else {
+    let Some((_, Event::TurnCompleted { status, error, .. })) = out.events.last() else {
         panic!("expected the turn to end, got {:?}", out.events);
     };
     assert_eq!(*status, TurnStatus::Failed);
@@ -348,7 +353,7 @@ fn signed_out_claude_reports_an_error_and_no_reply() {
     }
     assert!(!out.events.iter().any(|(_, e)| matches!(e,
         Event::ItemCompleted(item) if item.kind == ItemKind::AgentMessage)));
-    let Some((_, Event::TurnCompleted { status, error })) = out.events.last() else {
+    let Some((_, Event::TurnCompleted { status, error, .. })) = out.events.last() else {
         panic!("expected the turn to end, got {:?}", out.events);
     };
     assert_eq!(*status, TurnStatus::Failed);
@@ -379,7 +384,8 @@ fn exit_fails_the_running_turn() {
         out.events.last().map(|(_, e)| e),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Failed,
-            error: Some("Claude Code stopped with exit code 1".into())
+            error: Some("Claude Code stopped with exit code 1".into()),
+            stopped: false,
         })
     );
 }
@@ -406,7 +412,8 @@ fn a_message_stopped_before_it_started_ends_the_turn_without_a_result() {
         out.events.last().map(|(_, e)| e),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Interrupted,
-            error: None
+            error: None,
+            stopped: true,
         })
     );
 }

@@ -29,6 +29,36 @@ class NotReady(RuntimeError):
     """The app has not reported a frame yet. Retrying can succeed."""
 ROOT = Path(__file__).resolve().parent.parent
 
+# computer-use-mcp spawns the app but never reports how it exited, so each
+# launch runs under this parent. It writes the app's PID, then its exit
+# status, to the first file named; a negative returncode is a signal. The app's
+# stderr, where a panic goes, is kept in the second. The parent ignores
+# termination signals so a teardown still records the app's status.
+REAPER = """
+import json, os, signal, subprocess, sys
+path, log = sys.argv[1:3]
+stops = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+def write(value):
+    with open(path + '.tmp', 'w') as stream:
+        json.dump({'launcher_pid': os.getpid(), 'stderr': log, **value}, stream)
+    os.replace(path + '.tmp', path)
+def handle(disposition):
+    for number in stops:
+        signal.signal(number, disposition)
+handle(signal.SIG_IGN)
+try:
+    with open(log, 'ab') as stderr:
+        child = subprocess.Popen(sys.argv[3:], stderr=stderr,
+                                 preexec_fn=lambda: handle(signal.SIG_DFL))
+except OSError as error:
+    write({'pid': None, 'error': str(error)})
+    sys.exit(127)
+write({'pid': child.pid, 'returncode': None})
+code = child.wait()
+write({'pid': child.pid, 'returncode': code,
+       'signal': signal.Signals(-code).name if code < 0 else None})
+"""
+
 
 def timestamp():
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -42,6 +72,7 @@ def digest(path):
 class Run:
     def __init__(self, driver, root, evidence):
         self.env = {}
+        self.prime_keyboard = True
         self.binary = Path(root).resolve() / 'target/debug/keystone-desktop'
         self.binary_sha = digest(self.binary)
         driver_sha = digest(driver)
@@ -53,6 +84,8 @@ class Run:
         self.sequence = 0
         self.images = 0
         self.app_pids = []
+        self.exit_files = {}
+        self.app_logs = {}
         self.closed = False
         self.responses = queue.Queue()
         self.log = (self.evidence / 'actions.jsonl').open('a')
@@ -153,15 +186,41 @@ class Run:
         return {'session': session.get('structuredContent'), 'launch': self.launch()}
 
     def launch(self):
+        # KS-009: once a temporary virtual keyboard such as wtype's goes away,
+        # Sway's seat has no keyboard. A new client then gets no keymap, and
+        # GPUI 0.2.2 unwraps the missing keymap on its first modifiers event.
+        # A key event from the driver's own keyboard makes it the seat
+        # keyboard again; F24 has no binding in the private desktop or the app.
+        if self.prime_keyboard:
+            self.call('input', {'actions': [{'action': 'keypress', 'keys': ['F24']}]})
         self.geometry.unlink(missing_ok=True)
         extra = [f'{key}={value}' for key, value in sorted(self.env.items())]
+        number = len(self.exit_files) + 1
+        status = self.evidence / f'exit-{number:02d}.json'
+        log = self.evidence / f'app-{number:02d}.stderr.log'
         result = self.call('app_launch', {'argv': [
             '/usr/bin/env', '-u', 'KEYSTONE_VISUAL_FIXTURE', f'KEYSTONE_STATE_PATH={self.state}',
-            f'KEYSTONE_AUTOMATION_PATH={self.geometry}', *extra, str(self.binary)]})
-        pid = result.get('structuredContent', {}).get('pid')
-        if pid:
-            self.app_pids.append(pid)
-        return result.get('structuredContent')
+            f'KEYSTONE_AUTOMATION_PATH={self.geometry}', *extra,
+            sys.executable, '-I', '-c', REAPER, str(status), str(log),
+            str(self.binary)]})
+        launched = result.get('structuredContent', {})
+        deadline = time.monotonic() + 10
+        while (record := read_exit(status)) is None:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f'Launcher {launched.get("pid")} never reported the app PID')
+            time.sleep(0.02)
+        if record['pid'] is None:
+            raise RuntimeError(f'App failed to start: {record["error"]}')
+        self.app_pids.append(record['pid'])
+        self.exit_files[record['pid']] = status
+        self.app_logs[record['pid']] = log
+        self.record('app_pid', record)
+        return {**launched, 'pid': record['pid'], 'launcher_pid': record['launcher_pid']}
+
+    def exit_status(self, pid):
+        """The app's exit record once it has exited and been reaped, else None."""
+        record = read_exit(self.exit_files[pid])
+        return record if record and record.get('returncode') is not None else None
 
     def doctor(self):
         result = {name: self.call(name).get('structuredContent')
@@ -174,18 +233,18 @@ class Run:
                 identities.append({'pid': pid, 'exe': actual, 'sha256': digest(executable),
                                    'matches_launch': digest(executable) == self.binary_sha})
             except FileNotFoundError:
-                identities.append({'pid': pid, 'exited': True})
+                identities.append({'pid': pid, 'exited': True, 'exit': self.exit_status(pid)})
         result['processes'] = identities
         result['binary_sha256_now'] = digest(self.binary)
         result['binary_unchanged'] = result['binary_sha256_now'] == self.binary_sha
         self.record('doctor', result)
         return result
 
-    def window_origin(self, pid):
+    def window_rect(self, pid):
         windows = self.call('windows_list').get('structuredContent', {})
         for window in windows.get('windows', windows if isinstance(windows, list) else []):
             if window.get('pid') == pid:
-                return window['rect']['x'], window['rect']['y']
+                return window['rect']
         raise RuntimeError(f'No window for app PID {pid}: {json.dumps(windows)}')
 
     def elements(self):
@@ -195,7 +254,18 @@ class Run:
         frame = json.loads(self.geometry.read_text())
         if frame['pid'] not in self.app_pids:
             raise NotReady(f'Geometry is from PID {frame["pid"]}, not a launched app')
-        ox, oy = self.window_origin(frame['pid'])
+        rect = self.window_rect(frame['pid'])
+        ox, oy = rect['x'], rect['y']
+        # The first frame can predate the compositor's configure, and its
+        # layout then belongs to another size. Clicking it misses. The
+        # tolerance covers the window's own inset, 1 px a side under Sway.
+        viewport = frame.get('viewport')
+        if viewport and (abs(viewport['w'] - rect['width']) > 8
+                         or abs(viewport['h'] - rect['height']) > 8):
+            self.record('elements_not_ready', {'revision': frame['revision'],
+                                               'viewport': viewport, 'window': rect})
+            raise NotReady(f'Frame is {viewport["w"]}x{viewport["h"]}, '
+                           f'window is {rect["width"]}x{rect["height"]}')
 
         def place(b):
             return None if b is None else {'x': round(ox + b['x']), 'y': round(oy + b['y']),
@@ -284,6 +354,13 @@ class Run:
         if errors:
             raise RuntimeError(json.dumps(result))
         return result
+
+
+def read_exit(path):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
 
 
 # Variables a run may pass to the app. The state and automation paths stay owned by the run.

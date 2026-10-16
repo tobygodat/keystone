@@ -13,7 +13,7 @@ Send a message in a Claude Code or Codex session, watch the reply stream, answer
 
 ## How to get to it (user POV)
 
-- Click "Start with Claude Code" or "Start with Codex", or press Ctrl+N or Ctrl+Shift+N, type, then click Send or press Ctrl+Enter.
+- Click the **Claude Code** or **Codex** welcome pill, or press Ctrl+N or Ctrl+Shift+N, type, then click the round Send button or press Ctrl+Enter. Send is filled only when the draft has text.
 - Answer an approval card with Allow or Deny.
 - While a turn runs, type and press Ctrl+Enter to steer, or click Stop.
 

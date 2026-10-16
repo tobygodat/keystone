@@ -38,6 +38,25 @@ impl fmt::Display for Provider {
     }
 }
 
+/// How a session's latest turn stands. Saved with the session, so a failed turn still
+/// shows after a restart without reading every session's log.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum LastTurn {
+    Running,
+    /// Completed, or ended by the user: Stop, or a denial that ends the turn.
+    Finished,
+    /// Failed, or interrupted by anything but the user.
+    Failed,
+}
+
+/// Why a session needs the user, in priority order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Attention {
+    Approval,
+    Failed,
+    Replied,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Session {
     id: u64,
@@ -48,6 +67,19 @@ pub struct Session {
     /// The provider's own conversation ID, used to resume after a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_thread: Option<String>,
+    /// Unix milliseconds. Sessions saved before timestamps existed load as `None`
+    /// and show no time; a time is never invented for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<u64>,
+    /// When the session last changed: created, a message sent, or a turn ended.
+    /// Draft saves leave it alone, so rows do not move while the user types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at: Option<u64>,
+    /// When the user last saw the session's latest state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    viewed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_turn: Option<LastTurn>,
 }
 
 impl Session {
@@ -73,6 +105,50 @@ impl Session {
 
     pub fn provider_thread(&self) -> Option<&str> {
         self.provider_thread.as_deref()
+    }
+
+    pub fn created_at(&self) -> Option<u64> {
+        self.created_at
+    }
+
+    pub fn updated_at(&self) -> Option<u64> {
+        self.updated_at
+    }
+
+    pub fn viewed_at(&self) -> Option<u64> {
+        self.viewed_at
+    }
+
+    pub fn last_turn(&self) -> Option<LastTurn> {
+        self.last_turn
+    }
+
+    /// Never earlier than the last change, so a clock set back still clears it.
+    fn mark_viewed(&mut self, now: u64) {
+        self.viewed_at = Some(self.updated_at.map_or(now, |updated| updated.max(now)));
+    }
+
+    /// What the session needs from the user, if anything. `awaiting_approval` and
+    /// `running` describe the live provider in this process. A turn saved as running
+    /// that no live provider runs was cut off when Keystone closed, so it failed.
+    pub fn attention(&self, awaiting_approval: bool, running: bool) -> Option<Attention> {
+        let failed = match self.last_turn {
+            Some(LastTurn::Failed) => true,
+            Some(LastTurn::Running) => !running,
+            _ => false,
+        };
+        let unseen = self
+            .updated_at
+            .is_some_and(|updated| self.viewed_at.is_none_or(|viewed| updated > viewed));
+        if awaiting_approval {
+            Some(Attention::Approval)
+        } else if failed {
+            Some(Attention::Failed)
+        } else if unseen {
+            Some(Attention::Replied)
+        } else {
+            None
+        }
     }
 }
 
@@ -122,6 +198,13 @@ impl Workspace {
 
     pub fn preferences(&self) -> &Preferences {
         &self.preferences
+    }
+
+    fn leave_selected(&mut self, now: u64) {
+        let selected = self.selected;
+        if let Some(session) = self.sessions.iter_mut().find(|s| Some(s.id) == selected) {
+            session.mark_viewed(now);
+        }
     }
 }
 
@@ -178,12 +261,14 @@ impl Store {
         &self.path
     }
 
-    pub fn create(&mut self, provider: Provider) -> StoreResult<Applied<u64>> {
+    /// Creates a session and selects it. `now` is unix milliseconds.
+    pub fn create(&mut self, provider: Provider, now: u64) -> StoreResult<Applied<u64>> {
         let id = self.next_id;
         let next_id = id
             .checked_add(1)
             .ok_or_else(|| invalid("session ID exhausted"))?;
         let mut next = self.workspace.clone();
+        next.leave_selected(now);
         next.sessions.push(Session {
             id,
             title: format!("New {provider} session"),
@@ -191,6 +276,10 @@ impl Store {
             settled: false,
             draft: String::new(),
             provider_thread: None,
+            created_at: Some(now),
+            updated_at: Some(now),
+            viewed_at: Some(now),
+            last_turn: None,
         });
         next.selected = Some(id);
         let applied = self.commit(next, next_id)?;
@@ -200,7 +289,9 @@ impl Store {
         })
     }
 
-    pub fn select(&mut self, id: u64) -> StoreResult<Applied<()>> {
+    /// Selects a session. The session being left counts as viewed at `now`. The newly
+    /// selected one does not, so a reply it was showing stays unread until the user leaves.
+    pub fn select(&mut self, id: u64, now: u64) -> StoreResult<Applied<()>> {
         if !self
             .workspace
             .sessions
@@ -213,8 +304,51 @@ impl Store {
             return Ok(self.finish_sync());
         }
         let mut next = self.workspace.clone();
+        next.leave_selected(now);
         next.selected = Some(id);
         self.commit(next, self.next_id)
+    }
+
+    /// Marks the selected session viewed, for when the app quits while showing it.
+    pub fn leave(&mut self, now: u64) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        next.leave_selected(now);
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
+    }
+
+    /// Records a message sent from the selected session. It starts a turn, which also
+    /// clears a failure shown for the last one.
+    pub fn record_message(&mut self, id: u64, now: u64) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            session.updated_at = Some(now);
+            session.mark_viewed(now);
+            session.last_turn = Some(LastTurn::Running);
+        })
+    }
+
+    /// Records a turn the provider started on its own, such as one opened by a steer
+    /// that arrived after the previous turn ended.
+    pub fn record_turn_start(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.last_turn = Some(LastTurn::Running))
+    }
+
+    /// Records the end of a turn. The selected session's user sees it end.
+    pub fn record_turn_end(&mut self, id: u64, failed: bool, now: u64) -> StoreResult<Applied<()>> {
+        let selected = self.workspace.selected == Some(id);
+        self.update_session(id, |session| {
+            session.updated_at = Some(now);
+            session.last_turn = Some(if failed {
+                LastTurn::Failed
+            } else {
+                LastTurn::Finished
+            });
+            if selected {
+                session.mark_viewed(now);
+            }
+        })
     }
 
     pub fn set_settled(&mut self, id: u64, settled: bool) -> StoreResult<Applied<()>> {
@@ -343,7 +477,7 @@ mod tests {
         let mut store = Store::open(&path).unwrap();
         store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
 
-        let created = store.create(Provider::Claude).unwrap();
+        let created = store.create(Provider::Claude, 1).unwrap();
         assert_eq!(created.value, 1);
         assert_eq!(
             created.durability,
@@ -357,7 +491,7 @@ mod tests {
         assert_eq!(reopened.workspace().sessions().len(), 1);
         assert_eq!(reopened.next_id, 2);
         assert!(matches!(
-            store.select(1).unwrap().durability,
+            store.select(1, 2).unwrap().durability,
             Durability::DirectorySyncPending(_)
         ));
         assert!(matches!(
@@ -372,9 +506,164 @@ mod tests {
         assert!(store.pending_directory.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), before_retry);
         assert_eq!(store.workspace().sessions().len(), 1);
-        let next = store.create(Provider::Codex).unwrap();
+        let next = store.create(Provider::Codex, 3).unwrap();
         assert_eq!(next.value, 2);
         assert_eq!(next.durability, Durability::Synced);
         assert_eq!(Store::open(&path).unwrap().workspace().sessions().len(), 2);
+    }
+
+    #[test]
+    fn timestamps_follow_create_send_turn_end_and_leave_but_not_drafts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        let times = |store: &Store, id: u64| {
+            let session = &store.workspace().sessions()[id as usize - 1];
+            (
+                session.created_at(),
+                session.updated_at(),
+                session.viewed_at(),
+            )
+        };
+
+        store.create(Provider::Codex, 1_000).unwrap();
+        assert_eq!(times(&store, 1), (Some(1_000), Some(1_000), Some(1_000)));
+        store.set_draft(1, "typing".into()).unwrap();
+        assert_eq!(times(&store, 1), (Some(1_000), Some(1_000), Some(1_000)));
+        store.record_message(1, 2_000).unwrap();
+        assert_eq!(times(&store, 1), (Some(1_000), Some(2_000), Some(2_000)));
+        // A turn that ends while its session is selected is seen as it ends.
+        store.record_turn_end(1, false, 3_000).unwrap();
+        assert_eq!(times(&store, 1), (Some(1_000), Some(3_000), Some(3_000)));
+
+        // Creating a second session leaves the first.
+        store.create(Provider::Claude, 4_000).unwrap();
+        assert_eq!(times(&store, 1), (Some(1_000), Some(3_000), Some(4_000)));
+        // A turn ending elsewhere is unseen.
+        store.record_turn_end(1, false, 5_000).unwrap();
+        assert_eq!(times(&store, 1), (Some(1_000), Some(5_000), Some(4_000)));
+        // Selecting it does not count as viewing it; leaving it does.
+        store.select(1, 6_000).unwrap();
+        assert_eq!(times(&store, 1), (Some(1_000), Some(5_000), Some(4_000)));
+        assert_eq!(times(&store, 2), (Some(4_000), Some(4_000), Some(6_000)));
+        store.leave(7_000).unwrap();
+        assert_eq!(times(&store, 1), (Some(1_000), Some(5_000), Some(7_000)));
+        assert_eq!(times(&Store::open(&path).unwrap(), 1), times(&store, 1));
+    }
+
+    #[test]
+    fn a_state_file_from_before_timestamps_loads_without_times() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":2,"workspace":{"sessions":[{"id":1,"title":"Old","provider":"Codex","settled":false,"draft":"keep"}],"selected":1}}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+        let session = &store.workspace().sessions()[0];
+        assert_eq!(
+            (
+                session.created_at(),
+                session.updated_at(),
+                session.viewed_at()
+            ),
+            (None, None, None)
+        );
+        assert_eq!(session.draft(), "keep");
+
+        // Saving it again writes no invented times.
+        store.set_draft(1, "edited".into()).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("_at"), "{saved}");
+        assert!(saved.contains(r#""version":1"#));
+    }
+
+    #[test]
+    fn attention_prefers_approval_then_failure_then_an_unseen_reply() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        store.create(Provider::Codex, 2_000).unwrap();
+        let attention = |store: &Store, approval, running| {
+            store.workspace().sessions()[0].attention(approval, running)
+        };
+        assert_eq!(attention(&store, false, false), None);
+
+        store.record_turn_end(1, false, 3_000).unwrap();
+        assert_eq!(attention(&store, false, false), Some(Attention::Replied));
+        store.record_turn_end(1, true, 4_000).unwrap();
+        assert_eq!(attention(&store, false, false), Some(Attention::Failed));
+        assert_eq!(attention(&store, true, true), Some(Attention::Approval));
+
+        // Viewing a failure does not clear it. The next message does.
+        store.select(1, 5_000).unwrap();
+        store.select(2, 6_000).unwrap();
+        assert_eq!(attention(&store, false, false), Some(Attention::Failed));
+        store.select(1, 7_000).unwrap();
+        store.record_message(1, 8_000).unwrap();
+        assert_eq!(attention(&store, false, true), None);
+        // A turn saved as running with nothing running was cut off by a restart.
+        assert_eq!(attention(&store, false, false), Some(Attention::Failed));
+        assert_eq!(
+            Store::open(directory.path().join("state.json"))
+                .unwrap()
+                .workspace()
+                .sessions()[0]
+                .attention(false, false),
+            Some(Attention::Failed)
+        );
+    }
+
+    #[test]
+    fn an_unseen_reply_holds_while_selected_and_clears_on_leave() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        store.create(Provider::Codex, 2_000).unwrap();
+        store.record_turn_end(1, false, 3_000).unwrap();
+        let first = |store: &Store| store.workspace().sessions()[0].attention(false, false);
+
+        store.select(1, 4_000).unwrap();
+        assert_eq!(first(&store), Some(Attention::Replied));
+        store.select(2, 5_000).unwrap();
+        assert_eq!(first(&store), None);
+
+        // A reply that lands while the session is open is seen as it lands.
+        store.select(1, 6_000).unwrap();
+        store.record_turn_end(1, false, 7_000).unwrap();
+        assert_eq!(first(&store), None);
+    }
+
+    #[test]
+    fn leaving_clears_an_unseen_reply_after_the_clock_moves_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        store.create(Provider::Codex, 2_000).unwrap();
+        store.record_turn_end(1, false, 10_000).unwrap();
+        store.select(1, 9_000).unwrap();
+        store.select(2, 9_500).unwrap();
+        assert_eq!(
+            store.workspace().sessions()[0].attention(false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_turn_the_provider_starts_on_its_own_fails_if_cut_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        store.record_message(1, 2_000).unwrap();
+        store.record_turn_end(1, false, 3_000).unwrap();
+        // A late steer opens another turn without a new message.
+        store.record_turn_start(1).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.workspace().sessions()[0].attention(false, false),
+            Some(Attention::Failed)
+        );
     }
 }

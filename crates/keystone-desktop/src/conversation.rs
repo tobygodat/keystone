@@ -271,7 +271,7 @@ impl Conversation {
             }
             Event::ApprovalRequested(approval) => self.approvals.push(approval),
             Event::ApprovalResolved { request } => self.approvals.retain(|a| a.request != request),
-            Event::TurnCompleted { status, error } => {
+            Event::TurnCompleted { status, error, .. } => {
                 self.running = false;
                 self.approvals.clear();
                 // A stopped turn leaves items the provider never completes. Keep what
@@ -482,6 +482,7 @@ mod tests {
         Event::TurnCompleted {
             status: TurnStatus::Completed,
             error: None,
+            stopped: false,
         }
     }
 
@@ -530,6 +531,7 @@ mod tests {
                 Event::TurnCompleted {
                     status: TurnStatus::Interrupted,
                     error: None,
+                    stopped: true,
                 },
             ],
         );
@@ -554,6 +556,16 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_failure_ends_the_turn() {
+        let mut live = Conversation::default();
+        live.push_local("hello");
+        live.apply(Event::Failed {
+            message: "Could not start Codex".into(),
+        });
+        assert!(!live.running);
     }
 
     #[test]
@@ -903,6 +915,7 @@ mod tests {
                 Event::TurnCompleted {
                     status: TurnStatus::Interrupted,
                     error: None,
+                    stopped: true,
                 },
             ],
         );
