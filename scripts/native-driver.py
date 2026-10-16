@@ -63,10 +63,15 @@ write({'pid': child.pid, 'returncode': code,
 def default_driver():
     """This checkout's driver, else the main checkout's, which git worktrees share."""
     local = ROOT / '.audit/tools/computer-use-mcp'
-    common = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-                            cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    if local.exists():
+        return local
+    try:
+        common = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                                cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return local
     shared = Path(common).parent / '.audit/tools/computer-use-mcp' if common else local
-    return local if local.exists() or not shared.exists() else shared
+    return shared if shared.exists() else local
 
 
 def add_binary_argument(parser):
