@@ -28,6 +28,21 @@ The session sidebar is a cached GPUI view (`SessionSidebar`). GPUI reuses its pr
 
 The transcript is a virtualized GPUI `list`. With 3,000 rows, a draw fell from 115 ms to under 1 ms on 2026-10-16, because only the rows in view are laid out and painted. Streaming a reply at the end of that transcript costs the same as a still frame.
 
+Builds go through `scripts/rustc-wrapper.sh`, set as the rustc wrapper in `.cargo/config.toml`. When mold is installed, the wrapper adds `-C link-arg=-fuse-ld=mold`. When sccache is installed, it runs rustc through sccache. Without either, it runs rustc unchanged, so the repo still builds on a machine that has neither. On Arch, install both with `sudo pacman -S --needed sccache mold`. The cache lives in `~/.cache/sccache` and defaults to 10 GB.
+
+On 2026-10-16 each configuration built `keystone-desktop` cold in a fresh worktree, interleaved so that plain builds ran before and after the others. Other projects kept the load average between 30 and 240 on 24 cores, so CPU time is the comparable figure. Wall time is shown with the load when the build started.
+
+| Build | CPU s | Wall s (load) | Touch rebuild s (median of 3) | sccache hits |
+| --- | --- | --- | --- | --- |
+| Plain | 994 | 161 (238) | 0.68 | |
+| sccache and mold, empty cache | 1,009 | 65 (92) | 0.54 | 0 of 499 |
+| sccache and mold, warm cache, new worktree | 640 | 49 (46) | 0.53 | 406 of 499 |
+| Plain, again | 977 | 68 (32) | 0.92 | |
+
+A cache miss costs about 2% more CPU. A new worktree with a warm cache spends 35% less CPU. mold cuts a touch rebuild by about 0.15 to 0.4 s.
+
+The other 93 crates miss because serde's build script writes into `target/`, and serde's rlib embeds that path. Every crate built on serde then has a different input hash in each worktree, including GPUI, the longest step on the critical path. `--remap-path-prefix` would remove the path from the rlib. sccache 0.17 hashes that flag's value, though, and `SCCACHE_BASEDIRS` does not rewrite rustc arguments, so the remap yielded no hits at all. mold is passed as a constant flag for the same reason. A linker script inside the checkout puts the checkout's path into every key, and a new worktree then hit 2 of 499 crates.
+
 ## Next opportunities
 
 - A sidebar rebuild still lays out every row. If session counts grow into the thousands, switch the list to `uniform_list` so only visible rows are built.
