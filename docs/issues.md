@@ -52,3 +52,7 @@ Status is open with a workaround. On 2026-10-15, with Sway 1.12 nested in Hyprla
 ## KS-012. Driver wheel events reach no GPUI view
 
 Status is open. On 2026-10-16, with the nested Sway driver in headless mode, `input` scroll actions (`scroll_x` 0 and `scroll_y` of -5, -10, -120, and -1500, after a pointer move) moved neither the virtualized transcript nor the composer's multiline scroll, which predates that change. Clicks and typing worked in the same run. A GPUI test with a simulated `ScrollWheelEvent` scrolls the transcript, so the gap is in the driver's wheel path or GPUI's handling of the axis events it sends. Native wheel scrolling is unproven until this is resolved. The run is `.audit/verify-20261015T210533-412732`.
+
+## KS-013. Click-only copy before any key press on Wayland
+
+Status is open. GPUI 0.2.2's Wayland client sets the clipboard with the serial of the last key press. Before the first key press in a window there is none, so the compositor ignores the request. On 2026-10-15 in the nested Sway run, clicking a code block's copy button in a fresh window showed the check mark, but `wl-paste` reported nothing copied. After typing in the composer, the same click copied the block. Revisit on a GPUI upgrade. Evidence is in `.audit/verify-20261015T210845-408538`.
