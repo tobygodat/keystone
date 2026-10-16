@@ -1981,6 +1981,109 @@ mod tests {
         );
     }
 
+    fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect("control rendered");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// Row actions show on hover, so point at the row before clicking one.
+    fn hover(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect("row rendered");
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn settled_section_starts_collapsed_and_opens_below_active(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Claude).unwrap();
+        store.create(Provider::Codex).unwrap();
+        store.set_settled(1, true).unwrap();
+        cx.update(keystone_ui::init);
+        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        assert!(cx.debug_bounds("session-1").is_none());
+        assert!(cx.debug_bounds("session-2").is_some());
+
+        click(cx, "settled-section");
+        let y = |cx: &mut gpui::VisualTestContext, selector| {
+            cx.debug_bounds(selector).unwrap().origin.y
+        };
+        let (active, header, settled) = (
+            y(cx, "session-2"),
+            y(cx, "settled-section"),
+            y(cx, "session-1"),
+        );
+        assert!(active < header && header < settled);
+    }
+
+    #[gpui::test]
+    fn row_settle_moves_that_session_and_keeps_the_selection(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Claude).unwrap();
+        store.create(Provider::Codex).unwrap();
+        cx.update(keystone_ui::init);
+        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let saved = |path: &Path| {
+            let store = Store::open(path).unwrap();
+            let settled = store
+                .workspace()
+                .sessions()
+                .iter()
+                .map(|s| s.settled())
+                .collect::<Vec<_>>();
+            (store.workspace().selected(), settled)
+        };
+
+        hover(cx, "session-1");
+        click(cx, "settle-1");
+        assert_eq!(saved(&path), (Some(2), vec![true, false]));
+
+        click(cx, "settled-section");
+        hover(cx, "session-1");
+        click(cx, "settle-1");
+        assert_eq!(saved(&path), (Some(2), vec![false, false]));
+    }
+
+    #[gpui::test]
+    fn sidebar_toggle_hides_the_column_and_ctrl_f_restores_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("workspace.json")).unwrap();
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let toggle_x =
+            |cx: &mut gpui::VisualTestContext| cx.debug_bounds("sidebar-toggle").unwrap().origin.x;
+        assert_eq!(toggle_x(cx), px(308.));
+
+        click(cx, "sidebar-toggle");
+        assert_eq!(toggle_x(cx), px(6.));
+
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(toggle_x(cx), px(308.));
+        view.update_in(cx, |this, window, cx| {
+            assert!(this.search.focus_handle(cx).is_focused(window))
+        });
+    }
+
+    #[test]
+    fn excerpt_is_the_first_written_line_or_the_provider() {
+        assert_eq!(
+            excerpt(
+                "\n  Fix persistence durability first \nthen the rest",
+                Provider::Claude
+            ),
+            "Fix persistence durability first"
+        );
+        assert_eq!(excerpt(" \n\n", Provider::Codex), "Codex");
+        assert_eq!(excerpt("", Provider::Claude), "Claude Code");
+    }
+
     #[gpui::test]
     fn clicking_create_and_settle_persists_sessions(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();

@@ -7,6 +7,7 @@ Write a multiline draft, switch sessions, and reopen Keystone without losing the
 - `draft-focus` focuses the composer by clicking or Ctrl+L.
 - `draft-autosave` persists typed text after the debounce.
 - `draft-switch` keeps each session's draft separately.
+- `draft-excerpt` shows each draft's first line under its sidebar title once the debounced save lands.
 - `draft-restart` restores saved text and selection after a normal quit.
 - `draft-multiline` accepts Enter and multiline paste, wraps text, and scrolls after eight visible rows.
 
@@ -25,7 +26,7 @@ Preconditions:
 
 - Call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","l"]}]}`.
 - Call `input` with `{"actions":[{"action":"type","text":"Verified draft."}]}`.
-- Call `input` with `{"actions":[{"action":"wait","duration_ms":1000}]}`. Read `workspace` and require the selected session's draft to equal `Verified draft.`. Capture the visible composer and preserve a snapshot.
+- Call `input` with `{"actions":[{"action":"wait","duration_ms":1000}]}`. Read `workspace` and require the selected session's draft to equal `Verified draft.`. Capture the visible composer and preserve a snapshot. Require `Verified draft.` under the session's title in the sidebar. Before the save lands, the row still shows its previous excerpt.
 - Create Codex with Ctrl+Shift+N. Focus with Ctrl+L and type `Second draft.`. `click` the original row by its `session-<id>`. Require `Verified draft.` to return and both saved drafts to remain distinct.
 - Press Ctrl+Q through `input`. Poll `call` with `{"tool":"windows_list","arguments":{}}` until empty. Run `doctor` and require the app PID to have exited.
 - Call `launch`, then `wait_for` `{"id":"composer-field"}`. Run `doctor`, capture `screenshot`, and require the original selection and visible draft to match the saved snapshot.
@@ -36,7 +37,7 @@ Preconditions:
 
 ## Gotchas
 
-- Autosave waits 250 ms after changes. Observe the file instead of assuming a fixed wait always suffices.
+- Autosave waits 250 ms after changes. The sidebar excerpt updates with the save, not per keystroke. Observe the file instead of assuming a fixed wait always suffices.
 - `stop` forcibly ends remaining apps. It does not prove graceful-save behavior. Quit through the UI first.
 - Very rapid long text input has a known rendering issue. A short passing draft does not resolve it.
 - `type` sends native key events. It is not clipboard paste. Use a native clipboard owner such as `wl-copy` on the observed nested Wayland socket before Ctrl+V.

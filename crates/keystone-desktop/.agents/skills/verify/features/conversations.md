@@ -13,7 +13,7 @@ Send a message in a Codex session, watch the reply stream, answer an approval, s
 
 ## How to get to it (user POV)
 
-- Click "Start with Codex" or press Ctrl+Shift+N, type, then click Send or press Ctrl+Enter.
+- Click the **Codex** welcome pill or press Ctrl+Shift+N, type, then click the round Send button or press Ctrl+Enter. Send is filled only when a Codex draft has text.
 - Answer an approval card with Allow or Deny.
 - While a turn runs, type and press Ctrl+Enter to steer, or click Stop.
 

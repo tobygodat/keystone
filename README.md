@@ -2,11 +2,11 @@
 
 A Rust and GPUI desktop workspace for Claude Code and Codex.
 
-This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, filter settled sessions, save multiline drafts, settle and un-settle them, and restore them on restart. Codex sessions send messages to your installed `codex` and stream the reply, with approvals, steering, and stop. Claude Code sessions are not connected yet. The optional visual fixture is labeled as sample content.
+This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, save multiline drafts, settle and un-settle them into a collapsible Settled section, and restore them on restart. Codex sessions send messages to your installed `codex` and stream the reply, with approvals, steering, and stop. Claude Code sessions are not connected yet. The optional visual fixture is labeled as sample content.
 
 ## Run the preview
 
-Run `cargo run -p keystone-desktop --locked` in a Linux graphical session. Press Ctrl+Q to quit. The gear at the bottom of the left rail chooses the theme (System, Light, or Dark), the density, and the interface font. Escape closes an open menu. Ctrl+N creates a Claude session, Ctrl+Shift+N creates a Codex session, Ctrl+L focuses the composer, Ctrl+Enter sends, Ctrl+F focuses search, and Ctrl+Shift+S toggles settlement.
+Run `cargo run -p keystone-desktop --locked` in a Linux graphical session. Press Ctrl+Q to quit. The gear at the bottom of the sidebar chooses the theme (System, Light, or Dark), the density, and the interface font. Escape closes an open menu. Ctrl+N creates a Claude session, Ctrl+Shift+N creates a Codex session, Ctrl+L focuses the composer, Ctrl+Enter sends, Ctrl+F focuses search, and Ctrl+Shift+S toggles settlement.
 
 Codex runs with your own `codex` login and approval settings, in the directory Keystone was started from. Set `KEYSTONE_PROJECT_DIR` to choose another directory, or `KEYSTONE_CODEX_PATH` to use a specific `codex` binary. Each session's completed messages are kept in `sessions/<id>.jsonl` next to the workspace file. See [the provider design](docs/design/providers.md).
 
