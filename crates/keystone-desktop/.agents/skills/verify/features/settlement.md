@@ -22,9 +22,9 @@ Preconditions:
 - Clear search so it cannot hide the expected row.
 
 - Move the pointer over the first row with `input` `{"actions":[{"action":"move","x":..,"y":..}]}` at the `session-1` center from `elements`. Require `settle-1` to appear in `elements`.
-- `click` `{"id":"settle-1"}`. Require `settled:true` for session 1 and the second session still in `workspace.selected`. Capture and require session 1 gone from **Active** and a collapsed **Settled (1)** header at the bottom.
+- `click` `{"id":"settle-1"}`. Require `settled:true` for session 1 and the second session still in `workspace.selected`. Capture and require session 1 gone from **Working** and a collapsed **Settled (1)** header at the bottom.
 - `click` `{"id":"settled-section"}`. Capture and require the settled row below the header, with a filled wedge, a muted title, and **Un-settle** on hover.
-- Hover the settled row and `click` `{"id":"settle-1"}`. Require `settled:false` and the row back under **Active**.
+- Hover the settled row and `click` `{"id":"settle-1"}`. Require `settled:false` and the row back under **Working**.
 - Select a row, then call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","shift","s"]}]}`. Require `settled:true` for the selected record and **Settled** after its title in the top bar. Press it again to return it.
 - Preserve screenshots and a state snapshot for each exercised entry point.
 
@@ -33,3 +33,4 @@ Preconditions:
 - A row's Settle button exists only while that row is hovered or selected. `elements` lists it only when it is drawn, so hover before clicking.
 - Settling the selected session keeps it selected. With the section collapsed, its row is hidden while its conversation stays open.
 - The section header counts the settled sessions that match the current search.
+- A settled session stays in Settled even when it needs action, such as a failed turn. Settling is how the user puts a session away.

@@ -12,7 +12,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools only obser
 
 ## Features
 
-- [Sessions](sessions.md) covers welcome, sidebar menu, keyboard creation, and selection.
+- [Sessions](sessions.md) covers welcome, sidebar menu, keyboard creation, selection, the Needs action and Working sections, and row times.
 - [Drafts and restart](drafts.md) covers focus, typing, autosave, and restoration.
 - [Settlement](settlement.md) covers row and shortcut settling, un-settling, and the collapsible Settled section.
 - [Search and navigation](search.md) covers search entry points, matching, clearing, and sidebar visibility.

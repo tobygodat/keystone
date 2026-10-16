@@ -2,7 +2,7 @@
 
 A Rust and GPUI desktop workspace for Claude Code and Codex.
 
-This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, save multiline drafts, settle and un-settle them into a collapsible Settled section, and restore them on restart. Codex sessions send messages to your installed `codex` and stream the reply, with approvals, steering, and stop. Claude Code sessions are not connected yet. The optional visual fixture is labeled as sample content.
+This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, save multiline drafts, see the sessions that need you (an approval, a failed turn, or an unread reply) above the ones still working, settle and un-settle them into a collapsible Settled section, and restore them on restart. Codex sessions send messages to your installed `codex` and stream the reply, with approvals, steering, and stop. Claude Code sessions are not connected yet. The optional visual fixture is labeled as sample content.
 
 ## Run the preview
 

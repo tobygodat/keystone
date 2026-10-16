@@ -27,4 +27,5 @@ The session sidebar is a cached GPUI view (`SessionSidebar`). GPUI reuses its pr
 ## Next opportunities
 
 - A sidebar rebuild still lays out every row. If session counts grow into the thousands, switch the list to `uniform_list` so only visible rows are built.
-- `Label::truncate` shapes each label on every layout and once more when it cuts one (KS-010). With 200 rows that adds about 0.04 ms to a sidebar refresh, or 0.13 ms when every excerpt is cut. GPUI caches shaped lines across frames, so the cost stays small. If it grows, cache the cut per row width.
+- `Label::truncate` shapes each label on every layout and once more when it cuts one (KS-010). With 200 rows the refresh benchmark shows no measurable cost, even when every excerpt is cut, because GPUI caches shaped lines across frames. A first frame with new text pays the shaping. If that shows up, cache the cut per row width.
+- Each row now derives its attention and formats its time, which calls `localtime_r` once per row. With 200 rows that added about 0.1 ms to a refresh (1.08 ms to 1.20 ms, medians of 15 alternating runs).

@@ -7,9 +7,9 @@ Write a multiline draft, switch sessions, and reopen Keystone without losing the
 - `draft-focus` focuses the composer by clicking or Ctrl+L.
 - `draft-autosave` persists typed text after the debounce.
 - `draft-switch` keeps each session's draft separately.
-- `draft-excerpt` shows each draft's first line under its sidebar title once the debounced save lands.
+- `draft-excerpt` shows each draft's first line under its sidebar title once the debounced save lands. A line too long for the row ends with "…".
 - `draft-restart` restores saved text and selection after a normal quit.
-- `draft-multiline` accepts Enter and multiline paste, wraps text, and scrolls after eight visible rows.
+- `draft-multiline` accepts Enter and multiline paste, wraps long lines at the composer's width, grows the composer upward with each wrapped row, and scrolls after eight visible rows.
 
 ## How to get to it (user POV)
 
@@ -32,6 +32,7 @@ Preconditions:
 - Call `launch`, then `wait_for` `{"id":"composer-field"}`. Run `doctor`, capture `screenshot`, and require the original selection and visible draft to match the saved snapshot.
 - `click` `{"id":"composer-field"}` and append ` Again.`. Require the file and screenshot to show the combined text. This distinguishes a restored usable editor from a static image.
 - Insert a new line with Enter and type a second paragraph. Require a literal newline in the saved draft. Click a later row and insert a marker. Check its exact position in the saved text.
+- Type one line longer than the composer. Require it to continue on the next row, the composer to grow upward with its toolbar in place, and the sidebar excerpt to end in "…". Click the start of the second visual row and type a marker; check its position in the saved text.
 - Paste a draft longer than eight visual rows through a native clipboard route. Inspect wrapping, scrolling, selection, and caret visibility at a narrow window width.
 - Test window close separately using `call` with the `window_action` tool, with `action:"close"` and the observed window ID. Do not claim that Ctrl+Q proves the close-control path.
 

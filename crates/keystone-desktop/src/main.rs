@@ -67,11 +67,26 @@ fn arch_mark(size: Pixels) -> impl IntoElement {
         )
 }
 
-/// The wall clock in unix milliseconds. Tests swap in a fixed clock.
-fn system_now() -> u64 {
+/// The wall clock in unix milliseconds. The store takes it as an argument, so its
+/// tests pass fixed times.
+fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Whether `event` ends a turn, and if so whether the turn failed. Only the user's own
+/// Stop makes an interruption a normal end.
+fn turn_failed(event: &Event, stop_requested: bool) -> Option<bool> {
+    match event {
+        Event::TurnCompleted { status, .. } => Some(match status {
+            TurnStatus::Completed => false,
+            TurnStatus::Interrupted => !stop_requested,
+            TurnStatus::Failed => true,
+        }),
+        Event::Failed { .. } => Some(true),
+        _ => None,
+    }
 }
 
 fn durability_warning(durability: Durability) -> Option<String> {
@@ -107,7 +122,6 @@ struct Keystone {
     project_dir: PathBuf,
     wake: Wake,
     transcript_scroll: ScrollHandle,
-    clock: fn() -> u64,
 }
 
 impl Keystone {
@@ -201,7 +215,6 @@ impl Keystone {
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
-            clock: system_now,
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -286,7 +299,7 @@ impl Keystone {
         if !self.save_draft(cx) {
             return false;
         }
-        match self.store.leave((self.clock)()) {
+        match self.store.leave(now_ms()) {
             Ok(applied) => {
                 self.error = durability_warning(applied.durability);
                 self.error.is_none()
@@ -303,7 +316,7 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
-        self.error = match self.store.create(provider, (self.clock)()) {
+        self.error = match self.store.create(provider, now_ms()) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
@@ -419,7 +432,7 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
-        self.error = match self.store.select(id, (self.clock)()) {
+        self.error = match self.store.select(id, now_ms()) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
@@ -899,17 +912,9 @@ impl Keystone {
         let dir = self.sessions_dir.clone();
         let mut sidebar_changed = false;
         for (session, event) in events {
-            let failed = match &event {
-                Event::TurnCompleted { status, .. } => Some(match status {
-                    TurnStatus::Completed => false,
-                    TurnStatus::Interrupted => !self.conversation(session).stop_requested,
-                    TurnStatus::Failed => true,
-                }),
-                Event::Failed { .. } => Some(true),
-                _ => None,
-            };
+            let failed = turn_failed(&event, self.conversation(session).stop_requested);
             if let Some(failed) = failed
-                && let Err(error) = self.store.record_turn_end(session, failed, (self.clock)())
+                && let Err(error) = self.store.record_turn_end(session, failed, now_ms())
             {
                 self.error = Some(format!("Could not save the session. {error}"));
             }
@@ -1004,7 +1009,7 @@ impl Keystone {
                 self.error = None;
                 let dir = self.sessions_dir.clone();
                 self.conversation(id).push_local(&dir, id, &text);
-                if let Err(error) = self.store.record_message(id, (self.clock)()) {
+                if let Err(error) = self.store.record_message(id, now_ms()) {
                     self.error = Some(format!("Could not save the session. {error}"));
                 }
                 self.composer
@@ -1510,7 +1515,7 @@ impl SessionSidebar {
         let this = app.read(cx);
         let workspace = this.store.workspace();
         let query = this.search.read(cx).value().to_lowercase();
-        let now = LocalTime::at((this.clock)());
+        let now = LocalTime::at(now_ms());
         let mut sections: [Vec<SessionRow>; 3] = Default::default();
         for session in workspace.sessions().iter().filter(|s| {
             format!("{} {}", s.title(), s.provider())
@@ -2156,7 +2161,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn settled_section_starts_collapsed_and_opens_below_active(cx: &mut gpui::TestAppContext) {
+    fn settled_section_starts_collapsed_and_opens_below_working(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         store.create(Provider::Claude, 1).unwrap();
@@ -2382,6 +2387,32 @@ mod tests {
         view.update_in(cx, |this, window, cx| {
             assert!(this.search.focus_handle(cx).is_focused(window))
         });
+    }
+
+    #[test]
+    fn only_the_users_stop_makes_an_interrupted_turn_a_normal_end() {
+        let ended = |status| Event::TurnCompleted {
+            status,
+            error: None,
+        };
+        assert_eq!(
+            turn_failed(&ended(TurnStatus::Completed), false),
+            Some(false)
+        );
+        assert_eq!(
+            turn_failed(&ended(TurnStatus::Interrupted), true),
+            Some(false)
+        );
+        assert_eq!(
+            turn_failed(&ended(TurnStatus::Interrupted), false),
+            Some(true)
+        );
+        assert_eq!(turn_failed(&ended(TurnStatus::Failed), true), Some(true));
+        let failed = Event::Failed {
+            message: "Codex exited".into(),
+        };
+        assert_eq!(turn_failed(&failed, false), Some(true));
+        assert_eq!(turn_failed(&Event::TurnStarted, false), None);
     }
 
     #[test]
