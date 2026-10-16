@@ -173,7 +173,7 @@ impl Keystone {
                     .timer(std::time::Duration::from_secs(60))
                     .await;
                 let aged = this.update(cx, |this, cx| {
-                    if this.session_sidebar.read(cx).shows_time {
+                    if this.sidebar && this.session_sidebar.read(cx).shows_time {
                         this.refresh(cx);
                     }
                 });
@@ -913,9 +913,15 @@ impl Keystone {
         let mut sidebar_changed = false;
         for (session, event) in events {
             let failed = turn_failed(&event, self.conversation(session).stop_requested);
-            if let Some(failed) = failed
-                && let Err(error) = self.store.record_turn_end(session, failed, now_ms())
-            {
+            let saved = match (&event, failed) {
+                (Event::TurnStarted, _) => self.store.record_turn_start(session).map(drop),
+                (_, Some(failed)) => self
+                    .store
+                    .record_turn_end(session, failed, now_ms())
+                    .map(drop),
+                _ => Ok(()),
+            };
+            if let Err(error) = saved {
                 self.error = Some(format!("Could not save the session. {error}"));
             }
             sidebar_changed |= failed.is_some()
@@ -1563,7 +1569,8 @@ impl SessionSidebar {
             }
             let open = !section.collapsible() || settled_open;
             if open {
-                self.shows_time |= rows.iter().any(|row| row.time.is_some());
+                // The selected row shows Settle where its time would be.
+                self.shows_time |= rows.iter().any(|row| row.time.is_some() && !row.selected);
             }
             let header = Self::header(section, rows.len(), open, app, cx);
             list = list

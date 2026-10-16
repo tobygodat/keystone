@@ -123,6 +123,11 @@ impl Session {
         self.last_turn
     }
 
+    /// Never earlier than the last change, so a clock set back still clears it.
+    fn mark_viewed(&mut self, now: u64) {
+        self.viewed_at = Some(self.updated_at.map_or(now, |updated| updated.max(now)));
+    }
+
     /// What the session needs from the user, if anything. `awaiting_approval` and
     /// `running` describe the live provider in this process. A turn saved as running
     /// that no live provider runs was cut off when Keystone closed, so it failed.
@@ -198,7 +203,7 @@ impl Workspace {
     fn leave_selected(&mut self, now: u64) {
         let selected = self.selected;
         if let Some(session) = self.sessions.iter_mut().find(|s| Some(s.id) == selected) {
-            session.viewed_at = Some(now);
+            session.mark_viewed(now);
         }
     }
 }
@@ -319,9 +324,15 @@ impl Store {
     pub fn record_message(&mut self, id: u64, now: u64) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| {
             session.updated_at = Some(now);
-            session.viewed_at = Some(now);
+            session.mark_viewed(now);
             session.last_turn = Some(LastTurn::Running);
         })
+    }
+
+    /// Records a turn the provider started on its own, such as one opened by a steer
+    /// that arrived after the previous turn ended.
+    pub fn record_turn_start(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.last_turn = Some(LastTurn::Running))
     }
 
     /// Records the end of a turn. The selected session's user sees it end.
@@ -335,7 +346,7 @@ impl Store {
                 LastTurn::Finished
             });
             if selected {
-                session.viewed_at = Some(now);
+                session.mark_viewed(now);
             }
         })
     }
@@ -622,5 +633,37 @@ mod tests {
         store.select(1, 6_000).unwrap();
         store.record_turn_end(1, false, 7_000).unwrap();
         assert_eq!(first(&store), None);
+    }
+
+    #[test]
+    fn leaving_clears_an_unseen_reply_after_the_clock_moves_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        store.create(Provider::Codex, 2_000).unwrap();
+        store.record_turn_end(1, false, 10_000).unwrap();
+        store.select(1, 9_000).unwrap();
+        store.select(2, 9_500).unwrap();
+        assert_eq!(
+            store.workspace().sessions()[0].attention(false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_turn_the_provider_starts_on_its_own_fails_if_cut_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        store.record_message(1, 2_000).unwrap();
+        store.record_turn_end(1, false, 3_000).unwrap();
+        // A late steer opens another turn without a new message.
+        store.record_turn_start(1).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.workspace().sessions()[0].attention(false, false),
+            Some(Attention::Failed)
+        );
     }
 }
