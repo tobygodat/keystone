@@ -8,7 +8,7 @@ use gpui::{
     TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill,
     point, prelude::*, px, relative, size,
 };
-use keystone_ui::ActiveTheme;
+use keystone_ui::{ActiveTheme, Color, TextSize};
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -177,6 +177,8 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     scroll_offset: Pixels,
     is_selecting: bool,
+    text_size: TextSize,
+    text_color: Color,
 }
 
 impl EventEmitter<Changed> for TextInput {}
@@ -199,7 +201,15 @@ impl TextInput {
             last_bounds: None,
             scroll_offset: px(0.),
             is_selecting: false,
+            text_size: TextSize::Base,
+            text_color: Color::Default,
         }
+    }
+
+    pub fn text_style(mut self, size: TextSize, color: Color) -> Self {
+        self.text_size = size;
+        self.text_color = color;
+        self
     }
 
     pub fn value(&self) -> &str {
@@ -1086,9 +1096,9 @@ impl Render for TextInput {
             .items_center()
             .w_full()
             .overflow_hidden()
-            .text_size(px(13.))
+            .text_size(self.text_size.px())
             .line_height(px(20.))
-            .text_color(cx.theme().colors.text)
+            .text_color(self.text_color.to_hsla(cx))
             .child(TextElement { input: cx.entity() })
     }
 }

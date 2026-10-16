@@ -5,9 +5,9 @@ mod text_input;
 use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
-    AnyView, App, Application, Bounds, Context, Corner, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, size,
+    AnyView, App, Application, Bounds, BoxShadow, Context, Corner, Entity, FocusHandle, Focusable,
+    FontWeight, IntoElement, Pixels, Render, ScrollHandle, StyleRefinement, Subscription,
+    WeakEntity, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
 };
 use keystone_agent::codex::Command;
 use keystone_agent::{CodexConnection, ItemKind, ItemStatus, TurnStatus, Wake};
@@ -31,7 +31,39 @@ gpui::actions!(
     ]
 );
 
-const CONTENT_WIDTH: f32 = 884.;
+/// The transcript and the composer share one centred column.
+const CONTENT_WIDTH: f32 = 640.;
+
+fn provider_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => "Claude Code",
+        Provider::Codex => "Codex",
+    }
+}
+
+fn provider_color(provider: Provider, cx: &App) -> Color {
+    let colors = &cx.theme().colors;
+    Color::Custom(match provider {
+        Provider::Claude => colors.provider_claude,
+        Provider::Codex => colors.provider_codex,
+    })
+}
+
+/// Keystone's mark: two muted side stones and the keystone in the accent colour.
+fn arch_mark(size: Pixels) -> impl IntoElement {
+    div()
+        .relative()
+        .flex_shrink_0()
+        .size(size)
+        .child(Icon::new(IconName::ArchStones).size(size))
+        .child(
+            div().absolute().top_0().left_0().child(
+                Icon::new(IconName::ArchKeystone)
+                    .size(size)
+                    .color(Color::Accent),
+            ),
+        )
+}
 
 fn durability_warning(durability: Durability) -> Option<String> {
     match durability {
@@ -69,7 +101,10 @@ struct Keystone {
 
 impl Keystone {
     fn new(store: Store, fixture: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let composer = cx.new(|cx| TextInput::new("Write a draft…", InputMode::Multiline, cx));
+        let composer = cx.new(|cx| {
+            TextInput::new("Write a draft…", InputMode::Multiline, cx)
+                .text_style(TextSize::Body, Color::Strong)
+        });
         let search =
             cx.new(|cx| TextInput::new("Search conversations…", InputMode::SingleLine, cx));
         let subscriptions = vec![
@@ -527,7 +562,6 @@ impl Keystone {
 
     fn composer(&self, current: Option<(Provider, bool)>, cx: &mut Context<Self>) -> gpui::Div {
         let colors = cx.theme().colors;
-        let has_session = current.is_some();
         let conversation = self
             .store
             .workspace()
@@ -536,143 +570,210 @@ impl Keystone {
         let running = conversation.is_some_and(|c| c.running);
         let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
         let codex = matches!(current, Some((Provider::Codex, _)));
-        let status = match current {
-            None => "Choose a provider to start",
-            Some((Provider::Claude, _)) => {
-                "Claude Code is not connected yet · Enter for a new line"
-            }
-            Some(_) if waiting => "Waiting for your approval",
-            Some(_) if running => "Working · Ctrl+Enter steers this turn",
-            Some(_) => "Ctrl+Enter to send · Enter for a new line",
-        };
-        let project = self.project_dir.file_name().map_or_else(
-            || self.project_dir.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        div().w_full().max_w(px(CONTENT_WIDTH)).px_3().child(
-            v_flex()
-                .surface(Elevation::Surface, cx)
-                .border_color(colors.border_strong)
-                .p_3()
-                .gap_3()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(Icon::new(IconName::Folder).size(px(14.)))
-                        .child(
-                            div()
-                                .id("project")
-                                .automation_id("project")
-                                .child(Label::new(project).size(TextSize::Ui).color(Color::Muted))
-                                .tooltip(
-                                    Tooltip::text(self.project_dir.display().to_string()).builder(),
-                                ),
-                        )
-                        .child(div().flex_1())
-                        .when_some(current.as_ref(), |d, (_, settled)| {
-                            d.child(
-                                Button::new(
-                                    "settle",
-                                    if *settled { "Un-settle" } else { "Settle" },
-                                )
-                                .size(ButtonSize::Compact)
-                                .icon(IconName::Check)
-                                .selected(*settled)
-                                .debug_selector(|| "settle".into())
-                                .tooltip(Tooltip::with_key(
-                                    if *settled {
-                                        "Return to active work"
-                                    } else {
-                                        "Move out of active work"
-                                    },
-                                    "Ctrl+Shift+S",
-                                ))
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_settle(cx))),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .id("composer-field")
-                        .automation_id("composer-field")
-                        .min_h(px(28.))
-                        .when(has_session, |d| d.child(self.composer.clone()))
-                        .when(!has_session, |d| {
-                            d.text_color(colors.text_placeholder)
-                                .child("Choose a provider to write a draft…")
-                        }),
-                )
-                .child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .when_some(current.as_ref(), |d, (provider, _)| {
-                            d.child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded(radius::CONTROL)
-                                    .bg(colors.element_hover)
-                                    .child(Label::new(provider.to_string()).size(TextSize::Sm)),
-                            )
-                        })
-                        .child(Label::new(status).size(TextSize::Sm).color(Color::Muted))
-                        .child(div().flex_1())
-                        .when(codex && running, |d| {
-                            d.child(
-                                Button::new("stop", "Stop")
-                                    .style(ButtonStyle::Subtle)
-                                    .icon(IconName::Square)
-                                    .debug_selector(|| "stop".into())
-                                    .tooltip(Tooltip::text("Stop this turn"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.stop_turn(window, cx)
-                                    })),
-                            )
-                        })
-                        .when(codex, |d| {
-                            d.child(
-                                Button::new("send", if running { "Steer" } else { "Send" })
-                                    .style(ButtonStyle::Filled)
-                                    .icon(IconName::Up)
-                                    .debug_selector(|| "send".into())
-                                    .tooltip(Tooltip::with_key(
-                                        if running {
-                                            "Send to the running turn"
-                                        } else {
-                                            "Send to Codex"
-                                        },
-                                        "Ctrl+Enter",
-                                    ))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.send_message(window, cx)
-                                    })),
-                            )
-                        })
-                        .when(!has_session, |d| {
-                            d.child(
-                                Button::new("welcome-claude", "Start with Claude Code")
-                                    .style(ButtonStyle::Filled)
-                                    .icon(IconName::Plus)
-                                    .debug_selector(|| "welcome-claude".into())
-                                    .tooltip(Tooltip::with_key("New Claude session", "Ctrl+N"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.start(Provider::Claude, window, cx)
-                                    })),
+        let can_send = codex && !self.composer.read(cx).value().trim().is_empty();
+        let field = div()
+            .id("composer-field")
+            .automation_id("composer-field")
+            .min_h(px(44.))
+            .pr(px(6.));
+        let (field, toolbar) = match current {
+            None => (
+                field
+                    .text_size(TextSize::Body.px())
+                    .line_height(px(20.))
+                    .text_color(colors.text_placeholder)
+                    .child("Choose a provider below to start a session…"),
+                h_flex()
+                    .gap_2()
+                    .child(self.welcome_pill(Provider::Claude, cx))
+                    .child(self.welcome_pill(Provider::Codex, cx))
+                    .child(div().flex_1())
+                    .child(
+                        Label::new("Ctrl N · Ctrl Shift N")
+                            .size(TextSize::Sm)
+                            .color(Color::Muted),
+                    ),
+            ),
+            Some((provider, settled)) => {
+                let status = match provider {
+                    Provider::Claude => "Claude Code is not connected yet · Enter for a new line",
+                    _ if waiting => "Waiting for your approval",
+                    _ if running => "Working · Ctrl+Enter steers this turn",
+                    _ => "Ctrl+Enter to send · Enter for a new line",
+                };
+                let project = self.project_dir.file_name().map_or_else(
+                    || self.project_dir.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                let toolbar = h_flex()
+                    .gap(px(14.))
+                    .child(
+                        h_flex()
+                            .flex_shrink()
+                            .min_w_0()
+                            .gap(px(7.))
+                            .child(
+                                Icon::new(IconName::Diamond)
+                                    .size(px(12.))
+                                    .color(provider_color(provider, cx)),
                             )
                             .child(
-                                Button::new("welcome-codex", "Start with Codex")
-                                    .style(ButtonStyle::Filled)
-                                    .icon(IconName::Plus)
-                                    .debug_selector(|| "welcome-codex".into())
-                                    .tooltip(Tooltip::with_key("New Codex session", "Ctrl+Shift+N"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.start(Provider::Codex, window, cx)
-                                    })),
+                                Label::new(provider_name(provider))
+                                    .size(TextSize::Ui)
+                                    .weight(FontWeight::MEDIUM),
                             )
-                        }),
-                ),
-        )
+                            .child(
+                                Label::new(status)
+                                    .size(TextSize::Ui)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            ),
+                    )
+                    .child(div().flex_shrink_0().w_px().h(px(14.)).bg(colors.border))
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap(px(6.))
+                            .child(Icon::new(IconName::Folder).size(px(13.)))
+                            .child(
+                                div()
+                                    .id("project")
+                                    .automation_id("project")
+                                    .child(
+                                        Label::new(project).size(TextSize::Ui).color(Color::Muted),
+                                    )
+                                    .tooltip(
+                                        Tooltip::text(self.project_dir.display().to_string())
+                                            .builder(),
+                                    ),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("settle", if settled { "Un-settle" } else { "Settle" })
+                            .size(ButtonSize::Compact)
+                            .icon(IconName::Check)
+                            .selected(settled)
+                            .debug_selector(|| "settle".into())
+                            .tooltip(Tooltip::with_key(
+                                if settled {
+                                    "Return to active work"
+                                } else {
+                                    "Move out of active work"
+                                },
+                                "Ctrl+Shift+S",
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_settle(cx))),
+                    )
+                    .when(codex && running, |d| {
+                        d.child(
+                            Button::new("stop", "Stop")
+                                .style(ButtonStyle::Subtle)
+                                .icon(IconName::Square)
+                                .debug_selector(|| "stop".into())
+                                .tooltip(Tooltip::text("Stop this turn"))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.stop_turn(window, cx)),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id("send")
+                            .automation_id("send")
+                            .flex_shrink_0()
+                            .size(px(32.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(if can_send {
+                                colors.element_inverse
+                            } else {
+                                colors.element_disabled
+                            })
+                            .child(Icon::new(IconName::Up).size(px(15.)).color(if can_send {
+                                Color::Custom(colors.text_inverse)
+                            } else {
+                                Color::Faint
+                            }))
+                            .tooltip(
+                                Tooltip::with_key(
+                                    if running { "Steer" } else { "Send" },
+                                    "Ctrl+Enter",
+                                )
+                                .builder(),
+                            )
+                            .when(can_send, |d| {
+                                d.cursor_pointer().hover(|s| s.opacity(0.85)).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.send_message(window, cx)
+                                    }),
+                                )
+                            })
+                            .when(!can_send, |d| d.cursor_not_allowed()),
+                    );
+                (
+                    field
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.composer.focus_handle(cx).focus(window)
+                        }))
+                        .child(self.composer.clone()),
+                    toolbar,
+                )
+            }
+        };
+        v_flex()
+            .w_full()
+            .max_w(px(CONTENT_WIDTH))
+            .flex_shrink_0()
+            .bg(colors.composer)
+            .border_1()
+            .border_color(colors.composer_border)
+            .rounded(radius::COMPOSER)
+            .shadow(vec![BoxShadow {
+                color: colors.composer_shadow,
+                offset: point(px(0.), px(10.)),
+                blur_radius: px(30.),
+                spread_radius: px(0.),
+            }])
+            .pt(px(16.))
+            .pl(px(18.))
+            .pr(px(12.))
+            .pb(px(12.))
+            .gap(px(14.))
+            .child(field)
+            .child(toolbar)
+    }
+
+    fn welcome_pill(&self, provider: Provider, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        let (id, tooltip, key) = match provider {
+            Provider::Claude => ("welcome-claude", "New Claude session", "Ctrl+N"),
+            Provider::Codex => ("welcome-codex", "New Codex session", "Ctrl+Shift+N"),
+        };
+        h_flex()
+            .id(id)
+            .automation_id(id)
+            .h(px(30.))
+            .px(px(11.))
+            .gap(px(7.))
+            .rounded(px(15.))
+            .bg(colors.element_selected)
+            .cursor_pointer()
+            .hover(move |s| s.bg(colors.element_active))
+            .child(
+                Icon::new(IconName::Diamond)
+                    .size(px(12.))
+                    .color(provider_color(provider, cx)),
+            )
+            .child(
+                Label::new(provider_name(provider))
+                    .size(TextSize::Ui)
+                    .weight(FontWeight::MEDIUM),
+            )
+            .tooltip(Tooltip::with_key(tooltip, key).builder())
+            .on_click(cx.listener(move |this, _, window, cx| this.start(provider, window, cx)))
     }
 
     fn conversation(&mut self, session: u64) -> &mut Conversation {
@@ -1198,69 +1299,110 @@ impl Render for Keystone {
             .and_then(|id| self.conversations.get(&id))
             .is_some_and(|c| !c.is_empty());
         let composer = self.composer(current, cx);
-        let main = if self.fixture || has_conversation {
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .items_center()
-                .child(
-                    v_flex()
-                        .id("conversation")
-                        .automation_id("conversation")
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.transcript_scroll)
-                        .items_center()
-                        .child(
-                            div()
-                                .w_full()
-                                .max_w(px(CONTENT_WIDTH))
-                                .px_3()
-                                .py_6()
-                                .when(self.fixture, |d| d.child(self.transcript(cx)))
-                                .when_some(selected.filter(|_| !self.fixture), |d, id| {
-                                    d.child(self.conversation_view(id, cx))
-                                }),
-                        ),
-                )
-                .when_some(self.error_line(), |d, error| {
-                    d.child(
-                        div()
-                            .w_full()
-                            .max_w(px(CONTENT_WIDTH))
-                            .px_4()
-                            .pb_2()
-                            .child(error),
-                    )
-                })
-                .child(composer.pb_2())
-        } else {
+        let error = self.error_line().map(|error| {
+            div()
+                .w_full()
+                .max_w(px(CONTENT_WIDTH))
+                .px_1()
+                .pb_2()
+                .child(error)
+        });
+        let main = if let (None, false) = (selected, self.fixture) {
             v_flex()
                 .flex_1()
                 .min_w_0()
                 .h_full()
                 .items_center()
                 .justify_center()
+                .gap(px(22.))
+                .px(px(24.))
+                .pb(px(60.))
                 .child(
                     v_flex()
-                        .w_full()
-                        .max_w(px(CONTENT_WIDTH))
-                        .gap_5()
+                        .items_center()
+                        .gap_2()
+                        .child(arch_mark(px(40.)))
                         .child(
                             div()
                                 .id("welcome-heading")
                                 .automation_id("welcome-heading")
-                                .px_3()
-                                .child(Label::new("What should we work on?").size(TextSize::Title)),
-                        )
-                        .child(composer)
-                        .when_some(self.error_line(), |d, error| {
-                            d.child(div().px_4().child(error))
-                        }),
+                                .child(
+                                    Label::new("What should we work on?")
+                                        .size(TextSize::Title)
+                                        .weight(FontWeight::SEMIBOLD)
+                                        .color(Color::Strong),
+                                ),
+                        ),
                 )
+                .child(composer)
+                .children(error)
+        } else {
+            let body = if self.fixture || has_conversation {
+                v_flex()
+                    .id("conversation")
+                    .automation_id("conversation")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.transcript_scroll)
+                    .items_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(CONTENT_WIDTH))
+                            .py_6()
+                            .when(self.fixture, |d| d.child(self.transcript(cx)))
+                            .when_some(selected.filter(|_| !self.fixture), |d, id| {
+                                d.child(self.conversation_view(id, cx))
+                            }),
+                    )
+            } else {
+                let hint = match current {
+                    Some((Provider::Claude, _)) => {
+                        "Claude Code isn’t connected in this preview. Your draft is saved on this machine."
+                    }
+                    _ => "Your draft is saved on this machine. Ctrl Enter sends it to Codex.",
+                };
+                v_flex()
+                    .id("empty-conversation")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.))
+                    .child(
+                        Icon::new(IconName::Wedge)
+                            .size(px(28.))
+                            .color(Color::Custom(cx.theme().colors.border_strong)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("No messages yet"),
+                    )
+                    .child(
+                        div()
+                            .w(px(320.))
+                            .text_center()
+                            .text_size(TextSize::Ui.px())
+                            .line_height(px(18.))
+                            .text_color(cx.theme().colors.text_muted)
+                            .child(hint),
+                    )
+            };
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .items_center()
+                .px(px(24.))
+                .pb(px(18.))
+                .child(body)
+                .children(error)
+                .child(composer)
         };
         v_flex()
             .size_full()
