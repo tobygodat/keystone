@@ -535,6 +535,105 @@ fn stopping_a_queued_follow_up_interrupts_the_turn() {
     assert_eq!(turn_ends(&out), [TurnStatus::Interrupted]);
 }
 
+fn turn_end(out: &Outputs) -> Option<(TurnStatus, bool)> {
+    out.events.iter().rev().find_map(|(_, e)| match e {
+        Event::TurnCompleted {
+            status, stopped, ..
+        } => Some((*status, *stopped)),
+        _ => None,
+    })
+}
+
+/// The turn's end says whether the user's Stop ended it. A denial lets the turn go on,
+/// a failure stays a failure, and a Stop after the turn ended reports nothing.
+#[test]
+fn the_turn_end_says_whether_the_user_stopped_it() {
+    let init = r#"{"type":"system","subtype":"init","session_id":"s","capabilities":["msg_lifecycle_v1"]}"#;
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+
+    driver.command(send(1), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            lifecycle(1, "queued"),
+            lifecycle(1, "started"),
+            init.into(),
+            can_use_tool("r1"),
+        ],
+    );
+    let request = asked(&out)[0].clone();
+    driver.command(
+        Command::Answer {
+            session: SESSION,
+            request,
+            allow: false,
+        },
+        &mut out,
+    );
+    assert!(driver.is_running(), "a denial lets the turn go on");
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"DONE"}"#.into(),
+            lifecycle(1, "completed"),
+        ],
+    );
+    assert_eq!(turn_end(&out), Some((TurnStatus::Completed, false)));
+
+    driver.command(send(2), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[lifecycle(2, "queued"), lifecycle(2, "started")],
+    );
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["aborted"]}"#.into(),
+            lifecycle(2, "completed"),
+        ],
+    );
+    assert_eq!(turn_end(&out), Some((TurnStatus::Interrupted, true)));
+
+    // The next turn fails on its own: the earlier Stop does not carry over.
+    driver.command(send(3), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            lifecycle(3, "queued"),
+            lifecycle(3, "started"),
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["overloaded"]}"#.into(),
+            lifecycle(3, "completed"),
+        ],
+    );
+    assert_eq!(turn_end(&out), Some((TurnStatus::Failed, false)));
+
+    // Stop after the turn ended: nothing is written and nothing is reported.
+    let (writes, events) = (out.writes.len(), out.events.len());
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert_eq!((out.writes.len(), out.events.len()), (writes, events));
+
+    // A crash after Stop is still a failure.
+    driver.command(send(4), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[lifecycle(4, "queued"), lifecycle(4, "started")],
+    );
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    driver.on_exit("Claude Code stopped with exit code 1", &mut out);
+    assert_eq!(
+        turn_end(&out).map(|(status, _)| status),
+        Some(TurnStatus::Failed)
+    );
+}
+
 fn can_use_tool(id: &str) -> String {
     format!(
         r#"{{"type":"control_request","request_id":"{id}","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"ls"}},"tool_use_id":"t-{id}"}}}}"#

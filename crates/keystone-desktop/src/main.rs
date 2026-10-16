@@ -3816,6 +3816,255 @@ mod tests {
         );
     }
 
+    /// A Claude driver for session 1, standing in for the `claude` process.
+    struct Claude {
+        driver: keystone_agent::claude::ClaudeDriver,
+        sent: u64,
+        events: Vec<(u64, Event)>,
+    }
+
+    impl Claude {
+        const SEED: u64 = 7;
+
+        fn open() -> Self {
+            let mut out = keystone_agent::Outputs::default();
+            let driver = keystone_agent::claude::ClaudeDriver::new(1, false, Self::SEED, &mut out);
+            let mut claude = Self {
+                driver,
+                sent: 0,
+                events: Vec::new(),
+            };
+            claude.line(
+                r#"{"type":"system","subtype":"init","session_id":"s","capabilities":["msg_lifecycle_v1"]}"#
+                    .into(),
+            );
+            claude
+        }
+
+        fn line(&mut self, line: String) {
+            let mut out = keystone_agent::Outputs::default();
+            self.driver.on_line(line.as_bytes(), &mut out);
+            self.events.extend(out.events);
+        }
+
+        fn lifecycle(&mut self, state: &str) {
+            let uuid = keystone_agent::claude::message_uuid(Self::SEED, self.sent);
+            self.line(format!(
+                r#"{{"type":"command_lifecycle","command_uuid":"{uuid}","state":"{state}"}}"#
+            ));
+        }
+
+        fn send(&mut self) {
+            let mut out = keystone_agent::Outputs::default();
+            self.driver.command(
+                Command::Send {
+                    session: 1,
+                    text: "hello".into(),
+                },
+                &mut out,
+            );
+            self.events.extend(out.events);
+            self.sent += 1;
+            self.lifecycle("queued");
+            self.lifecycle("started");
+        }
+
+        fn stop(&mut self) {
+            let mut out = keystone_agent::Outputs::default();
+            self.driver
+                .command(Command::Interrupt { session: 1 }, &mut out);
+            self.events.extend(out.events);
+        }
+
+        /// Ends the message with a result, failed or not.
+        fn end(&mut self, failed: bool) {
+            self.line(if failed {
+                r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["overloaded"]}"#.into()
+            } else {
+                r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#.into()
+            });
+            self.lifecycle("completed");
+        }
+    }
+
+    fn deliver_claude(
+        view: &gpui::Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+        claude: &mut Claude,
+    ) {
+        let events = std::mem::take(&mut claude.events);
+        view.update(cx, |this, cx| this.receive(Vec::new(), events, cx));
+    }
+
+    #[gpui::test]
+    fn a_claude_stop_or_failure_classifies_its_own_turn_while_history_loads(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, view, cx, release) = held_history(cx);
+        let mut claude = Claude::open();
+        claude.send();
+        claude.stop();
+        claude.end(true);
+        deliver_claude(&view, cx, &mut claude);
+        assert_eq!(
+            last_turn(&view, cx),
+            Some(keystone_core::LastTurn::Finished)
+        );
+        // The next turn fails on its own before the history arrives.
+        claude.send();
+        claude.end(true);
+        deliver_claude(&view, cx, &mut claude);
+        load(&view, cx, &release);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+        // A Stop that reaches Claude after the failure changes nothing.
+        let rows = view.read_with(cx, |this, _| this.conversations[&1].rows.len());
+        claude.stop();
+        deliver_claude(&view, cx, &mut claude);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+        assert_eq!(
+            view.read_with(cx, |this, _| this.conversations[&1].rows.len()),
+            rows
+        );
+    }
+
+    /// A wrapper that runs the scripted Claude with `env` set, so tests sharing this
+    /// process see no change.
+    fn claude_script(dir: &std::path::Path, env: &str) -> PathBuf {
+        let script = dir.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{env} KEYSTONE_FAKE_CLAUDE_DELAY_MS=5 exec '{}' \"$@\"\n",
+                fake("keystone-fake-claude").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        script
+    }
+
+    fn send_text(view: &gpui::Entity<Keystone>, cx: &mut gpui::VisualTestContext, text: &str) {
+        view.update_in(cx, |this, window, cx| {
+            this.composer
+                .update(cx, |input, cx| input.set_value(text.into(), cx));
+            this.send_message(window, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    fn in_section(cx: &mut gpui::VisualTestContext, row: &'static str, section: Section) -> bool {
+        let row = y(cx, row);
+        let mut after = |header| cx.debug_bounds(header).map(|b| b.origin.y);
+        let (start, end) = match section {
+            Section::Attention => (after("attention-section"), after("working-section")),
+            Section::Working => (after("working-section"), after("settled-section")),
+            Section::Settled => (after("settled-section"), None),
+        };
+        start.is_some_and(|start| start < row) && end.is_none_or(|end| row < end)
+    }
+
+    #[gpui::test]
+    fn claude_sessions_move_between_working_and_needs_action(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Claude, 1).unwrap();
+        store.create(Provider::Claude, 2).unwrap();
+        store.select(1, 3).unwrap();
+        let script = claude_script(dir.path(), "");
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        view.update(cx, |this, _| {
+            this.claude = Some(ClaudeConnection::new(Some(script), this.wake.clone()))
+        });
+        let running = |view: &Keystone| view.conversations[&1].running;
+
+        send_text(&view, cx, "a long one");
+        assert!(in_section(cx, "session-1", Section::Working));
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].rows.iter().any(|row| {
+                matches!(row, Row::Item(item)
+                if item.status == ItemStatus::InProgress && item.text.contains("word1"))
+            })
+        });
+        view.update_in(cx, |this, window, cx| this.stop_turn(window, cx));
+        wait_until(cx, &view, |view| !running(view));
+        // Stopped by the user, and seen as it ended: nothing to act on.
+        assert_eq!(
+            last_turn(&view, cx),
+            Some(keystone_core::LastTurn::Finished)
+        );
+        assert!(in_section(cx, "session-1", Section::Working));
+
+        send_text(&view, cx, "please run it");
+        wait_until(cx, &view, |view| {
+            !view.conversations[&1].approvals.is_empty()
+        });
+        cx.run_until_parked();
+        assert!(in_section(cx, "session-1", Section::Attention));
+        click(cx, "approve");
+        wait_until(cx, &view, |view| !running(view));
+        cx.run_until_parked();
+        assert!(in_section(cx, "session-1", Section::Working));
+
+        // A reply that ends while the user is elsewhere is unread.
+        send_text(&view, cx, "hello");
+        view.update(cx, |this, cx| this.select(2, cx));
+        wait_until(cx, &view, |view| !running(view));
+        cx.run_until_parked();
+        assert!(in_section(cx, "session-1", Section::Attention));
+        view.read_with(cx, |this, _| {
+            let session = &this.store.workspace().sessions()[0];
+            assert_eq!(session.attention(false, false), Some(Attention::Replied));
+        });
+    }
+
+    #[gpui::test]
+    fn a_failed_claude_turn_moves_the_session_to_needs_action(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Claude, 1).unwrap();
+        store.create(Provider::Claude, 2).unwrap();
+        store.select(1, 3).unwrap();
+        let script = claude_script(dir.path(), "KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1");
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        view.update(cx, |this, _| {
+            this.claude = Some(ClaudeConnection::new(Some(script), this.wake.clone()))
+        });
+        send_text(&view, cx, "hello");
+        wait_until(cx, &view, |view| !view.conversations[&1].running);
+        cx.run_until_parked();
+        assert!(in_section(cx, "session-1", Section::Attention));
+        assert!(in_section(cx, "session-2", Section::Working));
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+    }
+
+    #[gpui::test]
+    fn a_claude_that_fails_to_start_moves_the_session_to_needs_action(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Claude, 1).unwrap();
+        store.create(Provider::Claude, 2).unwrap();
+        store.select(1, 3).unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let missing = dir.path().join("no-such-claude");
+        view.update(cx, |this, _| {
+            this.claude = Some(ClaudeConnection::new(Some(missing), this.wake.clone()))
+        });
+        send_text(&view, cx, "hello");
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].error.is_some() && !view.conversations[&1].running
+        });
+        cx.run_until_parked();
+        assert!(in_section(cx, "session-1", Section::Attention));
+        assert!(in_section(cx, "session-2", Section::Working));
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+    }
+
     #[test]
     fn excerpt_is_the_first_written_line_or_the_provider() {
         assert_eq!(
