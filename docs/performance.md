@@ -12,7 +12,7 @@ Run `python scripts/perf.py --note "what changed"` after a change that could aff
 | `touch_ui_s` | Seconds to rebuild after touching a `keystone-ui` component. |
 | `desktop_debug_mb` | Size of the debug desktop binary. Most of it is debug info, and it drives link time. |
 | `sidebar_draw_ms` | Mean window draw with 200 sessions after only the root view is notified, as a composer keystroke does. From the ignored `perf_sidebar_draw` GPUI test. |
-| `sidebar_refresh_ms` | Mean window draw with 200 sessions after the sidebar is also notified, as a session or filter change does. Rows before this column existed leave it empty. |
+| `sidebar_refresh_ms` | Mean window draw with 200 sessions after the sidebar is also notified, as a session, section, or search change does. Rows before this column existed leave it empty. |
 
 The draw benchmark runs in the GPUI test platform, so it measures layout and scene building, not GPU presentation. Compare rows from the same machine. Treat differences under about 20% as noise on a loaded desktop.
 
@@ -27,4 +27,5 @@ The session sidebar is a cached GPUI view (`SessionSidebar`). GPUI reuses its pr
 ## Next opportunities
 
 - A sidebar rebuild still lays out every row. If session counts grow into the thousands, switch the list to `uniform_list` so only visible rows are built.
-- The ellipsis workaround in KS-010 costs nothing. Recheck it when upgrading GPUI.
+- `Label::truncate` shapes each label on every layout and once more when it cuts one (KS-010). With 200 rows the refresh benchmark shows no measurable cost, even when every excerpt is cut, because GPUI caches shaped lines across frames. A first frame with new text pays the shaping. If that shows up, cache the cut per row width.
+- Each row now derives its attention and formats its time, which calls `localtime_r` once per row. With 200 rows that added about 0.1 ms to a refresh (1.08 ms to 1.20 ms, medians of 15 alternating runs).

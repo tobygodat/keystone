@@ -35,6 +35,8 @@ pub struct Conversation {
     /// Set while the log cannot be written. Kept apart from provider errors, so it
     /// stays visible until saving works again.
     pub save_error: Option<String>,
+    /// The user pressed Stop, so the turn's interruption is not a failure.
+    pub stop_requested: bool,
     /// Where the current turn's rows begin. Item IDs are matched only from here, so
     /// an ID a provider reuses in a later turn never replaces an earlier row.
     turn_start: usize,
@@ -146,6 +148,7 @@ impl Conversation {
             Event::ApprovalResolved { request } => self.approvals.retain(|a| a.request != request),
             Event::TurnCompleted { status, error } => {
                 self.running = false;
+                self.stop_requested = false;
                 self.approvals.clear();
                 // A stopped turn leaves items the provider never completes. Keep what
                 // streamed, so the partial reply survives a restart.

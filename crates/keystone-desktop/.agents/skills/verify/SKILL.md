@@ -39,7 +39,7 @@ If the window is absent, inspect `driver.stderr.log` in the evidence directory, 
 {"id":"welcome-claude","bounds":{"x":893,"y":503,"w":172,"h":28},"visible":{"x":893,"y":503,"w":172,"h":28},"center":{"x":979,"y":517}}
 ```
 
-The app writes this itself. Names are the GPUI debug selectors used by simulated tests, so they match the test suite. `visible` is the part inside its clip. An open menu covering an element is not subtracted, so check the screenshot when menus are open. Unnamed controls, such as the titlebar tab, still need screenshot coordinates. Name a control with `debug_selector` on a component or `automation_id` on a div when a journey needs it.
+The app writes this itself. Names are the GPUI debug selectors used by simulated tests, so they match the test suite. `visible` is the part inside its clip. An open menu covering an element is not subtracted, so check the screenshot when menus are open. Unnamed controls, such as the window controls, still need screenshot coordinates. Name a control with `debug_selector` on a component or `automation_id` on a div when a journey needs it.
 
 Prefer names and waits over coordinates and sleeps:
 
@@ -60,7 +60,7 @@ Every driver request and sanitized result is recorded in `actions.jsonl`, along 
 
 Capture both the action and its resulting visible state. A screenshot alone does not prove persistence. A saved file alone does not prove rendering or restored input. For restart, inspect the reopened UI and use it again. Include the feature ID, entry point, expected outcome, observed outcome, and screenshot paths in a run report. Mark untested entry points explicitly.
 
-Use screenshots for the reference comparison. Check rail and sidebar proportions, tabs, centered welcome heading, composer alignment, text legibility, clipping, and smaller windows. Do not claim pixel parity at different sizes or scales. Codex sessions send messages; Claude sessions do not yet. Replies from the scripted Codex are test data and prove Keystone's handling, not the provider's. A run with the real `codex` proves the integration but spends the user's usage. The fixture transcript is sample content and cannot prove provider behavior.
+Use screenshots for the reference comparison. Check the 302 px sidebar column, the top bar breadcrumb, the centered welcome heading and composer, the 640 px conversation column, text legibility, clipping, and smaller windows. Do not claim pixel parity at different sizes or scales. Codex sessions send messages; Claude sessions do not yet. Replies from the scripted Codex are test data and prove Keystone's handling, not the provider's. A run with the real `codex` proves the integration but spends the user's usage. The fixture transcript is sample content and cannot prove provider behavior.
 
 Under verification the sidebar renders uncached, because a reused cached view reports no geometry. Do not use verification runs for performance claims.
 
