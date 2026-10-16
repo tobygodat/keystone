@@ -1,6 +1,6 @@
 # Provider integration design
 
-Status: Codex is implemented as described, in `crates/keystone-agent` (2026-10-15). Claude Code is not built yet. The spike results below have been folded in. Log IO, history loading, and provider startup run off the UI thread, and the transcript is virtualized (2026-10-16; see sections 3 and 10).
+Status: Codex and Claude Code are implemented as described, in `crates/keystone-agent` (2026-10-15). The spike results below have been folded in. Log IO, history loading, and provider startup run off the UI thread, and the transcript is virtualized (2026-10-16; see sections 3 and 10). [Claude Code in practice](#claude-code-in-practice) records what the Claude driver does that the spike did not show, and what is not built yet.
 
 Keystone drives the user's own installed `claude` and `codex` programs. This document says how, and where it deliberately differs from Zeron (MIT, Rust, studied at commit `3b2f780`) and T3 Code. Protocol facts were checked against Claude Code 2.1.300 and codex-cli 0.162.1 on 2026-10-15.
 
@@ -79,11 +79,11 @@ No SQLite and no CRDT. Both add build time and solve problems Keystone does not 
 ### 4. Turns end only when the provider says so
 
 The core runs one lifecycle per session: idle → running → (awaiting approval ↔ running) → ended with `completed`, `interrupted`, or `failed`.
-- **Claude:** the turn ends at `result`. A `result` with `origin.kind = "task-notification"` is a turn the agent started itself, shown as such.
+- **Claude:** the turn ends at a `result` once every message sent during it has finished, as reported by `command_lifecycle` frames. A steer can produce one `result` or two, so counting results is not enough. Output that arrives while idle starts a turn the agent began itself, such as after a background task.
 - **Codex:** the turn ends at `turn/completed`.
 - **Process exit:** `on_exit` closes any open turn as failed with the stderr tail.
 
-The driver also reports whether the user ended the turn: with Stop, or with a denial the provider ends the turn on. Codex's `decline` lets the turn go on and its `cancel` ends it; the driver sends `decline` when Codex offers it. Only the driver knows which turn an interrupt or a `cancel` reached, so it carries this on that turn's end (`stopped`), and the desktop counts an interrupted turn as a failure unless it was stopped. A Stop that drops messages Codex has not received yet ends that turn in the driver; a Stop that arrives after the turn ended does nothing, so it never replaces that turn's end. A crash or an explicit failure stays a failure.
+The driver also reports whether the user ended the turn: with Stop, or with a denial the provider ends the turn on. Codex's `decline` lets the turn go on and its `cancel` ends it; the driver sends `decline` when Codex offers it. Only the driver knows which turn an interrupt or a `cancel` reached, so it carries this on that turn's end (`stopped`), and the desktop counts an interrupted turn as a failure unless it was stopped. A Stop that drops messages Codex has not received yet ends that turn in the driver; a Stop that arrives after the turn ended does nothing, so it never replaces that turn's end. Claude's deny always lets the turn go on, so only Stop marks a Claude turn stopped: the driver sends `interrupt` only while a turn runs, and that turn's end carries `stopped`. A crash or an explicit failure stays a failure.
 
 There are no watchdogs, heartbeats, or quiet-period timers. Zeron added and later retired several of these after "stuck working" incidents. Capabilities are data detected at startup (Claude's `system/init` capabilities, Codex's `initialize` response), not trait booleans.
 
@@ -114,7 +114,7 @@ The message types are written by hand for the subset Keystone uses. A test valid
 ### 8. Steering and interrupt
 
 Steering follows the scope: a message sent during a turn steers that turn, and there is no follow-up queue.
-- **Claude:** a user message with priority `now`, or `next` while a tool is running, because `now` aborts a running MCP call. Zeron found this rule; credit it. In the spike, a `now` steer ended the current response with a `result` (`terminal_reason: aborted_streaming`), then a second `result` followed with the steered reply. Keystone shows both as one user-visible turn.
+- **Claude:** a user message with priority `now`, or `next` while a tool is running, because `now` aborts a running MCP call. Zeron found this rule; credit it. In the spike, a `now` steer ended the current response with a `result` (`terminal_reason: aborted_streaming`), then a second `result` followed with the steered reply. A `next` steer sent during a tool call was folded into the running turn in one recording, with a single `result`, and ran as its own turn in another. Keystone shows all of these as one user-visible turn.
 - **Codex:** `turn/steer` with the expected turn ID. In the spike, the same turn continued and completed with the steered reply. If the turn already ended, the message starts the next turn.
 
 Interrupt uses Claude's `interrupt` with `cancel_queued` when the `interrupt_cancel_queued_v1` capability is present, or Codex's `turn/interrupt`. In the spike, Claude ended with `result` subtype `error_during_execution` and stayed running; Codex ended with `turn/completed` status `interrupted`. Interrupting a turn does not stop background tasks. Stopping the runtime does, and asks first when background work is live.
@@ -129,7 +129,7 @@ A new `keystone-agent` crate holds items, drivers, the session lifecycle, the pr
 
 The process host uses one blocking reader thread per child process for stdout and one for stderr, plus a writer thread with a bounded queue. That is a few threads per active session and no async runtime in Keystone's own code. `async-process` and `smol` are already compiled through GPUI if that changes.
 
-The UI thread never blocks on a provider or the disk. Provider commands go through a `worker::Worker` per connection, in order, so finding the program and spawning it happen there. A start failure arrives as a `Failed` event for the session that needed it. The connection keeps its event inbox under its own lock, so draining events never waits for a process to start. A Claude connection can use the same worker and the same `log::Logs`.
+The UI thread never blocks on a provider or the disk. Provider commands go through a `worker::Worker`, in order, so finding the program and spawning it happen there, outside the connection's lock: a start that stalls, such as on a hung disk, holds up only the commands waiting on that process. A start failure arrives as a `Failed` event for the session that needed it. The connection keeps its event inbox under its own lock, so draining events never waits for a process to start. Codex has one worker for its one app-server. Claude has a worker per session, so one session stuck starting never delays another's messages, Stop, or answers, and its events go through the same conversation, `log::Logs`, and transcript as Codex's. A starting Claude session's driver takes its first message before the spawn and keeps what it writes and reports until the process is in place, so output Claude prints before reading anything, such as a failed `--resume`, still belongs to that turn. Dropping a connection does not wait for queued commands. It waits up to two seconds for a start in progress, so the process it starts is ended; a start stuck longer is given up on and ends its own process if it ever starts while Keystone still runs. The one error `send` returns at once is a steer the provider cannot take now (see [Claude Code in practice](#claude-code-in-practice)); the text then stays in the composer.
 
 ## Spike results, 2026-10-15
 
@@ -146,6 +146,19 @@ Run in a disposable repository with Claude Code 2.1.300 (`--model haiku`) and co
 | Claude interrupt | `error_during_execution`, process still running. |
 | Claude capabilities on 2.1.300 | `interrupt_receipt_v1`, `interrupt_cancel_queued_v1`, `interrupt_send_now_v1`, `msg_lifecycle_v1`, `request_marker_lists_v1`, `sdk_mcp_tools_list_changed`, `sdk_mcp_manifests`, `mcp_read_resource_v1`, `mcp_tool_ui_meta_v1`, `ui_surface_v1`. |
 | Footprint | Codex: 650 MB idle with one thread, plus about 150 MB per extra thread. Claude: 256 MB per idle session process. |
+
+## Claude Code in practice
+
+Checked against Claude Code 2.1.300 on 2026-10-15. The driver is `crates/keystone-agent/src/claude.rs`. Its tests replay redacted recordings in `crates/keystone-agent/tests/fixtures/claude-2.1.300-*.jsonl`. `keystone-fake-claude` is a scripted stand-in for the UI and process tests.
+
+- **Launch.** One process per session runs `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --replay-user-messages --permission-prompts host --permission-prompt-tool stdio`, plus `--resume <session id>` once the session has one. It starts on the session's first message, in the project directory, and starts again with `--resume` after it exits. `KEYSTONE_CLAUDE_PATH` chooses the binary. No permission mode or model is passed, so the user's own Claude configuration applies.
+- **Turn tracking.** Each message carries a `uuid`, and Claude answers with `command_lifecycle` frames: `queued`, `started`, then `completed` or `cancelled`. A turn ends when its latest `result` is in and every message sent during it has finished. A message cancelled before it started gets no `result` at all, so Stop right after Send ends the turn when the cancellation arrives. Each message's start is tracked, so if Stop cancels a queued follow-up after an earlier message's successful `result`, the turn ends as stopped, not completed.
+- **Steering needs lifecycle frames.** Without them a steer's aborted first `result` would end the turn while the steer still ran. Keystone detects support from the stream itself: any `command_lifecycle` frame, or `msg_lifecycle_v1` in `system/init`'s capabilities. Claude 2.1.300 sends `queued` as soon as a message arrives, before `init`. Until one of these is seen, or when `init` lacks the capability, a message sent during a turn is refused: the composer keeps the text and the transcript shows the reason itself. A message sent while the previous one is still waiting on the worker, or for Claude to start, counts as such a steer. The version number is not used, because the capability is what the driver depends on.
+- **Items.** Text and thinking blocks stream from `stream_event` deltas and complete from the whole `assistant` block. `tool_use` starts a tool item: `Bash` becomes a command, `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` become file changes, and anything else a named tool. The matching `tool_result` completes it with capped output. A failed command's exit code is read from Claude's "Exit code N" prefix. A denied call shows as not run. Subagent traffic (`parent_tool_use_id` set) is not shown.
+- **Approvals.** `can_use_tool` becomes an approval. Allow sends the input Claude asked about back unchanged; Deny sends a denial message. `control_cancel_request` withdraws one, and a later answer to it is not sent. Claude's request IDs are only unique within its process, so Keystone's IDs include a per-process seed, and an answer from before a restart never reaches a new request with the same ID. Any other control request gets an error response.
+- **Stop.** `interrupt` with `cancel_queued: true`, so steers Claude has not started are dropped too. Claude completes the cut-off text block itself, so the partial reply is kept.
+- **Errors.** A failed `--resume` produces a `result` before `system/init` and then exit 1. The turn fails with "Could not resume this Claude Code conversation", and Keystone never starts a fresh conversation in its place. A signed-out Claude sends a synthetic assistant message with `error: authentication_failed`. Keystone does not show it as a reply; the turn fails with a sign-in message. A missing or unstartable binary fails the turn from the worker with the path and the OS error, shown in the session's transcript.
+- **Not built yet.** Idle processes are not stopped, so each Claude session keeps its process until Keystone quits. There is no version check or capability gate beyond `msg_lifecycle_v1`; versions without lifecycle frames run one message per turn and cannot be steered. Thinking text is kept only when Claude sends it; with summarized thinking off it is empty and hidden. Background-task turns, hook events, and `/` commands are not specially handled. Reconciliation of Claude's transcript after a crash is not built.
 
 ## Limitations
 
@@ -208,7 +221,7 @@ These are added to `scripts/perf.py` before the drivers are tuned:
 
 1. **Spike, done 2026-10-15.** See the results above. Redacted fixtures still need to be cut from the raw logs.
 2. **Codex first.** The `keystone-agent` crate, the Codex driver with fixture tests, the process host, the log store, and a desktop transcript with submit, stream, and interrupt.
-3. **Claude driver,** against the same item model and fixtures.
+3. **Claude driver,** against the same item model and fixtures. Done 2026-10-15.
 4. **Approvals and steering** in the UI and inbox, then resume, crash reconciliation, and import.
 5. **Handoff and second opinion** from the neutral log.
 

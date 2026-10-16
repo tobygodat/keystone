@@ -364,7 +364,8 @@ def read_exit(path):
 
 
 # Variables a run may pass to the app. The state and automation paths stay owned by the run.
-APP_ENV = {'KEYSTONE_CODEX_PATH', 'KEYSTONE_PROJECT_DIR', 'KEYSTONE_FAKE_CODEX_DELAY_MS'}
+APP_ENV = {'KEYSTONE_CODEX_PATH', 'KEYSTONE_CLAUDE_PATH', 'KEYSTONE_PROJECT_DIR',
+           'KEYSTONE_FAKE_CODEX_DELAY_MS', 'KEYSTONE_FAKE_CLAUDE_DELAY_MS'}
 
 
 def app_env(env):

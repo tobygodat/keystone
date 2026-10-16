@@ -1,6 +1,8 @@
 //! The full stack against the scripted app-server: process host, connection, and driver.
 
-use keystone_agent::codex::Command;
+mod gate;
+use gate::Gate;
+use keystone_agent::Command;
 use keystone_agent::{CodexConnection, Event, ItemKind, TurnStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -219,4 +221,19 @@ fn a_codex_that_cannot_start_fails_the_session_that_needed_it() {
         "got {events:?}"
     );
     assert!(conn.pid().is_none());
+}
+
+/// Dropping the connection gives up on a stuck start after a bounded wait.
+#[test]
+fn dropping_gives_up_on_a_stuck_start() {
+    let (conn, _wake) = connect();
+    let gate = Gate::new(None);
+    conn.hold_starts(gate.hook());
+    conn.send(1, "/tmp", None, "hello".into());
+    gate.reached(1);
+    let started = Instant::now();
+    drop(conn);
+    let took = started.elapsed();
+    gate.release(1);
+    assert!(took < Duration::from_secs(3), "drop took {took:?}");
 }

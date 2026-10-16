@@ -5,6 +5,7 @@
 //! [`CodexDriver::command`], and both produce lines to write and [`Event`]s per session.
 //! Checked against codex-cli 0.162.1.
 
+use crate::driver::{Command, Outputs};
 use crate::item::{Approval, Event, Item, ItemKind, ItemStatus, RequestId, TurnStatus, cap_output};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -21,42 +22,6 @@ const OPT_OUT: [&str; 6] = [
     "thread/status/changed",
     "thread/tokenUsage/updated",
 ];
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Command {
-    /// Start a Codex thread for the session, resuming `resume` when given.
-    Open {
-        session: u64,
-        cwd: String,
-        resume: Option<String>,
-    },
-    /// Start a turn, or steer the running one.
-    Send {
-        session: u64,
-        text: String,
-    },
-    Interrupt {
-        session: u64,
-    },
-    Answer {
-        session: u64,
-        request: RequestId,
-        allow: bool,
-    },
-}
-
-/// Lines to write to the app-server and events for each session.
-#[derive(Debug, Default)]
-pub struct Outputs {
-    pub writes: Vec<String>,
-    pub events: Vec<(u64, Event)>,
-}
-
-impl Outputs {
-    fn event(&mut self, session: u64, event: Event) {
-        self.events.push((session, event));
-    }
-}
 
 enum Pending {
     Initialize,

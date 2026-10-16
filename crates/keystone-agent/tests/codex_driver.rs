@@ -1,7 +1,8 @@
 //! The Codex driver against a recording of real codex-cli 0.162.1 traffic for one
 //! thread: a plain reply, a command approval, and an interrupted turn.
 
-use keystone_agent::codex::{CodexDriver, Command, Outputs};
+use keystone_agent::codex::CodexDriver;
+use keystone_agent::{Command, Outputs};
 use keystone_agent::{Event, ItemKind, ItemStatus, RequestId, TurnStatus};
 use serde_json::Value;
 

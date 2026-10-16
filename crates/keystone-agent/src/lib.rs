@@ -5,15 +5,18 @@
 //! keeps blocking work off the UI thread. See
 //! `docs/design/providers.md`.
 
+pub mod claude;
 pub mod codex;
 mod connection;
+mod driver;
 pub mod find;
 pub mod host;
 mod item;
 pub mod log;
 pub mod worker;
 
-pub use connection::{CodexConnection, Wake};
+pub use connection::{ClaudeConnection, CodexConnection, Connection, StartHook, Wake};
+pub use driver::{Command, Outputs};
 pub use item::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
 };
