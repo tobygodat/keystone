@@ -80,6 +80,71 @@ pub struct Session {
     viewed_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_turn: Option<LastTurn>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    approval_mode: ApprovalMode,
+    /// Whether Keystone sent this session's provider an approval override. Providers keep
+    /// an override on the conversation, so returning to the provider's own settings must
+    /// restore them explicitly, even after a restart.
+    #[serde(default, skip_serializing_if = "is_default")]
+    approval_overridden: bool,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+/// How much a session's agent may do before asking. Each provider maps a mode to its own
+/// settings; see `docs/design/providers.md`. The default sends nothing, so the user's own
+/// provider configuration decides, as it did before modes existed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum ApprovalMode {
+    #[default]
+    Provider,
+    ReadOnly,
+    Ask,
+    Auto,
+    FullAccess,
+}
+
+impl ApprovalMode {
+    pub const ALL: [ApprovalMode; 5] = [
+        ApprovalMode::Provider,
+        ApprovalMode::ReadOnly,
+        ApprovalMode::Ask,
+        ApprovalMode::Auto,
+        ApprovalMode::FullAccess,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Provider => "Provider settings",
+            Self::ReadOnly => "Read only",
+            Self::Ask => "Ask first",
+            Self::Auto => "Auto",
+            Self::FullAccess => "Full access",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Provider => "Use your own Codex or Claude Code configuration",
+            Self::ReadOnly => "Reads files; asks before any change",
+            Self::Ask => "Asks before commands not known to be safe",
+            Self::Auto => "Edits and runs in the project; asks to go further",
+            Self::FullAccess => "Never asks, with no sandbox",
+        }
+    }
+
+    /// A short stable name, used in automation selectors.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::ReadOnly => "read-only",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+            Self::FullAccess => "full-access",
+        }
+    }
 }
 
 impl Session {
@@ -105,6 +170,14 @@ impl Session {
 
     pub fn provider_thread(&self) -> Option<&str> {
         self.provider_thread.as_deref()
+    }
+
+    pub fn approval_mode(&self) -> ApprovalMode {
+        self.approval_mode
+    }
+
+    pub fn approval_overridden(&self) -> bool {
+        self.approval_overridden
     }
 
     pub fn created_at(&self) -> Option<u64> {
@@ -220,6 +293,7 @@ pub struct Store {
     workspace: Workspace,
     next_id: u64,
     pending_directory: Option<File>,
+    writes: u64,
     #[cfg(test)]
     sync_directory: fn(&File) -> io::Result<()>,
 }
@@ -235,6 +309,7 @@ impl Store {
                     workspace: Workspace::default(),
                     next_id: 1,
                     pending_directory: None,
+                    writes: 0,
                     #[cfg(test)]
                     sync_directory: File::sync_all,
                 });
@@ -247,6 +322,7 @@ impl Store {
             workspace: snapshot.workspace,
             next_id: snapshot.next_id,
             pending_directory: None,
+            writes: 0,
             #[cfg(test)]
             sync_directory: File::sync_all,
         })
@@ -259,6 +335,12 @@ impl Store {
     /// The workspace file this store saves to.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// How many times this store has written the workspace file since it opened.
+    #[doc(hidden)]
+    pub fn writes(&self) -> u64 {
+        self.writes
     }
 
     /// Creates a session and selects it. `now` is unix milliseconds.
@@ -280,6 +362,8 @@ impl Store {
             updated_at: Some(now),
             viewed_at: Some(now),
             last_turn: None,
+            approval_mode: ApprovalMode::default(),
+            approval_overridden: false,
         });
         next.selected = Some(id);
         let applied = self.commit(next, next_id)?;
@@ -368,6 +452,22 @@ impl Store {
         self.update_session(id, |session| session.provider_thread = Some(thread))
     }
 
+    /// Takes effect from the session's next turn. Any mode but the default also records,
+    /// in the same write, that the provider may now hold an override, so the record is
+    /// saved before an override can be sent. The record is never cleared: returning to
+    /// the default then restores the provider's own settings explicitly.
+    pub fn set_approval_mode(&mut self, id: u64, mode: ApprovalMode) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            session.approval_mode = mode;
+            session.approval_overridden |= mode != ApprovalMode::Provider;
+        })
+    }
+
+    /// Records that the provider may hold an approval override for this session.
+    pub fn set_approval_overridden(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.approval_overridden = true)
+    }
+
     pub fn set_draft(&mut self, id: u64, text: String) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.draft = text)
     }
@@ -428,6 +528,7 @@ impl Store {
         file.flush()?;
         file.as_file().sync_all()?;
         file.persist(&self.path)?;
+        self.writes += 1;
         self.workspace = snapshot.workspace;
         self.next_id = snapshot.next_id;
         self.pending_directory = Some(directory);

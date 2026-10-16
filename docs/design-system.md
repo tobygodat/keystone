@@ -22,12 +22,32 @@
 | `StyledExt` | `surface(elevation, cx)` for backgrounds, borders, and shadows, and `hairline_*` for separators. |
 | `IconName`, `Icon`, `Icons` | Typed icon names and the asset source that serves them. Icons are drawn on a 24-unit grid and tinted with the text color. `Wedge` and `WedgeFilled` mark working and settled sessions, and a `WedgeFilled` in `Color::Warning` marks a session waiting for approval or with a failed turn, `Diamond` is the provider glyph, `Pencil` starts a session, and `ArchStones` with `ArchKeystone` stack into the arch mark so the keystone can take the accent color. Filled shapes set `fill='white'` on their own paths. |
 | `Label`, `Kbd` | Text with a size, a color, and optional truncation or monospace. `truncate` keeps one line and ends text that does not fit with "…". `Kbd` shows a shortcut hint. |
-| `Button`, `IconButton` | `ButtonStyle::{Ghost, Subtle, Filled}`, `ButtonSize::{Compact, Default, Large}`, selected and disabled states, and tooltips. |
+| `Button`, `IconButton` | `ButtonStyle::{Ghost, Subtle, Filled}`, `ButtonSize::{Compact, Default, Large}`, selected and disabled states, and tooltips. `Button::color` marks a state that needs attention, such as full access. `track_focus` makes a button focusable, with a `border_focused` ring while it has focus; Enter or Space then presses it. |
+| `ConfirmDialog`, `DialogFocus` | A modal question with Cancel and Confirm. See below. |
 | `ListItem` | A selectable row for lists such as the session sidebar. `on_hover` reports the pointer entering and leaving, so a list can build a row action only for the row under the pointer. |
-| `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group. |
+| `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group, and `MenuItem::detail` adds a muted line that explains it. |
+| `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
 | `Tooltip` | A hover card with an optional shortcut. |
 
 Run `cargo run -p keystone-ui --example gallery` to see every component in every state. Its header switches between themes and densities.
+
+## Markdown
+
+`Document::parse` uses `pulldown-cmark` (MIT) with tables and strikethrough on. It never fails, so a host can render a reply at every streamed delta. An open code fence runs to the end of the text, so a streaming code block does not flicker back into paragraphs. Raw HTML shows as text.
+
+`Markdown::new(id, Arc<Document>)` is one self-contained element, so a transcript row can host it. Body text inherits the surrounding text size and line height. Headings, emphasis, inline code, links, lists, quotes, tables with column alignment, and rules use theme tokens only. Fenced code is monospace in `code_text`, scrolls sideways instead of wrapping, and has a copy button that shows a check for a moment. Its debug selector is `{id}-copy-{n}`, counting code blocks from 1. Links open with `App::open_url` only for `http`, `https`, and `mailto`; agent text cannot launch other handlers. Hosts that redraw often should cache the parsed document. The desktop keeps one per reply row in the virtualized transcript and parses a row again only when its text changes, such as at each streamed delta.
+
+## Confirm dialog
+
+`ConfirmDialog::new(id, &focus, title, message)` asks before a risky change. `tone(Color)` colors its icon and Confirm, `Danger` by default. `on_cancel` and `on_confirm` take `Fn(&mut Window, &mut App)`. The caller owns whether it is open: create a `DialogFocus` when it opens, keep it while it shows, and drop it in both handlers.
+
+- It draws over the whole window, menus included, on a `scrim` wash that takes every press outside the card.
+- `DialogFocus::new` focuses Cancel, so Enter alone never confirms. Tab and Shift+Tab move between the two buttons, and Enter or Space presses the focused one.
+- Cancel, Escape, and a press on the scrim call `on_cancel`. Only Confirm calls `on_confirm`. Each handler should return focus where it was, such as the composer.
+- The card's key context is `ConfirmDialog::KEY_CONTEXT` (`Dialog`). Bind app shortcuts with `Some("!Dialog")` so they stay off while it is open.
+- Debug selectors are `{id}` for the card, and `{id}-cancel` and `{id}-confirm` for the buttons.
+
+The gallery's "Open confirm dialog" button shows it.
 
 ## Adding a component
 
@@ -41,4 +61,6 @@ The component shapes follow Zed's `ui` crate, and the visual values follow Zeron
 
 GPUI 0.2.2's `text_ellipsis` truncates to the first width it measured, so `Label::truncate` uses its own element. It measures the text on every layout and cuts it to its final width with a trailing "…". See KS-010 in [the issue list](issues.md).
 
-Text sizes and the monospace font do not change with density or font choice yet. The default fonts, Inter and GeistMono Nerd Font Mono, are not bundled. GPUI falls back to a system font when they are missing.
+Text sizes do not change with density or font choice yet. The default fonts, Inter and GeistMono Nerd Font Mono, are not bundled. GPUI falls back to a system font when they are missing. The desktop picks the first installed monospace font from a short list, so code stays monospace. The interface font has no such list: on a machine without Inter, GPUI's fallback showed no bold or italic, so Markdown emphasis was invisible until an installed font such as Liberation Sans was chosen in settings.
+
+A copy click before any key press in the window copies nothing on Wayland. See KS-013.

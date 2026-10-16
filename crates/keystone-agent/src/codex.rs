@@ -5,8 +5,9 @@
 //! [`CodexDriver::command`], and both produce lines to write and [`Event`]s per session.
 //! Checked against codex-cli 0.162.1.
 
-use crate::driver::{Command, Outputs};
+use crate::driver::{ApprovalState, Command, Outputs};
 use crate::item::{Approval, Event, Item, ItemKind, ItemStatus, RequestId, TurnStatus, cap_output};
+use keystone_core::ApprovalMode;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
@@ -23,6 +24,65 @@ const OPT_OUT: [&str; 6] = [
     "thread/tokenUsage/updated",
 ];
 
+/// A Codex approval policy and sandbox, sent with each `turn/start`. Codex keeps them
+/// for the thread's later turns too.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Policy {
+    pub approval: ApprovalPolicy,
+    pub sandbox: Sandbox,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalPolicy {
+    Untrusted,
+    OnRequest,
+    Never,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sandbox {
+    ReadOnly,
+    WorkspaceWrite,
+    FullAccess,
+}
+
+/// The Codex approval policy and sandbox for a mode. `None` sends nothing, so the user's
+/// own Codex configuration applies.
+pub fn policy(mode: ApprovalMode) -> Option<Policy> {
+    let (approval, sandbox) = match mode {
+        ApprovalMode::Provider => return None,
+        ApprovalMode::ReadOnly => (ApprovalPolicy::OnRequest, Sandbox::ReadOnly),
+        ApprovalMode::Ask => (ApprovalPolicy::Untrusted, Sandbox::WorkspaceWrite),
+        ApprovalMode::Auto => (ApprovalPolicy::OnRequest, Sandbox::WorkspaceWrite),
+        ApprovalMode::FullAccess => (ApprovalPolicy::Never, Sandbox::FullAccess),
+    };
+    Some(Policy { approval, sandbox })
+}
+
+impl Policy {
+    fn params(self) -> (Value, Value) {
+        let approval = match self.approval {
+            ApprovalPolicy::Untrusted => "untrusted",
+            ApprovalPolicy::OnRequest => "on-request",
+            ApprovalPolicy::Never => "never",
+        };
+        let sandbox = match self.sandbox {
+            Sandbox::ReadOnly => "readOnly",
+            Sandbox::WorkspaceWrite => "workspaceWrite",
+            Sandbox::FullAccess => "dangerFullAccess",
+        };
+        (json!(approval), json!({ "type": sandbox }))
+    }
+}
+
+/// The user's own settings for a directory, as a fresh thread reports them.
+#[derive(Clone, Debug, PartialEq)]
+enum Baseline {
+    Requested,
+    Known(Value, Value),
+    Unavailable,
+}
+
 enum Pending {
     Initialize,
     Thread {
@@ -31,6 +91,10 @@ enum Pending {
     },
     TurnStart {
         session: u64,
+    },
+    /// A throwaway thread, opened only to read the user's settings for `cwd`.
+    Baseline {
+        cwd: String,
     },
     Steer {
         session: u64,
@@ -68,6 +132,17 @@ struct Session {
     epoch: u64,
     /// Open approval requests and the decision that denies each one.
     approvals: HashMap<RequestId, &'static str>,
+    cwd: String,
+    /// The policy for new turns. `None` uses the user's settings.
+    policy: Option<Policy>,
+    /// The policy the running or starting turn was started under. A message for a
+    /// session whose policy changed since waits for the next turn instead of steering.
+    turn_policy: Option<Policy>,
+    /// The thread may hold an override from an earlier turn, so using the user's
+    /// settings means sending them. It stays set for the thread: every turn under the
+    /// user's settings sends them, so no failed or lost restore can leave an override
+    /// behind.
+    overridden: bool,
 }
 
 pub struct CodexDriver {
@@ -77,6 +152,8 @@ pub struct CodexDriver {
     pending: HashMap<u64, Pending>,
     sessions: HashMap<u64, Session>,
     threads: HashMap<String, u64>,
+    /// The user's own approval policy and sandbox, per working directory.
+    baselines: HashMap<String, Baseline>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -91,6 +168,7 @@ impl CodexDriver {
             pending: HashMap::new(),
             sessions: HashMap::new(),
             threads: HashMap::new(),
+            baselines: HashMap::new(),
             unknown: 0,
         };
         let line = driver.request(
@@ -125,8 +203,30 @@ impl CodexDriver {
                 cwd,
                 resume,
             } => {
-                self.sessions.entry(session).or_default().opening = true;
+                let state = self.sessions.entry(session).or_default();
+                state.opening = true;
+                state.cwd = cwd.clone();
+                // A resumed thread reports its own override, not the user's settings, so
+                // read those from a fresh thread before the next turn needs them.
+                if resume.is_none() {
+                    // A new thread holds no override.
+                    state.overridden = false;
+                } else if state.overridden {
+                    self.request_baseline(&cwd, out);
+                }
                 self.open_thread(session, cwd, resume, out);
+            }
+            Command::Configure {
+                session,
+                approval: ApprovalState { mode, overridden },
+            } => {
+                let open = self.is_open(session);
+                let state = self.sessions.entry(session).or_default();
+                state.policy = policy(mode);
+                // Once open, this process knows what it sent the thread.
+                if !open {
+                    state.overridden |= overridden;
+                }
             }
             Command::Send { session, text } => self.send(session, text, out),
             Command::Interrupt { session } => self.interrupt(session, out),
@@ -191,6 +291,7 @@ impl CodexDriver {
         self.sessions.clear();
         self.threads.clear();
         self.pending.clear();
+        self.baselines.clear();
         self.ready = false;
     }
 
@@ -245,6 +346,11 @@ impl CodexDriver {
                 },
             ),
             (None, _) | (Some(_), Turn::Starting) => state.waiting.push(text),
+            // The running turn has another approval mode: the message starts the next
+            // turn when this one ends, under the latest mode.
+            (Some(_), Turn::Running(_)) if state.policy != state.turn_policy => {
+                state.waiting.push(text)
+            }
             (Some(thread), Turn::Running(turn)) => {
                 let epoch = state.epoch;
                 let line = self.request(
@@ -260,14 +366,44 @@ impl CodexDriver {
                 self.write(line, out);
             }
             (Some(thread), Turn::Idle) => {
+                let mut params = json!({"threadId": thread, "input": text_input(&text)});
+                match (state.policy, state.overridden) {
+                    (Some(policy), _) => {
+                        let (approval, sandbox) = policy.params();
+                        params["approvalPolicy"] = approval;
+                        params["sandboxPolicy"] = sandbox;
+                        state.overridden = true;
+                    }
+                    (None, false) => {}
+                    (None, true) => match self.baselines.get(&state.cwd) {
+                        Some(Baseline::Known(approval, sandbox)) => {
+                            params["approvalPolicy"] = approval.clone();
+                            params["sandboxPolicy"] = sandbox.clone();
+                        }
+                        // Wait for the user's settings instead of running under an
+                        // override they turned off.
+                        Some(Baseline::Requested) => return state.waiting.push(text),
+                        None => {
+                            state.waiting.push(text);
+                            let cwd = state.cwd.clone();
+                            return self.request_baseline(&cwd, out);
+                        }
+                        Some(Baseline::Unavailable) => {
+                            state.waiting.clear();
+                            return out.event(
+                                session,
+                                Event::Failed {
+                                    message: "Could not read your Codex approval settings to restore them. Choose an approval mode to continue.".into(),
+                                },
+                            );
+                        }
+                    },
+                }
                 // Starting, so further messages wait for the ID instead of starting a
                 // parallel turn.
                 state.turn = Turn::Starting;
-                let line = self.request(
-                    "turn/start",
-                    json!({"threadId": thread, "input": text_input(&text)}),
-                    Pending::TurnStart { session },
-                );
+                state.turn_policy = state.policy;
+                let line = self.request("turn/start", params, Pending::TurnStart { session });
                 self.write(line, out);
             }
         }
@@ -307,6 +443,21 @@ impl CodexDriver {
         }
     }
 
+    fn request_baseline(&mut self, cwd: &str, out: &mut Outputs) {
+        if self.baselines.contains_key(cwd) {
+            return;
+        }
+        self.baselines.insert(cwd.to_owned(), Baseline::Requested);
+        let line = self.request(
+            "thread/start",
+            json!({"cwd": cwd, "ephemeral": true}),
+            Pending::Baseline {
+                cwd: cwd.to_owned(),
+            },
+        );
+        self.write(line, out);
+    }
+
     /// Delivers what was waiting for the thread or the turn ID, and a pending stop.
     fn flush(&mut self, session: u64, out: &mut Outputs) {
         let Some(state) = self.sessions.get_mut(&session) else {
@@ -340,12 +491,43 @@ impl CodexDriver {
                 out.writes.push(r#"{"method":"initialized"}"#.to_owned());
                 out.writes.append(&mut self.before_ready);
             }
-            Pending::Thread { session, resume } => {
-                let thread = serde_json::from_slice::<Response<ThreadResult>>(line)
+            Pending::Baseline { cwd } => {
+                let result = serde_json::from_slice::<Response<ThreadResult>>(line)
                     .ok()
-                    .and_then(|r| r.result)
-                    .map(|r| r.thread.id);
-                match thread {
+                    .and_then(|r| r.result);
+                match result.and_then(ThreadResult::settings) {
+                    Some((approval, sandbox)) => {
+                        self.baselines
+                            .insert(cwd.clone(), Baseline::Known(approval, sandbox));
+                    }
+                    None => {
+                        self.baselines.insert(cwd.clone(), Baseline::Unavailable);
+                    }
+                }
+                let waiting: Vec<u64> = self
+                    .sessions
+                    .iter()
+                    .filter(|(_, s)| s.cwd == cwd && !s.waiting.is_empty())
+                    .map(|(&id, _)| id)
+                    .collect();
+                for session in waiting {
+                    self.flush(session, out);
+                }
+            }
+            Pending::Thread { session, resume } => {
+                let result = serde_json::from_slice::<Response<ThreadResult>>(line)
+                    .ok()
+                    .and_then(|r| r.result);
+                // A new thread has no override yet, so it reports the user's settings.
+                if !resume
+                    && let Some(cwd) = self.sessions.get(&session).map(|s| s.cwd.clone())
+                    && let Some((approval, sandbox)) =
+                        result.as_ref().and_then(|r| r.clone().settings())
+                {
+                    self.baselines
+                        .insert(cwd, Baseline::Known(approval, sandbox));
+                }
+                match result.map(|r| r.thread.id) {
                     Some(thread) => self.thread_ready(session, thread, out),
                     // Never fall back to a fresh thread on its own: the user would see the
                     // old conversation while Codex had none of it.
@@ -640,12 +822,21 @@ struct Response<T> {
     result: Option<T>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ThreadResult {
     thread: Named,
+    #[serde(rename = "approvalPolicy")]
+    approval_policy: Option<Value>,
+    sandbox: Option<Value>,
 }
 
-#[derive(Deserialize)]
+impl ThreadResult {
+    fn settings(self) -> Option<(Value, Value)> {
+        Some((self.approval_policy?, self.sandbox?))
+    }
+}
+
+#[derive(Clone, Deserialize)]
 struct Named {
     id: String,
 }
