@@ -11,7 +11,10 @@ use keystone_ui::{Appearance, Density, Fonts, Theme, set_theme};
 struct Gallery {
     menu_open: bool,
     selected_row: usize,
+    markdown: std::sync::Arc<keystone_ui::markdown::Document>,
 }
+
+const MARKDOWN: &str = "## Heading\n\nA paragraph with **strong**, *emphasis*, `inline code`, ~~struck~~, and a [link](https://example.com).\n\n- A bullet\n  1. A nested number\n- Another bullet\n\n> A quoted line.\n\n| Left | Center | Right |\n| :-- | :-: | --: |\n| `a` | b | 1 |\n| c | d | 22 |\n\n```rust\nfn main() {\n    println!(\"A long line that scrolls sideways instead of wrapping, as in an editor, so code keeps its shape.\");\n}\n```\n\n---\n";
 
 fn section(title: &'static str, body: impl IntoElement) -> impl IntoElement {
     v_flex()
@@ -74,6 +77,11 @@ impl Render for Gallery {
                         Button::new(SharedString::from(format!("{name}-disabled")), "Disabled")
                             .style(style)
                             .disabled(true)
+                            .into_any_element(),
+                        Button::new(SharedString::from(format!("{name}-warning")), "Warning")
+                            .style(style)
+                            .icon(IconName::Shield)
+                            .color(Color::Warning)
                             .into_any_element(),
                     ]))
             }));
@@ -186,6 +194,13 @@ impl Render for Gallery {
                 .kbd("Ctrl+Shift+N"),
         )
         .child(MenuSeparator)
+        .child(MenuHeader::new("Approvals"))
+        .child(
+            MenuItem::new("ask", "Ask first")
+                .detail("Asks before commands not known to be safe")
+                .checked(true),
+        )
+        .child(MenuSeparator)
         .child(MenuHeader::new("Density"))
         .child(MenuItem::new("compact", "Compact").checked(false))
         .child(MenuItem::new("default", "Default").checked(true))
@@ -248,7 +263,15 @@ impl Render for Gallery {
                     .child(section("ICON BUTTONS", icon_buttons))
                     .child(section(
                         "POPOVER MENU",
-                        h_flex().h(px(260.)).items_start().child(menu),
+                        h_flex().h(px(330.)).items_start().child(menu),
+                    ))
+                    .child(section(
+                        "MARKDOWN",
+                        div()
+                            .max_w(px(760.))
+                            .text_size(TextSize::Body.px())
+                            .line_height(px(22.))
+                            .child(Markdown::new("gallery-markdown", self.markdown.clone())),
                     ))
                     .child(section("LIST ITEMS", list))
                     .child(section("LABELS", labels))
@@ -273,6 +296,9 @@ fn main() {
                     cx.new(|_| Gallery {
                         menu_open: true,
                         selected_row: 0,
+                        markdown: std::sync::Arc::new(keystone_ui::markdown::Document::parse(
+                            MARKDOWN,
+                        )),
                     })
                 },
             )

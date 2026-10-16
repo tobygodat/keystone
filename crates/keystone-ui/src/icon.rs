@@ -45,6 +45,7 @@ icons! {
     Minus => "icons/minus.svg", "<path d='M5 12h14'/>";
     Square => "icons/square.svg", "<rect x='5' y='5' width='14' height='14' rx='2'/>";
     Check => "icons/check.svg", "<path d='m5 12 5 5 9-10'/>";
+    Shield => "icons/shield.svg", "<path d='M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6Z'/>";
 }
 
 /// Serves every `IconName` as a white-stroked SVG. GPUI tints it with `text_color`.

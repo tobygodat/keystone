@@ -95,3 +95,26 @@ fn popover_opens_from_trigger_and_closes_on_any_outside_press(cx: &mut TestAppCo
     click(cx, "trigger");
     assert!(!open(cx));
 }
+
+struct Reply;
+
+impl Render for Reply {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(Markdown::from_source(
+            "reply",
+            "Some **bold** [text](https://example.com).\n\n```rust\nfn main() {}\n```\n\n```\nsecond\n```\n",
+        ))
+    }
+}
+
+#[gpui::test]
+fn markdown_code_blocks_copy_their_code(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    let (_view, cx) = cx.add_window_view(|_, _| Reply);
+    click(cx, "reply-copy-1");
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(copied.as_deref(), Some("fn main() {}"));
+    click(cx, "reply-copy-2");
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(copied.as_deref(), Some("second"));
+}

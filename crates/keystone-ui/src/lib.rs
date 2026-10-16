@@ -9,6 +9,7 @@ mod icon;
 mod kbd;
 mod label;
 mod list_item;
+pub mod markdown;
 mod popover;
 mod styled_ext;
 mod theme;
@@ -21,6 +22,7 @@ pub use icon::{Icon, IconName, Icons};
 pub use kbd::Kbd;
 pub use label::Label;
 pub use list_item::ListItem;
+pub use markdown::Markdown;
 pub use popover::{MenuHeader, MenuItem, MenuSeparator, PopoverMenu};
 pub use styled_ext::{StyledExt, h_flex, v_flex};
 pub use theme::{ActiveTheme, Appearance, Colors, Density, Fonts, Theme};
@@ -42,7 +44,7 @@ pub mod prelude {
     pub use crate::automation::AutomationExt;
     pub use crate::{
         ActiveTheme, Button, ButtonSize, ButtonStyle, Color, Elevation, Icon, IconButton, IconName,
-        Kbd, Label, ListItem, MenuHeader, MenuItem, MenuSeparator, PopoverMenu, StyledExt,
-        TextSize, Tooltip, h_flex, radius, spacing, v_flex,
+        Kbd, Label, ListItem, Markdown, MenuHeader, MenuItem, MenuSeparator, PopoverMenu,
+        StyledExt, TextSize, Tooltip, h_flex, radius, spacing, v_flex,
     };
 }

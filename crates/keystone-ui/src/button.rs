@@ -152,6 +152,7 @@ pub struct Button {
     common: Common,
     label: SharedString,
     icon: Option<IconName>,
+    color: Option<Color>,
 }
 
 impl Button {
@@ -160,11 +161,18 @@ impl Button {
             common: Common::new(id.into()),
             label: label.into(),
             icon: None,
+            color: None,
         }
     }
 
     pub fn icon(mut self, icon: IconName) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Overrides the label and icon color, for a state that needs attention.
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = Some(color);
         self
     }
 
@@ -174,7 +182,9 @@ impl Button {
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let size = self.common.size;
-        let color = if self.common.selected || self.common.style == ButtonStyle::Filled {
+        let color = if let Some(color) = self.color {
+            color
+        } else if self.common.selected || self.common.style == ButtonStyle::Filled {
             Color::Default
         } else {
             Color::Muted

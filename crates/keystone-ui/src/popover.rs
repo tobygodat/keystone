@@ -122,6 +122,7 @@ impl RenderOnce for PopoverMenu {
 pub struct MenuItem {
     id: ElementId,
     label: SharedString,
+    detail: Option<SharedString>,
     icon: Option<IconName>,
     checked: Option<bool>,
     kbd: Option<SharedString>,
@@ -134,12 +135,19 @@ impl MenuItem {
         Self {
             id: id.into(),
             label: label.into(),
+            detail: None,
             icon: None,
             checked: None,
             kbd: None,
             on_click: None,
             debug_selector: None,
         }
+    }
+
+    /// A muted second line under the label, for choices that need explaining.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 
     pub fn icon(mut self, icon: IconName) -> Self {
@@ -177,9 +185,17 @@ impl RenderOnce for MenuItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let hover = theme.colors.element_hover;
+        let height = theme.density.control(px(28.));
+        let has_detail = self.detail.is_some();
         let mut el = h_flex()
             .id(self.id)
-            .h(theme.density.control(px(28.)))
+            .map(|d| {
+                if has_detail {
+                    d.min_h(height).py(theme.density.pad(px(5.))).items_start()
+                } else {
+                    d.h(height)
+                }
+            })
             .px(px(8.))
             .gap_2()
             .rounded(radius::MENU_ROW)
@@ -192,9 +208,12 @@ impl RenderOnce for MenuItem {
                 }))
             })
             .child(
-                div()
+                v_flex()
                     .flex_1()
-                    .child(Label::new(self.label).size(TextSize::Base)),
+                    .child(Label::new(self.label).size(TextSize::Base))
+                    .when_some(self.detail, |d, detail| {
+                        d.child(Label::new(detail).size(TextSize::Sm).color(Color::Muted))
+                    }),
             )
             .when_some(self.kbd, |d, keys| d.child(Kbd::new(keys)));
         if let Some(selector) = self.debug_selector {
