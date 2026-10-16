@@ -9,3 +9,4 @@ date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_
 2026-10-16T01:12:59Z	b9e91ec	0.60	0.73	270	0.48	0.57	virtualized transcript; logs and Codex startup on workers	0.67	0.59
 2026-10-16T01:47:09Z	016fa9f	1.01	1.11	271	1.01	2.11	rev2 shell		
 2026-10-16T02:59:07Z	4292e65+dirty	0.92	1.00	271	0.77	1.23	rev3 sidebar		
+2026-10-16T03:32:57Z	1e38881	0.63	0.73	271	0.53	0.73	merge main (Revision 2 shell) into codex-review-followups	0.66	0.59
