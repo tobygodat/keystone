@@ -106,8 +106,7 @@ impl Keystone {
             TextInput::new("Write a draft…", InputMode::Multiline, cx)
                 .text_style(TextSize::Body, Color::Strong)
         });
-        let search =
-            cx.new(|cx| TextInput::new("Search conversations…", InputMode::SingleLine, cx));
+        let search = cx.new(|cx| TextInput::new("Search", InputMode::SingleLine, cx));
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
                 this.draft_save_task = Some(cx.spawn(async move |this, cx| {
@@ -385,36 +384,40 @@ impl Keystone {
         }
     }
 
-    fn titlebar(&self, title: String, cx: &mut Context<Self>) -> impl IntoElement {
-        let (tab_bg, density) = (cx.theme().colors.element_selected, cx.theme().density);
+    /// The main column's bar: the sidebar toggle, the breadcrumb, and the window controls.
+    fn top_bar(&self, session: Option<(String, bool)>, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .h(density.control(px(38.)))
             .flex_shrink_0()
-            .pr_1()
-            .hairline_b(cx)
+            .h(cx.theme().density.control(px(44.)))
+            .px(px(6.))
+            .gap(px(10.))
             .child(
-                div()
-                    .w(px(if self.sidebar { 302. } else { 46. }))
-                    .flex_shrink_0(),
+                IconButton::new("sidebar-toggle", IconName::Panel)
+                    .debug_selector(|| "sidebar-toggle".into())
+                    .tooltip(Tooltip::text(if self.sidebar {
+                        "Hide sidebar"
+                    } else {
+                        "Show sidebar"
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sidebar = !this.sidebar;
+                        this.refresh(cx);
+                    })),
             )
-            .child(
-                h_flex()
-                    .h(px(28.))
-                    .w(px(220.))
-                    .px_2p5()
-                    .gap_2()
-                    .rounded(radius::CONTROL)
-                    .bg(tab_bg)
-                    .child(Icon::new(IconName::Chat).size(px(14.)))
-                    .child(Label::new(title).truncate()),
-            )
-            .child(
-                div().flex_1().flex().justify_center().child(
-                    Label::new("keystone")
-                        .size(TextSize::Sm)
-                        .color(Color::Faint),
-                ),
-            )
+            .child(Label::new("keystone").color(Color::Muted))
+            .when_some(session, |d, (title, settled)| {
+                d.child(Label::new("/").color(Color::Faint))
+                    .child(
+                        Label::new(title)
+                            .weight(FontWeight::MEDIUM)
+                            .color(Color::Strong)
+                            .truncate(),
+                    )
+                    .when(settled, |d| {
+                        d.child(Label::new("Settled").color(Color::Muted))
+                    })
+            })
+            .child(div().flex_1())
             .child(
                 IconButton::new("minimize", IconName::Minus)
                     .tooltip(Tooltip::text("Minimize"))
@@ -436,44 +439,122 @@ impl Keystone {
             )
     }
 
-    fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rail_bg = cx.theme().colors.sidebar;
+    /// The left column: app bar, search, the cached session list, and the settings footer.
+    fn sidebar_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (colors, density) = (cx.theme().colors, cx.theme().density);
+        let list = AnyView::from(self.session_sidebar.clone());
         v_flex()
-            .w(px(46.))
+            .w(px(302.))
             .flex_shrink_0()
             .h_full()
-            .items_center()
-            .py_2()
-            .gap_1()
-            .bg(rail_bg)
+            .bg(colors.sidebar)
             .hairline_r(cx)
             .child(
-                IconButton::new("sidebar", IconName::Panel)
-                    .debug_selector(|| "rail-sidebar".into())
-                    .size(ButtonSize::Large)
-                    .tooltip(Tooltip::text(if self.sidebar {
-                        "Hide sidebar"
-                    } else {
-                        "Show sidebar"
-                    }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar = !this.sidebar;
-                        this.refresh(cx);
-                    })),
+                h_flex()
+                    .flex_shrink_0()
+                    .h(density.control(px(44.)))
+                    .pl(px(13.))
+                    .pr_2()
+                    .gap(px(10.))
+                    .child(arch_mark(px(20.)))
+                    .child(
+                        Label::new("keystone")
+                            .size(TextSize::Body)
+                            .weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        h_flex()
+                            .h(px(18.))
+                            .px(px(6.))
+                            .rounded(px(5.))
+                            .bg(colors.element_hover)
+                            .child(Label::new("preview").size(TextSize::Xs).color(Color::Muted)),
+                    )
+                    .child(div().flex_1())
+                    .child(self.new_session_menu(cx)),
             )
             .child(
-                IconButton::new("search", IconName::Search)
-                    .debug_selector(|| "rail-search".into())
-                    .size(ButtonSize::Large)
-                    .tooltip(Tooltip::with_key("Search", "Ctrl+F"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.sidebar = true;
-                        this.search.focus_handle(cx).focus(window);
-                        this.refresh(cx);
-                    })),
+                h_flex()
+                    .flex_shrink_0()
+                    .h(density.control(px(36.)))
+                    .pl(px(14.))
+                    .pr_2()
+                    .gap_2()
+                    .child(Icon::new(IconName::Search).size(px(15.)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .automation_id("search-field")
+                            .child(self.search.clone()),
+                    )
+                    .child(Label::new("Ctrl F").size(TextSize::Sm).color(Color::Faint)),
             )
-            .child(div().flex_1())
-            .child(self.settings_menu(cx))
+            // A reused cached view skips prepaint, so it would report no element
+            // geometry. Verification trades that speed for names.
+            .map(|d| {
+                if automation::enabled() {
+                    d.child(div().flex_1().min_h_0().w_full().child(list))
+                } else {
+                    d.child(list.cached(StyleRefinement::default().flex_1().min_h_0().w_full()))
+                }
+            })
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .h(density.control(px(40.)))
+                    .pl(px(6.))
+                    .pr(px(14.))
+                    .gap_0p5()
+                    .hairline_t(cx)
+                    .child(self.settings_menu(cx))
+                    .child(
+                        div().flex_1().child(
+                            Label::new("Local workspace")
+                                .size(TextSize::Ui)
+                                .color(Color::Muted),
+                        ),
+                    )
+                    .child(
+                        Label::new("Claude Code + Codex")
+                            .size(TextSize::Sm)
+                            .color(Color::Faint),
+                    ),
+            )
+    }
+
+    fn new_session_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        PopoverMenu::new(
+            "new-session-menu",
+            IconButton::new("new-session", IconName::Pencil)
+                .debug_selector(|| "new-session".into())
+                .selected(self.new_menu)
+                .tooltip(Tooltip::text("New session")),
+        )
+        .anchor(Corner::TopRight)
+        .open(self.new_menu)
+        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+            this.new_menu = *open;
+            cx.notify();
+        }))
+        .child(
+            MenuItem::new("new-claude", "New Claude session")
+                .icon(IconName::Chat)
+                .kbd("Ctrl+N")
+                .debug_selector(|| "new-claude".into())
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.start(Provider::Claude, window, cx)),
+                ),
+        )
+        .child(
+            MenuItem::new("new-codex", "New Codex session")
+                .icon(IconName::Chat)
+                .kbd("Ctrl+Shift+N")
+                .debug_selector(|| "new-codex".into())
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.start(Provider::Codex, window, cx)),
+                ),
+        )
     }
 
     fn settings_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1309,8 +1390,7 @@ impl SessionSidebar {
         let (settled, active): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| row.settled);
         let mut list = v_flex()
             .id("session-list")
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .overflow_y_scroll()
             .px_2()
             .py(px(6.));
@@ -1352,100 +1432,20 @@ impl SessionSidebar {
 
 impl Render for SessionSidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(app) = self.app.upgrade() else {
-            return div();
-        };
-        let this = app.read(cx);
-        let (new_menu, search) = (this.new_menu, this.search.clone());
-        let density = cx.theme().density;
-        let listener = |f: fn(&mut Keystone, &mut Window, &mut Context<Keystone>)| {
-            let app = app.downgrade();
-            move |_: &_, window: &mut Window, cx: &mut App| {
-                let _ = app.update(cx, |this, cx| f(this, window, cx));
-            }
-        };
-        let set_menu = {
-            let app = app.downgrade();
-            move |open: &bool, _: &mut Window, cx: &mut App| {
-                let open = *open;
-                let _ = app.update(cx, |this, cx| {
-                    this.new_menu = open;
-                    this.refresh(cx);
-                });
-            }
-        };
-        v_flex()
-            .size_full()
-            .hairline_r(cx)
-            .child(
-                h_flex()
-                    .h(density.control(px(40.)))
-                    .pl_3()
-                    .pr_1p5()
-                    .hairline_b(cx)
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Label::new("Workspace").weight(FontWeight::MEDIUM)),
-                    )
-                    .child(
-                        PopoverMenu::new(
-                            "new-session-menu",
-                            IconButton::new("new-session", IconName::Plus)
-                                .debug_selector(|| "new-session".into())
-                                .selected(new_menu)
-                                .tooltip(Tooltip::text("New session")),
-                        )
-                        .anchor(Corner::TopRight)
-                        .open(new_menu)
-                        .on_open_change(set_menu)
-                        .child(
-                            MenuItem::new("new-claude", "New Claude session")
-                                .icon(IconName::Chat)
-                                .kbd("Ctrl+N")
-                                .debug_selector(|| "new-claude".into())
-                                .on_click(listener(|this, window, cx| {
-                                    this.start(Provider::Claude, window, cx)
-                                })),
-                        )
-                        .child(
-                            MenuItem::new("new-codex", "New Codex session")
-                                .icon(IconName::Chat)
-                                .kbd("Ctrl+Shift+N")
-                                .debug_selector(|| "new-codex".into())
-                                .on_click(listener(|this, window, cx| {
-                                    this.start(Provider::Codex, window, cx)
-                                })),
-                        ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .h(density.control(px(36.)))
-                    .pl_3()
-                    .pr_1p5()
-                    .gap_2()
-                    .child(Icon::new(IconName::Search).size(px(14.)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .automation_id("search-field")
-                            .child(search),
-                    ),
-            )
-            .child(self.sections(&app, cx))
+        match self.app.upgrade() {
+            Some(app) => self.sections(&app, cx).into_any_element(),
+            None => div().into_any_element(),
+        }
     }
 }
 
 impl Render for Keystone {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (background, text, ui_font, density) = (
+        let (background, text, ui_font) = (
             theme.colors.background,
             theme.colors.text,
             theme.fonts.ui.clone(),
-            theme.density,
         );
         let current = self
             .store
@@ -1453,9 +1453,7 @@ impl Render for Keystone {
             .sessions()
             .iter()
             .find(|s| Some(s.id()) == self.store.workspace().selected());
-        let title = current
-            .map(|s| s.title().to_owned())
-            .unwrap_or_else(|| "Workspace".into());
+        let session = current.map(|s| (s.title().to_owned(), s.settled()));
         let selected = current.map(|s| s.id());
         let current = current.map(|s| (s.provider(), s.settled()));
         if let Some(id) = selected {
@@ -1476,8 +1474,8 @@ impl Render for Keystone {
         let main = if let (None, false) = (selected, self.fixture) {
             v_flex()
                 .flex_1()
-                .min_w_0()
-                .h_full()
+                .min_h_0()
+                .w_full()
                 .items_center()
                 .justify_center()
                 .gap(px(22.))
@@ -1561,8 +1559,8 @@ impl Render for Keystone {
             };
             v_flex()
                 .flex_1()
-                .min_w_0()
-                .h_full()
+                .min_h_0()
+                .w_full()
                 .items_center()
                 .px(px(24.))
                 .pb(px(18.))
@@ -1570,8 +1568,9 @@ impl Render for Keystone {
                 .children(error)
                 .child(composer)
         };
-        v_flex()
+        h_flex()
             .size_full()
+            .items_start()
             .bg(background)
             .font_family(ui_font)
             .text_color(text)
@@ -1614,46 +1613,14 @@ impl Render for Keystone {
                 this.search.focus_handle(cx).focus(window);
                 this.refresh(cx);
             }))
-            .child(self.titlebar(title, cx))
+            .when(self.sidebar, |d| d.child(self.sidebar_column(cx)))
             .child(
-                div()
-                    .flex()
+                v_flex()
                     .flex_1()
-                    .min_h_0()
-                    .child(self.rail(cx))
-                    .when(self.sidebar, |d| {
-                        let sidebar = AnyView::from(self.session_sidebar.clone());
-                        let style = StyleRefinement::default()
-                            .w(px(256.))
-                            .flex_shrink_0()
-                            .h_full();
-                        // A reused cached view skips prepaint, so it would report no
-                        // element geometry. Verification trades that speed for names.
-                        if automation::enabled() {
-                            d.child(div().w(px(256.)).flex_shrink_0().h_full().child(sidebar))
-                        } else {
-                            d.child(sidebar.cached(style))
-                        }
-                    })
+                    .min_w_0()
+                    .h_full()
+                    .child(self.top_bar(session, cx))
                     .child(main),
-            )
-            .child(
-                h_flex()
-                    .h(density.control(px(26.)))
-                    .flex_shrink_0()
-                    .px_3()
-                    .hairline_t(cx)
-                    .child(
-                        Label::new("Local workspace")
-                            .size(TextSize::Xs)
-                            .color(Color::Muted),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Label::new("Claude Code + Codex · preview")
-                            .size(TextSize::Xs)
-                            .color(Color::Muted),
-                    ),
             )
     }
 }
@@ -1772,10 +1739,8 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(second(cx), first_row);
 
-        view.update_in(cx, |this, _, cx| {
-            this.search
-                .update(cx, |input, cx| input.set_value(String::new(), cx))
-        });
+        cx.update(|_, cx| TextInput::bind_keys(cx));
+        cx.simulate_keystrokes("ctrl-a backspace");
         cx.run_until_parked();
         assert_eq!(second(cx), second_row);
 

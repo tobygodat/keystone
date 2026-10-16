@@ -907,7 +907,7 @@ impl Element for TextElement {
             let height = if input.mode == InputMode::Multiline {
                 layout.height().min(line_height * 8).max(px(28.))
             } else {
-                px(28.)
+                line_height
             };
             size(width, height)
         });
@@ -1095,6 +1095,8 @@ impl Render for TextInput {
             .flex()
             .items_center()
             .w_full()
+            // A single line is centred in a 28 px field that still takes clicks.
+            .when(self.mode == InputMode::SingleLine, |d| d.h(px(28.)))
             .overflow_hidden()
             .text_size(self.text_size.px())
             .line_height(px(20.))
