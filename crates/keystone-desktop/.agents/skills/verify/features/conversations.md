@@ -10,7 +10,7 @@ Send a message in a Claude Code or Codex session, watch the reply stream, answer
 - `chat-steer` sends a message during a turn to that turn. The button reads Steer while a turn runs.
 - `chat-stop` ends the running turn. The partial reply stays, marked Stopped.
 - `chat-markdown` renders replies as Markdown: headings, emphasis, inline code, lists, quotes, tables, and code blocks with a copy button. Completed replies have a copy button below them. Web links open in the browser.
-- `chat-approval-mode` chooses the session's approval mode from the shield button in the composer. The mode is saved and applies from the next turn. Full access shows in the warning color.
+- `chat-approval-mode` chooses the session's approval mode from the shield button in the composer. The mode is saved and applies to every message sent after it. Full access shows in the warning color.
 - `chat-restore` reopens the conversation from its log after a restart, scrolled to the latest message, and resumes the same provider conversation.
 
 ## How to get to it (user POV)

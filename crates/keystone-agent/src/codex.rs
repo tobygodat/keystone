@@ -132,8 +132,13 @@ struct Session {
     cwd: String,
     /// The policy for new turns. `None` uses the user's settings.
     policy: Option<Policy>,
+    /// The policy the running or starting turn was started under. A message for a
+    /// session whose policy changed since waits for the next turn instead of steering.
+    turn_policy: Option<Policy>,
     /// The thread may hold an override from an earlier turn, so using the user's
-    /// settings again means sending them.
+    /// settings means sending them. It stays set for the thread: every turn under the
+    /// user's settings sends them, so no failed or lost restore can leave an override
+    /// behind.
     overridden: bool,
 }
 
@@ -336,6 +341,11 @@ impl CodexDriver {
                 },
             ),
             (None, _) | (Some(_), Turn::Starting) => state.waiting.push(text),
+            // The running turn has another approval mode: the message starts the next
+            // turn when this one ends, under the latest mode.
+            (Some(_), Turn::Running(_)) if state.policy != state.turn_policy => {
+                state.waiting.push(text)
+            }
             (Some(thread), Turn::Running(turn)) => {
                 let epoch = state.epoch;
                 let line = self.request(
@@ -364,7 +374,6 @@ impl CodexDriver {
                         Some(Baseline::Known(approval, sandbox)) => {
                             params["approvalPolicy"] = approval.clone();
                             params["sandboxPolicy"] = sandbox.clone();
-                            state.overridden = false;
                         }
                         // Wait for the user's settings instead of running under an
                         // override they turned off.
@@ -388,6 +397,7 @@ impl CodexDriver {
                 // Starting, so further messages wait for the ID instead of starting a
                 // parallel turn.
                 state.turn = Turn::Starting;
+                state.turn_policy = state.policy;
                 let line = self.request("turn/start", params, Pending::TurnStart { session });
                 self.write(line, out);
             }

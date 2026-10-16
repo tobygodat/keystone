@@ -66,6 +66,11 @@ pub fn args(mode: ApprovalMode) -> Vec<&'static str> {
 /// What Claude is told when the user denies a tool call.
 const DENIED: &str = "The user denied this in Keystone.";
 
+/// What Claude is told when it asks to leave plan mode under Read only. Approving
+/// `ExitPlanMode` returns Claude to the mode it had before plan mode, which can write
+/// files without asking, so Read only never allows it.
+const READ_ONLY_PLAN: &str = "Keystone's approval mode is Read only, so Claude Code stays in plan mode and cannot make changes. Present the plan and stop; the user can choose another approval mode to carry it out.";
+
 #[derive(Default)]
 struct Turn {
     /// Messages sent during this turn that Claude has not completed or dropped, and
@@ -80,8 +85,9 @@ struct Turn {
     /// The latest result's status and error. A later result replaces it.
     result: Option<(TurnStatus, Option<String>)>,
     stopping: bool,
-    /// Messages not written yet: the turn waits for Claude to confirm its permission
-    /// mode, or a steer waits to learn whether Claude reports lifecycle frames.
+    /// Messages not written yet: they wait for Claude to confirm the selected
+    /// permission mode, or a steer waits to learn whether Claude reports lifecycle
+    /// frames.
     held: Vec<String>,
     /// Whether the turn's first message was written.
     written: bool,
@@ -90,7 +96,11 @@ struct Turn {
 enum Request {
     Initialize,
     Interrupt,
-    SetMode,
+    /// A `set_permission_mode` for the selection with this version.
+    SetMode {
+        version: u64,
+        target: &'static str,
+    },
 }
 
 struct Pending {
@@ -98,6 +108,8 @@ struct Pending {
     request_id: Value,
     input: Value,
     tool_use_id: Option<String>,
+    /// Whether allowing it leaves plan mode.
+    exits_plan: bool,
 }
 
 pub struct ClaudeDriver {
@@ -126,16 +138,26 @@ pub struct ClaudeDriver {
     api_error: Option<String>,
     /// The approval mode the process was launched with.
     launched: ApprovalMode,
-    /// The approval mode for the next turn.
+    /// The approval mode the user selected last, and its version, which counts every
+    /// change. Each `set_permission_mode` records the version it was sent for.
     mode: ApprovalMode,
-    /// The permission mode Claude last reported, or the one it was launched with.
-    current: Option<String>,
+    version: u64,
+    /// Whether Claude answered `initialize`. No message is written before.
+    initialized: bool,
+    /// The permission mode Claude last confirmed: in its `initialize` answer, an
+    /// answer to `set_permission_mode`, or a `system` report.
+    confirmed: Option<String>,
     /// Whether Keystone changed the permission mode in this process.
     changed: bool,
-    /// A `set_permission_mode` request the turn's messages wait for.
-    gate: Option<String>,
-    /// The ID of the latest control request Keystone sent.
-    last_request: Option<String>,
+    /// Whether the user allowed `ExitPlanMode` in the running turn. Claude's mode is
+    /// then unknown until the turn ends, so steers wait for the next turn.
+    leaving_plan: bool,
+    /// Whether a `set_permission_mode` went unanswered too long. The process's mode
+    /// is unknown, so it is replaced before anything else is written to it.
+    untrusted: bool,
+    /// `set_permission_mode` requests sent since the connection last asked, so it can
+    /// time them ([`ClaudeDriver::take_mode_requests`]).
+    timed: Vec<String>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -169,10 +191,13 @@ impl ClaudeDriver {
             api_error: None,
             launched: mode,
             mode,
-            current: permission_mode(mode).map(str::to_owned),
+            version: 0,
+            initialized: false,
+            confirmed: None,
             changed: false,
-            gate: None,
-            last_request: None,
+            leaving_plan: false,
+            untrusted: false,
+            timed: Vec::new(),
             unknown: 0,
         };
         let line = driver.request(json!({"subtype": "initialize"}), Request::Initialize);
@@ -184,19 +209,69 @@ impl ClaudeDriver {
         self.turn.is_some()
     }
 
-    /// Whether the next turn needs a new process to run in its approval mode. A
-    /// running process cannot enter `bypassPermissions` unless launched in it, and
-    /// one launched in it is never lowered in place: approving Claude's `ExitPlanMode`
-    /// returns to the mode before plan mode. The user's own settings come back only
-    /// in a process launched without a mode, since Claude does not keep a mode across
-    /// `--resume`.
+    /// Whether a message in the selected approval mode needs a new process. A running
+    /// process cannot enter `bypassPermissions` unless launched in it, and one
+    /// launched in it is never lowered in place. The user's own settings come back
+    /// only in a process Keystone never changed the mode of. A process whose mode is
+    /// unknown is replaced too.
     pub fn needs_restart(&self) -> bool {
-        match self.mode {
-            ApprovalMode::FullAccess => self.launched != ApprovalMode::FullAccess,
-            _ if self.launched == ApprovalMode::FullAccess => true,
-            ApprovalMode::Provider => self.launched != ApprovalMode::Provider || self.changed,
-            _ => false,
+        self.untrusted
+            || match self.mode {
+                ApprovalMode::FullAccess => self.launched != ApprovalMode::FullAccess,
+                _ if self.launched == ApprovalMode::FullAccess => true,
+                ApprovalMode::Provider => self.launched != ApprovalMode::Provider || self.changed,
+                _ => false,
+            }
+    }
+
+    /// Whether a turn waits for a new process: it needs one and nothing of it was
+    /// written. The connection replaces the process, carrying the turn's messages
+    /// over with [`ClaudeDriver::take_unsent`] and [`ClaudeDriver::carry`].
+    pub fn wants_restart(&self) -> bool {
+        self.needs_restart() && self.turn.as_ref().is_some_and(|turn| !turn.written)
+    }
+
+    /// Takes the messages of a turn nothing of which was written, ending it without
+    /// reporting an end: it goes on in the next process.
+    pub fn take_unsent(&mut self) -> Vec<String> {
+        match self.turn.take() {
+            Some(turn) if !turn.written => turn.held,
+            turn => {
+                self.turn = turn;
+                Vec::new()
+            }
         }
+    }
+
+    /// Continues a turn carried over from a replaced process. Its start was reported.
+    pub fn carry(&mut self, messages: Vec<String>, out: &mut Outputs) {
+        if messages.is_empty() || self.turn.is_some() {
+            return;
+        }
+        self.turn = Some(Turn {
+            held: messages,
+            ..Turn::default()
+        });
+        self.pump(out);
+    }
+
+    /// The `set_permission_mode` requests sent since the last call, by ID.
+    pub fn take_mode_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.timed)
+    }
+
+    /// A `set_permission_mode` request went unanswered too long. If Claude has still
+    /// not answered it, the process's mode is unknown: nothing more is written to it,
+    /// and the messages waiting for it fail.
+    pub fn mode_request_timed_out(&mut self, id: &str, out: &mut Outputs) {
+        if !matches!(self.requests.get(id), Some(Request::SetMode { .. })) {
+            return;
+        }
+        self.untrusted = true;
+        self.fail_held(
+            "Claude Code did not confirm the approval mode in time, so nothing was sent. Send again to restart it.",
+            out,
+        );
     }
 
     /// Why a message sent now could not steer the running turn, if it could not.
@@ -219,12 +294,17 @@ impl ClaudeDriver {
         match command {
             // The process is started with the directory and `--resume`.
             Command::Open { .. } => {}
-            // Applied when the next turn starts. Claude does not keep a mode across
-            // `--resume`, so an earlier process's mode is never left behind.
+            // Checked again before every message is written, including those waiting.
             Command::Configure {
                 approval: ApprovalState { mode, .. },
                 ..
-            } => self.mode = mode,
+            } => {
+                if mode != self.mode {
+                    self.mode = mode;
+                    self.version += 1;
+                }
+                self.pump(out);
+            }
             Command::Send { text, .. } => self.send(text, out),
             Command::Interrupt { .. } => {
                 // Nothing reached Claude yet, so the turn ends here.
@@ -250,6 +330,11 @@ impl ClaudeDriver {
                     return;
                 };
                 let response = if allow {
+                    // Claude leaves plan mode when the tool runs, at a time no later line
+                    // is ordered against, so nothing more is written in this turn.
+                    if pending.exits_plan {
+                        self.leaving_plan = true;
+                    }
                     json!({"behavior": "allow", "updatedInput": pending.input})
                 } else {
                     if let Some(id) = pending.tool_use_id {
@@ -284,7 +369,8 @@ impl ClaudeDriver {
                     permission_mode: Some(mode),
                 }) = serde_json::from_slice(line)
                 {
-                    self.current = Some(mode);
+                    self.confirmed = Some(mode);
+                    self.pump(out);
                 }
             }
             ("command_lifecycle", _) => self.on_lifecycle(line, out),
@@ -325,59 +411,74 @@ impl ClaudeDriver {
     fn request(&mut self, request: Value, purpose: Request) -> String {
         self.next_request += 1;
         let id = format!("keystone-{}", self.next_request);
-        self.last_request = Some(id.clone());
+        if let Request::SetMode { .. } = purpose {
+            self.timed.push(id.clone());
+        }
         let line =
             json!({"type": "control_request", "request_id": id, "request": request}).to_string();
         self.requests.insert(id, purpose);
         line
     }
 
-    /// Starts a turn, or steers the running one. Claude queues a message sent before
-    /// it is ready. A new turn first sets the approval mode when Claude's differs, and
-    /// its messages wait for Claude to confirm it.
+    /// Starts a turn, or steers the running one. Every message waits in the turn's
+    /// `held` list and is written by [`ClaudeDriver::pump`].
     fn send(&mut self, text: String, out: &mut Outputs) {
-        let Some(turn) = &mut self.turn else {
-            if self.needs_restart() {
-                // The connection starts a new process first; this is the backstop.
+        match &mut self.turn {
+            Some(turn) => turn.held.push(text),
+            None => {
+                self.turn = Some(Turn {
+                    held: vec![text],
+                    ..Turn::default()
+                });
                 out.event(self.session, Event::TurnStarted);
-                return out.event(
-                    self.session,
-                    Event::TurnCompleted {
-                        status: TurnStatus::Failed,
-                        error: Some(
-                            "Claude Code must restart to use this approval mode. Send again."
-                                .into(),
-                        ),
-                    },
-                );
             }
-            self.turn = Some(Turn {
-                held: vec![text],
-                ..Turn::default()
-            });
-            out.event(self.session, Event::TurnStarted);
-            let target = permission_mode(self.mode);
-            if target.is_some() && self.current.as_deref() != target {
+        }
+        self.pump(out);
+    }
+
+    /// Whether a user message may be written now: Claude answered `initialize`, no
+    /// `set_permission_mode` is unanswered, and the mode Claude confirmed last is the
+    /// one the latest selection needs. With Provider settings, Keystone must never
+    /// have changed the mode of this process.
+    fn mode_confirmed(&self) -> bool {
+        !self.needs_restart()
+            && self.initialized
+            && !self.leaving_plan
+            && !self.mode_requested()
+            && permission_mode(self.mode)
+                .is_none_or(|target| self.confirmed.as_deref() == Some(target))
+    }
+
+    fn mode_requested(&self) -> bool {
+        self.requests
+            .values()
+            .any(|r| matches!(r, Request::SetMode { .. }))
+    }
+
+    /// Writes the held messages if the selected mode is confirmed, or asks Claude for
+    /// it when nothing else is pending. A process that needs replacing is left to the
+    /// connection ([`ClaudeDriver::wants_restart`]).
+    fn pump(&mut self, out: &mut Outputs) {
+        if self.turn.as_ref().is_none_or(|turn| turn.held.is_empty()) {
+            return;
+        }
+        if !self.mode_confirmed() {
+            if self.initialized
+                && !self.leaving_plan
+                && !self.mode_requested()
+                && !self.needs_restart()
+                && let Some(target) = permission_mode(self.mode)
+            {
                 let line = self.request(
                     json!({"subtype": "set_permission_mode", "mode": target}),
-                    Request::SetMode,
+                    Request::SetMode {
+                        version: self.version,
+                        target,
+                    },
                 );
-                self.gate = self.last_request.clone();
                 self.changed = true;
                 out.writes.push(line);
             }
-            return self.release(out);
-        };
-        // Held messages go first, in order.
-        if self.gate.is_some() || (turn.written && self.lifecycle.is_none()) {
-            return turn.held.push(text);
-        }
-        self.write(text, out);
-    }
-
-    /// Writes the messages held for the turn, once nothing holds them.
-    fn release(&mut self, out: &mut Outputs) {
-        if self.gate.is_some() {
             return;
         }
         let Some(turn) = &mut self.turn else { return };
@@ -391,8 +492,33 @@ impl ClaudeDriver {
         }
     }
 
-    /// Writes one message: the turn's first, or a steer.
+    /// Fails the messages that wait: the turn, if none of it was written, or else
+    /// its held steers.
+    fn fail_held(&mut self, reason: &str, out: &mut Outputs) {
+        let Some(turn) = &mut self.turn else { return };
+        if !turn.written {
+            return self.finish(TurnStatus::Failed, Some(reason.into()), out);
+        }
+        let n = std::mem::take(&mut turn.held).len();
+        if n > 0 {
+            out.event(
+                self.session,
+                Event::Warning {
+                    message: format!("{n} message(s) not sent. {reason}"),
+                },
+            );
+        }
+    }
+
+    /// Writes one message: the turn's first, or a steer. Only [`ClaudeDriver::pump`]
+    /// calls it, after checking the mode; it is checked again here.
     fn write(&mut self, text: String, out: &mut Outputs) {
+        if !self.mode_confirmed() {
+            if let Some(turn) = &mut self.turn {
+                turn.held.push(text);
+            }
+            return;
+        }
         // Without lifecycle frames, the steered turn's first `result` would end it while
         // the steer still runs. The connection refuses these first; this is the backstop.
         if let Some(turn) = &self.turn
@@ -466,8 +592,31 @@ impl ClaudeDriver {
         self.finish(status, error, out);
     }
 
+    /// Ends the turn. Steers still held after a completed turn start the next one;
+    /// otherwise they are dropped, with a warning.
     fn finish(&mut self, status: TurnStatus, error: Option<String>, out: &mut Outputs) {
-        self.turn = None;
+        self.leaving_plan = false;
+        let (held, written) = self
+            .turn
+            .take()
+            .map_or((Vec::new(), false), |turn| (turn.held, turn.written));
+        let carried = if status == TurnStatus::Completed {
+            held
+        } else {
+            // A turn with nothing written reports its own reason.
+            if !held.is_empty() && written && status == TurnStatus::Failed {
+                out.event(
+                    self.session,
+                    Event::Warning {
+                        message: format!(
+                            "{} message(s) not sent, because the turn failed",
+                            held.len()
+                        ),
+                    },
+                );
+            }
+            Vec::new()
+        };
         self.message = None;
         self.blocks.clear();
         self.tools.clear();
@@ -477,6 +626,14 @@ impl ClaudeDriver {
             out.event(self.session, Event::ApprovalResolved { request });
         }
         out.event(self.session, Event::TurnCompleted { status, error });
+        if !carried.is_empty() {
+            self.turn = Some(Turn {
+                held: carried,
+                ..Turn::default()
+            });
+            out.event(self.session, Event::TurnStarted);
+            self.pump(out);
+        }
     }
 
     fn on_init(&mut self, line: &[u8], out: &mut Outputs) {
@@ -488,7 +645,7 @@ impl ClaudeDriver {
             self.lifecycle = Some(init.capabilities.iter().any(|c| c == "msg_lifecycle_v1"));
         }
         if init.permission_mode.is_some() {
-            self.current = init.permission_mode;
+            self.confirmed = init.permission_mode;
         }
         // Claude repeats `init` before each turn; report the ID once.
         if self.conversation.as_deref() != Some(init.session_id.as_str()) {
@@ -500,7 +657,7 @@ impl ClaudeDriver {
                 },
             );
         }
-        self.release(out);
+        self.pump(out);
     }
 
     fn on_lifecycle(&mut self, line: &[u8], out: &mut Outputs) {
@@ -508,7 +665,7 @@ impl ClaudeDriver {
             return self.unknown += 1;
         };
         self.lifecycle = Some(true);
-        self.release(out);
+        self.pump(out);
         let Some(turn) = &mut self.turn else { return };
         match frame.state.as_str() {
             "started" => {
@@ -758,6 +915,26 @@ impl ClaudeDriver {
             return self.unknown += 1;
         };
         let request = control.request;
+        if request.subtype == "can_use_tool"
+            && request.tool_name.as_deref() == Some("ExitPlanMode")
+            && self.mode == ApprovalMode::ReadOnly
+        {
+            if let Some(id) = &request.tool_use_id {
+                self.denied.insert(id.clone());
+            }
+            out.writes.push(
+                json!({"type": "control_response", "response": {"subtype": "success",
+                    "request_id": control.request_id,
+                    "response": {"behavior": "deny", "message": READ_ONLY_PLAN}}})
+                .to_string(),
+            );
+            return out.event(
+                self.session,
+                Event::Warning {
+                    message: "Claude Code asked to leave plan mode. Read only keeps it there, so it was refused; choose another approval mode to let it make changes.".into(),
+                },
+            );
+        }
         if request.subtype != "can_use_tool" {
             // Answer everything else with an error, so Claude never waits forever.
             out.writes.push(
@@ -771,6 +948,7 @@ impl ClaudeDriver {
             return;
         }
         self.ensure_turn(out);
+        let exits_plan = request.tool_name.as_deref() == Some("ExitPlanMode");
         let tool = request
             .display_name
             .or(request.tool_name)
@@ -802,6 +980,7 @@ impl ClaudeDriver {
                 request_id: control.request_id,
                 input,
                 tool_use_id: request.tool_use_id.clone(),
+                exits_plan,
             },
         );
         out.event(
@@ -829,7 +1008,17 @@ impl ClaudeDriver {
             return;
         };
         let failed = match purpose {
-            Request::SetMode => return self.on_mode_set(response, out),
+            Request::SetMode { version, target } => {
+                return self.on_mode_set(response, version, target, out);
+            }
+            Request::Initialize if response.subtype != "error" => {
+                self.initialized = true;
+                self.confirmed = response
+                    .response
+                    .and_then(|r| r.current_permission_mode)
+                    .or_else(|| permission_mode(self.launched).map(str::to_owned));
+                return self.pump(out);
+            }
             Request::Initialize => "Claude Code did not start",
             Request::Interrupt => "Could not stop the turn",
         };
@@ -838,38 +1027,47 @@ impl ClaudeDriver {
         }
         let error = response.error.unwrap_or_else(|| "no reason given".into());
         let message = format!("{failed}: {error}");
-        let event = match purpose {
-            Request::Initialize => Event::Failed { message },
-            _ => Event::Warning { message },
-        };
-        out.event(self.session, event);
+        match purpose {
+            Request::Initialize => {
+                if self.turn.is_some() {
+                    self.finish(TurnStatus::Failed, Some(message.clone()), out);
+                }
+                out.event(self.session, Event::Failed { message });
+            }
+            _ => out.event(self.session, Event::Warning { message }),
+        }
     }
 
-    /// Claude answered the turn's `set_permission_mode`. Its messages go out only
-    /// under the mode the user chose; if Claude refused it, the turn fails unsent.
-    fn on_mode_set(&mut self, response: ControlResult, out: &mut Outputs) {
-        let id = response.request_id.as_str().map(str::to_owned);
-        let gated = id.is_some() && self.gate == id;
-        if gated {
-            self.gate = None;
-        }
+    /// Claude answered a `set_permission_mode`. Its answer is what the process runs in
+    /// now, whichever selection it was for. Held messages go out only once that is the
+    /// latest selection's mode ([`ClaudeDriver::pump`]); a refusal of the latest
+    /// selection fails them unsent, and an older one is followed by a new request.
+    fn on_mode_set(
+        &mut self,
+        response: ControlResult,
+        version: u64,
+        target: &'static str,
+        out: &mut Outputs,
+    ) {
         if response.subtype == "error" {
-            if gated && self.turn.is_some() {
+            if version == self.version {
                 let error = response.error.unwrap_or_else(|| "no reason given".into());
-                self.finish(
-                    TurnStatus::Failed,
-                    Some(format!(
+                return self.fail_held(
+                    &format!(
                         "Claude Code did not accept the approval mode, so nothing was sent: {error}"
-                    )),
+                    ),
                     out,
                 );
             }
-            return;
+        } else {
+            self.confirmed = Some(
+                response
+                    .response
+                    .and_then(|r| r.mode)
+                    .unwrap_or_else(|| target.to_owned()),
+            );
         }
-        if let Some(mode) = response.response.and_then(|r| r.mode) {
-            self.current = Some(mode);
-        }
-        self.release(out);
+        self.pump(out);
     }
 
     fn on_result(&mut self, line: &[u8], out: &mut Outputs) {
@@ -1117,9 +1315,12 @@ struct ControlResult {
     response: Option<ModeSet>,
 }
 
+/// The parts of a control answer Keystone reads: `set_permission_mode`'s `mode`, and
+/// `initialize`'s `current_permission_mode`.
 #[derive(Deserialize)]
 struct ModeSet {
     mode: Option<String>,
+    current_permission_mode: Option<String>,
 }
 
 #[derive(Deserialize)]

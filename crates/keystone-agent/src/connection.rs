@@ -495,16 +495,24 @@ fn deliver(shared: &mut Shared, inbox: &Mutex<Vec<(u64, Event)>>, mut out: Outpu
 /// commands: other sessions' messages, Stop, and answers go through, and [`send`]
 /// never waits for a start.
 ///
+/// The driver writes a message only once Claude has confirmed the session's latest
+/// approval mode, under the lock every mode change takes. When the mode needs a new
+/// process and nothing of the turn was written, the session's worker replaces the
+/// process and carries the turn's messages over.
+///
 /// [`send`]: ClaudeConnection::send
 pub struct ClaudeConnection {
-    wake: Wake,
-    shared: Arc<Mutex<ClaudeShared>>,
-    /// Signalled when a start finishes.
-    started: Arc<Condvar>,
-    /// Kept apart from `shared`, so draining never waits for a process to start.
-    inbox: Inbox,
-    workers: Mutex<HashMap<u64, Worker>>,
+    starter: ClaudeStarter,
 }
+
+type Workers = Arc<Mutex<HashMap<u64, Worker>>>;
+
+/// How long Claude may take to answer `set_permission_mode` before the messages
+/// waiting for it fail and its process is replaced.
+const MODE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long Claude may take to report the user's own permission mode.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Default)]
 struct ClaudeShared {
@@ -525,6 +533,8 @@ struct ClaudeShared {
     /// Set when the connection is dropped, so queued commands start nothing.
     closed: bool,
     before_start: Option<StartHook>,
+    /// [`MODE_TIMEOUT`], shorter in tests.
+    mode_timeout: Option<Duration>,
 }
 
 /// A session's process, from when it begins starting until it exits.
@@ -538,6 +548,11 @@ struct Live {
     /// Why the process exited before the worker could use it.
     exited: Option<String>,
     generation: u64,
+    /// What the process was started with, for a replacement.
+    cwd: PathBuf,
+    resume: Option<String>,
+    /// Whether the worker has a job queued to replace the process.
+    replacing: bool,
 }
 
 impl ClaudeShared {
@@ -558,17 +573,6 @@ impl ClaudeShared {
         live.and_then(ClaudeDriver::steer_blocked)
     }
 
-    /// Records the session's approval state and gives it to its driver.
-    fn set_approval(&mut self, session: u64, approval: ApprovalState) {
-        self.approvals.insert(session, approval);
-        if let Some(live) = self.live.get_mut(&session) {
-            live.driver.command(
-                Command::Configure { session, approval },
-                &mut Outputs::default(),
-            );
-        }
-    }
-
     /// Counts one of the session's queued messages as handled.
     fn unqueue(&mut self, session: u64) {
         if let Some(n) = self.queued.get_mut(&session) {
@@ -580,30 +584,54 @@ impl ClaudeShared {
     }
 }
 
+/// Records the session's approval state and gives it to its driver, which may now
+/// write what waited for it, or need a new process. Returns what the driver wrote.
+fn configure(shared: &mut ClaudeShared, session: u64, approval: ApprovalState) -> Outputs {
+    shared.approvals.insert(session, approval);
+    let mut out = Outputs::default();
+    if let Some(live) = shared.live.get_mut(&session) {
+        live.driver
+            .command(Command::Configure { session, approval }, &mut out);
+    }
+    out
+}
+
+/// What a job on a session's worker is for.
+enum Job {
+    /// A message, with the directory and saved conversation to start a process with.
+    Message(PathBuf, Option<String>),
+    /// Stop or an answer: nothing to start.
+    Command,
+    /// Replaces a process that cannot run the waiting turn's approval mode.
+    Replace,
+}
+
 impl ClaudeConnection {
     /// `program` is the `claude` binary to run, or `None` to look for it on first use.
     pub fn new(program: Option<PathBuf>, wake: Wake) -> Self {
         Self {
-            wake,
-            shared: Arc::new(Mutex::new(ClaudeShared {
-                program,
-                ..ClaudeShared::default()
-            })),
-            started: Arc::default(),
-            inbox: Arc::default(),
-            workers: Mutex::default(),
+            starter: ClaudeStarter {
+                wake,
+                shared: Arc::new(Mutex::new(ClaudeShared {
+                    program,
+                    ..ClaudeShared::default()
+                })),
+                started: Arc::default(),
+                inbox: Arc::default(),
+                workers: Arc::default(),
+            },
         }
     }
 
     /// The session's process ID while it runs.
     pub fn pid(&self, session: u64) -> Option<u32> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.starter.shared.lock().unwrap();
         let live = shared.live.get(&session)?;
         live.process.as_ref().map(Process::pid)
     }
 
     pub fn is_running(&self, session: u64) -> bool {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.starter.shared.lock().unwrap();
         shared
             .live
             .get(&session)
@@ -622,15 +650,19 @@ impl ClaudeConnection {
         text: String,
     ) -> Result<(), &'static str> {
         {
-            let mut shared = self.shared.lock().unwrap();
-            shared.set_approval(session, approval);
-            if let Some(reason) = shared.steer_blocked(session) {
+            let mut shared = self.starter.shared.lock().unwrap();
+            let out = configure(&mut shared, session, approval);
+            let refused = shared.steer_blocked(session);
+            if refused.is_none() {
+                *shared.queued.entry(session).or_default() += 1;
+            }
+            self.starter.deliver(shared, session, out);
+            if let Some(reason) = refused {
                 return Err(reason);
             }
-            *shared.queued.entry(session).or_default() += 1;
         }
-        let start = (PathBuf::from(cwd), resume.map(str::to_owned));
-        self.run(session, Some(start), move |driver, out| {
+        let start = Job::Message(PathBuf::from(cwd), resume.map(str::to_owned));
+        self.starter.queue(session, start, move |driver, out| {
             driver.command(Command::Send { session, text }, out)
         });
         Ok(())
@@ -640,88 +672,155 @@ impl ClaudeConnection {
     /// to stop or answer.
     pub fn command(&self, command: Command) {
         let session = command_session(&command);
-        self.run(session, None, move |driver, out| {
-            driver.command(command, out)
-        });
+        self.starter
+            .queue(session, Job::Command, move |driver, out| {
+                driver.command(command, out)
+            });
     }
 
     /// Changes the session's approval state at once; see [`Connection::set_approval`].
     pub fn set_approval(&self, session: u64, approval: ApprovalState) {
-        self.shared.lock().unwrap().set_approval(session, approval);
+        let mut shared = self.starter.shared.lock().unwrap();
+        let out = configure(&mut shared, session, approval);
+        self.starter.deliver(shared, session, out);
     }
 
     /// Takes every event that arrived since the last call.
     pub fn drain(&self) -> Vec<(u64, Event)> {
-        std::mem::take(&mut self.inbox.lock().unwrap())
+        std::mem::take(&mut self.starter.inbox.lock().unwrap())
     }
 
     #[doc(hidden)]
     pub fn hold_starts(&self, hook: StartHook) {
-        self.shared.lock().unwrap().before_start = Some(hook);
+        self.starter.shared.lock().unwrap().before_start = Some(hook);
     }
 
-    /// Queues `act` for the session's driver. `start`, given for a message, is the
-    /// directory and saved conversation to start a process with if none runs.
-    fn run(
+    /// Shortens how long Claude may take to confirm a permission mode.
+    #[doc(hidden)]
+    pub fn set_mode_timeout(&self, timeout: Duration) {
+        self.starter.shared.lock().unwrap().mode_timeout = Some(timeout);
+    }
+}
+
+/// What a session's worker, its process's reader, and its timers share.
+#[derive(Clone)]
+struct ClaudeStarter {
+    wake: Wake,
+    shared: Arc<Mutex<ClaudeShared>>,
+    /// Signalled when a start finishes.
+    started: Arc<Condvar>,
+    /// Kept apart from `shared`, so draining never waits for a process to start.
+    inbox: Inbox,
+    workers: Workers,
+}
+
+impl ClaudeStarter {
+    /// Queues `act` for the session's driver on the session's worker.
+    fn queue(
         &self,
         session: u64,
-        start: Option<(PathBuf, Option<String>)>,
+        job: Job,
         act: impl FnOnce(&mut ClaudeDriver, &mut Outputs) + Send + 'static,
     ) {
-        let starter = self.starter();
+        let starter = self.clone();
         let mut workers = self.workers.lock().unwrap();
         let worker = workers
             .entry(session)
             .or_insert_with(|| Worker::new("claude-session"));
-        worker.run(move || starter.run(session, start, act));
+        worker.run(move || starter.run(session, job, act));
     }
 
-    fn starter(&self) -> ClaudeStarter {
-        ClaudeStarter {
-            wake: self.wake.clone(),
-            shared: self.shared.clone(),
-            started: self.started.clone(),
-            inbox: self.inbox.clone(),
+    /// Delivers the driver's outputs ([`claude_deliver`]), then, without the lock,
+    /// wakes the UI, times new `set_permission_mode` requests, and queues the
+    /// process's replacement when a waiting turn needs one.
+    fn deliver(&self, mut shared: MutexGuard<'_, ClaudeShared>, session: u64, out: Outputs) {
+        let wake = claude_deliver(&mut shared, &self.inbox, session, out);
+        let timeout = shared.mode_timeout.unwrap_or(MODE_TIMEOUT);
+        let mut timed = Vec::new();
+        let mut replace = false;
+        let mut generation = 0;
+        if let Some(live) = shared.live.get_mut(&session)
+            && live.process.is_some()
+        {
+            timed = live.driver.take_mode_requests();
+            generation = live.generation;
+            if live.driver.wants_restart() && !live.replacing {
+                live.replacing = true;
+                replace = true;
+            }
+        }
+        drop(shared);
+        if wake {
+            (self.wake)();
+        }
+        if replace {
+            self.queue(session, Job::Replace, |_, _| {});
+        }
+        for id in timed {
+            let starter = self.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(timeout);
+                let mut shared = starter.shared.lock().unwrap();
+                let mut out = Outputs::default();
+                match shared.live.get_mut(&session) {
+                    Some(live) if live.generation == generation => {
+                        live.driver.mode_request_timed_out(&id, &mut out)
+                    }
+                    _ => return,
+                }
+                starter.deliver(shared, session, out);
+            });
         }
     }
-}
 
-/// What a session's worker needs to start its `claude`.
-struct ClaudeStarter {
-    wake: Wake,
-    shared: Arc<Mutex<ClaudeShared>>,
-    started: Arc<Condvar>,
-    inbox: Inbox,
-}
-
-impl ClaudeStarter {
-    /// Runs `act` on the session's driver, first starting a process for a message
-    /// when none runs.
-    fn run(
-        &self,
-        session: u64,
-        start: Option<(PathBuf, Option<String>)>,
-        act: impl FnOnce(&mut ClaudeDriver, &mut Outputs),
-    ) {
-        let message = start.is_some();
+    /// Runs `act` on the session's driver. A message, or a [`Job::Replace`], first
+    /// replaces a process that cannot run the session's approval mode, if no turn of
+    /// its own was written yet, carrying any waiting turn over; a message starts a
+    /// process when none runs.
+    fn run(&self, session: u64, job: Job, act: impl FnOnce(&mut ClaudeDriver, &mut Outputs)) {
         let mut shared = self.shared.lock().unwrap();
         if shared.closed {
             return;
         }
-        // A message that starts a turn the process cannot run in the session's approval
-        // mode replaces the idle process, resuming its conversation. This worker runs
-        // the session's commands in order, so no start of its own is in progress.
-        if message
-            && let Some(live) = shared.live.get(&session)
-            && !live.driver.is_running()
-            && live.driver.needs_restart()
-        {
-            // Dropping the handle ends the process; its late exit is ignored.
-            drop(shared.live.remove(&session));
+        let message = matches!(job, Job::Message(..));
+        let command = matches!(job, Job::Command);
+        let mut start = match job {
+            Job::Message(cwd, resume) => Some((cwd, resume)),
+            Job::Command | Job::Replace => None,
+        };
+        let mut carried = Vec::new();
+        if let Some(live) = shared.live.get_mut(&session) {
+            if !message && !command {
+                live.replacing = false;
+            }
+            // This worker runs the session's commands in order, so no start of its own
+            // is in progress, and the process is in place. A running turn moves only if
+            // nothing of it was written.
+            let replace = if live.driver.is_running() {
+                !command && live.driver.wants_restart()
+            } else {
+                message && live.driver.needs_restart()
+            };
+            if replace {
+                carried = live.driver.take_unsent();
+                let live = shared.live.remove(&session).expect("checked above");
+                start = start.or(Some((live.cwd.clone(), live.resume.clone())));
+                // Dropping the handle ends the process; its late exit is ignored.
+                drop(live);
+            }
         }
         if !shared.live.contains_key(&session) {
             let Some((cwd, resume)) = start else { return };
-            self.start(shared, session, &cwd, resume, act);
+            if !message && carried.is_empty() {
+                return;
+            }
+            let act = move |driver: &mut ClaudeDriver, out: &mut Outputs| {
+                driver.carry(carried, out);
+                if message {
+                    act(driver, out);
+                }
+            };
+            self.start(shared, session, &cwd, resume, message, act);
             return;
         }
         if message {
@@ -730,38 +829,39 @@ impl ClaudeStarter {
         let mut out = Outputs::default();
         let live = shared.live.get_mut(&session).expect("checked above");
         act(&mut live.driver, &mut out);
-        let wake = claude_deliver(&mut shared, &self.inbox, session, out);
-        drop(shared);
-        if wake {
-            (self.wake)();
-        }
+        self.deliver(shared, session, out);
     }
 
-    /// Starts the session's process for its first message, `act`. The driver takes
-    /// the message first, so it knows its turn when the first output arrives, which
-    /// can come before Claude reads anything.
+    /// Starts the session's process for `act`: its first message, or a turn carried
+    /// over. The driver takes it first, so it knows its turn when the first output
+    /// arrives, which can come before Claude reads anything. Nothing is written to
+    /// Claude until it answers `initialize`, under the lock, in the latest mode.
     fn start(
         &self,
         mut shared: MutexGuard<'_, ClaudeShared>,
         session: u64,
         cwd: &Path,
         resume: Option<String>,
+        message: bool,
         act: impl FnOnce(&mut ClaudeDriver, &mut Outputs),
     ) {
         let resume = shared.threads.get(&session).cloned().or(resume);
         shared.generation += 1;
         let generation = shared.generation;
-        let mode = shared
-            .approvals
-            .get(&session)
-            .map_or(ApprovalMode::Provider, |a| a.mode);
+        let approval = shared.approvals.get(&session).copied().unwrap_or_default();
+        let mode = approval.mode;
+        // A conversation Keystone set a mode in may resume in it, such as plan mode,
+        // so the user's own settings are read from a fresh process and passed.
+        let probe = mode == ApprovalMode::Provider && resume.is_some() && approval.overridden;
         let mut pending = Outputs::default();
         let mut driver =
             ClaudeDriver::new(session, resume.is_some(), random_seed(), mode, &mut pending);
         act(&mut driver, &mut pending);
         // Counted only now that the driver has the turn, so a message sent during the
         // start is refused like any steer too early to send.
-        shared.unqueue(session);
+        if message {
+            shared.unqueue(session);
+        }
         shared.live.insert(
             session,
             Live {
@@ -770,13 +870,16 @@ impl ClaudeStarter {
                 pending,
                 exited: None,
                 generation,
+                cwd: cwd.to_owned(),
+                resume: resume.clone(),
+                replacing: false,
             },
         );
         shared.starting += 1;
         let program = shared.program.clone();
         let hook = shared.before_start.clone();
         drop(shared);
-        let spawned = self.spawn(session, generation, program, hook, cwd, resume, mode);
+        let spawned = self.spawn(session, generation, program, hook, cwd, resume, mode, probe);
 
         let mut shared = self.shared.lock().unwrap();
         let current = shared
@@ -817,13 +920,10 @@ impl ClaudeStarter {
         };
         shared.starting -= 1;
         self.started.notify_all();
-        let wake = claude_deliver(&mut shared, &self.inbox, session, out);
-        drop(shared);
+        // The mode may have changed during the start to one this process cannot run.
+        self.deliver(shared, session, out);
         // Dropping the handle of a process that already exited ends what it left.
         drop(ended);
-        if wake {
-            (self.wake)();
-        }
     }
 
     fn finish_start(&self) {
@@ -831,7 +931,10 @@ impl ClaudeStarter {
         self.started.notify_all();
     }
 
-    /// Finds and starts the session's `claude`, holding no lock.
+    /// Finds and starts the session's `claude`, holding no lock. A mode Keystone
+    /// selected is always passed, on `--resume` too; with Provider settings, `probe`
+    /// asks for the user's own mode to pass.
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         &self,
         session: u64,
@@ -841,6 +944,7 @@ impl ClaudeStarter {
         cwd: &Path,
         resume: Option<String>,
         mode: ApprovalMode,
+        probe: bool,
     ) -> Result<Process, String> {
         if let Some(hook) = hook {
             hook(session);
@@ -855,16 +959,22 @@ impl ClaudeStarter {
                 found
             }
         };
+        let baseline = if probe {
+            Some(probe_permission_mode(&program, cwd)?)
+        } else {
+            None
+        };
         let mut args = claude::args(mode);
+        if let Some(baseline) = &baseline {
+            args.extend(["--permission-mode", baseline]);
+        }
         if let Some(resume) = &resume {
             args.extend(["--resume", resume]);
         }
         let on_line = {
-            let shared = self.shared.clone();
-            let inbox = self.inbox.clone();
-            let wake = self.wake.clone();
+            let starter = self.clone();
             move |line: &[u8]| {
-                let mut guard = shared.lock().unwrap();
+                let mut guard = starter.shared.lock().unwrap();
                 let mut out = Outputs::default();
                 match guard.live.get_mut(&session) {
                     Some(live) if live.generation == generation => {
@@ -873,11 +983,7 @@ impl ClaudeStarter {
                     // Output from a replaced process is not for the new driver.
                     _ => return,
                 }
-                let wake_now = claude_deliver(&mut guard, &inbox, session, out);
-                drop(guard);
-                if wake_now {
-                    wake();
-                }
+                starter.deliver(guard, session, out);
             }
         };
         let on_exit = {
@@ -912,6 +1018,43 @@ impl ClaudeStarter {
     }
 }
 
+/// The permission mode the user's own settings give a new conversation in `cwd`, as
+/// a fresh `claude` reports it in its `initialize` answer. It is closed at once, with
+/// no message sent.
+fn probe_permission_mode(program: &Path, cwd: &Path) -> Result<String, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let on_line = move |line: &[u8]| {
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
+            return;
+        };
+        let response = &message["response"];
+        if message["type"] == "control_response" && response["request_id"] == "keystone-probe" {
+            let _ = tx.send(
+                response["response"]["current_permission_mode"]
+                    .as_str()
+                    .map(str::to_owned),
+            );
+        }
+    };
+    let failed = |reason: &str| {
+        format!(
+            "Could not read your Claude Code approval settings to restore them ({reason}). Choose an approval mode to continue."
+        )
+    };
+    let process = Process::spawn(program, &claude::ARGS, cwd, on_line, |_| {})
+        .map_err(|e| failed(&e.to_string()))?;
+    process.send(
+        serde_json::json!({"type": "control_request", "request_id": "keystone-probe",
+            "request": {"subtype": "initialize"}})
+        .to_string(),
+    );
+    match rx.recv_timeout(PROBE_TIMEOUT) {
+        Ok(Some(mode)) => Ok(mode),
+        Ok(None) => Err(failed("Claude Code did not report it")),
+        Err(_) => Err(failed("Claude Code did not answer")),
+    }
+}
+
 impl Connection for ClaudeConnection {
     fn send(
         &self,
@@ -943,18 +1086,23 @@ impl Drop for ClaudeConnection {
     /// for, and starts only up to [`START_WAIT`]; a start that finishes after this
     /// ends its own process.
     fn drop(&mut self) {
-        for (_, worker) in self.workers.get_mut().unwrap().drain() {
+        let workers: Vec<Worker> = {
+            let mut workers = self.starter.workers.lock().unwrap();
+            workers.drain().map(|(_, worker)| worker).collect()
+        };
+        for worker in workers {
             worker.detach();
         }
         let live: Vec<Live> = {
-            let mut shared = self.shared.lock().unwrap();
+            let mut shared = self.starter.shared.lock().unwrap();
             shared.closed = true;
             shared.generation += 1;
             shared.live.drain().map(|(_, live)| live).collect()
         };
         drop(live);
-        let shared = self.shared.lock().unwrap();
+        let shared = self.starter.shared.lock().unwrap();
         let _ = self
+            .starter
             .started
             .wait_timeout_while(shared, START_WAIT, |s| s.starting > 0)
             .unwrap();

@@ -13,8 +13,17 @@
 //! Permission modes work like Claude Code 2.1.300's: `--permission-mode` at launch,
 //! else `KEYSTONE_FAKE_CLAUDE_USER_MODE` (the user's own setting, `default` when unset),
 //! and `set_permission_mode`, which refuses `bypassPermissions` unless the process was
-//! launched in it. No mode is kept across `--resume`. `init` reports the mode, and each
-//! reply names the mode it ran under.
+//! launched in it. Only plan mode is kept across a `--resume` with no mode given (in
+//! `.fake-claude-plan-<session>`, in `KEYSTONE_FAKE_CLAUDE_LOG_DIR` when set, else the
+//! working directory). The `initialize` answer
+//! and `init` report the mode, and each reply names the mode it ran under.
+//! `KEYSTONE_FAKE_CLAUDE_HOLD_MODE_MS` delays answers to `set_permission_mode`. That
+//! and the user's mode can also be set for one working directory, in its
+//! `.fake-claude-hold-mode-ms` and `.fake-claude-user-mode` files.
+//!
+//! A prompt containing "exit plan" asks to approve `ExitPlanMode` first, as Claude does
+//! in plan mode. Approved, the mode returns to the one before plan mode, as Claude
+//! 2.1.300 does; denied, the reply says so.
 //!
 //! An answer applies only to the approval it names, and an approval Claude withdrew
 //! takes no answer. Request IDs restart in each process, as a stale answer from an
@@ -66,6 +75,10 @@ struct Shared {
     state: Mutex<State>,
     /// The permission mode, and whether the process may enter `bypassPermissions`.
     mode: Mutex<String>,
+    /// The mode approving `ExitPlanMode` returns to.
+    before_plan: Mutex<String>,
+    /// Marks the conversation as in plan mode, for a later `--resume`.
+    plan_file: PathBuf,
     bypass: bool,
     wake: Condvar,
     /// Whether to send `command_lifecycle` frames.
@@ -113,16 +126,49 @@ fn main() {
         .iter()
         .position(|a| a == "--permission-mode")
         .and_then(|i| args.get(i + 1).cloned());
+    // Settings from a file in the working directory apply to that directory alone.
+    let setting = |name: &str| {
+        std::fs::read_to_string(format!(".fake-claude-{name}"))
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .or_else(|| {
+                std::env::var(format!(
+                    "KEYSTONE_FAKE_CLAUDE_{}",
+                    name.to_uppercase().replace('-', "_")
+                ))
+                .ok()
+            })
+    };
+    let user_mode = setting("user-mode").unwrap_or_else(|| "default".into());
+    let plan_file = std::env::var_os("KEYSTONE_FAKE_CLAUDE_LOG_DIR")
+        .map_or_else(PathBuf::new, PathBuf::from)
+        .join(format!(".fake-claude-plan-{session}"));
     let mode = launch_mode.clone().unwrap_or_else(|| {
-        std::env::var("KEYSTONE_FAKE_CLAUDE_USER_MODE").unwrap_or_else(|_| "default".into())
+        if plan_file.exists() {
+            "plan".into()
+        } else {
+            user_mode.clone()
+        }
     });
+    let hold_mode = Duration::from_millis(
+        setting("hold-mode-ms")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    );
     let shared = Arc::new(Shared {
         state: Mutex::default(),
         bypass: launch_mode.as_deref() == Some("bypassPermissions"),
-        mode: Mutex::new(mode),
+        before_plan: Mutex::new(if mode == "plan" {
+            user_mode.clone()
+        } else {
+            mode.clone()
+        }),
+        plan_file,
+        mode: Mutex::new(String::new()),
         wake: Condvar::new(),
         lifecycle: frames,
     });
+    set_mode(&shared, &mode);
     let worker = {
         let (out, shared, session) = (out.clone(), shared.clone(), session.clone());
         thread::spawn(move || work(&out, &shared, &session, delay, signed_out))
@@ -144,8 +190,10 @@ fn main() {
                     )
                 };
                 match message["request"]["subtype"].as_str() {
-                    Some("initialize") => reply(json!({"commands": []})),
+                    Some("initialize") => reply(json!({"commands": [],
+                        "current_permission_mode": *shared.mode.lock().unwrap()})),
                     Some("set_permission_mode") => {
+                        thread::sleep(hold_mode);
                         let mode = message["request"]["mode"].as_str().unwrap_or_default();
                         let mode = if mode == "manual" { "default" } else { mode };
                         if mode == "bypassPermissions" && !shared.bypass {
@@ -156,7 +204,7 @@ fn main() {
                                      "error": "Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"}}),
                             );
                         } else {
-                            *shared.mode.lock().unwrap() = mode.to_owned();
+                            set_mode(&shared, mode);
                             reply(json!({"mode": mode}));
                             emit(
                                 &out,
@@ -228,6 +276,20 @@ fn main() {
     shared.state.lock().unwrap().closed = true;
     shared.wake.notify_all();
     let _ = worker.join();
+}
+
+/// Changes the permission mode, remembering plan mode for a later `--resume`.
+fn set_mode(shared: &Shared, mode: &str) {
+    let mut current = shared.mode.lock().unwrap();
+    if mode == "plan" && *current != "plan" && !current.is_empty() {
+        *shared.before_plan.lock().unwrap() = current.clone();
+    }
+    *current = mode.to_owned();
+    if mode == "plan" {
+        let _ = std::fs::write(&shared.plan_file, "");
+    } else {
+        let _ = std::fs::remove_file(&shared.plan_file);
+    }
 }
 
 fn lifecycle(out: &Out, shared: &Shared, session: &str, uuid: &str, state: &str) {
@@ -312,7 +374,46 @@ fn answer(
     mode: &str,
     delay: Duration,
 ) -> &'static str {
-    let mut reply = format!("Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`");
+    let mut mode = mode.to_owned();
+    let mut left_plan = "";
+    if text.contains("exit plan") && mode == "plan" {
+        let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
+        let request = format!("fake-exit-plan-{turn}");
+        shared.state.lock().unwrap().approval = Some((request.clone(), tx));
+        emit(
+            out,
+            json!({"type": "control_request", "request_id": request, "request":
+               {"subtype": "can_use_tool", "tool_name": "ExitPlanMode", "display_name": "ExitPlanMode",
+                "input": {"plan": "Write the file."}, "tool_use_id": format!("fake-exit-toolu-{turn}")}}),
+        );
+        let allow = loop {
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(allow) => break allow,
+                Err(RecvTimeoutError::Disconnected) => break false,
+                Err(RecvTimeoutError::Timeout) => {
+                    if shared.state.lock().unwrap().abort == Some(Abort::Stop) {
+                        shared.state.lock().unwrap().approval = None;
+                        return stopped(out);
+                    }
+                }
+            }
+        };
+        if allow {
+            let before = shared.before_plan.lock().unwrap().clone();
+            set_mode(shared, &before);
+            mode = before;
+            emit(
+                out,
+                json!({"type": "system", "subtype": "status", "status": null, "permissionMode": mode}),
+            );
+            left_plan = " Left plan mode.";
+        } else {
+            left_plan = " Stayed in plan mode.";
+        }
+    }
+    let mode = mode.as_str();
+    let mut reply =
+        format!("Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan}");
     if text.contains("long") {
         for n in 1..=200 {
             reply.push_str(&format!(" word{n}"));

@@ -716,3 +716,144 @@ fn a_message_behind_a_restart_is_refused_until_claude_reports() {
     );
     until(&conn, &wake, completed);
 }
+
+/// A directory only one test starts Claude in, with the scripted Claude's settings
+/// for it, such as `("user-mode", "acceptEdits")`.
+fn project(name: &str, settings: &[(&str, &str)]) -> String {
+    let dir = pid_dir(name);
+    for (setting, value) in settings {
+        std::fs::write(dir.join(format!(".fake-claude-{setting}")), value).unwrap();
+    }
+    dir.to_str().unwrap().to_owned()
+}
+
+/// Review round 2, finding 1. A message sent in Full access, whose process is still
+/// starting when Read only is chosen, runs in Read only: nothing is written before
+/// Claude confirms its mode, and the Full access process is replaced before that.
+#[test]
+fn a_mode_chosen_while_claude_starts_is_the_one_the_message_runs_in() {
+    use keystone_core::ApprovalMode::*;
+    let dir = project("spawn-race", &[]);
+    let (conn, wake) = connect();
+    let gate = Gate::new(Some(&[1]));
+    conn.hold_starts(gate.hook());
+    conn.send(1, &dir, None, mode(FullAccess), "spawn race".into())
+        .unwrap();
+    gate.reached(1);
+    conn.set_approval(1, mode(ReadOnly));
+    gate.release(1);
+    let events = until(&conn, &wake, completed);
+    assert_eq!(mode_of(&events), "plan");
+    assert_eq!(
+        events.iter().filter(|e| **e == Event::TurnStarted).count(),
+        1,
+        "one turn, carried to the new process"
+    );
+    assert_eq!(started_in(std::path::Path::new(&dir)).len(), 2);
+}
+
+/// Claude keeps plan mode across a `--resume` with no mode given. A mode Keystone
+/// selected is passed on every resume, and Provider settings after an override pass
+/// the user's own mode, read from a fresh process.
+#[test]
+fn a_resumed_claude_runs_in_the_selected_mode_not_the_one_it_left() {
+    use keystone_core::ApprovalMode::*;
+    let dir = project("resume-modes", &[("user-mode", "acceptEdits")]);
+    let (conn, wake) = connect();
+    conn.send(1, &dir, None, mode(ReadOnly), "first".into())
+        .unwrap();
+    assert_eq!(mode_of(&until(&conn, &wake, completed)), "plan");
+    kill(&conn, &wake, 1);
+    conn.send(1, &dir, None, mode(ReadOnly), "second".into())
+        .unwrap();
+    assert_eq!(mode_of(&until(&conn, &wake, completed)), "plan");
+    conn.send(1, &dir, None, mode(Provider), "third".into())
+        .unwrap();
+    assert_eq!(mode_of(&until(&conn, &wake, completed)), "acceptEdits");
+}
+
+/// Review round 2, finding 3. Approving `ExitPlanMode` returns Claude to its mode
+/// before plan mode, which may write without asking, so Read only refuses it and
+/// says so; the user is not asked.
+#[test]
+fn read_only_refuses_to_leave_plan_mode() {
+    use keystone_core::ApprovalMode::*;
+    let dir = project("exit-plan", &[]);
+    let (conn, wake) = connect();
+    conn.send(
+        1,
+        &dir,
+        None,
+        mode(ReadOnly),
+        "exit plan, then write".into(),
+    )
+    .unwrap();
+    let events = until(&conn, &wake, completed);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ApprovalRequested(_)))
+    );
+    assert!(events.iter().any(
+        |e| matches!(e, Event::Warning { message } if message.contains("Read only keeps it"))
+    ));
+    assert!(reply(&events).unwrap().contains("Stayed in plan mode"));
+    assert_eq!(mode_of(&events), "plan");
+}
+
+/// Review round 2, finding 5. Stop while Claude has not answered a mode change leaves
+/// nothing behind: the next message waits for that answer, sets its own mode, and runs
+/// in it.
+#[test]
+fn stop_before_claude_confirms_a_mode_leaves_the_next_message_free() {
+    use keystone_core::ApprovalMode::*;
+    let dir = project("stop-mode", &[("hold-mode-ms", "600")]);
+    let (conn, wake) = connect();
+    conn.send(1, &dir, None, mode(Auto), "hello".into())
+        .unwrap();
+    assert_eq!(mode_of(&until(&conn, &wake, completed)), "acceptEdits");
+    conn.send(1, &dir, None, mode(ReadOnly), "cancel this".into())
+        .unwrap();
+    conn.command(Command::Interrupt { session: 1 });
+    let events = until(&conn, &wake, completed);
+    assert_eq!(
+        events.last(),
+        Some(&Event::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            error: None
+        })
+    );
+    conn.send(1, &dir, None, mode(Auto), "after Stop".into())
+        .unwrap();
+    let events = until(&conn, &wake, completed);
+    assert!(reply(&events).unwrap().contains("after Stop"));
+    assert_eq!(mode_of(&events), "acceptEdits");
+}
+
+/// A mode change Claude never confirms fails the turn with nothing sent, and the next
+/// message runs in a new process.
+#[test]
+fn an_unconfirmed_mode_fails_the_turn_and_the_next_message_replaces_claude() {
+    use keystone_core::ApprovalMode::*;
+    let dir = project("mode-timeout", &[("hold-mode-ms", "4000")]);
+    let (conn, wake) = connect();
+    conn.set_mode_timeout(Duration::from_millis(300));
+    conn.send(1, &dir, None, NO_MODE, "hello".into()).unwrap();
+    assert_eq!(mode_of(&until(&conn, &wake, completed)), "default");
+    let pid = conn.pid(1).unwrap();
+    conn.send(1, &dir, None, mode(Auto), "never sent".into())
+        .unwrap();
+    let events = until(&conn, &wake, completed);
+    assert!(
+        matches!(events.last(), Some(Event::TurnCompleted { status: TurnStatus::Failed, error: Some(error) })
+        if error.contains("did not confirm the approval mode"))
+    );
+    assert_eq!(reply(&events), None);
+    std::fs::remove_file(PathBuf::from(&dir).join(".fake-claude-hold-mode-ms")).unwrap();
+    conn.send(1, &dir, None, mode(Auto), "again".into())
+        .unwrap();
+    let events = until(&conn, &wake, completed);
+    assert_eq!(mode_of(&events), "acceptEdits");
+    assert!(reply(&events).unwrap().contains("again"));
+    assert_ne!(conn.pid(1), Some(pid));
+}
