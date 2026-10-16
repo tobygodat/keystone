@@ -83,6 +83,8 @@ The core runs one lifecycle per session: idle → running → (awaiting approval
 - **Codex:** the turn ends at `turn/completed`.
 - **Process exit:** `on_exit` closes any open turn as failed with the stderr tail.
 
+The driver also reports whether the user ended the turn: with Stop, or with a denial the provider ends the turn on. Codex's `decline` lets the turn go on and its `cancel` ends it; the driver sends `decline` when Codex offers it. Only the driver knows which turn an interrupt or a `cancel` reached, so it carries this on that turn's end (`stopped`), and the desktop counts an interrupted turn as a failure unless it was stopped. A Stop that drops messages Codex has not received yet ends that turn in the driver; a Stop that arrives after the turn ended does nothing, so it never replaces that turn's end. Claude's deny always lets the turn go on, so only Stop marks a Claude turn stopped: the driver sends `interrupt` only while a turn runs, and that turn's end carries `stopped`. A crash or an explicit failure stays a failure.
+
 There are no watchdogs, heartbeats, or quiet-period timers. Zeron added and later retired several of these after "stuck working" incidents. Capabilities are data detected at startup (Claude's `system/init` capabilities, Codex's `initialize` response), not trait booleans.
 
 ### 5. Process topology

@@ -7,8 +7,9 @@ Write a multiline draft, switch sessions, and reopen Keystone without losing the
 - `draft-focus` focuses the composer by clicking or Ctrl+L.
 - `draft-autosave` persists typed text after the debounce.
 - `draft-switch` keeps each session's draft separately.
+- `draft-excerpt` shows each draft's first line under its sidebar title once the debounced save lands. A line too long for the row ends with "…".
 - `draft-restart` restores saved text and selection after a normal quit.
-- `draft-multiline` accepts Enter and multiline paste, wraps text, and scrolls after eight visible rows.
+- `draft-multiline` accepts Enter and multiline paste, wraps long lines at the composer's width, grows the composer upward with each wrapped row, and scrolls after eight visible rows.
 
 ## How to get to it (user POV)
 
@@ -25,20 +26,21 @@ Preconditions:
 
 - Call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","l"]}]}`.
 - Call `input` with `{"actions":[{"action":"type","text":"Verified draft."}]}`.
-- Call `input` with `{"actions":[{"action":"wait","duration_ms":1000}]}`. Read `workspace` and require the selected session's draft to equal `Verified draft.`. Capture the visible composer and preserve a snapshot.
+- Call `input` with `{"actions":[{"action":"wait","duration_ms":1000}]}`. Read `workspace` and require the selected session's draft to equal `Verified draft.`. Capture the visible composer and preserve a snapshot. Require `Verified draft.` under the session's title in the sidebar. Before the save lands, the row still shows its previous excerpt.
 - Create Codex with Ctrl+Shift+N. Focus with Ctrl+L and type `Second draft.`. `click` the original row by its `session-<id>`. Require `Verified draft.` to return and both saved drafts to remain distinct.
 - Press Ctrl+Q through `input`. Poll `call` with `{"tool":"windows_list","arguments":{}}` until empty. Run `doctor` and require the app PID to have exited.
 - Call `launch`, then `wait_for` `{"id":"composer-field"}`. Run `doctor`, capture `screenshot`, and require the original selection and visible draft to match the saved snapshot.
 - `click` `{"id":"composer-field"}` and append ` Again.`. Require the file and screenshot to show the combined text. This distinguishes a restored usable editor from a static image.
 - Insert a new line with Enter and type a second paragraph. Require a literal newline in the saved draft. Click a later row and insert a marker. Check its exact position in the saved text.
+- Type one line longer than the composer. Require it to continue on the next row, the composer to grow upward with its toolbar in place, and the sidebar excerpt to end in "…". Click the start of the second visual row and type a marker; check its position in the saved text.
 - Paste a draft longer than eight visual rows through a native clipboard route. Inspect wrapping, scrolling, selection, and caret visibility at a narrow window width.
 - Test window close separately using `call` with the `window_action` tool, with `action:"close"` and the observed window ID. Do not claim that Ctrl+Q proves the close-control path.
 
 ## Gotchas
 
-- Autosave waits 250 ms after changes. Observe the file instead of assuming a fixed wait always suffices.
+- Autosave waits 250 ms after changes. The sidebar excerpt updates with the save, not per keystroke. Observe the file instead of assuming a fixed wait always suffices.
 - `stop` forcibly ends remaining apps. It does not prove graceful-save behavior. Quit through the UI first.
-- Very rapid long text input has a known rendering issue. A short passing draft does not resolve it.
+- Very rapid long text input used to stall the app (KS-005, closed). Use `scripts/native-stress.py` to recheck it. A short passing draft does not prove it.
 - `type` sends native key events. It is not clipboard paste. Use a native clipboard owner such as `wl-copy` on the observed nested Wayland socket before Ctrl+V.
-- Temporary virtual keyboard use can affect later GPUI startup in the same nested desktop. Record failures separately from restoration. A clean restart run that uses only the driver's persistent keyboard passed. See KS-009 in `docs/issues.md`.
+- A temporary virtual keyboard, such as `wtype` on the nested socket, leaves Sway's seat without a keyboard when it exits. GPUI 0.2.2 then panics on startup. `launch` sends F24 through the driver's own keyboard first to restore it. Starting the app any other way after `wtype` needs the same step. See KS-009 in `docs/issues.md`.
 - Storage-failure close blocking requires fault injection in the disposable state path and is not covered by this normal-save journey.

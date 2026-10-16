@@ -84,6 +84,7 @@ struct Turn {
     unrun: bool,
     /// The latest result's status and error. A later result replaces it.
     result: Option<(TurnStatus, Option<String>)>,
+    /// The user stopped this turn. Its end reports it, so it never reaches another turn.
     stopping: bool,
     /// Messages not written yet: they wait for Claude to confirm the selected
     /// permission mode, or a steer waits to learn whether Claude reports lifecycle
@@ -596,10 +597,11 @@ impl ClaudeDriver {
     /// otherwise they are dropped, with a warning.
     fn finish(&mut self, status: TurnStatus, error: Option<String>, out: &mut Outputs) {
         self.leaving_plan = false;
-        let (held, written) = self
-            .turn
-            .take()
-            .map_or((Vec::new(), false), |turn| (turn.held, turn.written));
+        // Only Stop ends a Claude turn early: a denial lets the turn go on.
+        let (held, written, stopped) =
+            self.turn.take().map_or((Vec::new(), false, false), |turn| {
+                (turn.held, turn.written, turn.stopping)
+            });
         let carried = if status == TurnStatus::Completed {
             held
         } else {
@@ -625,7 +627,14 @@ impl ClaudeDriver {
         for request in std::mem::take(&mut self.approvals).into_keys() {
             out.event(self.session, Event::ApprovalResolved { request });
         }
-        out.event(self.session, Event::TurnCompleted { status, error });
+        out.event(
+            self.session,
+            Event::TurnCompleted {
+                status,
+                error,
+                stopped,
+            },
+        );
         if !carried.is_empty() {
             self.turn = Some(Turn {
                 held: carried,

@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = Path(os.environ.get("KEYSTONE_CAPTURE_DIR", ROOT / ".audit" / "native-smoke"))
 DRAFT = "Native smoke draft survives restart."
 KEY_DELAY = os.environ.get("KEYSTONE_KEY_DELAY_MS", "100")
+LONG_DRAFT = " A long draft should keep its caret visible." * int(os.environ.get("KEYSTONE_LONG_REPEAT", "6"))
 
 
 def command(*args):
@@ -136,8 +137,8 @@ def run(result):
                 input_keys("-d", KEY_DELAY, "--", DRAFT)
                 populated = expect("composer draft persisted", lambda s: s["sessions"][1]["draft"] == DRAFT)
                 capture("populated")
-                input_keys("-d", KEY_DELAY, "--", " A long draft should keep its caret visible." * 6)
-                expect("long draft persisted", lambda s: s["sessions"][1]["draft"] == DRAFT + " A long draft should keep its caret visible." * 6)
+                input_keys("-d", KEY_DELAY, "--", LONG_DRAFT)
+                expect("long draft persisted", lambda s: s["sessions"][1]["draft"] == DRAFT + LONG_DRAFT)
                 capture("long-input")
                 shortcut("a")
                 input_keys("-d", KEY_DELAY, "--", DRAFT)
@@ -187,7 +188,7 @@ def run(result):
 
 def main():
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    result = {"status": "failed", "input": "native Wayland keyboard via wtype", "key_delay_ms": int(KEY_DELAY), "checks": [], "pids": []}
+    result = {"status": "failed", "input": "native Wayland keyboard via wtype", "key_delay_ms": int(KEY_DELAY), "long_draft_chars": len(LONG_DRAFT), "checks": [], "pids": []}
     try:
         run(result)
     except subprocess.CalledProcessError as error:

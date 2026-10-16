@@ -57,6 +57,21 @@ Run `.audit/verify-20261015T165545-settings` drove the settings menu natively wi
 
 The saved state snapshot recorded `{"theme": "Light", "density": "Compact", "ui_font": "Noto Sans"}`. Cleanup reported no errors and no retained scratch state. System theme switching, Spacious density, and the settled filter were not exercised in this run.
 
+## Stability runs, 2026-10-15
+
+`scripts/native-stress.py` drives the same server code without MCP. Each run gets a fresh headless desktop. It clicks **Start with Claude Code** by name and types a long draft with `wtype -d 10` on the nested socket. It quits with a `wtype` Ctrl+Q and relaunches, then quits through the driver. It asserts the exact saved draft and captures `grim` screenshots after creation, typing, and restore.
+
+| Batch | Runs | Result |
+| --- | --- | --- |
+| Unprimed: before the driver change, then `--no-prime` | 4 | All four relaunches panicked at `gpui-0.2.2/src/platform/linux/wayland/client.rs:1267` (KS-009). |
+| 1,093 characters, before the frame check | 10 | 6 passed. 4 clicks missed, before any typing. |
+| 1,093 characters | 12 | 12 passed. |
+| 2,677 characters | 5 | 5 passed. |
+
+The 4 missed clicks used the app's first frame. GPUI drew that frame at its default 1100 by 720 before Sway configured the window to 1280 by 900. The button then moved. `elements` now reports not ready until the frame's viewport matches the window rect, within an 8-pixel inset tolerance. It records each rejection as `elements_not_ready` in `actions.jsonl`. In the 12-run batch, 6 of 24 launches had that early frame, and every click waited it out.
+
+`launch` now sends F24 through the driver's keyboard before starting the app, because of KS-009. Every primed run that reached the relaunch after `wtype` survived it, 31 of 31, counting short check runs not tabled here. See KS-005 and KS-009 in [issues.md](issues.md).
+
 ## Maintenance
 
 Use `/maintain-verification-skill` when the app's user paths change. Update the feature map and re-run the affected entries. Keep failed evidence alongside successful evidence.

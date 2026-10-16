@@ -18,6 +18,7 @@ pub mod radius {
     pub const ROW: Pixels = px(8.);
     pub const PANEL: Pixels = px(10.);
     pub const POPOVER: Pixels = px(12.);
+    pub const COMPOSER: Pixels = px(18.);
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,7 +49,7 @@ impl TextSize {
             TextSize::Ui => 12.,
             TextSize::Base => 13.,
             TextSize::Body => 14.,
-            TextSize::Title => 20.,
+            TextSize::Title => 24.,
         })
     }
 }

@@ -6,7 +6,7 @@
 
 - Colors live only in `crates/keystone-ui/src/theme.rs`. `scripts/check.sh` fails on GPUI color constructors such as `rgb(`, `hsla(`, or `white(` anywhere else.
 - Components read the theme through `cx.theme()` when they render. Call sites pass semantic `Color` values, not raw colors.
-- Hover, press, and selection are translucent washes over the parent surface, white in the dark theme and black in the light theme. One state color works on the rail, the sidebar, and popovers.
+- Hover, press, and selection are translucent washes over the parent surface, white in the dark theme and black in the light theme. One state color works on the sidebar, the main column, the composer, and popovers.
 - Components size controls and rows through `cx.theme().density`, not fixed heights. Use `Density::control` for heights and `Density::pad` for row padding.
 - Interactive components accept `debug_selector`, so GPUI simulated-input tests can find them.
 - Disabled controls ignore clicks and show a not-allowed cursor.
@@ -17,13 +17,14 @@
 | --- | --- |
 | `Theme`, `Colors`, `Fonts`, `ActiveTheme` | The installed palette, density, and fonts. `keystone_ui::init` installs the dark theme. `keystone_ui::set_theme` replaces it and redraws every window. |
 | `Appearance`, `Density` | `Light` or `Dark`, and `Compact`, `Default`, or `Spacious`. `Theme::new` combines them with `Fonts`. |
-| `Color`, `TextSize`, `Elevation`, `spacing`, `radius` | Semantic tokens. Prefer these to raw pixels and colors. |
+| `Color`, `TextSize`, `Elevation`, `spacing`, `radius` | Semantic tokens. Prefer these to raw pixels and colors. `Color::Strong` is the brightest text, for headings, selected titles, and draft text. `radius::COMPOSER` rounds the floating composer. |
+| Shell colors | `sidebar` fills the left column. `composer`, `composer_border`, and `composer_shadow` style the floating composer. `element_inverse` with `text_inverse` is the one filled primary action (Send); `element_disabled` is its disabled wash. `provider_claude` and `provider_codex` tint provider glyphs; the desktop app maps `Provider` to them, so keystone-ui stays provider-agnostic. |
 | `StyledExt` | `surface(elevation, cx)` for backgrounds, borders, and shadows, and `hairline_*` for separators. |
-| `IconName`, `Icon`, `Icons` | Typed icon names and the asset source that serves them. |
-| `Label`, `Kbd` | Text with a size, a color, and optional truncation or monospace. `Kbd` shows a shortcut hint. |
+| `IconName`, `Icon`, `Icons` | Typed icon names and the asset source that serves them. Icons are drawn on a 24-unit grid and tinted with the text color. `Wedge` and `WedgeFilled` mark working and settled sessions, and a `WedgeFilled` in `Color::Warning` marks a session waiting for approval or with a failed turn, `Diamond` is the provider glyph, `Pencil` starts a session, and `ArchStones` with `ArchKeystone` stack into the arch mark so the keystone can take the accent color. Filled shapes set `fill='white'` on their own paths. |
+| `Label`, `Kbd` | Text with a size, a color, and optional truncation or monospace. `truncate` keeps one line and ends text that does not fit with "…". `Kbd` shows a shortcut hint. |
 | `Button`, `IconButton` | `ButtonStyle::{Ghost, Subtle, Filled}`, `ButtonSize::{Compact, Default, Large}`, selected and disabled states, and tooltips. `Button::color` marks a state that needs attention, such as full access. `track_focus` makes a button focusable, with a `border_focused` ring while it has focus; Enter or Space then presses it. |
 | `ConfirmDialog`, `DialogFocus` | A modal question with Cancel and Confirm. See below. |
-| `ListItem` | A selectable row for lists such as the session sidebar. |
+| `ListItem` | A selectable row for lists such as the session sidebar. `on_hover` reports the pointer entering and leaving, so a list can build a row action only for the row under the pointer. |
 | `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group, and `MenuItem::detail` adds a muted line that explains it. |
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
 | `Tooltip` | A hover card with an optional shortcut. |
@@ -58,7 +59,7 @@ The component shapes follow Zed's `ui` crate, and the visual values follow Zeron
 
 ## Known limits
 
-GPUI 0.2.2 cannot render a reliable text ellipsis, so `Label::truncate` clips. See KS-010 in [the issue list](issues.md).
+GPUI 0.2.2's `text_ellipsis` truncates to the first width it measured, so `Label::truncate` uses its own element. It measures the text on every layout and cuts it to its final width with a trailing "…". See KS-010 in [the issue list](issues.md).
 
 Text sizes do not change with density or font choice yet. The default fonts, Inter and GeistMono Nerd Font Mono, are not bundled. GPUI falls back to a system font when they are missing. The desktop picks the first installed monospace font from a short list, so code stays monospace. The interface font has no such list: on a machine without Inter, GPUI's fallback showed no bold or italic, so Markdown emphasis was invisible until an installed font such as Liberation Sans was chosen in settings.
 

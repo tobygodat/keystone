@@ -111,11 +111,15 @@ fn recorded_session_produces_turns_items_and_approvals() {
     );
 
     // Steers join the turn they steer: four messages make one turn at the end, and
-    // Stop ends it as interrupted with no error.
+    // Stop ends it as interrupted with no error, ended by the user.
     let ends: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            Event::TurnCompleted { status, error } => Some((*status, error.clone())),
+            Event::TurnCompleted {
+                status,
+                error,
+                stopped,
+            } => Some((*status, error.clone(), *stopped)),
             _ => None,
         })
         .collect();
@@ -123,11 +127,11 @@ fn recorded_session_produces_turns_items_and_approvals() {
     assert_eq!(
         ends,
         [
-            (Completed, None),
-            (Completed, None),
-            (Completed, None),
-            (Completed, None),
-            (Interrupted, None)
+            (Completed, None, false),
+            (Completed, None, false),
+            (Completed, None, false),
+            (Completed, None, false),
+            (Interrupted, None, true)
         ]
     );
     let starts = events.iter().filter(|e| **e == Event::TurnStarted).count();
@@ -308,7 +312,8 @@ fn a_resumed_conversation_keeps_its_id() {
         events.last(),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Completed,
-            error: None
+            error: None,
+            stopped: false,
         })
     );
 }
@@ -324,7 +329,7 @@ fn a_conversation_claude_no_longer_has_fails_instead_of_starting_fresh() {
         br#"{"type":"result","subtype":"error_during_execution","duration_ms":0,"is_error":true,"num_turns":0,"session_id":"00000000-0000-4000-8000-000000000000","errors":["No conversation found with session ID: 00000000-0000-4000-8000-000000000000"]}"#,
         &mut out,
     );
-    let Some((_, Event::TurnCompleted { status, error })) = out.events.last() else {
+    let Some((_, Event::TurnCompleted { status, error, .. })) = out.events.last() else {
         panic!("expected the turn to end, got {:?}", out.events);
     };
     assert_eq!(*status, TurnStatus::Failed);
@@ -355,7 +360,7 @@ fn signed_out_claude_reports_an_error_and_no_reply() {
     }
     assert!(!out.events.iter().any(|(_, e)| matches!(e,
         Event::ItemCompleted(item) if item.kind == ItemKind::AgentMessage)));
-    let Some((_, Event::TurnCompleted { status, error })) = out.events.last() else {
+    let Some((_, Event::TurnCompleted { status, error, .. })) = out.events.last() else {
         panic!("expected the turn to end, got {:?}", out.events);
     };
     assert_eq!(*status, TurnStatus::Failed);
@@ -388,7 +393,8 @@ fn exit_fails_the_running_turn() {
         out.events.last().map(|(_, e)| e),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Failed,
-            error: Some("Claude Code stopped with exit code 1".into())
+            error: Some("Claude Code stopped with exit code 1".into()),
+            stopped: false,
         })
     );
 }
@@ -416,7 +422,8 @@ fn a_message_stopped_before_it_started_ends_the_turn_without_a_result() {
         out.events.last().map(|(_, e)| e),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Interrupted,
-            error: None
+            error: None,
+            stopped: true,
         })
     );
 }
@@ -562,6 +569,106 @@ fn stopping_a_queued_follow_up_interrupts_the_turn() {
     );
     assert!(!driver.is_running());
     assert_eq!(turn_ends(&out), [TurnStatus::Interrupted]);
+}
+
+fn turn_end(out: &Outputs) -> Option<(TurnStatus, bool)> {
+    out.events.iter().rev().find_map(|(_, e)| match e {
+        Event::TurnCompleted {
+            status, stopped, ..
+        } => Some((*status, *stopped)),
+        _ => None,
+    })
+}
+
+/// The turn's end says whether the user's Stop ended it. A denial lets the turn go on,
+/// a failure stays a failure, and a Stop after the turn ended reports nothing.
+#[test]
+fn the_turn_end_says_whether_the_user_stopped_it() {
+    let init = r#"{"type":"system","subtype":"init","session_id":"s","capabilities":["msg_lifecycle_v1"]}"#;
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+
+    driver.command(send(1), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            lifecycle(1, "queued"),
+            lifecycle(1, "started"),
+            init.into(),
+            can_use_tool("r1"),
+        ],
+    );
+    let request = asked(&out)[0].clone();
+    driver.command(
+        Command::Answer {
+            session: SESSION,
+            request,
+            allow: false,
+        },
+        &mut out,
+    );
+    assert!(driver.is_running(), "a denial lets the turn go on");
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"DONE"}"#.into(),
+            lifecycle(1, "completed"),
+        ],
+    );
+    assert_eq!(turn_end(&out), Some((TurnStatus::Completed, false)));
+
+    driver.command(send(2), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[lifecycle(2, "queued"), lifecycle(2, "started")],
+    );
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["aborted"]}"#.into(),
+            lifecycle(2, "completed"),
+        ],
+    );
+    assert_eq!(turn_end(&out), Some((TurnStatus::Interrupted, true)));
+
+    // The next turn fails on its own: the earlier Stop does not carry over.
+    driver.command(send(3), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            lifecycle(3, "queued"),
+            lifecycle(3, "started"),
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["overloaded"]}"#.into(),
+            lifecycle(3, "completed"),
+        ],
+    );
+    assert_eq!(turn_end(&out), Some((TurnStatus::Failed, false)));
+
+    // Stop after the turn ended: nothing is written and nothing is reported.
+    let (writes, events) = (out.writes.len(), out.events.len());
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert_eq!((out.writes.len(), out.events.len()), (writes, events));
+
+    // A crash after Stop is still a failure.
+    driver.command(send(4), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[lifecycle(4, "queued"), lifecycle(4, "started")],
+    );
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    driver.on_exit("Claude Code stopped with exit code 1", &mut out);
+    assert_eq!(
+        turn_end(&out).map(|(status, _)| status),
+        Some(TurnStatus::Failed)
+    );
 }
 
 fn can_use_tool(id: &str) -> String {
@@ -735,7 +842,7 @@ fn a_refused_mode_fails_the_turn_without_sending() {
     feed(&mut driver, &mut out, &[reply]);
     assert_eq!(user_writes(&out), 0);
     assert!(out.events.iter().any(|(_, e)| matches!(e,
-        Event::TurnCompleted { status: TurnStatus::Failed, error: Some(error) }
+        Event::TurnCompleted { status: TurnStatus::Failed, error: Some(error), stopped: false }
             if error.contains("approval mode"))));
     assert!(!driver.is_running());
 }

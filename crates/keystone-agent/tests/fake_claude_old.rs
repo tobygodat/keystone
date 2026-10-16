@@ -58,7 +58,8 @@ fn a_claude_without_lifecycle_frames_refuses_steers() {
         events.last(),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Completed,
-            error: None
+            error: None,
+            stopped: false,
         })
     );
     let reply = events.iter().rev().find_map(|e| match e {
