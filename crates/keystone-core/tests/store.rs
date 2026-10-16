@@ -10,10 +10,10 @@ fn sessions_and_drafts_survive_restart() {
     assert!(store.workspace().sessions().is_empty());
     assert_eq!(store.workspace().selected(), None);
 
-    let claude = store.create(Provider::Claude).unwrap().value;
-    let codex = store.create(Provider::Codex).unwrap().value;
+    let claude = store.create(Provider::Claude, 1).unwrap().value;
+    let codex = store.create(Provider::Codex, 1).unwrap().value;
     assert_eq!((claude, codex), (1, 2));
-    store.select(claude).unwrap();
+    store.select(claude, 1).unwrap();
     store.set_settled(codex, true).unwrap();
     store
         .set_draft(claude, "First paragraph 🥔\n\n第二段\n".into())
@@ -41,7 +41,7 @@ fn sessions_and_drafts_survive_restart() {
 
     restored.set_settled(codex, false).unwrap();
     assert!(!Store::open(&path).unwrap().workspace().sessions()[1].settled());
-    assert_eq!(restored.create(Provider::Claude).unwrap().value, 3);
+    assert_eq!(restored.create(Provider::Claude, 1).unwrap().value, 3);
 }
 
 #[test]
@@ -49,10 +49,10 @@ fn invalid_commands_leave_memory_and_file_unchanged() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
     let mut store = Store::open(&path).unwrap();
-    store.create(Provider::Claude).unwrap();
+    store.create(Provider::Claude, 1).unwrap();
     let before = fs::read(&path).unwrap();
 
-    assert!(store.select(99).is_err());
+    assert!(store.select(99, 1).is_err());
     assert!(store.set_settled(99, true).is_err());
     assert!(store.set_draft(99, "lost".into()).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);
@@ -84,12 +84,12 @@ fn save_failure_keeps_visible_state_unchanged() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("missing").join("state.json");
     let mut store = Store::open(&path).unwrap();
-    assert!(store.create(Provider::Claude).is_err());
+    assert!(store.create(Provider::Claude, 1).is_err());
     assert!(store.workspace().sessions().is_empty());
     assert_eq!(store.workspace().selected(), None);
 
     fs::create_dir(path.parent().unwrap()).unwrap();
-    assert_eq!(store.create(Provider::Claude).unwrap().value, 1);
+    assert_eq!(store.create(Provider::Claude, 1).unwrap().value, 1);
     assert_eq!(
         Store::open(&path).unwrap().workspace().sessions()[0].id(),
         1
@@ -132,7 +132,7 @@ fn provider_thread_survives_restart_and_is_absent_in_older_files() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
     let mut store = Store::open(&path).unwrap();
-    let id = store.create(Provider::Codex).unwrap().value;
+    let id = store.create(Provider::Codex, 1).unwrap().value;
     assert_eq!(store.workspace().sessions()[0].provider_thread(), None);
     assert!(
         !fs::read_to_string(&path)

@@ -45,9 +45,16 @@ icons! {
     Minus => "icons/minus.svg", "<path d='M5 12h14'/>";
     Square => "icons/square.svg", "<rect x='5' y='5' width='14' height='14' rx='2'/>";
     Check => "icons/check.svg", "<path d='m5 12 5 5 9-10'/>";
+    Wedge => "icons/wedge.svg", "<path d='M2.4 3.6H21.6L17.3 20.4H6.7Z' stroke-width='2.4'/>";
+    WedgeFilled => "icons/wedge-filled.svg", "<path d='M2.4 3.6H21.6L17.3 20.4H6.7Z' fill='white' stroke='none'/>";
+    Diamond => "icons/diamond.svg", "<path d='M12 4 20 12 12 20 4 12Z' fill='white' stroke-width='2'/>";
+    Pencil => "icons/pencil.svg", "<path d='M12 20h8 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z'/>";
+    ArchStones => "icons/arch-stones.svg", "<path d='M1.2 19.2V12.6L6.2 7.9 8.9 11 5.5 14.4V19.2Z M22.8 19.2V12.6L17.8 7.9 15.1 11 18.5 14.4V19.2Z' stroke-width='1.4'/>";
+    ArchKeystone => "icons/arch-keystone.svg", "<path d='M7.7 4.8H16.3L14.4 11.5H9.6Z' fill='white' stroke='none'/>";
 }
 
 /// Serves every `IconName` as a white-stroked SVG. GPUI tints it with `text_color`.
+/// Filled shapes set `fill='white'` on their own paths, since the root sets no fill.
 pub struct Icons;
 
 impl AssetSource for Icons {
