@@ -1,11 +1,17 @@
 //! The full stack against a scripted Claude older than `msg_lifecycle_v1`. Its own
 //! file, because the fake reads the setting from the environment.
 
+use keystone_agent::ApprovalState;
 use keystone_agent::{ClaudeConnection, Event, ItemKind, TurnStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
+
+const NO_MODE: ApprovalState = ApprovalState {
+    mode: keystone_core::ApprovalMode::Provider,
+    overridden: false,
+};
 
 /// Without lifecycle frames a steer would be mis-grouped, so the connection refuses it
 /// and the caller keeps the text. The running turn goes on and ends normally.
@@ -23,7 +29,7 @@ fn a_claude_without_lifecycle_frames_refuses_steers() {
             let _ = tx.send(());
         }),
     );
-    conn.send(1, "/tmp", None, "long".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "long".into()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut events = Vec::new();
     let mut steered = false;
@@ -31,7 +37,7 @@ fn a_claude_without_lifecycle_frames_refuses_steers() {
         for (_, event) in conn.drain() {
             if !steered && matches!(event, Event::ItemDelta { .. }) {
                 let error = conn
-                    .send(1, "/tmp", None, "change course".into())
+                    .send(1, "/tmp", None, NO_MODE, "change course".into())
                     .unwrap_err();
                 assert!(error.contains("msg_lifecycle_v1"), "{error}");
                 steered = true;
@@ -66,5 +72,5 @@ fn a_claude_without_lifecycle_frames_refuses_steers() {
     );
     assert!(!conn.is_running(1));
     // Idle again, so a message starts the next turn.
-    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "hello".into()).unwrap();
 }

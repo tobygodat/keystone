@@ -17,7 +17,19 @@ const FONT_CANDIDATES: [&str; 8] = [
     "Ubuntu",
 ];
 
-pub fn theme_for(preferences: &Preferences, window: &Window) -> Theme {
+/// Monospace fonts for code, in order of preference. The first installed one is used, so
+/// code stays monospace when the default is missing; a proportional fallback misaligns it.
+const MONO_CANDIDATES: [&str; 7] = [
+    "GeistMono Nerd Font Mono",
+    "JetBrainsMono Nerd Font",
+    "JetBrains Mono",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Liberation Mono",
+    "Adwaita Mono",
+];
+
+pub fn theme_for(preferences: &Preferences, window: &Window, cx: &App) -> Theme {
     let appearance = match preferences.theme {
         ThemeMode::Light => Appearance::Light,
         ThemeMode::Dark => Appearance::Dark,
@@ -34,6 +46,13 @@ pub fn theme_for(preferences: &Preferences, window: &Window) -> Theme {
     let mut fonts = Fonts::default();
     if let Some(font) = &preferences.ui_font {
         fonts.ui = font.clone().into();
+    }
+    let installed = cx.text_system().all_font_names();
+    if let Some(mono) = MONO_CANDIDATES
+        .iter()
+        .find(|font| installed.iter().any(|name| name == *font))
+    {
+        fonts.mono = (*mono).into();
     }
     Theme::new(appearance, density, fonts)
 }

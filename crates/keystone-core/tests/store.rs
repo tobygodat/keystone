@@ -1,4 +1,4 @@
-use keystone_core::{Density, Preferences, Provider, Store, ThemeMode};
+use keystone_core::{ApprovalMode, Density, Preferences, Provider, Store, ThemeMode};
 use std::fs;
 use tempfile::tempdir;
 
@@ -147,4 +147,50 @@ fn provider_thread_survives_restart_and_is_absent_in_older_files() {
         restored.workspace().sessions()[0].provider_thread(),
         Some("thread-123")
     );
+}
+
+#[test]
+fn approval_mode_defaults_to_provider_settings_and_survives_restart() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    // A session saved before approval modes existed keeps the provider's own settings.
+    fs::write(
+        &path,
+        r#"{"version":1,"next_id":2,"workspace":{"sessions":[{"id":1,"title":"Old","provider":"Codex","settled":false,"draft":""}],"selected":1}}"#,
+    )
+    .unwrap();
+    let mut store = Store::open(&path).unwrap();
+    let session = &store.workspace().sessions()[0];
+    assert_eq!(session.approval_mode(), ApprovalMode::Provider);
+    assert!(!session.approval_overridden());
+
+    let id = store.create(Provider::Claude, 1).unwrap().value;
+    assert_eq!(
+        store.workspace().sessions()[1].approval_mode(),
+        ApprovalMode::Provider
+    );
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("approval_mode") && !saved.contains("approval_overridden"));
+
+    store.set_approval_mode(1, ApprovalMode::ReadOnly).unwrap();
+    store.set_approval_overridden(1).unwrap();
+    store
+        .set_approval_mode(id, ApprovalMode::FullAccess)
+        .unwrap();
+    drop(store);
+    let restored = Store::open(&path).unwrap();
+    let sessions = restored.workspace().sessions();
+    assert_eq!(sessions[0].approval_mode(), ApprovalMode::ReadOnly);
+    assert!(sessions[0].approval_overridden());
+    assert_eq!(sessions[1].approval_mode(), ApprovalMode::FullAccess);
+    // Saved in the same write as the mode, before any turn could send the override.
+    assert!(sessions[1].approval_overridden());
+
+    // Returning to the default keeps the record that an override was sent.
+    let mut store = restored;
+    store.set_approval_mode(1, ApprovalMode::Provider).unwrap();
+    let session = &Store::open(&path).unwrap().workspace().sessions()[0].clone();
+    assert_eq!(session.approval_mode(), ApprovalMode::Provider);
+    assert!(session.approval_overridden());
+    assert!(store.set_approval_mode(99, ApprovalMode::Auto).is_err());
 }

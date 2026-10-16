@@ -10,8 +10,12 @@ use keystone_ui::{Appearance, Density, Fonts, Theme, set_theme};
 
 struct Gallery {
     menu_open: bool,
+    dialog: Option<DialogFocus>,
     selected_row: usize,
+    markdown: std::sync::Arc<keystone_ui::markdown::Document>,
 }
+
+const MARKDOWN: &str = "## Heading\n\nA paragraph with **strong**, *emphasis*, `inline code`, ~~struck~~, and a [link](https://example.com).\n\n- A bullet\n  1. A nested number\n- Another bullet\n\n> A quoted line.\n\n| Left | Center | Right |\n| :-- | :-: | --: |\n| `a` | b | 1 |\n| c | d | 22 |\n\n```rust\nfn main() {\n    println!(\"A long line that scrolls sideways instead of wrapping, as in an editor, so code keeps its shape.\");\n}\n```\n\n---\n";
 
 fn section(title: &'static str, body: impl IntoElement) -> impl IntoElement {
     v_flex()
@@ -74,6 +78,11 @@ impl Render for Gallery {
                         Button::new(SharedString::from(format!("{name}-disabled")), "Disabled")
                             .style(style)
                             .disabled(true)
+                            .into_any_element(),
+                        Button::new(SharedString::from(format!("{name}-warning")), "Warning")
+                            .style(style)
+                            .icon(IconName::Shield)
+                            .color(Color::Warning)
                             .into_any_element(),
                     ]))
             }));
@@ -186,6 +195,13 @@ impl Render for Gallery {
                 .kbd("Ctrl+Shift+N"),
         )
         .child(MenuSeparator)
+        .child(MenuHeader::new("Approvals"))
+        .child(
+            MenuItem::new("ask", "Ask first")
+                .detail("Asks before commands not known to be safe")
+                .checked(true),
+        )
+        .child(MenuSeparator)
         .child(MenuHeader::new("Density"))
         .child(MenuItem::new("compact", "Compact").checked(false))
         .child(MenuItem::new("default", "Default").checked(true))
@@ -202,6 +218,21 @@ impl Render for Gallery {
                     .child(Label::new(format!("{elevation:?}")).size(TextSize::Ui))
                     .into_any_element()
             }));
+        let dialog = h_flex().gap_3().child(
+            Button::new("dialog-open", "Open confirm dialog")
+                .style(ButtonStyle::Subtle)
+                .icon(IconName::Shield)
+                .debug_selector(|| "dialog-open".into())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.dialog = Some(DialogFocus::new(window, cx));
+                    cx.notify();
+                })),
+        );
+        let close = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.dialog = None;
+            cx.notify();
+        });
+        let close = std::rc::Rc::new(close);
         div()
             .id("gallery")
             .size_full()
@@ -245,16 +276,39 @@ impl Render for Gallery {
                             })),
                     )
                     .child(section("BUTTONS", buttons))
+                    .child(section("CONFIRM DIALOG", dialog))
                     .child(section("ICON BUTTONS", icon_buttons))
                     .child(section(
                         "POPOVER MENU",
-                        h_flex().h(px(260.)).items_start().child(menu),
+                        h_flex().h(px(330.)).items_start().child(menu),
+                    ))
+                    .child(section(
+                        "MARKDOWN",
+                        div()
+                            .max_w(px(760.))
+                            .text_size(TextSize::Body.px())
+                            .line_height(px(22.))
+                            .child(Markdown::new("gallery-markdown", self.markdown.clone())),
                     ))
                     .child(section("LIST ITEMS", list))
                     .child(section("LABELS", labels))
                     .child(section("ICONS", icons))
                     .child(section("SURFACES", surfaces)),
             )
+            .when_some(self.dialog.as_ref(), |d, focus| {
+                let (cancel, confirm) = (close.clone(), close);
+                d.child(
+                    ConfirmDialog::new(
+                        "gallery-dialog",
+                        focus,
+                        "Turn on Full access?",
+                        "Codex will run commands and edit files without asking, until you choose another approval mode.",
+                    )
+                    .tone(Color::Warning)
+                    .on_cancel(move |window, cx| cancel(&(), window, cx))
+                    .on_confirm(move |window, cx| confirm(&(), window, cx)),
+                )
+            })
     }
 }
 
@@ -272,7 +326,11 @@ fn main() {
                 |_, cx| {
                     cx.new(|_| Gallery {
                         menu_open: true,
+                        dialog: None,
                         selected_row: 0,
+                        markdown: std::sync::Arc::new(keystone_ui::markdown::Document::parse(
+                            MARKDOWN,
+                        )),
                     })
                 },
             )

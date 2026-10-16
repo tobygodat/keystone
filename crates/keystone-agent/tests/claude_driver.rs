@@ -6,7 +6,9 @@
 
 use keystone_agent::claude::ClaudeDriver;
 use keystone_agent::{Command, Event, ItemKind, ItemStatus, Outputs, TurnStatus};
+use keystone_core::ApprovalMode;
 use serde_json::Value;
+use std::collections::HashMap;
 
 const CONVERSATION: &str = "39e3a669-3dfc-4bfd-9fd6-02464374d10a";
 const SESSION: u64 = 4;
@@ -40,7 +42,8 @@ fn parse(line: &str) -> Value {
 /// stopping where the recording stopped, and allowing then denying the two commands.
 fn replay() -> (ClaudeDriver, Outputs) {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     let init = parse(&out.writes[0]);
     assert_eq!(
         (init["type"].as_str(), init["request"]["subtype"].as_str()),
@@ -268,7 +271,8 @@ fn writes_steer_with_priority_and_answer_with_the_asked_input() {
 #[test]
 fn a_steer_during_a_tool_call_waits_for_the_tool() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(1), &mut out);
     for line in [
         r#"{"type":"command_lifecycle","command_uuid":"6b657973-746f-46e6-8005-000000000001","state":"queued"}"#,
@@ -286,7 +290,8 @@ fn a_steer_during_a_tool_call_waits_for_the_tool() {
 #[test]
 fn a_resumed_conversation_keeps_its_id() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, true, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, true, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(
         Command::Send {
             session: SESSION,
@@ -316,7 +321,8 @@ fn a_resumed_conversation_keeps_its_id() {
 #[test]
 fn a_conversation_claude_no_longer_has_fails_instead_of_starting_fresh() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, true, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, true, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(1), &mut out);
     // Claude 2.1.300's only output for an unknown `--resume` ID, before it exits 1.
     driver.on_line(
@@ -337,7 +343,8 @@ fn a_conversation_claude_no_longer_has_fails_instead_of_starting_fresh() {
 #[test]
 fn signed_out_claude_reports_an_error_and_no_reply() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(1), &mut out);
     let uuid = "6b657973-746f-46e6-8005-000000000001";
     // Claude 2.1.300 with no login, trimmed to the fields Keystone reads.
@@ -363,7 +370,8 @@ fn signed_out_claude_reports_an_error_and_no_reply() {
 #[test]
 fn unknown_control_requests_are_refused() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     out.writes.clear();
     driver.on_line(
         br#"{"type":"control_request","request_id":"r9","request":{"subtype":"elicitation"}}"#,
@@ -377,7 +385,8 @@ fn unknown_control_requests_are_refused() {
 #[test]
 fn exit_fails_the_running_turn() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(1), &mut out);
     driver.on_exit("Claude Code stopped with exit code 1", &mut out);
     assert_eq!(
@@ -393,7 +402,8 @@ fn exit_fails_the_running_turn() {
 #[test]
 fn a_message_stopped_before_it_started_ends_the_turn_without_a_result() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(1), &mut out);
     driver.command(Command::Interrupt { session: SESSION }, &mut out);
     let uuid = "6b657973-746f-46e6-8005-000000000001";
@@ -415,6 +425,21 @@ fn a_message_stopped_before_it_started_ends_the_turn_without_a_result() {
             error: None,
             stopped: true,
         })
+    );
+}
+
+/// Claude answers `initialize`, reporting the mode a process launched in `launched`
+/// runs in. Nothing is written to Claude before.
+fn ready(driver: &mut ClaudeDriver, out: &mut Outputs, launched: ApprovalMode) {
+    let mode = keystone_agent::claude::permission_mode(launched).unwrap_or("default");
+    initialize(driver, out, mode);
+}
+
+/// Claude answers `initialize`, reporting that it runs in `mode`.
+fn initialize(driver: &mut ClaudeDriver, out: &mut Outputs, mode: &str) {
+    driver.on_line(
+        format!(r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"keystone-1","response":{{"current_permission_mode":"{mode}"}}}}}}"#).as_bytes(),
+        out,
     );
 }
 
@@ -451,7 +476,8 @@ fn turn_ends(out: &Outputs) -> Vec<TurnStatus> {
 #[test]
 fn a_claude_without_lifecycle_frames_is_not_steered() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(4), &mut out);
     feed(
         &mut driver,
@@ -481,19 +507,28 @@ fn a_claude_without_lifecycle_frames_is_not_steered() {
 }
 
 /// Before the first frame or `init`, Keystone cannot tell whether steering is safe.
+/// The connection refuses such a steer; one that reaches the driver anyway, such as
+/// after the connection replaced the process, waits for Claude to say.
 #[test]
-fn a_steer_before_claude_reports_anything_is_refused() {
+fn a_steer_before_claude_reports_anything_waits_for_it() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(4), &mut out);
     assert!(driver.steer_blocked().is_some());
     driver.command(send(5), &mut out);
     assert_eq!(user_writes(&out), 1);
-    // The first frame settles it.
+    // The first frame settles it, and the held steer goes out.
     feed(&mut driver, &mut out, &[lifecycle(1, "queued")]);
     assert_eq!(driver.steer_blocked(), None);
-    driver.command(send(5), &mut out);
     assert_eq!(user_writes(&out), 2);
+    assert!(
+        !out.events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::Warning { .. }))
+    );
+    driver.command(send(6), &mut out);
+    assert_eq!(user_writes(&out), 3);
 }
 
 /// Stop cancels a follow-up that was queued behind a message whose result already
@@ -501,7 +536,8 @@ fn a_steer_before_claude_reports_anything_is_refused() {
 #[test]
 fn stopping_a_queued_follow_up_interrupts_the_turn() {
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(1), &mut out);
     feed(
         &mut driver,
@@ -550,7 +586,8 @@ fn turn_end(out: &Outputs) -> Option<(TurnStatus, bool)> {
 fn the_turn_end_says_whether_the_user_stopped_it() {
     let init = r#"{"type":"system","subtype":"init","session_id":"s","capabilities":["msg_lifecycle_v1"]}"#;
     let mut out = Outputs::default();
-    let mut driver = ClaudeDriver::new(SESSION, false, SEED, &mut out);
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
 
     driver.command(send(1), &mut out);
     feed(
@@ -669,7 +706,8 @@ fn answer(driver: &mut ClaudeDriver, request: keystone_agent::RequestId) -> Vec<
 #[test]
 fn stale_answers_are_never_sent() {
     let mut out = Outputs::default();
-    let mut first = ClaudeDriver::new(SESSION, false, 1, &mut out);
+    let mut first = ClaudeDriver::new(SESSION, false, 1, ApprovalMode::Provider, &mut out);
+    ready(&mut first, &mut out, ApprovalMode::Provider);
     first.command(send(1), &mut out);
     feed(&mut first, &mut out, &[can_use_tool("r1")]);
     let withdrawn = asked(&out)[0].clone();
@@ -686,7 +724,8 @@ fn stale_answers_are_never_sent() {
 
     // The next process numbers its requests the same way.
     let mut out = Outputs::default();
-    let mut second = ClaudeDriver::new(SESSION, true, 2, &mut out);
+    let mut second = ClaudeDriver::new(SESSION, true, 2, ApprovalMode::Provider, &mut out);
+    ready(&mut second, &mut out, ApprovalMode::Provider);
     second.command(send(1), &mut out);
     feed(&mut second, &mut out, &[can_use_tool("r2")]);
     let current = asked(&out)[0].clone();
@@ -697,4 +736,623 @@ fn stale_answers_are_never_sent() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["response"]["request_id"], "r2");
     assert_eq!(sent[0]["response"]["response"]["behavior"], "allow");
+}
+
+fn configure(driver: &mut ClaudeDriver, mode: ApprovalMode) {
+    driver.command(
+        Command::Configure {
+            session: SESSION,
+            approval: keystone_agent::ApprovalState {
+                mode,
+                overridden: false,
+            },
+        },
+        &mut Outputs::default(),
+    );
+}
+
+/// The `set_permission_mode` requests written, by mode.
+fn modes_set(out: &Outputs) -> Vec<String> {
+    out.writes
+        .iter()
+        .map(|w| parse(w))
+        .filter(|w| w["request"]["subtype"] == "set_permission_mode")
+        .map(|w| w["request"]["mode"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn mode_set_reply(out: &Outputs, result: &str) -> String {
+    let request = out
+        .writes
+        .iter()
+        .map(|w| parse(w))
+        .rfind(|w| w["request"]["subtype"] == "set_permission_mode")
+        .unwrap()["request_id"]
+        .clone();
+    format!(r#"{{"type":"control_response","response":{{"request_id":{request},{result}}}}}"#)
+}
+
+/// Ends the turn whose last message was the `n`th sent.
+fn end_turn(driver: &mut ClaudeDriver, out: &mut Outputs, first: u64, last: u64) {
+    let mut lines = vec![];
+    for n in first..=last {
+        lines.push(lifecycle(n, "started"));
+    }
+    lines.push(r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#.into());
+    for n in first..=last {
+        lines.push(lifecycle(n, "completed"));
+    }
+    feed(driver, out, &lines);
+}
+
+/// A mode is set when a turn starts, and the turn's message waits for Claude to
+/// confirm it. A steer after a change waits for the new mode too.
+#[test]
+fn a_mode_is_set_before_the_turn_and_its_message_waits_for_claude() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    configure(&mut driver, ApprovalMode::ReadOnly);
+    let mut out = Outputs::default();
+    driver.command(send(1), &mut out);
+    assert_eq!(modes_set(&out), ["plan"]);
+    assert_eq!(user_writes(&out), 0);
+    // A steer sent meanwhile waits behind the first message.
+    driver.command(send(2), &mut out);
+    assert_eq!(user_writes(&out), 0);
+    let reply = mode_set_reply(&out, r#""subtype":"success","response":{"mode":"plan"}"#);
+    feed(&mut driver, &mut out, &[reply]);
+    assert_eq!(user_writes(&out), 1);
+    feed(&mut driver, &mut out, &[lifecycle(1, "queued")]);
+    assert_eq!(user_writes(&out), 2);
+
+    // A steer after a change waits for Claude to confirm the new mode, during the turn.
+    configure(&mut driver, ApprovalMode::Auto);
+    driver.command(send(3), &mut out);
+    assert_eq!(
+        (modes_set(&out), user_writes(&out)),
+        (vec!["plan".into(), "acceptEdits".into()], 2)
+    );
+    let reply = mode_set_reply(
+        &out,
+        r#""subtype":"success","response":{"mode":"acceptEdits"}"#,
+    );
+    feed(&mut driver, &mut out, &[reply]);
+    assert_eq!(user_writes(&out), 3);
+    end_turn(&mut driver, &mut out, 1, 3);
+    assert_eq!(turn_ends(&out), [TurnStatus::Completed]);
+
+    // The next turn needs nothing set.
+    let mut out = Outputs::default();
+    driver.command(send(4), &mut out);
+    assert_eq!((modes_set(&out).len(), user_writes(&out)), (0, 1));
+    assert!(!driver.needs_restart());
+}
+
+/// Claude refusing the mode fails the turn; nothing runs under the old one.
+#[test]
+fn a_refused_mode_fails_the_turn_without_sending() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    configure(&mut driver, ApprovalMode::Auto);
+    let mut out = Outputs::default();
+    driver.command(send(1), &mut out);
+    let reply = mode_set_reply(&out, r#""subtype":"error","error":"no""#);
+    feed(&mut driver, &mut out, &[reply]);
+    assert_eq!(user_writes(&out), 0);
+    assert!(out.events.iter().any(|(_, e)| matches!(e,
+        Event::TurnCompleted { status: TurnStatus::Failed, error: Some(error), stopped: false }
+            if error.contains("approval mode"))));
+    assert!(!driver.is_running());
+}
+
+/// Stop before Claude confirms the mode ends the turn with nothing sent.
+#[test]
+fn stop_while_the_mode_is_set_sends_nothing() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    initialize(&mut driver, &mut out, "acceptEdits");
+    configure(&mut driver, ApprovalMode::Ask);
+    let mut out = Outputs::default();
+    driver.command(send(1), &mut out);
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert_eq!(turn_ends(&out), [TurnStatus::Interrupted]);
+    let reply = mode_set_reply(&out, r#""subtype":"success","response":{"mode":"default"}"#);
+    feed(&mut driver, &mut out, &[reply]);
+    assert_eq!(user_writes(&out), 0);
+}
+
+/// Approving Claude's `ExitPlanMode` leaves plan mode; Read only returns at the next
+/// turn.
+#[test]
+fn leaving_plan_mode_is_undone_at_the_next_turn() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::ReadOnly, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::ReadOnly);
+    let mut out = Outputs::default();
+    // Launched in plan mode, so nothing needs setting.
+    driver.command(send(1), &mut out);
+    assert_eq!((modes_set(&out).len(), user_writes(&out)), (0, 1));
+    feed(
+        &mut driver,
+        &mut out,
+        &[
+            format!(
+                r#"{{"type":"system","subtype":"init","session_id":"{CONVERSATION}","capabilities":["msg_lifecycle_v1"],"permissionMode":"plan"}}"#
+            ),
+            r#"{"type":"system","subtype":"status","status":null,"permissionMode":"default"}"#
+                .into(),
+        ],
+    );
+    end_turn(&mut driver, &mut out, 1, 1);
+    let mut out = Outputs::default();
+    driver.command(send(2), &mut out);
+    assert_eq!(
+        (modes_set(&out), user_writes(&out)),
+        (vec!["plan".into()], 0)
+    );
+}
+
+/// Which changes need a new process. Claude enters `bypassPermissions` only when
+/// launched in it, a process launched in it is never lowered in place, and the user's
+/// own settings come back only in a process launched with no mode.
+#[test]
+fn some_modes_need_a_new_process() {
+    use ApprovalMode::*;
+    let restart = |launched, to| {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(SESSION, false, SEED, launched, &mut out);
+        configure(&mut driver, to);
+        driver.needs_restart()
+    };
+    for (launched, to, expected) in [
+        (Provider, Provider, false),
+        (Provider, ReadOnly, false),
+        (Provider, Auto, false),
+        (Provider, FullAccess, true),
+        (Ask, Auto, false),
+        (Auto, Provider, true),
+        (FullAccess, FullAccess, false),
+        (FullAccess, Auto, true),
+        (FullAccess, Provider, true),
+    ] {
+        assert_eq!(restart(launched, to), expected, "{launched:?} to {to:?}");
+    }
+
+    // A mode Keystone set in a process launched without one also needs a new process
+    // to return to the user's settings.
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, Provider, &mut out);
+    initialize(&mut driver, &mut out, "acceptEdits");
+    configure(&mut driver, Ask);
+    driver.command(send(1), &mut out);
+    configure(&mut driver, Provider);
+    assert!(driver.needs_restart());
+    assert_eq!(
+        keystone_agent::claude::args(FullAccess)[12..],
+        ["--permission-mode", "bypassPermissions"]
+    );
+    assert_eq!(keystone_agent::claude::args(Provider).len(), 12);
+}
+
+/// Stop drops a steer that waits for Claude to report lifecycle support.
+#[test]
+fn stop_drops_a_held_steer() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    driver.command(send(4), &mut out);
+    driver.command(send(5), &mut out);
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    feed(&mut driver, &mut out, &[lifecycle(1, "queued")]);
+    assert_eq!(user_writes(&out), 1);
+}
+
+/// The ID of the latest `set_permission_mode` request written.
+fn mode_request(out: &Outputs) -> Value {
+    out.writes
+        .iter()
+        .map(|w| parse(w))
+        .rfind(|w| w["request"]["subtype"] == "set_permission_mode")
+        .unwrap()["request_id"]
+        .clone()
+}
+
+fn mode_answer(request: &Value, mode: &str) -> String {
+    format!(
+        r#"{{"type":"control_response","response":{{"request_id":{request},"subtype":"success","response":{{"mode":"{mode}"}}}}}}"#
+    )
+}
+
+/// Review round 2, finding 2. Claude confirming the mode of an older selection does
+/// not release the waiting message: the latest selection's mode is set first.
+#[test]
+fn a_confirmation_for_an_older_selection_releases_nothing() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    configure(&mut driver, ApprovalMode::Auto);
+    let mut out = Outputs::default();
+    driver.command(send(1), &mut out);
+    let auto = mode_request(&out);
+    configure(&mut driver, ApprovalMode::ReadOnly);
+    feed(&mut driver, &mut out, &[mode_answer(&auto, "acceptEdits")]);
+    assert_eq!(user_writes(&out), 0, "not sent under acceptEdits");
+    assert_eq!(modes_set(&out), ["acceptEdits", "plan"]);
+    let plan = mode_request(&out);
+    feed(&mut driver, &mut out, &[mode_answer(&plan, "plan")]);
+    assert_eq!(user_writes(&out), 1);
+}
+
+/// Review round 2, finding 5. Stop while Claude has not answered a mode request ends
+/// the turn, and leaves no gate: the next message waits only for that answer, then for
+/// its own mode.
+#[test]
+fn stop_leaves_no_gate_behind() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Auto, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Auto);
+    configure(&mut driver, ApprovalMode::ReadOnly);
+    let mut out = Outputs::default();
+    driver.command(send(1), &mut out);
+    let plan = mode_request(&out);
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert_eq!(turn_ends(&out), [TurnStatus::Interrupted]);
+    configure(&mut driver, ApprovalMode::Auto);
+    driver.command(send(2), &mut out);
+    // Claude's mode is unknown until it answers: the plan request may still apply.
+    assert_eq!(user_writes(&out), 0);
+    feed(&mut driver, &mut out, &[mode_answer(&plan, "plan")]);
+    assert_eq!(user_writes(&out), 0, "not sent under plan");
+    let auto = mode_request(&out);
+    feed(&mut driver, &mut out, &[mode_answer(&auto, "acceptEdits")]);
+    assert_eq!(user_writes(&out), 1);
+    assert!(driver.is_running());
+}
+
+/// Review round 2, finding 3. Under Read only `ExitPlanMode` is refused at once, with
+/// a reason for Claude and a warning for the user; under other modes the user decides.
+#[test]
+fn read_only_refuses_exit_plan_mode() {
+    let exit_plan = r#"{"type":"control_request","request_id":"x1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"p"},"tool_use_id":"t1"}}"#;
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::ReadOnly, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::ReadOnly);
+    driver.command(send(1), &mut out);
+    let mut out = Outputs::default();
+    driver.on_line(exit_plan.as_bytes(), &mut out);
+    assert!(asked(&out).is_empty());
+    let [answer] = &out.writes[..] else {
+        panic!("{:?}", out.writes)
+    };
+    let answer = parse(answer);
+    assert_eq!(answer["response"]["request_id"], "x1");
+    assert_eq!(answer["response"]["response"]["behavior"], "deny");
+    assert!(
+        answer["response"]["response"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Read only")
+    );
+    assert!(
+        out.events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::Warning { .. }))
+    );
+
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Auto, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Auto);
+    driver.command(send(1), &mut out);
+    let mut out = Outputs::default();
+    driver.on_line(exit_plan.as_bytes(), &mut out);
+    assert_eq!(asked(&out).len(), 1);
+    assert!(out.writes.is_empty());
+}
+
+/// A mode request Claude never answers fails the waiting turn with nothing sent, and
+/// the process is replaced before the next message.
+#[test]
+fn an_unanswered_mode_request_fails_the_turn_and_marks_the_process() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    configure(&mut driver, ApprovalMode::Auto);
+    let mut out = Outputs::default();
+    driver.command(send(1), &mut out);
+    // The answered `initialize` is timed too, and its timeout changes nothing.
+    let [initialize, request] = &driver.take_timed_requests()[..] else {
+        panic!("two requests to time")
+    };
+    driver.request_timed_out(initialize, &mut out);
+    assert!(!driver.needs_restart());
+    driver.request_timed_out(request, &mut out);
+    assert_eq!(turn_ends(&out), [TurnStatus::Failed]);
+    assert_eq!(user_writes(&out), 0);
+    assert!(driver.needs_restart());
+    // A late answer does not make the process usable again.
+    let late = mode_answer(&mode_request(&out), "acceptEdits");
+    feed(&mut driver, &mut out, &[late]);
+    assert!(driver.needs_restart());
+}
+
+/// A deterministic random source for the interleaving test.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+}
+
+/// A Claude process for the interleaving test. It reads Keystone's lines in order,
+/// when the test lets it, and answers as Claude 2.1.300 does.
+struct Sim {
+    driver: ClaudeDriver,
+    /// Lines written to this process and not read yet.
+    unread: std::collections::VecDeque<String>,
+    /// Lines it wrote and Keystone has not read yet.
+    unsent: std::collections::VecDeque<String>,
+    mode: String,
+    bypass: bool,
+    /// The mode `ExitPlanMode` returns to.
+    before_plan: String,
+    /// Messages read and not finished.
+    running: Vec<u64>,
+    /// Whether `ExitPlanMode` waits for an answer. The turn cannot end meanwhile.
+    asking: bool,
+    seed: u64,
+}
+
+const USER_MODE: &str = "acceptEdits";
+
+impl Sim {
+    fn launch(mode: ApprovalMode, seed: u64, out: &mut Outputs) -> Self {
+        let flag = keystone_agent::claude::permission_mode(mode).unwrap_or(USER_MODE);
+        let driver = ClaudeDriver::new(SESSION, true, seed, mode, out);
+        Self {
+            driver,
+            unread: Default::default(),
+            unsent: Default::default(),
+            mode: flag.into(),
+            bypass: mode == ApprovalMode::FullAccess,
+            before_plan: flag.into(),
+            running: vec![],
+            asking: false,
+            seed,
+        }
+    }
+
+    fn set_mode(&mut self, mode: &str) {
+        if mode == "plan" && self.mode != "plan" {
+            self.before_plan = self.mode.clone();
+        }
+        self.mode = mode.into();
+    }
+
+    /// Reads one line Keystone wrote. Returns the mode a user message runs in.
+    fn read(&mut self) -> Option<(u64, String)> {
+        let line = parse(&self.unread.pop_front()?);
+        let control = |id: &Value, body: Value| {
+            serde_json::json!({"type": "control_response", "response":
+                {"subtype": "success", "request_id": id, "response": body}})
+            .to_string()
+        };
+        match (line["type"].as_str(), line["request"]["subtype"].as_str()) {
+            (Some("control_request"), Some("initialize")) => {
+                let answer = control(
+                    &line["request_id"],
+                    serde_json::json!({"current_permission_mode": self.mode}),
+                );
+                self.unsent.push_back(answer);
+            }
+            (Some("control_request"), Some("set_permission_mode")) => {
+                let mode = line["request"]["mode"].as_str().unwrap().to_owned();
+                if mode == "bypassPermissions" && !self.bypass {
+                    self.unsent.push_back(serde_json::json!({"type": "control_response", "response":
+                        {"subtype": "error", "request_id": line["request_id"], "error": "bypass_not_launched"}}).to_string());
+                } else {
+                    self.set_mode(&mode);
+                    let answer = control(&line["request_id"], serde_json::json!({"mode": mode}));
+                    self.unsent.push_back(answer);
+                    self.unsent.push_back(format!(
+                        r#"{{"type":"system","subtype":"status","permissionMode":"{mode}"}}"#
+                    ));
+                }
+            }
+            (Some("control_request"), Some("interrupt")) => {
+                if std::mem::take(&mut self.asking) {
+                    self.unsent.push_back(
+                        r#"{"type":"control_cancel_request","request_id":"exit-plan"}"#.into(),
+                    );
+                }
+                for n in std::mem::take(&mut self.running) {
+                    self.unsent.push_back(self.lifecycle(n, "cancelled"));
+                }
+                self.unsent.push_back(
+                    r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["interrupted"]}"#.into(),
+                );
+                let answer = control(&line["request_id"], serde_json::json!({}));
+                self.unsent.push_back(answer);
+            }
+            (Some("control_response"), _) => {
+                // An approved `ExitPlanMode` returns to the mode before plan mode.
+                if line["response"]["request_id"] == "exit-plan"
+                    && std::mem::take(&mut self.asking)
+                    && line["response"]["response"]["behavior"] == "allow"
+                    && self.mode == "plan"
+                {
+                    let mode = self.before_plan.clone();
+                    self.set_mode(&mode);
+                    self.unsent.push_back(format!(
+                        r#"{{"type":"system","subtype":"status","permissionMode":"{mode}"}}"#
+                    ));
+                }
+            }
+            (Some("user"), _) => {
+                let uuid = line["uuid"].as_str().unwrap();
+                let n = u64::from_str_radix(&uuid[uuid.len() - 12..], 16).unwrap();
+                self.running.push(n);
+                self.unsent.push_back(self.lifecycle(n, "queued"));
+                self.unsent.push_back(self.lifecycle(n, "started"));
+                self.unsent.push_back(format!(
+                    r#"{{"type":"system","subtype":"init","session_id":"s","capabilities":["msg_lifecycle_v1"],"permissionMode":"{}"}}"#,
+                    self.mode
+                ));
+                return Some((n, self.mode.clone()));
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn lifecycle(&self, n: u64, state: &str) -> String {
+        let uuid = keystone_agent::claude::message_uuid(self.seed, n);
+        format!(r#"{{"type":"command_lifecycle","command_uuid":"{uuid}","state":"{state}"}}"#)
+    }
+
+    /// Finishes the messages it is running.
+    fn finish(&mut self) {
+        if self.running.is_empty() || self.asking {
+            return;
+        }
+        self.unsent.push_back(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#.into(),
+        );
+        for n in std::mem::take(&mut self.running) {
+            self.unsent.push_back(self.lifecycle(n, "completed"));
+        }
+    }
+}
+
+/// Random interleavings of mode changes, messages, steers, Stop, `ExitPlanMode`, and
+/// Claude's answers, with the connection's process replacement. Every message Claude
+/// reads runs in the mode of the selection that was latest when it was written.
+#[test]
+fn messages_only_ever_run_in_the_mode_selected_when_they_were_written() {
+    use ApprovalMode::*;
+    let modes = [Provider, ReadOnly, Ask, Auto, FullAccess];
+    let mut checked = 0;
+    for run in 0..3000u64 {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ (run + 1).wrapping_mul(0x2545_f491_4f6c_dd1d));
+        let mut selected = modes[rng.below(5) as usize];
+        let mut seed = 1;
+        let mut out = Outputs::default();
+        let mut sim = Sim::launch(selected, seed, &mut out);
+        // What each written message must run in, by message number.
+        let mut expected: HashMap<u64, String> = HashMap::new();
+        let mut text = 0;
+        let route = |sim: &mut Sim,
+                     out: &mut Outputs,
+                     selected: ApprovalMode,
+                     expected: &mut HashMap<u64, String>| {
+            for line in out.writes.drain(..) {
+                let message = parse(&line);
+                if message["type"] == "user" {
+                    let uuid = message["uuid"].as_str().unwrap();
+                    let n = u64::from_str_radix(&uuid[uuid.len() - 12..], 16).unwrap();
+                    let mode =
+                        keystone_agent::claude::permission_mode(selected).unwrap_or(USER_MODE);
+                    expected.insert(n, mode.into());
+                }
+                sim.unread.push_back(line);
+            }
+        };
+        for _ in 0..100 {
+            match rng.below(9) {
+                0 => {
+                    selected = modes[rng.below(5) as usize];
+                    sim.driver.command(
+                        Command::Configure {
+                            session: SESSION,
+                            approval: keystone_agent::ApprovalState {
+                                mode: selected,
+                                overridden: true,
+                            },
+                        },
+                        &mut out,
+                    );
+                }
+                1 | 2 => {
+                    // A message, as the connection sends it: an idle process that cannot
+                    // run the mode is replaced first.
+                    if !sim.driver.is_running() && sim.driver.needs_restart() {
+                        seed += 1;
+                        route(&mut sim, &mut out, selected, &mut expected);
+                        sim = Sim::launch(selected, seed, &mut out);
+                        expected.clear();
+                    }
+                    if sim.driver.steer_blocked().is_none() {
+                        text += 1;
+                        sim.driver.command(
+                            Command::Send {
+                                session: SESSION,
+                                text: format!("m{text}"),
+                            },
+                            &mut out,
+                        );
+                    }
+                }
+                3 => sim
+                    .driver
+                    .command(Command::Interrupt { session: SESSION }, &mut out),
+                4 | 5 => {
+                    if let Some((n, mode)) = sim.read() {
+                        assert_eq!(
+                            Some(&mode),
+                            expected.get(&n),
+                            "run {run}: message {n} ran in the wrong mode"
+                        );
+                        checked += 1;
+                    }
+                }
+                6 => {
+                    if let Some(line) = sim.unsent.pop_front() {
+                        let before = out.events.len();
+                        sim.driver.on_line(line.as_bytes(), &mut out);
+                        // The user allows whatever Claude asks.
+                        let asked: Vec<_> = out.events[before..]
+                            .iter()
+                            .filter_map(|(_, e)| match e {
+                                Event::ApprovalRequested(a) => Some(a.request.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        for request in asked {
+                            sim.driver.command(
+                                Command::Answer {
+                                    session: SESSION,
+                                    request,
+                                    allow: true,
+                                },
+                                &mut out,
+                            );
+                        }
+                    }
+                }
+                7 => sim.finish(),
+                _ => {
+                    if !sim.running.is_empty() && sim.mode == "plan" && !sim.asking {
+                        sim.asking = true;
+                        sim.unsent.push_back(r#"{"type":"control_request","request_id":"exit-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{},"tool_use_id":"e"}}"#.into());
+                    }
+                }
+            }
+            route(&mut sim, &mut out, selected, &mut expected);
+            // The connection replaces a process a waiting turn cannot run in.
+            if sim.driver.wants_restart() {
+                let carried = sim.driver.take_unsent();
+                seed += 1;
+                sim = Sim::launch(selected, seed, &mut out);
+                expected.clear();
+                sim.driver.carry(carried, &mut out);
+                route(&mut sim, &mut out, selected, &mut expected);
+            }
+        }
+    }
+    assert!(checked > 5_000, "only {checked} messages were checked");
 }

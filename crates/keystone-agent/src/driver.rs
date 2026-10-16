@@ -2,6 +2,17 @@
 //! produces. Drivers are state machines with no IO; see `docs/design/providers.md`.
 
 use crate::item::{Event, RequestId};
+use keystone_core::ApprovalMode;
+
+/// The approval mode a session's next turns run under. Each driver maps the mode to its
+/// provider's own settings; see "Approval modes" in `docs/design/providers.md`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ApprovalState {
+    pub mode: ApprovalMode,
+    /// Whether an earlier process may have sent the conversation an override that the
+    /// provider keeps across a resume. Saved before any override is sent.
+    pub overridden: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -23,6 +34,12 @@ pub enum Command {
         session: u64,
         request: RequestId,
         allow: bool,
+    },
+    /// Sets the approval mode for the session's next turns, including a message that
+    /// waits to start one. `overridden` is read only before the session opens.
+    Configure {
+        session: u64,
+        approval: ApprovalState,
     },
 }
 

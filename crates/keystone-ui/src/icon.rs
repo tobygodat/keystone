@@ -45,6 +45,7 @@ icons! {
     Minus => "icons/minus.svg", "<path d='M5 12h14'/>";
     Square => "icons/square.svg", "<rect x='5' y='5' width='14' height='14' rx='2'/>";
     Check => "icons/check.svg", "<path d='m5 12 5 5 9-10'/>";
+    Shield => "icons/shield.svg", "<path d='M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6Z'/>";
     Wedge => "icons/wedge.svg", "<path d='M2.4 3.6H21.6L17.3 20.4H6.7Z' stroke-width='2.4'/>";
     WedgeFilled => "icons/wedge-filled.svg", "<path d='M2.4 3.6H21.6L17.3 20.4H6.7Z' fill='white' stroke='none'/>";
     Diamond => "icons/diamond.svg", "<path d='M12 4 20 12 12 20 4 12Z' fill='white' stroke-width='2'/>";

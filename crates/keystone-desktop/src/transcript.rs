@@ -2,12 +2,15 @@
 //! virtualizes them; this module only decides a row's content.
 
 use crate::conversation::Row;
-use gpui::{AnyElement, App, div, prelude::*, px};
+use gpui::{AnyElement, App, ClipboardItem, SharedString, div, prelude::*, px};
 use keystone_agent::{ItemKind, ItemStatus, TurnStatus};
+use keystone_ui::markdown::Document;
 use keystone_ui::prelude::*;
+use std::sync::Arc;
 
-/// The content of a row that [`crate::conversation::visible`] accepts.
-pub fn row(row: &Row, cx: &App) -> AnyElement {
+/// The content of a row that [`crate::conversation::visible`] accepts. `index` is the
+/// row's place in the conversation, and `reply` the parsed Markdown of a reply row.
+pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> AnyElement {
     let colors = cx.theme().colors;
     let mono = cx.theme().fonts.mono.clone();
     match row {
@@ -24,7 +27,28 @@ pub fn row(row: &Row, cx: &App) -> AnyElement {
                         .child(item.text.clone()),
                 )
                 .into_any_element(),
-            ItemKind::AgentMessage => div().child(item.text.clone()).into_any_element(),
+            ItemKind::AgentMessage => {
+                let text = item.text.clone();
+                let document = reply.unwrap_or_else(|| Arc::new(Document::parse(&item.text)));
+                v_flex()
+                    .gap_1()
+                    .child(Markdown::new(
+                        SharedString::from(format!("reply-{index}")),
+                        document,
+                    ))
+                    .when(item.status == ItemStatus::Completed, |d| {
+                        d.child(
+                            IconButton::new(("copy-reply", index), IconName::Copy)
+                                .size(ButtonSize::Compact)
+                                .debug_selector(move || format!("copy-reply-{index}"))
+                                .tooltip(Tooltip::text("Copy reply"))
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+                                }),
+                        )
+                    })
+                    .into_any_element()
+            }
             ItemKind::Reasoning => div()
                 .text_size(TextSize::Ui.px())
                 .text_color(colors.text_muted)
