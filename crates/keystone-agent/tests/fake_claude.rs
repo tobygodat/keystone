@@ -824,7 +824,7 @@ fn stop_before_claude_confirms_a_mode_leaves_the_next_message_free() {
         Some(&Event::TurnCompleted {
             status: TurnStatus::Interrupted,
             error: None,
-            stopped: false,
+            stopped: true,
         })
     );
     conn.send(1, &dir, None, mode(Auto), "after Stop".into())

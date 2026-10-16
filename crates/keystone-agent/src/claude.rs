@@ -309,9 +309,10 @@ impl ClaudeDriver {
             Command::Send { text, .. } => self.send(text, out),
             Command::Interrupt { .. } => {
                 // Nothing reached Claude yet, so the turn ends here.
-                if let Some(turn) = &self.turn
+                if let Some(turn) = &mut self.turn
                     && !turn.written
                 {
+                    turn.stopping = true;
                     return self.finish(TurnStatus::Interrupted, None, out);
                 }
                 if let Some(turn) = &mut self.turn {
