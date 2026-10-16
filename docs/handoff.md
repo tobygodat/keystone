@@ -45,11 +45,19 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 
 ## Open work, in priority order
 
-0. **Providers.** Codex works end to end (`crates/keystone-agent`, `docs/design/providers.md`). Next: the Claude Code driver against the same item model; an approval-mode control per session; Markdown rendering of replies; a virtualized transcript list for long sessions. Known limit: after a restart, a steer message is listed before the reply it interrupted, because the log is ordered by completion. Review follow-ups: log writes, history loading, and starting Codex still run on the UI thread; move them to a worker. Completed transcript rows are not virtualized yet.
+0. **Providers.** Codex works end to end (`crates/keystone-agent`, `docs/design/providers.md`). Next: the Claude Code driver against the same item model; an approval-mode control per session; Markdown rendering of replies. The Codex review follow-ups are done (2026-10-16): session logs and history loading run on a worker (`log::Logs`), Codex is found and started on a worker, a restored transcript keeps the order it was shown in (`seq` in the log), and the transcript is a virtualized GPUI `list`. Known limits: theme, density, or font changes leave the cached heights of off-screen rows stale until they scroll into view, which can make the scroll extent briefly inaccurate. Native wheel scrolling is unproven because the driver's wheel events reach no GPUI view (KS-012); the GPUI test covers the wheel.
 1. **KS-005 confirmation.** The sidebar is now a cached view (see `docs/performance.md`). The 10 ms native typing check passed on 2026-10-15 both before and after that change, so the dependency optimization is the more likely fix. Repeat it several times before closing KS-005.
 2. **Appearance follow-ups.** The light theme, density, and font settings are built and saved in the workspace file. The interface font list only offers installed fonts from a fixed candidate list. Text size and the monospace font are not configurable yet. System mode follows GPUI's reported window appearance. On Hyprland with the portal reporting `prefer-dark`, it opened dark. A light desktop setting and switching while the app runs have not been tested.
 3. **Small polish.** Escape closes menus, selected rows have a hover state, and the color check catches `Hsla { .. }` literals. Nothing else is queued.
 4. **Prior open issues.** KS-002 partial, KS-004 partial, KS-005, and KS-009 in `docs/issues.md`.
+
+## Review follow-ups landed 2026-10-16
+
+- **Workers.** `keystone_agent::worker::Worker` runs blocking jobs in order on one thread. `log::Logs` uses one for every session's log: appends, syncs, and history loads, with results as `Report`s drained by the UI's pump. `CodexConnection` uses one for commands, so `send` and `command` no longer return errors; a start failure arrives as `Event::Failed`.
+- **Conversation.** `Conversation` (desktop crate) does no IO. Writes collect in an outbox (`take_writes`), and `Keystone::commit` hands them to `Logs` and splices the changed rows into the list. A conversation starts `loading()` and buffers events and sent messages until `restore`.
+- **Order.** Log entries carry `seq`. Old logs still read in file order.
+- **Transcript.** `Keystone::transcript_list` builds the list; `transcript::row` decides each row's content. Rows are named `transcript-row-N` and the status entry `transcript-status`, so native `elements` lists only the rows in view.
+- **Evidence.** Native run `.audit/verify-20261015T210533-412732` (local only): real Codex reply, a steer mid-reply, restart with the steer after the interrupted reply, resume, a 1,000-turn old-format log drawing 7 rows, session switching, and a save failure shown then cleared. Benchmark: 115 ms per frame before, under 1 ms after.
 
 ## Working preferences learned
 
