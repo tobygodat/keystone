@@ -3,7 +3,7 @@ mod settings;
 mod text_input;
 mod transcript;
 
-use conversation::Conversation;
+use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
     AnyElement, AnyView, App, Application, AvailableSpace, Bounds, Context, Corner, Entity,
@@ -12,9 +12,13 @@ use gpui::{
     WindowOptions, canvas, div, list, prelude::*, px, size,
 };
 use keystone_agent::log::{Logs, Report};
-use keystone_agent::{ClaudeConnection, CodexConnection, Command, Connection, Wake};
-use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
+use keystone_agent::{
+    ApprovalState, ClaudeConnection, CodexConnection, Command, Connection, ItemKind, Wake,
+};
+use keystone_core::{ApprovalMode, Density, Durability, Preferences, Provider, Store, ThemeMode};
+use keystone_ui::markdown::Document;
 use keystone_ui::{automation, prelude::*};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,6 +70,7 @@ struct Keystone {
     focus: FocusHandle,
     new_menu: bool,
     settings_menu: bool,
+    approval_menu: bool,
     settled_only: bool,
     sidebar: bool,
     fixture: bool,
@@ -87,6 +92,11 @@ struct Keystone {
     wake: Wake,
     /// Scrolls the sample transcript, which is not a list.
     transcript_scroll: ScrollHandle,
+    /// Each reply row's parsed Markdown and the hash of the text it was parsed from, so
+    /// a row is parsed again only when its text changes, such as while it streams.
+    markdown: RefCell<HashMap<(u64, usize), (u64, Arc<Document>)>>,
+    /// The sample transcript, parsed once.
+    fixture_document: Arc<Document>,
 }
 
 impl Keystone {
@@ -145,6 +155,7 @@ impl Keystone {
             focus: cx.focus_handle(),
             new_menu: false,
             settings_menu: false,
+            approval_menu: false,
             settled_only: false,
             sidebar: true,
             fixture,
@@ -157,6 +168,12 @@ impl Keystone {
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
+            markdown: RefCell::default(),
+            fixture_document: Arc::new(Document::parse(if fixture {
+                include_str!("fixture.md")
+            } else {
+                ""
+            })),
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -165,7 +182,7 @@ impl Keystone {
 
     fn apply_theme(&self, window: &Window, cx: &mut App) {
         keystone_ui::set_theme(
-            settings::theme_for(self.store.workspace().preferences(), window),
+            settings::theme_for(self.store.workspace().preferences(), window, cx),
             cx,
         );
     }
@@ -268,82 +285,34 @@ impl Keystone {
         self.refresh(cx);
     }
 
-    fn transcript(&self, cx: &App) -> gpui::Div {
-        let mut table = v_flex().surface(Elevation::Raised, cx).overflow_hidden();
-        for (index, cells) in [
-            ["Check", "Command", "When"],
-            [
-                "Core behavior",
-                "bash scripts/check.sh core",
-                "After persistence changes",
-            ],
-            [
-                "GPUI interactions",
-                "bash scripts/check.sh ui",
-                "After UI behavior changes",
-            ],
-            [
-                "Native build",
-                "bash scripts/check.sh build",
-                "Before desktop verification",
-            ],
-            [
-                "Native capture",
-                "python scripts/native-smoke.py",
-                "Check the real window",
-            ],
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            table = table.child(
-                h_flex()
-                    .py_2()
-                    .px_3()
-                    .when(index > 0, |d| d.hairline_t(cx))
-                    .children(cells.into_iter().enumerate().map(|(i, cell)| {
-                        let label = if index == 0 {
-                            Label::new(cell).size(TextSize::Ui).color(Color::Muted)
-                        } else if i == 1 {
-                            Label::new(cell).size(TextSize::Sm).mono()
-                        } else {
-                            Label::new(cell).size(TextSize::Ui)
-                        };
-                        div().flex_1().child(label)
-                    })),
-            );
-        }
-        let code = v_flex()
-            .surface(Elevation::Raised, cx)
-            .overflow_hidden()
+    fn transcript(&self) -> gpui::Div {
+        v_flex()
+            .gap_5()
+            .text_size(TextSize::Body.px())
+            .line_height(px(22.))
             .child(
-                h_flex()
-                    .px_3()
-                    .py_2()
-                    .gap_2()
-                    .hairline_b(cx)
-                    .child(Icon::new(IconName::File).size(px(14.)))
-                    .child(Label::new("bash").size(TextSize::Ui).color(Color::Muted)),
+                Label::new("Interface preview · sample transcript")
+                    .size(TextSize::Ui)
+                    .color(Color::Muted),
             )
-            .child(
-                div().p_4().child(
-                    Label::new("cargo run -p keystone-desktop --locked")
-                        .size(TextSize::Ui)
-                        .color(Color::Custom(cx.theme().colors.code_text))
-                        .mono(),
-                ),
-            );
-        v_flex().gap_5().text_size(TextSize::Body.px()).line_height(px(24.))
-            .child(Label::new("Interface preview · sample transcript").size(TextSize::Ui).color(Color::Muted))
-            .child(Label::new("A local workspace for Claude Code and Codex.").size(TextSize::Body).weight(FontWeight::SEMIBOLD))
-            .child("This sample shows the conversation layout. The current preview saves sessions and drafts locally. Agent execution is not connected yet.")
-            .child("The testing loop is ready.")
-            .child(table)
-            .child("Use behavior-focused integration tests for rapid iteration, plus a small native E2E suite. Keep live provider tests separate from deterministic UI checks.")
-            .child("The workspace stays focused on conversations. Session selection, draft editing, search, and settle controls are available in this preview.")
-            .child("Run the preview with the command below.")
-            .child(code)
-            .child("This is a visual fixture, not an agent response. No model request is made.")
+            .child(Markdown::new("fixture", self.fixture_document.clone()))
+    }
+
+    /// The parsed Markdown of reply row `index`, reused while its text is unchanged.
+    fn parsed(&self, session: u64, index: usize, text: &str) -> Arc<Document> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let hash = hasher.finish();
+        let mut cache = self.markdown.borrow_mut();
+        match cache.get(&(session, index)) {
+            Some((cached, document)) if *cached == hash => document.clone(),
+            _ => {
+                let document = Arc::new(Document::parse(text));
+                cache.insert((session, index), (hash, document.clone()));
+                document
+            }
+        }
     }
 
     fn select(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -560,6 +529,7 @@ impl Keystone {
             .and_then(|id| self.conversations.get(&id));
         let running = conversation.is_some_and(|c| c.running);
         let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
+        let mode = self.selected_session().map(|s| s.approval_mode());
         let status = match current {
             None => "Choose a provider to start",
             Some(_) if waiting => "Waiting for your approval",
@@ -637,6 +607,9 @@ impl Keystone {
                                     .child(Label::new(provider.to_string()).size(TextSize::Sm)),
                             )
                         })
+                        .when_some(mode, |d, mode| {
+                            d.child(self.approval_menu(mode, running, cx))
+                        })
                         .child(Label::new(status).size(TextSize::Sm).color(Color::Muted))
                         .child(div().flex_1())
                         .when(has_session && running, |d| {
@@ -695,6 +668,99 @@ impl Keystone {
                         }),
                 ),
         )
+    }
+
+    fn selected_session(&self) -> Option<&keystone_core::Session> {
+        let workspace = self.store.workspace();
+        let id = workspace.selected()?;
+        workspace.sessions().iter().find(|s| s.id() == id)
+    }
+
+    /// The session's approval mode, as a menu of every mode with what it allows.
+    fn approval_menu(
+        &self,
+        mode: ApprovalMode,
+        running: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tooltip = if running {
+            "Approval mode · a change applies from the next turn"
+        } else {
+            "Approval mode · applies from the next turn"
+        };
+        PopoverMenu::new(
+            "approval-menu",
+            Button::new("approval-mode", mode.label())
+                .size(ButtonSize::Compact)
+                .icon(IconName::Shield)
+                .selected(self.approval_menu)
+                .when(mode == ApprovalMode::FullAccess, |b| {
+                    b.color(Color::Warning)
+                })
+                .debug_selector(|| "approval-mode".into())
+                .tooltip(Tooltip::text(tooltip)),
+        )
+        .anchor(Corner::BottomLeft)
+        .open(self.approval_menu)
+        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+            this.approval_menu = *open;
+            cx.notify();
+        }))
+        .child(MenuHeader::new("Approvals"))
+        .children(ApprovalMode::ALL.map(|choice| {
+            MenuItem::new(("approval", choice as usize), choice.label())
+                .detail(choice.description())
+                .checked(choice == mode)
+                .debug_selector(|| format!("approval-{}", choice.slug()))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_approval_mode(choice, window, cx)
+                }))
+        }))
+    }
+
+    /// Saves the selected session's mode, then hands it to its provider at once, so a
+    /// message already waiting to start a turn, or a steer that becomes the next turn,
+    /// runs under it. The save comes first: it also records that the provider may hold
+    /// an override, and nothing reaches the provider unless that is saved.
+    fn set_approval_mode(
+        &mut self,
+        mode: ApprovalMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.approval_menu = false;
+        if let Some(id) = self.store.workspace().selected() {
+            match self.store.set_approval_mode(id, mode) {
+                Ok(applied) => {
+                    self.error = durability_warning(applied.durability);
+                    if let Some((provider, approval)) = self.approval(id)
+                        && let Some(connection) = self.started(provider)
+                    {
+                        connection.set_approval(id, approval);
+                    }
+                }
+                Err(error) => self.error = Some(format!("Approval mode not saved. {error}")),
+            }
+        }
+        self.composer.focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    /// The session's provider and its saved approval state.
+    fn approval(&self, session: u64) -> Option<(Provider, ApprovalState)> {
+        let session = self
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| s.id() == session)?;
+        Some((
+            session.provider(),
+            ApprovalState {
+                mode: session.approval_mode(),
+                overridden: session.approval_overridden(),
+            },
+        ))
     }
 
     /// The session's conversation. The first call starts loading its saved history.
@@ -972,11 +1038,29 @@ impl Keystone {
             .iter()
             .find(|s| s.id() == id)
             .and_then(|s| s.provider_thread().map(str::to_owned));
+        // A mode other than the default can leave an override with the provider, so that
+        // is saved before the message can carry one. Sessions saved by an earlier build
+        // may have a mode without the record.
+        let mode = session.approval_mode();
+        if mode != ApprovalMode::Provider
+            && !session.approval_overridden()
+            && let Err(error) = self.store.set_approval_overridden(id)
+        {
+            self.conversation(id).error = Some(format!(
+                "Not sent: the approval mode could not be saved first. {error}"
+            ));
+            self.commit(id);
+            cx.notify();
+            return;
+        }
+        let Some((provider, approval)) = self.approval(id) else {
+            return;
+        };
         // A failure to start the provider arrives later as an error in this
         // conversation. A refusal comes now, and the text stays in the composer.
         let sent =
-            self.connection(session.provider())
-                .send(id, &cwd, resume.as_deref(), text.clone());
+            self.connection(provider)
+                .send(id, &cwd, resume.as_deref(), approval, text.clone());
         if let Err(reason) = sent {
             // Shown in the session's transcript, where a draft save cannot clear it.
             self.conversation(id).error = Some(reason.to_owned());
@@ -1053,7 +1137,15 @@ impl Keystone {
             return div().into_any_element();
         };
         let content = match conversation.rows.get(index) {
-            Some(row) if conversation::visible(row) => Some(transcript::row(row, cx)),
+            Some(row) if conversation::visible(row) => {
+                let reply = match row {
+                    Row::Item(item) if item.kind == ItemKind::AgentMessage => {
+                        Some(self.parsed(session, index, &item.text))
+                    }
+                    _ => None,
+                };
+                Some(transcript::row(row, index, reply, cx))
+            }
             Some(_) => None,
             None => self.transcript_status(session, conversation, cx),
         };
@@ -1423,7 +1515,7 @@ impl Render for Keystone {
                                 .max_w(px(CONTENT_WIDTH))
                                 .px_3()
                                 .py_6()
-                                .child(self.transcript(cx)),
+                                .child(self.transcript()),
                         ),
                 })
                 .when_some(self.error_line(), |d, error| {
@@ -1474,9 +1566,12 @@ impl Render for Keystone {
             })
             // Capture runs before the focused input, so Escape closes an open menu first.
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && (this.new_menu || this.settings_menu) {
+                if event.keystroke.key == "escape"
+                    && (this.new_menu || this.settings_menu || this.approval_menu)
+                {
                     this.new_menu = false;
                     this.settings_menu = false;
+                    this.approval_menu = false;
                     this.refresh(cx);
                     cx.stop_propagation();
                 }
@@ -2419,6 +2514,327 @@ mod tests {
         }
     }
 
+    fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} not rendered"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// Chooses an approval mode the way a user does: the shield button, then the mode.
+    fn choose_mode(cx: &mut gpui::VisualTestContext, mode: ApprovalMode) {
+        click(cx, "approval-mode");
+        click(cx, format!("approval-{}", mode.slug()).leak());
+    }
+
+    fn send_text(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, text: &str) {
+        view.update(cx, |view, cx| {
+            view.composer
+                .update(cx, |input, cx| input.set_value(text.into(), cx))
+        });
+        cx.simulate_keystrokes("ctrl-enter");
+    }
+
+    /// The text of the last completed reply that contains `text`, once the turn ended.
+    fn reply_with(view: &Keystone, text: &str) -> Option<String> {
+        let c = view.conversations.get(&1)?;
+        if c.running {
+            return None;
+        }
+        c.rows.iter().rev().find_map(|row| match row {
+            Row::Item(item)
+                if item.kind == ItemKind::AgentMessage
+                    && item.status == ItemStatus::Completed
+                    && item.text.contains(text) =>
+            {
+                Some(item.text.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// Waits for a completed reply containing `text` and returns the setting the scripted
+    /// provider reports at its end: Codex's policy and sandbox, or Claude's mode.
+    fn setting_of_reply(
+        view: &Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+        text: &'static str,
+    ) -> String {
+        wait_until(cx, view, move |view| reply_with(view, text).is_some());
+        let reply = view.read_with(cx, |view, _| reply_with(view, text).unwrap());
+        reply.rsplit('`').nth(1).unwrap().to_owned()
+    }
+
+    /// A wrapper that runs a scripted provider with extra environment, so tests sharing
+    /// this process see no change.
+    fn wrapper(dir: &Path, name: &str, env: &str) -> PathBuf {
+        let script = dir.join(format!("{name}-wrapper"));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\n{env} exec '{}' \"$@\"\n", fake(name).display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        script
+    }
+
+    fn open_window<'a>(
+        path: &Path,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (Entity<Keystone>, &'a mut gpui::VisualTestContext) {
+        let store = Store::open(path).unwrap();
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx))
+    }
+
+    /// 2b in review: the record that the provider may hold an override is saved before
+    /// the override can be sent. Choosing a mode saves it with the mode. A session saved
+    /// with a mode but no record is not sent while the record cannot be saved.
+    #[gpui::test]
+    fn an_override_is_recorded_before_it_can_reach_the_provider(cx: &mut gpui::TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let codex = wrapper(
+            dir.path(),
+            "keystone-fake-codex",
+            "KEYSTONE_FAKE_CODEX_DELAY_MS=2",
+        );
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":3,"workspace":{"sessions":[
+                {"id":1,"title":"Old","provider":"Codex","settled":false,"draft":"","approval_mode":"FullAccess"},
+                {"id":2,"title":"New","provider":"Codex","settled":false,"draft":""}],"selected":2}}"#,
+        )
+        .unwrap();
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, _| {
+            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        });
+        let saved = |id: u64| {
+            Store::open(&path)
+                .unwrap()
+                .workspace()
+                .sessions()
+                .iter()
+                .find(|s| s.id() == id)
+                .unwrap()
+                .clone()
+        };
+        choose_mode(cx, ApprovalMode::Auto);
+        assert!(
+            saved(2).approval_overridden(),
+            "saved with the mode, before any turn"
+        );
+
+        view.update(cx, |view, cx| view.select(1, cx));
+        cx.run_until_parked();
+        let readonly = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(dir.path(), readonly).unwrap();
+        send_text(&view, cx, "hello");
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let error = view.conversations[&1].error.clone().unwrap();
+            assert!(error.starts_with("Not sent"), "{error}");
+            assert_eq!(view.composer.read(cx).value(), "hello");
+            assert!(
+                !view.codex.as_ref().unwrap().is_open(1),
+                "nothing reached Codex"
+            );
+        });
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        cx.simulate_keystrokes("ctrl-enter");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: hello"),
+            "never / dangerFullAccess"
+        );
+        assert!(saved(1).approval_overridden());
+    }
+
+    /// 2c in review: a mode chosen from the menu reaches work already handed to Codex.
+    /// A steer sent during a Full access turn reaches Codex as the turn ends; Codex
+    /// rejects it and the driver sends it as the next turn, which must use Read only.
+    #[gpui::test]
+    fn a_mode_chosen_from_the_menu_reaches_a_steer_that_becomes_the_next_turn(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let codex = wrapper(
+            dir.path(),
+            "keystone-fake-codex",
+            "KEYSTONE_FAKE_CODEX_DELAY_MS=20",
+        );
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, _| {
+            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        });
+        click(cx, "welcome-codex");
+        choose_mode(cx, ApprovalMode::FullAccess);
+        send_text(&view, cx, "end on steer");
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].rows.iter().any(|row| {
+                matches!(row, Row::Item(item)
+                    if item.kind == ItemKind::AgentMessage && !item.text.is_empty())
+            })
+        });
+        send_text(&view, cx, "late");
+        // Codex holds the steer for 300 ms; choose while it waits there.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        choose_mode(cx, ApprovalMode::ReadOnly);
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: late"),
+            "on-request / readOnly"
+        );
+    }
+
+    /// 2a in review: Codex exits after the user chose Read only on a thread that ran with
+    /// Full access. The next message starts a new app-server, which must still get Read
+    /// only; the resumed thread would otherwise keep Full access. After Keystone
+    /// restarts, Provider settings restore the user's own settings.
+    #[gpui::test]
+    fn a_mode_survives_a_codex_restart_and_provider_settings_restore_after_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let codex = wrapper(
+            dir.path(),
+            "keystone-fake-codex",
+            &format!(
+                "KEYSTONE_FAKE_CODEX_DELAY_MS=2 KEYSTONE_FAKE_CODEX_STATE='{}'",
+                dir.path().join("codex-state.json").display()
+            ),
+        );
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, _| {
+            view.codex = Some(CodexConnection::new(
+                Some(codex.clone()),
+                "test",
+                view.wake.clone(),
+            ))
+        });
+        click(cx, "welcome-codex");
+        choose_mode(cx, ApprovalMode::FullAccess);
+        send_text(&view, cx, "first");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: first"),
+            "never / dangerFullAccess"
+        );
+
+        choose_mode(cx, ApprovalMode::ReadOnly);
+        let pid = view.read_with(cx, |view, _| view.codex.as_ref().unwrap().pid().unwrap());
+        std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status()
+            .unwrap();
+        wait_until(cx, &view, |view| {
+            view.codex.as_ref().unwrap().pid().is_none()
+        });
+        send_text(&view, cx, "second");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: second"),
+            "on-request / readOnly"
+        );
+
+        // Keystone restarts. The thread still holds Read only, so Provider settings must
+        // send the user's own.
+        view.update(cx, |view, cx| view.flush_logs(cx));
+        let store = Store::open(&path).unwrap();
+        let (restored, cx) =
+            cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        restored.update(cx, |view, _| {
+            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        });
+        wait_until(cx, &restored, |view| {
+            view.conversations.get(&1).is_some_and(|c| !c.is_loading())
+        });
+        choose_mode(cx, ApprovalMode::Provider);
+        send_text(&restored, cx, "third");
+        assert_eq!(
+            setting_of_reply(&restored, cx, "You wrote: third"),
+            "on-request / workspaceWrite"
+        );
+    }
+
+    /// Claude sessions apply each mode from the menu. Full access and a return to
+    /// Provider settings need a new `claude` process, which resumes the conversation. A
+    /// change during a turn applies from the next turn.
+    #[gpui::test]
+    fn claude_sessions_apply_approval_modes_from_the_menu(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let claude = wrapper(
+            dir.path(),
+            "keystone-fake-claude",
+            "KEYSTONE_FAKE_CLAUDE_DELAY_MS=5",
+        );
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, _| {
+            view.claude = Some(ClaudeConnection::new(Some(claude), view.wake.clone()))
+        });
+        let pid = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| view.claude.as_ref().unwrap().pid(1))
+        };
+        click(cx, "welcome-claude");
+        choose_mode(cx, ApprovalMode::Auto);
+        send_text(&view, cx, "hello");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: hello"),
+            "acceptEdits"
+        );
+        let first = pid(&view, cx);
+
+        // A change while a turn runs waits for the next turn.
+        send_text(&view, cx, "long");
+        wait_until(cx, &view, |view| view.conversations[&1].running);
+        choose_mode(cx, ApprovalMode::ReadOnly);
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: long"),
+            "acceptEdits"
+        );
+        send_text(&view, cx, "next");
+        assert_eq!(setting_of_reply(&view, cx, "You wrote: next"), "plan");
+        assert_eq!(pid(&view, cx), first, "changed in place");
+
+        // Back to the user's own settings, in a process launched without a mode.
+        choose_mode(cx, ApprovalMode::Provider);
+        send_text(&view, cx, "back");
+        assert_eq!(setting_of_reply(&view, cx, "You wrote: back"), "default");
+        let own = pid(&view, cx);
+        assert_ne!(own, first);
+
+        // Full access runs the command without asking, in a new process.
+        choose_mode(cx, ApprovalMode::FullAccess);
+        send_text(&view, cx, "please run it");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: please run it"),
+            "bypassPermissions"
+        );
+        view.read_with(cx, |view, _| {
+            assert!(view.conversations[&1].rows.iter().any(|row| matches!(row,
+                Row::Item(item) if matches!(item.kind, ItemKind::Command { exit_code: Some(0), .. }))));
+            assert!(!view.conversations[&1].rows.iter().any(|row| matches!(row, Row::Decision { .. })));
+        });
+        let full = pid(&view, cx);
+        assert_ne!(full, own);
+
+        // Leaving Full access needs a new process too.
+        choose_mode(cx, ApprovalMode::Ask);
+        send_text(&view, cx, "last");
+        assert_eq!(setting_of_reply(&view, cx, "You wrote: last"), "default");
+        assert_ne!(pid(&view, cx), full);
+        let thread = Store::open(&path).unwrap().workspace().sessions()[0]
+            .provider_thread()
+            .map(str::to_owned);
+        assert!(thread.is_some_and(|t| t.starts_with("fake-claude-session-")));
+    }
+
     /// A scripted provider built by `keystone-agent`. Test binaries live in
     /// target/<profile>/deps; the scripts are one level up. `scripts/check.sh ui` builds
     /// them first.
@@ -2469,7 +2885,30 @@ mod tests {
             assert_eq!(view.composer.read(cx).value(), "");
             let rows = &view.conversations[&1].rows;
             assert!(matches!(&rows[0], Row::Item(item) if item.kind == ItemKind::UserMessage && item.text == "hello"));
-            assert!(rows.iter().any(|row| matches!(row, Row::Item(item) if item.text.contains("You wrote: hello"))));
+            // No mode chosen: Keystone sent no override, so Codex used its own settings.
+            assert!(rows.iter().any(|row| matches!(row, Row::Item(item)
+                if item.text.contains("You wrote: hello") && item.text.contains("`on-request / workspaceWrite`"))));
+        });
+        // The reply renders as Markdown, with a copy action once it is complete.
+        let reply = view.read_with(cx, |view, _| {
+            view.conversations[&1]
+                .rows
+                .iter()
+                .position(
+                    |row| matches!(row, Row::Item(item) if item.kind == ItemKind::AgentMessage),
+                )
+                .unwrap()
+        });
+        view.read_with(cx, |view, _| {
+            let cache = view.markdown.borrow();
+            let (_, document) = &cache[&(1, reply)];
+            assert!(!document.is_empty());
+        });
+        click(cx, format!("copy-reply-{reply}").leak());
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert!(copied.unwrap().contains("**Approvals:**"));
+        view.update_in(cx, |view, window, cx| {
+            view.composer.focus_handle(cx).focus(window)
         });
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].provider_thread(),
