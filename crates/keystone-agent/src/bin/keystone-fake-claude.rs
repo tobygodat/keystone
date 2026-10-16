@@ -9,6 +9,11 @@
 //! `KEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE=1` acts like a Claude older than
 //! `msg_lifecycle_v1`: no `command_lifecycle` frames and no such capability.
 //! `--resume missing` fails like a conversation Claude no longer has.
+//! In that mode only, `KEYSTONE_FAKE_CLAUDE_RELEASE_FILE` naming a path holds each
+//! reply after its first streamed word until that file exists, so a test can act
+//! mid-reply without a timing margin. A hold longer than [`RELEASE_LIMIT`] ends the
+//! turn as an interruption. With lifecycle frames the setting is ignored: the hold
+//! does not watch for steers, which only a lifecycle-capable Claude receives.
 //!
 //! Permission modes work like Claude Code 2.1.300's: `--permission-mode` at launch,
 //! else `KEYSTONE_FAKE_CLAUDE_USER_MODE` (the user's own setting, `default` when unset),
@@ -41,9 +46,12 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Out = Arc<Mutex<io::Stdout>>;
+
+/// The longest a reply waits for its release file.
+const RELEASE_LIMIT: Duration = Duration::from_secs(10);
 
 fn emit(out: &Out, message: Value) {
     let mut out = out.lock().unwrap();
@@ -85,6 +93,9 @@ struct Shared {
     wake: Condvar,
     /// Whether to send `command_lifecycle` frames.
     lifecycle: bool,
+    /// Where a reply pauses after its first word until this file exists. Only set
+    /// without lifecycle frames.
+    release_file: Option<PathBuf>,
 }
 
 fn main() {
@@ -170,6 +181,11 @@ fn main() {
         mode: Mutex::new(String::new()),
         wake: Condvar::new(),
         lifecycle: frames,
+        release_file: if frames {
+            None
+        } else {
+            std::env::var_os("KEYSTONE_FAKE_CLAUDE_RELEASE_FILE").map(PathBuf::from)
+        },
     });
     set_mode(&shared, &mode);
     let worker = {
@@ -532,6 +548,14 @@ fn answer(
             out,
             json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": piece}}),
         );
+        if i == 0 && !released(shared) {
+            emit(
+                out,
+                json!({"type": "assistant", "message": {"id": message, "content":
+                       [{"type": "text", "text": sent}]}, "parent_tool_use_id": null}),
+            );
+            return stopped(out);
+        }
         thread::sleep(delay);
     }
     emit(
@@ -545,6 +569,30 @@ fn answer(
         json!({"type": "result", "subtype": "success", "is_error": false, "result": sent}),
     );
     "completed"
+}
+
+/// Waits for the release file, if one is set. False when the wait ran out, the
+/// turn was stopped, or stdin closed, so the reply must not finish as if released.
+fn released(shared: &Shared) -> bool {
+    let Some(file) = &shared.release_file else {
+        return true;
+    };
+    let deadline = Instant::now() + RELEASE_LIMIT;
+    loop {
+        if file.exists() {
+            return true;
+        }
+        let state = shared.state.lock().unwrap();
+        if state.abort == Some(Abort::Stop) || state.closed {
+            return false;
+        }
+        drop(state);
+        if Instant::now() >= deadline {
+            eprintln!("release file {} never appeared", file.display());
+            return false;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 fn stopped(out: &Out) -> &'static str {

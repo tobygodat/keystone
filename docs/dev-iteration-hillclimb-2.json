@@ -1,0 +1,232 @@
+{
+  "measured_at": "2026-10-16",
+  "claim": "Warm complete core-fast wall time, including formatter, color lint, all 108 tests, Cargo doctest invocation and timing wrapper; not compilation speed.",
+  "target": {
+    "additional_reduction_percent": 30,
+    "minimum_hypotheses": 2
+  },
+  "environment": {
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "nextest": "0.9.148",
+    "logical_cpus": 24,
+    "build_jobs": 4,
+    "cache_state": "warm, first run per variant excluded",
+    "retries": 0
+  },
+  "method": "Five alternating fixture pairs, followed by five cycles of 8/12/16 workers on the same corrected source. Separate target directories for source variants. Worker variants copy check.sh and replace only its worker cap (and root path). No concurrent builds or test suites during measured samples.",
+  "experiments": [
+    {
+      "name": "Short replies and explicit pending-mode window",
+      "groups": {
+        "before": {
+          "head": "1c58323c56db7025905d767e8391048866501c14",
+          "dirty": false,
+          "threads": 8,
+          "wall_seconds": [
+            5.777479696000228,
+            5.768942074995721,
+            5.770377954992,
+            5.771959309000522,
+            5.773023710004054
+          ],
+          "median_s": 5.771959309000522,
+          "range_s": [
+            5.768942074995721,
+            5.777479696000228
+          ],
+          "passed_per_run": [
+            108,
+            108,
+            108,
+            108,
+            108
+          ],
+          "failure_count": 0,
+          "exit_codes": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "load1_range": [
+            0.41162109375,
+            0.59375
+          ],
+          "script_sha256": "ad0b72a5cfe365e63c424bb04f22bffdc9c5317608003932ca5dbafd23660ec7"
+        },
+        "candidate": {
+          "head": "6c24646d0180a48b38143c42ab732448476e54c2",
+          "dirty": false,
+          "threads": 8,
+          "wall_seconds": [
+            4.201719154007151,
+            4.198379424007726,
+            4.207379675004631,
+            4.196646002004854,
+            4.195724301011069
+          ],
+          "median_s": 4.198379424007726,
+          "range_s": [
+            4.195724301011069,
+            4.207379675004631
+          ],
+          "passed_per_run": [
+            108,
+            108,
+            108,
+            108,
+            108
+          ],
+          "failure_count": 0,
+          "exit_codes": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "load1_range": [
+            0.4248046875,
+            0.59375
+          ],
+          "script_sha256": "7ffc3f6116fd92f73b883c97fb50b62f169cc4d388bc17c09a636b344139efbb"
+        }
+      }
+    },
+    {
+      "name": "Worker cap after fixture changes",
+      "groups": {
+        "eight": {
+          "head": "6c24646d0180a48b38143c42ab732448476e54c2",
+          "dirty": false,
+          "threads": 8,
+          "wall_seconds": [
+            4.194439479004359,
+            4.20463085299707,
+            4.196765307002352,
+            4.20459934300743,
+            4.2102750209887745
+          ],
+          "median_s": 4.20459934300743,
+          "range_s": [
+            4.194439479004359,
+            4.2102750209887745
+          ],
+          "passed_per_run": [
+            108,
+            108,
+            108,
+            108,
+            108
+          ],
+          "failure_count": 0,
+          "exit_codes": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "load1_range": [
+            0.55859375,
+            0.74365234375
+          ],
+          "script_sha256": "7ffc3f6116fd92f73b883c97fb50b62f169cc4d388bc17c09a636b344139efbb"
+        },
+        "twelve": {
+          "head": "6c24646d0180a48b38143c42ab732448476e54c2",
+          "dirty": false,
+          "threads": 12,
+          "wall_seconds": [
+            3.5401161429908825,
+            3.542324675989221,
+            3.546870492005837,
+            3.544015874998877,
+            3.5347159580123844
+          ],
+          "median_s": 3.542324675989221,
+          "range_s": [
+            3.5347159580123844,
+            3.546870492005837
+          ],
+          "passed_per_run": [
+            108,
+            108,
+            108,
+            108,
+            108
+          ],
+          "failure_count": 0,
+          "exit_codes": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "load1_range": [
+            0.55859375,
+            0.68603515625
+          ],
+          "script_sha256": "0989e04c6da5c36765a165208012c2b6096a81c0b2eb1f3bee0fbe956cc79772"
+        },
+        "sixteen": {
+          "head": "6c24646d0180a48b38143c42ab732448476e54c2",
+          "dirty": false,
+          "threads": 16,
+          "wall_seconds": [
+            3.266660353008774,
+            3.2600096550013404,
+            3.2646398579963716,
+            3.2587846140086185,
+            3.252859731001081
+          ],
+          "median_s": 3.2600096550013404,
+          "range_s": [
+            3.252859731001081,
+            3.266660353008774
+          ],
+          "passed_per_run": [
+            108,
+            108,
+            108,
+            108,
+            108
+          ],
+          "failure_count": 0,
+          "exit_codes": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "load1_range": [
+            0.513671875,
+            0.74365234375
+          ],
+          "script_sha256": "c14f4096b010e661172cd567e1c1b863332ba187c85d6f91ef50844e2ea1b9b5"
+        }
+      }
+    }
+  ],
+  "result": {
+    "baseline_s": 5.771959309000522,
+    "final_s": 3.2600096550013404,
+    "reduction_percent": 43.519878078179886,
+    "original_core_baseline_s": 12.277643374007312,
+    "overall_reduction_percent": 73.44759449600056
+  },
+  "coverage": "All existing test names and assertions retained. Mode-change test uses Auto to force a pending confirmation before ReadOnly, since Ask already matches the initialized default mode. Restart keeps its original immediate-send ordering; its queued-state coverage remains scheduling-dependent, as before.",
+  "review": "Focused review caught the restart gate skipping the queued-old-driver path. Removed that gate; fresh verifier passed the whole 22-test fake-Claude binary and 10 repeated restart tests, half pinned to one CPU.",
+  "excluded": "An early preflight against still-changing source failed formatting before tests. Discarded; no unsuccessful or in-progress run appears in these samples.",
+  "limits": "Same machine and warm targets. Final versus baseline compares the endpoints of two sequential controlled experiments; each mechanism has its own within-experiment control. The genuine two-second shutdown deadlines remain unchanged.",
+  "verification": {
+    "inventory_identical": 108,
+    "ignored": 0,
+    "integrated_core_fast_passed": 108,
+    "integrated_core_passed": 108,
+    "timing_dispatch_tests_passed": 23
+  }
+}

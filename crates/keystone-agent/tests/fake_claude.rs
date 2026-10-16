@@ -415,7 +415,7 @@ fn a_steer_before_claude_reports_anything_is_refused() {
     let (conn, wake) = connect();
     let gate = Gate::new(Some(&[1]));
     conn.hold_starts(gate.hook());
-    conn.send(1, "/tmp", None, NO_MODE, "long".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "hello".into()).unwrap();
     gate.reached(1);
     let started = Instant::now();
     assert_eq!(
@@ -684,22 +684,33 @@ fn approval_modes_reach_claude_and_restart_it_only_when_needed() {
 }
 
 /// A change while a turn runs applies from the next turn, and a message sent before the
-/// change but still waiting runs under the new mode.
+/// change but still waiting runs under the new mode. The turn is held at its approval,
+/// and Claude's slow mode answer keeps the next message waiting.
 #[test]
 fn a_mode_change_during_a_turn_applies_to_the_next_one() {
     use keystone_core::ApprovalMode::*;
+    let dir = project("mode-change", &[("hold-mode-ms", "300")]);
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, mode(Provider), "long".into())
+    conn.send(1, &dir, None, mode(Provider), "run it".into())
         .unwrap();
-    until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
+    let events = until(&conn, &wake, |e| matches!(e, Event::ApprovalRequested(_)));
+    assert!(conn.is_running(1));
     conn.set_approval(1, mode(Ask));
+    assert!(conn.is_running(1), "the change did not end the turn");
+    conn.command(Command::Answer {
+        session: 1,
+        request: approval(&events).request,
+        allow: true,
+    });
     let events = until(&conn, &wake, completed);
+    assert!(reply(&events).unwrap().contains("You wrote: run it"));
     assert_eq!(mode_of(&events), "default");
     conn.set_approval(1, mode(Auto));
-    conn.send(1, "/tmp", None, mode(Ask), "next".into())
-        .unwrap();
+    conn.send(1, &dir, None, mode(Auto), "next".into()).unwrap();
     conn.set_approval(1, mode(ReadOnly));
-    assert_eq!(mode_of(&until(&conn, &wake, completed)), "plan");
+    let events = until(&conn, &wake, completed);
+    assert!(reply(&events).unwrap().contains("You wrote: next"));
+    assert_eq!(mode_of(&events), "plan");
 }
 
 /// While a message waits to start a turn in a new process, a second one cannot steer
@@ -711,13 +722,20 @@ fn a_message_behind_a_restart_is_refused_until_claude_reports() {
     conn.send(1, "/tmp", None, mode(Provider), "hello".into())
         .unwrap();
     until(&conn, &wake, completed);
-    conn.send(1, "/tmp", None, mode(FullAccess), "long".into())
+    conn.send(1, "/tmp", None, mode(FullAccess), "restarted".into())
         .unwrap();
     assert_eq!(
         conn.send(1, "/tmp", None, mode(FullAccess), "steer".into()),
         Err(keystone_agent::claude::STEER_NOT_YET)
     );
-    until(&conn, &wake, completed);
+    let events = until(&conn, &wake, completed);
+    assert!(reply(&events).unwrap().contains("You wrote: restarted"));
+    assert_eq!(mode_of(&events), "bypassPermissions");
+    assert!(
+        !events.iter().any(|e| matches!(e,
+            Event::ItemCompleted(item) if item.text.contains("steer"))),
+        "the refused message was sent: {events:?}"
+    );
 }
 
 /// A directory only one test starts Claude in, with the scripted Claude's settings

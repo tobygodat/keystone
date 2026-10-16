@@ -24,7 +24,7 @@ Run separate opt-in live checks for Claude Code and Codex after adapter changes 
 
 ## Build feedback
 
-Keep Cargo's incremental artifacts between runs. Use `cargo check` for compile feedback and build the executable when validating actual behavior. Pin dependencies with Cargo.lock. Start with `cargo test`; add nextest or compiler caching only after measuring a bottleneck. Do not clean target between ordinary edits.
+Keep Cargo's incremental artifacts between runs. Use `cargo check` for compile feedback and build the executable when validating actual behavior. Pin dependencies with Cargo.lock. Start with `cargo test`; add nextest or compiler caching only after measuring a bottleneck. Do not clean target between ordinary edits. `scripts/check.sh` records each run's wall time. See [development iteration timing](dev-iteration.md) to time other commands and compare runs.
 
 ## Evidence
 

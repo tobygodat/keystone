@@ -24,6 +24,7 @@ The driver was proved against the actual GPUI binary. It runs as the `keystone-v
 
 - Run `bash scripts/check.sh` for formatting, the theme color check, and core behavior tests.
 - Run `bash scripts/check.sh ui` for GPUI simulated-input tests of the app and its components.
+- Run `bash scripts/check.sh core-fast` for the same core checks with the nextest runner. Opt-in; see [docs/dev-iteration.md](docs/dev-iteration.md).
 - Run `bash scripts/check.sh build` to compile the native application and the component gallery.
 - Run `python scripts/perf.py --note "what changed"` to record build and render timings. See [performance](docs/performance.md).
 - Install sccache and mold (`sudo pacman -S --needed sccache mold`) to share dependency builds across worktrees and link faster. Builds still work without them. See [performance](docs/performance.md#decisions).

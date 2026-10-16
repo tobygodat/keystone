@@ -1,0 +1,126 @@
+{
+  "measured_at": "2026-10-16",
+  "claim": "Warm full core check wall time, including formatter, color lint, all 108 tests, Cargo doctest invocation and timing instrumentation; not a compiler/build speedup.",
+  "target": {
+    "reduction_percent": 30,
+    "minimum_hypotheses": 3
+  },
+  "environment": {
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "nextest": "0.9.148",
+    "logical_cpus": 24,
+    "build_jobs": 4,
+    "platform": "Linux-7.2.5-3-omarchy-x86_64-with-glibc2.44",
+    "cache_state": "warm; first invocation per side excluded",
+    "retries": 0
+  },
+  "experiments": [
+    {
+      "name": "Cross-binary scheduling and worker cap before fixture change",
+      "method": "One excluded warmup per side, then five alternating/cyclic samples; isolated targets for source comparisons",
+      "groups": {
+        "cargo": {
+          "head": "a7e62a6d481b85892bfc8e382627b1b3d9490688",
+          "dirty": false,
+          "wall_seconds": [12.317685974994674, 12.296379042993067, 12.268718082996202, 12.270233898001607, 12.274669402992004],
+          "median_s": 12.274669402992004,
+          "range_s": [12.268718082996202, 12.317685974994674],
+          "passed_per_run": [108, 108, 108, 108, 108],
+          "failure_count": 0,
+          "exit_codes": [0, 0, 0, 0, 0],
+          "load1_range": [0.19482421875, 0.53515625]
+        },
+        "nextest4": {
+          "head": "a7e62a6d481b85892bfc8e382627b1b3d9490688",
+          "dirty": false,
+          "wall_seconds": [11.043333624998922, 11.03683140600333, 11.016441611005575, 11.023106701002689, 11.038472478001495],
+          "median_s": 11.03683140600333,
+          "range_s": [11.016441611005575, 11.043333624998922],
+          "passed_per_run": [108, 108, 108, 108, 108],
+          "failure_count": 0,
+          "exit_codes": [0, 0, 0, 0, 0],
+          "load1_range": [0.3037109375, 0.607421875]
+        },
+        "nextest8": {
+          "head": "a7e62a6d481b85892bfc8e382627b1b3d9490688",
+          "dirty": false,
+          "wall_seconds": [6.733599621002213, 6.73068363800121, 6.718074226009776, 6.744005542990635, 6.741569342004368],
+          "median_s": 6.733599621002213,
+          "range_s": [6.718074226009776, 6.744005542990635],
+          "passed_per_run": [108, 108, 108, 108, 108],
+          "failure_count": 0,
+          "exit_codes": [0, 0, 0, 0, 0],
+          "load1_range": [0.330078125, 0.66845703125]
+        }
+      }
+    },
+    {
+      "name": "Remove old-Claude per-word sleeps with a release gate",
+      "method": "One excluded warmup per side, then five alternating/cyclic samples; isolated targets for source comparisons",
+      "groups": {
+        "before": {
+          "head": "a7e62a6d481b85892bfc8e382627b1b3d9490688",
+          "dirty": false,
+          "wall_seconds": [12.256698103999952, 12.274997867003549, 12.25635955001053, 12.30929296000977, 12.282930683999439],
+          "median_s": 12.274997867003549,
+          "range_s": [12.25635955001053, 12.30929296000977],
+          "passed_per_run": [108, 108, 108, 108, 108],
+          "failure_count": 0,
+          "exit_codes": [0, 0, 0, 0, 0],
+          "load1_range": [0.9619140625, 1.4248046875]
+        },
+        "gate": {
+          "head": "c03fe7dc89e9faf88e4993a5b1cae28ce7e7cbd0",
+          "dirty": false,
+          "wall_seconds": [8.019701810000697, 8.039338043992757, 8.017912466006237, 8.081280302998493, 8.025123996994807],
+          "median_s": 8.025123996994807,
+          "range_s": [8.017912466006237, 8.081280302998493],
+          "passed_per_run": [108, 108, 108, 108, 108],
+          "failure_count": 0,
+          "exit_codes": [0, 0, 0, 0, 0],
+          "load1_range": [0.8134765625, 1.4248046875]
+        }
+      }
+    },
+    {
+      "name": "Original core command versus final core-fast plus synchronized fixture",
+      "method": "One excluded warmup per side, then five alternating/cyclic samples; isolated targets for source comparisons",
+      "groups": {
+        "before": {
+          "head": "61d44385c6dc0d9a4e3a2e81516c9482e137337d",
+          "dirty": false,
+          "wall_seconds": [12.277643374007312, 12.281067251009517, 12.272523353996803, 12.308187076996546, 12.270851188004599],
+          "median_s": 12.277643374007312,
+          "range_s": [12.270851188004599, 12.308187076996546],
+          "passed_per_run": [108, 108, 108, 108, 108],
+          "failure_count": 0,
+          "exit_codes": [0, 0, 0, 0, 0],
+          "load1_range": [0.4150390625, 0.70556640625]
+        },
+        "combined": {
+          "head": "22916b4197b0ea04d65e52c51abb4f39b5824ad5",
+          "dirty": false,
+          "wall_seconds": [5.771535306994338, 5.770921060000546, 5.75816675099486, 5.765214843995636, 5.770541067002341],
+          "median_s": 5.770541067002341,
+          "range_s": [5.75816675099486, 5.771535306994338],
+          "passed_per_run": [108, 108, 108, 108, 108],
+          "failure_count": 0,
+          "exit_codes": [0, 0, 0, 0, 0],
+          "load1_range": [0.322265625, 0.6591796875]
+        }
+      }
+    }
+  ],
+  "final_reduction_percent": 52.999603497044,
+  "provenance": {
+    "original_source": "a7e62a6d481b85892bfc8e382627b1b3d9490688",
+    "final_baseline": "61d4438 has the same original fake-provider source and unchanged core command; it also contains unused core-fast dispatch and docs/test-harness additions",
+    "fixture_review_fix": "Final22916b4 limits the gate to no-lifecycle mode; gate-only experiment used c03fe7d before this restriction, in the same no-lifecycle workload",
+    "limits": [
+      "Warm tests only; no edited-source compiler speedup claimed",
+      "Doctest commands executed but current packages contain zero doctests",
+      "Not a test-flakiness guarantee: 5 measured successful runs per side plus targeted stress",
+      "Nextest 4-worker variant improved time but was superseded by8workers; no automatic runner switching"
+    ]
+  }
+}
