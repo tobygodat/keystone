@@ -10,6 +10,7 @@ use keystone_ui::{Appearance, Density, Fonts, Theme, set_theme};
 
 struct Gallery {
     menu_open: bool,
+    dialog: Option<DialogFocus>,
     selected_row: usize,
     markdown: std::sync::Arc<keystone_ui::markdown::Document>,
 }
@@ -217,6 +218,21 @@ impl Render for Gallery {
                     .child(Label::new(format!("{elevation:?}")).size(TextSize::Ui))
                     .into_any_element()
             }));
+        let dialog = h_flex().gap_3().child(
+            Button::new("dialog-open", "Open confirm dialog")
+                .style(ButtonStyle::Subtle)
+                .icon(IconName::Shield)
+                .debug_selector(|| "dialog-open".into())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.dialog = Some(DialogFocus::new(window, cx));
+                    cx.notify();
+                })),
+        );
+        let close = cx.listener(|this: &mut Self, _: &(), _, cx| {
+            this.dialog = None;
+            cx.notify();
+        });
+        let close = std::rc::Rc::new(close);
         div()
             .id("gallery")
             .size_full()
@@ -260,6 +276,7 @@ impl Render for Gallery {
                             })),
                     )
                     .child(section("BUTTONS", buttons))
+                    .child(section("CONFIRM DIALOG", dialog))
                     .child(section("ICON BUTTONS", icon_buttons))
                     .child(section(
                         "POPOVER MENU",
@@ -278,6 +295,20 @@ impl Render for Gallery {
                     .child(section("ICONS", icons))
                     .child(section("SURFACES", surfaces)),
             )
+            .when_some(self.dialog.as_ref(), |d, focus| {
+                let (cancel, confirm) = (close.clone(), close);
+                d.child(
+                    ConfirmDialog::new(
+                        "gallery-dialog",
+                        focus,
+                        "Turn on Full access?",
+                        "Codex will run commands and edit files without asking, until you choose another approval mode.",
+                    )
+                    .tone(Color::Warning)
+                    .on_cancel(move |window, cx| cancel(&(), window, cx))
+                    .on_confirm(move |window, cx| confirm(&(), window, cx)),
+                )
+            })
     }
 }
 
@@ -295,6 +326,7 @@ fn main() {
                 |_, cx| {
                     cx.new(|_| Gallery {
                         menu_open: true,
+                        dialog: None,
                         selected_row: 0,
                         markdown: std::sync::Arc::new(keystone_ui::markdown::Document::parse(
                             MARKDOWN,

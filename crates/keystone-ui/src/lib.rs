@@ -5,6 +5,7 @@
 pub mod automation;
 mod button;
 mod color;
+mod dialog;
 mod icon;
 mod kbd;
 mod label;
@@ -18,6 +19,7 @@ mod tooltip;
 
 pub use button::{Button, ButtonSize, ButtonStyle, IconButton};
 pub use color::Color;
+pub use dialog::{ConfirmDialog, DialogFocus};
 pub use icon::{Icon, IconName, Icons};
 pub use kbd::Kbd;
 pub use label::Label;
@@ -43,8 +45,8 @@ pub fn set_theme(theme: Theme, cx: &mut gpui::App) {
 pub mod prelude {
     pub use crate::automation::AutomationExt;
     pub use crate::{
-        ActiveTheme, Button, ButtonSize, ButtonStyle, Color, Elevation, Icon, IconButton, IconName,
-        Kbd, Label, ListItem, Markdown, MenuHeader, MenuItem, MenuSeparator, PopoverMenu,
-        StyledExt, TextSize, Tooltip, h_flex, radius, spacing, v_flex,
+        ActiveTheme, Button, ButtonSize, ButtonStyle, Color, ConfirmDialog, DialogFocus, Elevation,
+        Icon, IconButton, IconName, Kbd, Label, ListItem, Markdown, MenuHeader, MenuItem,
+        MenuSeparator, PopoverMenu, StyledExt, TextSize, Tooltip, h_flex, radius, spacing, v_flex,
     };
 }

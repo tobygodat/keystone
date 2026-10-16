@@ -77,6 +77,8 @@ pub struct Colors {
     pub border_strong: Hsla,
     pub border_focused: Hsla,
     pub shadow: Hsla,
+    /// The wash over the window behind a modal dialog.
+    pub scrim: Hsla,
 
     pub text: Hsla,
     pub text_muted: Hsla,
@@ -159,6 +161,7 @@ impl Colors {
             border_strong: white(0.14),
             border_focused: rgb(0x467bb0).into(),
             shadow: hsla(0., 0., 0., 0.45),
+            scrim: black(0.5),
 
             text: rgb(0xc9c9c9).into(),
             text_muted: rgb(0x858585).into(),
@@ -196,6 +199,7 @@ impl Colors {
             border_strong: black(0.16),
             border_focused: rgb(0x3a6ea5).into(),
             shadow: black(0.14),
+            scrim: black(0.24),
 
             text: rgb(0x262626).into(),
             text_muted: rgb(0x6b6b6b).into(),

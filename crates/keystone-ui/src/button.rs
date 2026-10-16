@@ -5,8 +5,8 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{TextSize, radius};
 use crate::tooltip::Tooltip;
 use gpui::{
-    App, ClickEvent, ElementId, IntoElement, Pixels, RenderOnce, SharedString, Stateful, Styled,
-    Window, div, prelude::*, px,
+    App, ClickEvent, ElementId, FocusHandle, IntoElement, Pixels, RenderOnce, SharedString,
+    Stateful, Styled, Window, div, prelude::*, px,
 };
 
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -50,6 +50,7 @@ struct Common {
     tooltip: Option<Tooltip>,
     on_click: Option<ClickHandler>,
     debug_selector: Option<String>,
+    focus: Option<FocusHandle>,
 }
 
 impl Common {
@@ -63,6 +64,7 @@ impl Common {
             tooltip: None,
             on_click: None,
             debug_selector: None,
+            focus: None,
         }
     }
 
@@ -91,16 +93,24 @@ impl Common {
         if self.disabled {
             return el.opacity(0.4).cursor_not_allowed();
         }
-        el.cursor_pointer()
-            .hover(move |s| s.bg(hover))
-            .active(move |s| s.bg(active))
-            .when_some(self.tooltip, |d, tip| d.tooltip(tip.builder()))
-            .when_some(self.on_click, |d, handler| {
-                d.on_click(move |event, window, cx| {
-                    cx.stop_propagation();
-                    handler(event, window, cx)
-                })
+        // The ring is a border that is always there, so focus never changes the size.
+        let ring = colors.border_focused;
+        el.when_some(self.focus, |d, focus| {
+            d.track_focus(&focus)
+                .border_2()
+                .border_color(ring.opacity(0.))
+                .focus(move |s| s.border_color(ring))
+        })
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .active(move |s| s.bg(active))
+        .when_some(self.tooltip, |d, tip| d.tooltip(tip.builder()))
+        .when_some(self.on_click, |d, handler| {
+            d.on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                handler(event, window, cx)
             })
+        })
     }
 }
 
@@ -136,6 +146,12 @@ macro_rules! common_builders {
             handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         ) -> Self {
             self.common.on_click = Some(Box::new(handler));
+            self
+        }
+
+        /// Makes the button focusable with a visible ring. Enter or Space clicks it while focused.
+        pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
+            self.common.focus = Some(focus.clone());
             self
         }
 
