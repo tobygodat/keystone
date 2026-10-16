@@ -11,7 +11,7 @@ use gpui::{
     Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
     WindowOptions, canvas, div, list, prelude::*, px, size,
 };
-use keystone_agent::codex::Command;
+use keystone_agent::Command;
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{CodexConnection, Wake};
 use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};

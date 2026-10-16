@@ -849,7 +849,8 @@ mod tests {
     /// mid-reply, and Codex never completed that message.
     #[test]
     fn a_real_stopped_codex_reply_survives_reload() {
-        use keystone_agent::codex::{CodexDriver, Command, Outputs};
+        use keystone_agent::codex::CodexDriver;
+        use keystone_agent::{Command, Outputs};
         const THREAD: &str = "01a1418d-549d-7553-bd08-4183fac44aa7";
         let fixture =
             include_str!("../../keystone-agent/tests/fixtures/codex-0.162.1-thread.jsonl");

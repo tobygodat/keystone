@@ -1,6 +1,6 @@
 //! The full stack against the scripted app-server: process host, connection, and driver.
 
-use keystone_agent::codex::Command;
+use keystone_agent::Command;
 use keystone_agent::{CodexConnection, Event, ItemKind, TurnStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
