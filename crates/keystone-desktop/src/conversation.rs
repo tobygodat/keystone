@@ -48,6 +48,8 @@ pub struct Conversation {
     /// While saved history is loading, what happens meanwhile waits here.
     pending: Option<Vec<Pending>>,
     writes: Vec<Write>,
+    /// The lowest row changed since [`Conversation::take_changes`].
+    changed: Option<usize>,
 }
 
 enum Pending {
@@ -78,6 +80,7 @@ impl Conversation {
             Ok(entries) => self.rebuild(entries),
             Err(error) => self.error = Some(format!("Could not read this conversation. {error}")),
         }
+        self.changed = Some(0);
         for pending in pending {
             match pending {
                 Pending::Local(text) => self.push_local(&text),
@@ -200,6 +203,7 @@ impl Conversation {
                     {
                         item.text = cap_output(&item.text);
                     }
+                    self.mark(index);
                 }
             }
             Event::ItemCompleted(item) => {
@@ -226,6 +230,7 @@ impl Conversation {
                     })
                     .collect();
                 for (index, item) in unfinished {
+                    self.mark(index);
                     self.log_item(index, item);
                 }
                 let shown = status != TurnStatus::Completed;
@@ -274,11 +279,18 @@ impl Conversation {
         std::mem::take(&mut self.writes)
     }
 
+    /// The lowest row added or changed since the last call. Every row after it may
+    /// have changed too.
+    pub fn take_changes(&mut self) -> Option<usize> {
+        self.changed.take()
+    }
+
     /// Puts `item` in its existing row, or a new one, and returns the row.
     fn place(&mut self, item: Item) -> usize {
         match self.position_for(&item) {
             Some(index) => {
                 self.rows[index] = Row::Item(item);
+                self.mark(index);
                 index
             }
             None => self.push(Row::Item(item)),
@@ -287,7 +299,12 @@ impl Conversation {
 
     fn push(&mut self, row: Row) -> usize {
         self.rows.push(row);
+        self.mark(self.rows.len() - 1);
         self.rows.len() - 1
+    }
+
+    fn mark(&mut self, index: usize) {
+        self.changed = Some(self.changed.map_or(index, |changed| changed.min(index)));
     }
 
     fn seq(&self, index: usize) -> u64 {
@@ -581,7 +598,29 @@ mod tests {
         log.save(&mut live);
         assert!(!live.is_loading() && live.running);
         assert_eq!(texts(&live), ["Earlier", "Sent while loading"]);
+        assert_eq!(live.take_changes(), Some(0));
         assert_eq!(texts(&log.restore()), ["Earlier", "Sent while loading"]);
+    }
+
+    #[test]
+    fn changes_report_the_lowest_changed_row() {
+        let mut live = Conversation::default();
+        live.push_local("one");
+        live.apply(Event::ItemStarted(message("m", "", ItemStatus::InProgress)));
+        assert_eq!(live.take_changes(), Some(0));
+        assert_eq!(live.take_changes(), None);
+        live.apply(Event::ItemDelta {
+            item_id: "m".into(),
+            text: "streamed".into(),
+        });
+        assert_eq!(live.take_changes(), Some(1));
+        live.apply(Event::ApprovalRequested(Approval {
+            request: RequestId("1".into()),
+            item_id: None,
+            action: "ls".into(),
+            detail: None,
+        }));
+        assert_eq!(live.take_changes(), None, "approvals are not rows");
     }
 
     #[test]

@@ -1,17 +1,19 @@
 mod conversation;
 mod settings;
 mod text_input;
+mod transcript;
 
-use conversation::{Conversation, Row};
+use conversation::Conversation;
 use futures::StreamExt;
 use gpui::{
-    AnyView, App, Application, Bounds, Context, Corner, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, size,
+    AnyElement, AnyView, App, Application, Bounds, Context, Corner, Entity, FocusHandle, Focusable,
+    FontWeight, IntoElement, ListAlignment, ListOffset, ListState, Render, ScrollHandle,
+    StyleRefinement, Subscription, WeakEntity, Window, WindowBounds, WindowOptions, div, list,
+    prelude::*, px, size,
 };
 use keystone_agent::codex::Command;
 use keystone_agent::log::{Logs, Report};
-use keystone_agent::{CodexConnection, ItemKind, ItemStatus, TurnStatus, Wake};
+use keystone_agent::{CodexConnection, Wake};
 use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
 use keystone_ui::{automation, prelude::*};
 use std::collections::HashMap;
@@ -62,9 +64,13 @@ struct Keystone {
     conversations: HashMap<u64, Conversation>,
     /// Each session's log of completed items, read and written off the UI thread.
     logs: Logs,
+    /// The virtualized transcript list for each session shown so far. It holds one
+    /// entry per conversation row plus a status entry after the last row.
+    transcripts: HashMap<u64, ListState>,
     /// The directory agents work in.
     project_dir: PathBuf,
     wake: Wake,
+    /// Scrolls the sample transcript, which is not a list.
     transcript_scroll: ScrollHandle,
 }
 
@@ -130,6 +136,7 @@ impl Keystone {
             codex: None,
             conversations: HashMap::new(),
             logs: Logs::new(sessions_dir, wake.clone()),
+            transcripts: HashMap::new(),
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
@@ -331,7 +338,7 @@ impl Keystone {
             Err(error) => Some(error.to_string()),
         };
         self.sync_draft(cx);
-        self.transcript_scroll.scroll_to_bottom();
+        self.scroll_to_end(id);
         self.refresh(cx);
     }
 
@@ -679,19 +686,40 @@ impl Keystone {
     /// The session's conversation. The first call starts loading its saved history.
     fn conversation(&mut self, session: u64) -> &mut Conversation {
         let logs = &self.logs;
-        let scroll = &self.transcript_scroll;
         self.conversations.entry(session).or_insert_with(|| {
-            // Open a conversation at its latest message.
-            scroll.scroll_to_bottom();
             logs.load(session);
             Conversation::loading()
         })
     }
 
-    /// Queues what the conversation logged.
+    /// Queues what the conversation logged and tells its list which rows changed.
     fn commit(&mut self, session: u64) {
-        if let Some(conversation) = self.conversations.get_mut(&session) {
-            self.logs.append(session, conversation.take_writes());
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        self.logs.append(session, conversation.take_writes());
+        let changed = conversation.take_changes();
+        let count = conversation.rows.len() + 1;
+        if let Some(list) = self.transcripts.get(&session) {
+            let old = list.item_count();
+            // The status entry after the last row changes with almost anything, so it
+            // is always remeasured.
+            let from = changed
+                .unwrap_or(usize::MAX)
+                .min(old.saturating_sub(1))
+                .min(count - 1);
+            list.splice(from..old, count - from);
+        }
+    }
+
+    /// Scrolls the session's transcript to its latest row. It then follows new rows
+    /// until the user scrolls up.
+    fn scroll_to_end(&self, session: u64) {
+        if let Some(list) = self.transcripts.get(&session) {
+            list.scroll_to(ListOffset {
+                item_ix: list.item_count(),
+                offset_in_item: px(0.),
+            });
         }
     }
 
@@ -736,7 +764,6 @@ impl Keystone {
                 }
             }
         }
-        self.transcript_scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -799,7 +826,7 @@ impl Keystone {
         self.composer
             .update(cx, |input, cx| input.set_value(String::new(), cx));
         self.save_draft(cx);
-        self.transcript_scroll.scroll_to_bottom();
+        self.scroll_to_end(id);
         // Clicking Send moves focus off the composer; put it back for the next message.
         self.composer.focus_handle(cx).focus(window);
         cx.notify();
@@ -834,104 +861,74 @@ impl Keystone {
         cx.notify();
     }
 
-    fn conversation_view(&self, session: u64, cx: &mut Context<Self>) -> gpui::Div {
+    /// The session's transcript: a virtualized list, so a long session lays out and
+    /// paints only the rows in view. It sticks to the bottom while new rows arrive,
+    /// unless the user has scrolled up.
+    fn transcript_list(&mut self, session: u64, cx: &mut Context<Self>) -> gpui::List {
+        let count = self.conversations.get(&session).map_or(0, |c| c.rows.len()) + 1;
+        let state = self
+            .transcripts
+            .entry(session)
+            .or_insert_with(|| ListState::new(count, ListAlignment::Bottom, px(600.)))
+            .clone();
+        let app = cx.weak_entity();
+        list(state, move |index, _, cx| {
+            app.update(cx, |this, cx| this.transcript_entry(session, index, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .size_full()
+        .py_6()
+    }
+
+    /// One list entry: a row, or after the last row, the turn's status. Each entry is
+    /// laid out on its own, so it carries the transcript's width and text style.
+    fn transcript_entry(&self, session: u64, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(conversation) = self.conversations.get(&session) else {
-            return v_flex();
+            return div().into_any_element();
         };
+        let content = match conversation.rows.get(index) {
+            Some(row) if conversation::visible(row) => Some(transcript::row(row, cx)),
+            Some(_) => None,
+            None => self.transcript_status(conversation, cx),
+        };
+        let Some(content) = content else {
+            // Nothing to show takes no space, gap included.
+            return div().into_any_element();
+        };
+        let name = match conversation.rows.len() {
+            count if index < count => format!("transcript-row-{index}"),
+            _ => "transcript-status".to_owned(),
+        };
+        h_flex()
+            .automation_id(name)
+            .w_full()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_WIDTH))
+                    .px_3()
+                    .when(index > 0, |d| d.pt_4())
+                    .text_size(TextSize::Body.px())
+                    .line_height(px(22.))
+                    .child(content),
+            )
+            .into_any_element()
+    }
+
+    /// What follows the last row: an approval request or the working indicator, and any
+    /// errors. `None` when there is nothing to say.
+    fn transcript_status(
+        &self,
+        conversation: &Conversation,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let colors = cx.theme().colors;
         let mono = cx.theme().fonts.mono.clone();
-        let mut view = v_flex()
-            .gap_4()
-            .text_size(TextSize::Body.px())
-            .line_height(px(22.));
-        for row in conversation
-            .rows
-            .iter()
-            .filter(|row| conversation::visible(row))
-        {
-            view = view.child(match row {
-                Row::Item(item) => match &item.kind {
-                    ItemKind::UserMessage => v_flex().items_end().child(
-                        div()
-                            .max_w(px(620.))
-                            .px_3()
-                            .py_2()
-                            .rounded(radius::ROW)
-                            .bg(colors.element_selected)
-                            .child(item.text.clone()),
-                    ),
-                    ItemKind::AgentMessage => div().child(item.text.clone()),
-                    ItemKind::Reasoning => div()
-                        .text_size(TextSize::Ui.px())
-                        .text_color(colors.text_muted)
-                        .child(item.text.clone()),
-                    ItemKind::Command { command, exit_code } => {
-                        let status = match (item.status, exit_code) {
-                            (ItemStatus::InProgress, _) => "Running".to_owned(),
-                            (ItemStatus::Declined, _) => "Not run".to_owned(),
-                            (ItemStatus::Failed, None) => "Stopped".to_owned(),
-                            (_, Some(code)) => format!("Exit {code}"),
-                            (_, None) => String::new(),
-                        };
-                        v_flex()
-                            .surface(Elevation::Raised, cx)
-                            .overflow_hidden()
-                            .child(
-                                h_flex()
-                                    .px_3()
-                                    .py_2()
-                                    .gap_2()
-                                    .hairline_b(cx)
-                                    .font_family(mono.clone())
-                                    .text_size(TextSize::Ui.px())
-                                    .child(div().flex_1().min_w_0().child(format!("$ {command}")))
-                                    .child(
-                                        Label::new(status).size(TextSize::Sm).color(Color::Muted),
-                                    ),
-                            )
-                            .when(!item.text.trim_end().is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .px_3()
-                                        .py_2()
-                                        .font_family(mono.clone())
-                                        .text_size(TextSize::Ui.px())
-                                        .text_color(colors.text_muted)
-                                        .child(item.text.trim_end().to_owned()),
-                                )
-                            })
-                    }
-                    ItemKind::FileChange { paths } => div()
-                        .text_size(TextSize::Ui.px())
-                        .text_color(colors.text_muted)
-                        .child(format!("Changed {}", paths.join(", "))),
-                    ItemKind::Tool { name } | ItemKind::Other { name } => div()
-                        .text_size(TextSize::Ui.px())
-                        .text_color(colors.text_muted)
-                        .child(format!("Used {name}")),
-                },
-                Row::TurnEnded { status, error } => {
-                    let (text, color) = match status {
-                        TurnStatus::Interrupted => ("Stopped", Color::Muted),
-                        _ => ("Failed", Color::Danger),
-                    };
-                    let text = match error {
-                        Some(error) => format!("{text}: {error}"),
-                        None => text.to_owned(),
-                    };
-                    div().child(Label::new(text).size(TextSize::Ui).color(color))
-                }
-                Row::Decision { action, allowed } => div().child(
-                    Label::new(format!(
-                        "{} {action}",
-                        if *allowed { "Allowed:" } else { "Denied:" }
-                    ))
-                    .size(TextSize::Ui)
-                    .color(Color::Muted),
-                ),
-            });
-        }
+        let mut view = v_flex().gap_4();
+        let mut empty = true;
         if let Some(approval) = conversation.approvals.first() {
+            empty = false;
             view = view.child(
                 v_flex()
                     .id("approval")
@@ -981,6 +978,7 @@ impl Keystone {
                     ),
             );
         } else if conversation.running {
+            empty = false;
             view = view.child(
                 div().id("turn-status").automation_id("turn-status").child(
                     Label::new("Working…")
@@ -990,13 +988,14 @@ impl Keystone {
             );
         }
         for error in conversation.error.iter().chain(&conversation.save_error) {
+            empty = false;
             view = view.child(
                 Label::new(error.clone())
                     .size(TextSize::Ui)
                     .color(Color::Danger),
             );
         }
-        view
+        (!empty).then(|| view.into_any_element())
     }
 
     fn error_line(&self) -> Option<impl IntoElement> {
@@ -1227,8 +1226,15 @@ impl Render for Keystone {
                 .min_w_0()
                 .h_full()
                 .items_center()
-                .child(
-                    v_flex()
+                .child(match selected.filter(|_| !self.fixture) {
+                    Some(id) => div()
+                        .id("conversation")
+                        .automation_id("conversation")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(self.transcript_list(id, cx)),
+                    None => v_flex()
                         .id("conversation")
                         .automation_id("conversation")
                         .flex_1()
@@ -1243,12 +1249,9 @@ impl Render for Keystone {
                                 .max_w(px(CONTENT_WIDTH))
                                 .px_3()
                                 .py_6()
-                                .when(self.fixture, |d| d.child(self.transcript(cx)))
-                                .when_some(selected.filter(|_| !self.fixture), |d, id| {
-                                    d.child(self.conversation_view(id, cx))
-                                }),
+                                .child(self.transcript(cx)),
                         ),
-                )
+                })
                 .when_some(self.error_line(), |d, error| {
                     d.child(
                         div()
@@ -1377,7 +1380,8 @@ impl Render for Keystone {
 #[cfg(all(test, feature = "ui-tests"))]
 mod tests {
     use super::*;
-    use keystone_agent::{Event, Item};
+    use conversation::Row;
+    use keystone_agent::{Event, Item, ItemKind, ItemStatus, TurnStatus};
 
     #[gpui::test]
     fn welcome_action_focuses_composer_and_preserves_draft_on_session_switch(
@@ -1572,6 +1576,87 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_long_transcript_draws_only_rows_in_view_and_follows_new_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 200);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 600)
+        });
+        cx.run_until_parked();
+        // Opened at the latest row. Rows far above were never laid out.
+        assert!(cx.debug_bounds("transcript-row-599").is_some());
+        assert!(cx.debug_bounds("transcript-row-0").is_none());
+        assert!(cx.debug_bounds("transcript-row-300").is_none());
+
+        // A row that arrives while at the bottom is followed.
+        let reply = |id: &str| {
+            Event::ItemCompleted(Item {
+                id: id.into(),
+                kind: ItemKind::AgentMessage,
+                text: format!("Reply {id}"),
+                status: ItemStatus::Completed,
+            })
+        };
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(reply("new"));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let composer = cx.debug_bounds("composer-field").unwrap();
+        let newest = cx
+            .debug_bounds("transcript-row-600")
+            .expect("new row drawn");
+        assert!(newest.bottom() <= composer.top(), "the new row is in view");
+
+        // The mouse wheel scrolls up through the history.
+        let last = cx.debug_bounds("transcript-row-600").unwrap();
+        let over = cx.debug_bounds("conversation").unwrap().center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(30.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let moved = cx.debug_bounds("transcript-row-600").unwrap();
+        assert_eq!(moved.top() - last.top(), px(30.), "scrolled by the wheel");
+
+        // Scrolled to the top, the first rows draw and a new row does not pull the
+        // view back down.
+        view.update(cx, |this, cx| {
+            this.transcripts[&1].scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let first = cx
+            .debug_bounds("transcript-row-0")
+            .expect("first row drawn");
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(reply("later"));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("transcript-row-0").unwrap(), first);
+        assert!(cx.debug_bounds("transcript-row-601").is_none());
+        // Sending, or selecting the session, returns to the latest row.
+        view.update(cx, |this, cx| {
+            this.scroll_to_end(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("transcript-row-601").is_some());
+    }
+
+    #[gpui::test]
     fn a_save_failure_shows_in_the_conversation_until_saving_works(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
@@ -1595,6 +1680,7 @@ mod tests {
         wait_until(cx, &view, |view| {
             view.conversations[&1].save_error.is_some()
         });
+        assert!(cx.debug_bounds("transcript-status").is_some());
         std::fs::remove_file(&sessions).unwrap();
         turn(&view, cx);
         wait_until(cx, &view, |view| {
