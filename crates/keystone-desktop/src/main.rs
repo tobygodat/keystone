@@ -7,9 +7,9 @@ use conversation::Conversation;
 use futures::StreamExt;
 use gpui::{
     AnyElement, AnyView, App, Application, AvailableSpace, Bounds, Context, Corner, Entity,
-    FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset, ListState, Render,
-    ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds, WindowOptions,
-    canvas, div, list, prelude::*, px, size,
+    FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset, ListState, Pixels,
+    Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
+    WindowOptions, canvas, div, list, prelude::*, px, size,
 };
 use keystone_agent::codex::Command;
 use keystone_agent::log::{Logs, Report};
@@ -744,30 +744,43 @@ impl Keystone {
 
     /// Runs before the transcript list lays out. When the row the user is scrolled
     /// into was remeasured, the kept offset can now fall past its end, such as when a
-    /// long reasoning summary is replaced by an empty one. The view would then skip
-    /// the rows below it, so it moves to the first row after the place it was.
+    /// long reasoning summary is replaced by an empty one, or when the transcript
+    /// widens and its text wraps onto fewer lines. The view would then skip the rows
+    /// below it, so it moves to the first row after the place it was. It spans the
+    /// transcript's width so it can measure the row at the width the list is about to
+    /// use.
     fn transcript_top_check(&self, session: u64, cx: &mut Context<Self>) -> impl IntoElement {
         let app = cx.weak_entity();
         canvas(
-            move |_, window, cx| {
-                let _ = app.update(cx, |this, cx| this.clamp_top(session, window, cx));
+            move |bounds, window, cx| {
+                let _ = app.update(cx, |this, cx| {
+                    this.clamp_top(session, bounds.size.width, window, cx)
+                });
             },
             |_, _, _, _| {},
         )
         .absolute()
-        .size_0()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h_0()
     }
 
-    fn clamp_top(&mut self, session: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.remeasured_top.remove(&session) {
-            return;
-        }
+    fn clamp_top(
+        &mut self,
+        session: u64,
+        width: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let remeasured = self.remeasured_top.remove(&session);
         let Some(list) = self.transcripts.get(&session).cloned() else {
             return;
         };
-        // The list measures entries at its own width, as of its last layout.
-        let width = list.viewport_bounds().size.width;
-        if width <= px(0.) {
+        // The list remeasures every entry when its width changes, and it has not
+        // laid out at this width yet.
+        let resized = list.viewport_bounds().size.width != width;
+        if !(remeasured || resized) || width <= px(0.) {
             return;
         }
         let space = size(AvailableSpace::Definite(width), AvailableSpace::MinContent);
@@ -1958,6 +1971,92 @@ mod tests {
             cx.debug_bounds("transcript-row-602").unwrap().top(),
             content_top
         );
+    }
+
+    /// Opens a long session in a window of the given width, with three long replies
+    /// streaming at its end, scrolled to the start of the first.
+    fn long_replies(
+        cx: &mut gpui::TestAppContext,
+        width: f32,
+    ) -> (
+        Entity<Keystone>,
+        &mut gpui::VisualTestContext,
+        tempfile::TempDir,
+        Pixels,
+    ) {
+        let (view, cx, dir) = long_session(cx);
+        cx.simulate_resize(size(px(width), px(700.)));
+        cx.run_until_parked();
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            for id in ["a", "b", "c"] {
+                conversation.apply(Event::ItemStarted(Item {
+                    id: id.into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Streamed words. ".repeat(600),
+                    status: ItemStatus::InProgress,
+                }));
+            }
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        scroll_to(&view, cx, at(600, 0.));
+        let content_top = cx.debug_bounds("transcript-row-600").unwrap().top();
+        (view, cx, dir, content_top)
+    }
+
+    #[gpui::test]
+    fn a_reader_scrolled_into_a_row_that_a_wider_window_shortens_sees_the_next_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx, _dir, content_top) = long_replies(cx, 700.);
+        let narrow = cx.debug_bounds("transcript-row-600").unwrap().size.height;
+        let offset = narrow * 0.8;
+        scroll_to(&view, cx, at(600, offset.into()));
+
+        // The reply wraps onto fewer lines, ending before the place being read.
+        cx.simulate_resize(size(px(1500.), px(700.)));
+        cx.run_until_parked();
+        let next = cx.debug_bounds("transcript-row-601").unwrap();
+        assert!(
+            next.size.height < offset,
+            "the replies are as long as each other"
+        );
+        assert_eq!(
+            next.top(),
+            content_top,
+            "the next row starts at the top, not above it"
+        );
+
+        // Following the bottom is unchanged by a resize.
+        view.update(cx, |this, cx| {
+            this.scroll_to_end(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(900.), px(700.)));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            let list = &this.transcripts[&1];
+            assert_eq!(list.logical_scroll_top().item_ix, list.item_count());
+        });
+    }
+
+    #[gpui::test]
+    fn a_reader_scrolled_into_a_row_that_a_narrower_window_lengthens_keeps_their_place(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx, _dir, content_top) = long_replies(cx, 1500.);
+        scroll_to(&view, cx, at(600, 1000.));
+
+        // The reply wraps onto more lines; the place being read is still inside it.
+        cx.simulate_resize(size(px(700.), px(700.)));
+        cx.run_until_parked();
+        let row = cx.debug_bounds("transcript-row-600").unwrap();
+        assert!(row.size.height > px(2000.));
+        assert_eq!(row.top(), content_top - px(1000.));
     }
 
     #[gpui::test]
