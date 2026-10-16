@@ -1471,6 +1471,7 @@ mod tests {
                     text,
                     status: ItemStatus::Completed,
                 },
+                seq: None,
             };
             log.append(&Entry::TurnStarted).unwrap();
             log.append(&item(
@@ -1497,6 +1498,7 @@ mod tests {
             log.append(&Entry::TurnEnded {
                 status: TurnStatus::Completed,
                 error: None,
+                seq: None,
             })
             .unwrap();
         }

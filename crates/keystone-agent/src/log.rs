@@ -14,20 +14,32 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// One line of a session log.
+///
+/// `seq` is the row's place in the transcript as it was shown: the order in which rows
+/// first appeared, not the order they completed. A steer appears before the reply it
+/// interrupted completes, so completion order would put it first. Logs written before
+/// `seq` existed have none and are shown in file order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "entry", rename_all = "snake_case")]
 pub enum Entry {
     TurnStarted,
     Item {
         item: Item,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
     Approval {
         action: String,
         allowed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
     TurnEnded {
         status: TurnStatus,
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
 }
 
@@ -229,6 +241,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_log_written_before_seq_existed_still_reads() {
+        let old = r#"{"entry":"item","item":{"id":"a","kind":{"type":"agent_message"},"text":"Hello","status":"completed"}}"#;
+        let entry: Entry = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            entry,
+            Entry::Item {
+                item: item("a"),
+                seq: None
+            }
+        );
+        // And an entry without a place is written the old way.
+        assert_eq!(serde_json::to_string(&entry).unwrap(), old);
+    }
+
     fn logs() -> (Logs, std::sync::mpsc::Receiver<()>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -247,6 +274,7 @@ mod tests {
                 vec![Write {
                     entry: Entry::Item {
                         item: item(&n.to_string()),
+                        seq: Some(n),
                     },
                     sync: n % 10 == 0,
                 }],
@@ -264,16 +292,16 @@ mod tests {
         else {
             panic!("expected one load report");
         };
-        let ids: Vec<_> = entries
+        let seqs: Vec<_> = entries
             .as_ref()
             .unwrap()
             .iter()
             .map(|e| match e {
-                Entry::Item { item } => item.id.parse::<u64>().unwrap(),
+                Entry::Item { seq, .. } => seq.unwrap(),
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(ids, (0..50).collect::<Vec<_>>());
+        assert_eq!(seqs, (0..50).collect::<Vec<_>>());
     }
 
     #[test]
@@ -321,7 +349,11 @@ mod tests {
         let item = item("a");
         let mut log = SessionLog::open(dir.path(), 7).unwrap();
         log.append(&Entry::TurnStarted).unwrap();
-        log.append(&Entry::Item { item: item.clone() }).unwrap();
+        log.append(&Entry::Item {
+            item: item.clone(),
+            seq: Some(0),
+        })
+        .unwrap();
         log.sync().unwrap();
         drop(log);
         let mut file = OpenOptions::new()
@@ -332,7 +364,13 @@ mod tests {
 
         assert_eq!(
             read(dir.path(), 7).unwrap(),
-            vec![Entry::TurnStarted, Entry::Item { item: item.clone() }]
+            vec![
+                Entry::TurnStarted,
+                Entry::Item {
+                    item: item.clone(),
+                    seq: Some(0),
+                }
+            ]
         );
         assert!(read(dir.path(), 8).unwrap().is_empty());
 
@@ -341,7 +379,11 @@ mod tests {
         log.append(&Entry::TurnStarted).unwrap();
         assert_eq!(
             read(dir.path(), 7).unwrap(),
-            vec![Entry::TurnStarted, Entry::Item { item }, Entry::TurnStarted]
+            vec![
+                Entry::TurnStarted,
+                Entry::Item { item, seq: Some(0) },
+                Entry::TurnStarted
+            ]
         );
     }
 }

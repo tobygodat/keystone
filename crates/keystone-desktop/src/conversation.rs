@@ -42,6 +42,9 @@ pub struct Conversation {
     /// Where the current turn's rows begin. Item IDs are matched only from here, so
     /// an ID a provider reuses in a later turn never replaces an earlier row.
     turn_start: usize,
+    /// The logged place of `rows[0]`; row `i` is logged as `seq_base + i`. After a
+    /// restore it continues past every place already in the log.
+    seq_base: u64,
     /// While saved history is loading, what happens meanwhile waits here.
     pending: Option<Vec<Pending>>,
     writes: Vec<Write>,
@@ -65,8 +68,8 @@ impl Conversation {
         self.pending.is_some()
     }
 
-    /// Rebuilds the rows from the session's log, then applies anything that happened
-    /// while loading.
+    /// Rebuilds the rows from the session's log, in the order they were first shown,
+    /// then applies anything that happened while loading.
     pub fn restore(&mut self, entries: Result<Vec<Entry>, String>) {
         let Some(pending) = self.pending.take() else {
             return;
@@ -86,33 +89,53 @@ impl Conversation {
     }
 
     fn rebuild(&mut self, entries: Vec<Entry>) {
+        // Each row's place: its logged `seq`, or for older logs, its order in the file.
+        let mut places: Vec<u64> = Vec::new();
+        let mut next = 0;
+        let mut add = |rows: &mut Vec<Row>, row: Row, seq: Option<u64>| {
+            let place = seq.unwrap_or(next);
+            next = next.max(place + 1);
+            rows.push(row);
+            places.push(place);
+        };
         let mut open_turn = false;
         for entry in entries {
             match entry {
                 Entry::TurnStarted => open_turn = true,
-                Entry::Item { item } => match self.position_for(&item) {
+                Entry::Item { item, seq } => match self.position_for(&item) {
                     Some(index) => self.rows[index] = Row::Item(item),
-                    None => self.rows.push(Row::Item(item)),
+                    None => add(&mut self.rows, Row::Item(item), seq),
                 },
-                Entry::Approval { action, allowed } => {
-                    self.rows.push(Row::Decision { action, allowed })
-                }
-                Entry::TurnEnded { status, error } => {
+                Entry::Approval {
+                    action,
+                    allowed,
+                    seq,
+                } => add(&mut self.rows, Row::Decision { action, allowed }, seq),
+                Entry::TurnEnded { status, error, seq } => {
                     open_turn = false;
                     if status != TurnStatus::Completed {
-                        self.rows.push(Row::TurnEnded { status, error });
+                        add(&mut self.rows, Row::TurnEnded { status, error }, seq);
                     }
                     self.turn_start = self.rows.len();
                 }
             }
         }
         if open_turn {
-            self.rows.push(Row::TurnEnded {
-                status: TurnStatus::Interrupted,
-                error: Some("Keystone closed during this turn".into()),
-            });
+            add(
+                &mut self.rows,
+                Row::TurnEnded {
+                    status: TurnStatus::Interrupted,
+                    error: Some("Keystone closed during this turn".into()),
+                },
+                None,
+            );
         }
+        let mut ordered: Vec<(u64, Row)> = places.into_iter().zip(self.rows.drain(..)).collect();
+        // Stable, so rows with the same place keep their order in the file.
+        ordered.sort_by_key(|(place, _)| *place);
+        self.rows = ordered.into_iter().map(|(_, row)| row).collect();
         self.turn_start = self.rows.len();
+        self.seq_base = next.saturating_sub(self.rows.len() as u64);
     }
 
     /// Shows and logs a sent message at once. Steers are not always echoed back, so
@@ -135,8 +158,8 @@ impl Conversation {
         if !self.running {
             self.turn_start = self.rows.len();
         }
-        self.push(Row::Item(item.clone()));
-        self.write(Entry::Item { item }, false);
+        let index = self.push(Row::Item(item.clone()));
+        self.log_item(index, item);
         self.running = true;
         self.error = None;
     }
@@ -180,8 +203,8 @@ impl Conversation {
                 }
             }
             Event::ItemCompleted(item) => {
-                self.place(item.clone());
-                self.write(Entry::Item { item }, false);
+                let index = self.place(item.clone());
+                self.log_item(index, item);
             }
             Event::ApprovalRequested(approval) => self.approvals.push(approval),
             Event::ApprovalResolved { request } => self.approvals.retain(|a| a.request != request),
@@ -190,26 +213,29 @@ impl Conversation {
                 self.approvals.clear();
                 // A stopped turn leaves items the provider never completes. Keep what
                 // streamed, so the partial reply survives a restart.
-                let unfinished: Vec<Item> = self
+                let unfinished: Vec<(usize, Item)> = self
                     .rows
                     .iter_mut()
-                    .filter_map(|row| match row {
+                    .enumerate()
+                    .filter_map(|(index, row)| match row {
                         Row::Item(item) if item.status == ItemStatus::InProgress => {
                             item.status = ItemStatus::Failed;
-                            Some(item.clone())
+                            Some((index, item.clone()))
                         }
                         _ => None,
                     })
                     .collect();
-                for item in unfinished {
-                    self.write(Entry::Item { item }, false);
+                for (index, item) in unfinished {
+                    self.log_item(index, item);
                 }
+                let shown = status != TurnStatus::Completed;
                 let entry = Entry::TurnEnded {
                     status,
                     error: error.clone(),
+                    seq: shown.then(|| self.seq(self.rows.len())),
                 };
                 self.write(entry, true);
-                if status != TurnStatus::Completed {
+                if shown {
                     self.push(Row::TurnEnded { status, error });
                 }
                 self.turn_start = self.rows.len();
@@ -233,6 +259,7 @@ impl Conversation {
         let entry = Entry::Approval {
             action: approval.action.clone(),
             allowed,
+            seq: Some(self.seq(self.rows.len())),
         };
         self.write(entry, true);
         self.push(Row::Decision {
@@ -261,6 +288,15 @@ impl Conversation {
     fn push(&mut self, row: Row) -> usize {
         self.rows.push(row);
         self.rows.len() - 1
+    }
+
+    fn seq(&self, index: usize) -> u64 {
+        self.seq_base + index as u64
+    }
+
+    fn log_item(&mut self, index: usize, item: Item) {
+        let seq = Some(self.seq(index));
+        self.write(Entry::Item { item, seq }, false);
     }
 
     fn write(&mut self, entry: Entry, sync: bool) {
@@ -414,20 +450,113 @@ mod tests {
         assert!(synced.is_empty(), "everything was saved");
 
         let reloaded = log.restore();
+        assert_eq!(reloaded.rows, live.rows, "restored as it was shown");
         assert_eq!(
             reloaded.rows,
             vec![
+                Row::Item(message("m", "Hello", ItemStatus::Completed)),
                 Row::Decision {
                     action: "rm -rf build".into(),
                     allowed: false
                 },
-                Row::Item(message("m", "Hello", ItemStatus::Completed)),
                 Row::TurnEnded {
                     status: TurnStatus::Interrupted,
                     error: None
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_steer_is_restored_after_the_reply_it_interrupted() {
+        for echoed in [true, false] {
+            let (mut live, mut log) = (Conversation::default(), Log::default());
+            live.push_local("Write a poem");
+            log.save(&mut live);
+            feed(
+                &mut live,
+                &mut log,
+                [
+                    Event::TurnStarted,
+                    Event::ItemStarted(user("u1", "Write a poem")),
+                    Event::ItemCompleted(user("u1", "Write a poem")),
+                    Event::ItemStarted(message("m1", "Roses", ItemStatus::InProgress)),
+                ],
+            );
+            // The steer is shown, and logged, while the first reply still streams.
+            live.push_local("Make it rhyme");
+            log.save(&mut live);
+            let mut rest = vec![Event::ItemCompleted(message(
+                "m1",
+                "Roses are red",
+                ItemStatus::Completed,
+            ))];
+            if echoed {
+                rest.push(Event::ItemStarted(user("u2", "Make it rhyme")));
+                rest.push(Event::ItemCompleted(user("u2", "Make it rhyme")));
+            }
+            rest.push(Event::ItemCompleted(message(
+                "m2",
+                "Violets are blue",
+                ItemStatus::Completed,
+            )));
+            rest.push(completed());
+            feed(&mut live, &mut log, rest);
+
+            let shown = [
+                "Write a poem",
+                "Roses are red",
+                "Make it rhyme",
+                "Violets are blue",
+            ];
+            assert_eq!(texts(&live), shown);
+            assert_eq!(texts(&log.restore()), shown, "echoed: {echoed}");
+        }
+    }
+
+    #[test]
+    fn an_old_log_keeps_file_order_and_new_rows_follow_it() {
+        // Written before entries carried their place.
+        let old = [
+            r#"{"entry":"item","item":{"id":"local:1-0","kind":{"type":"user_message"},"text":"Old question","status":"completed"}}"#,
+            r#"{"entry":"turn_started"}"#,
+            r#"{"entry":"item","item":{"id":"local:2-1","kind":{"type":"user_message"},"text":"Old steer","status":"completed"}}"#,
+            r#"{"entry":"item","item":{"id":"m","kind":{"type":"agent_message"},"text":"Old reply","status":"completed"}}"#,
+            r#"{"entry":"turn_ended","status":"completed","error":null}"#,
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("1.jsonl"), old.join("\n")).unwrap();
+        let mut log = Log(keystone_agent::log::read(dir.path(), 1).unwrap());
+        assert_eq!(log.0.len(), old.len());
+        let mut live = log.restore();
+        assert_eq!(texts(&live), ["Old question", "Old steer", "Old reply"]);
+
+        live.push_local("New question");
+        log.save(&mut live);
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::TurnStarted,
+                Event::ItemCompleted(message("m", "New reply", ItemStatus::Completed)),
+                completed(),
+            ],
+        );
+        let shown = [
+            "Old question",
+            "Old steer",
+            "Old reply",
+            "New question",
+            "New reply",
+        ];
+        assert_eq!(texts(&live), shown);
+        let mut again = log.restore();
+        assert_eq!(texts(&again), shown);
+
+        // And places keep growing across a second restart.
+        again.push_local("Third question");
+        log.save(&mut again);
+        assert_eq!(texts(&log.restore()).last(), Some(&"Third question"));
     }
 
     #[test]
@@ -584,6 +713,7 @@ mod tests {
         assert!(!streamed.is_empty());
         let reloaded = log.restore();
         assert_eq!(last_reply(&reloaded), Some(streamed));
+        assert_eq!(reloaded.rows, live.rows);
     }
 
     #[test]
