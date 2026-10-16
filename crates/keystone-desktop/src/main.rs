@@ -2,20 +2,23 @@ mod conversation;
 mod relative_time;
 mod settings;
 mod text_input;
+mod transcript;
 
-use conversation::{Conversation, Row};
+use conversation::Conversation;
 use futures::StreamExt;
 use gpui::{
-    AnyView, App, Application, Bounds, BoxShadow, Context, Corner, Entity, FocusHandle, Focusable,
-    FontWeight, IntoElement, Pixels, Render, ScrollHandle, StyleRefinement, Subscription,
-    WeakEntity, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
+    AnyElement, AnyView, App, Application, AvailableSpace, Bounds, BoxShadow, Context, Corner,
+    Entity, FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset, ListState,
+    Pixels, Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
+    WindowOptions, canvas, div, list, point, prelude::*, px, size,
 };
 use keystone_agent::codex::Command;
-use keystone_agent::{CodexConnection, Event, ItemKind, ItemStatus, TurnStatus, Wake};
+use keystone_agent::log::{Logs, Report};
+use keystone_agent::{CodexConnection, Event, TurnStatus, Wake};
 use keystone_core::{Attention, Density, Durability, Preferences, Provider, Store, ThemeMode};
 use keystone_ui::{automation, prelude::*};
 use relative_time::{LocalTime, relative};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use text_input::{Changed, InputMode, TextInput};
@@ -75,19 +78,24 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Whether `event` ends a turn, and if so whether the turn failed. Only the user's own
-/// Stop makes an interruption a normal end.
-fn turn_failed(event: &Event, stop_requested: bool) -> Option<bool> {
+/// Whether `event` ends a turn, and if so whether the turn failed. An interruption is a
+/// normal end only when the user ended that turn, which the provider reports with it.
+fn turn_failed(event: &Event) -> Option<bool> {
     match event {
-        Event::TurnCompleted { status, .. } => Some(match status {
+        Event::TurnCompleted {
+            status, stopped, ..
+        } => Some(match status {
             TurnStatus::Completed => false,
-            TurnStatus::Interrupted => !stop_requested,
+            TurnStatus::Interrupted => !stopped,
             TurnStatus::Failed => true,
         }),
         Event::Failed { .. } => Some(true),
         _ => None,
     }
 }
+
+/// How long closing waits for saved histories to finish loading.
+const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn durability_warning(durability: Durability) -> Option<String> {
     match durability {
@@ -116,11 +124,18 @@ struct Keystone {
     /// The shared Codex app-server connection, created on the first message.
     codex: Option<CodexConnection>,
     conversations: HashMap<u64, Conversation>,
-    /// Where each session's log of completed items is kept.
-    sessions_dir: PathBuf,
+    /// Each session's log of completed items, read and written off the UI thread.
+    logs: Logs,
+    /// The virtualized transcript list for each session shown so far. It holds one
+    /// entry per conversation row plus a status entry after the last row.
+    transcripts: HashMap<u64, ListState>,
+    /// Sessions whose list top row was remeasured while the user was scrolled into it,
+    /// to check against the row's new height before the list lays out.
+    remeasured_top: HashSet<u64>,
     /// The directory agents work in.
     project_dir: PathBuf,
     wake: Wake,
+    /// Scrolls the sample transcript, which is not a list.
     transcript_scroll: ScrollHandle,
 }
 
@@ -211,7 +226,9 @@ impl Keystone {
             fixture,
             codex: None,
             conversations: HashMap::new(),
-            sessions_dir,
+            logs: Logs::new(sessions_dir, wake.clone()),
+            transcripts: HashMap::new(),
+            remeasured_top: HashSet::new(),
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
@@ -293,10 +310,14 @@ impl Keystone {
         }
     }
 
-    /// Saves the draft and marks the open session viewed. Returns false, with the error
-    /// shown, when either fails, so the app stays open.
+    /// Saves the draft, writes the session logs, and marks the open session viewed.
+    /// Returns false, with the error shown, when the draft or the session cannot be
+    /// saved, so the app stays open. The logs are written either way.
     fn save_before_exit(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.save_draft(cx) {
+        let saved = self.save_draft(cx);
+        // Before `leave`: the last events may end a turn the user is watching.
+        self.flush_logs(cx);
+        if !saved {
             return false;
         }
         match self.store.leave(now_ms()) {
@@ -437,7 +458,7 @@ impl Keystone {
             Err(error) => Some(error.to_string()),
         };
         self.sync_draft(cx);
-        self.transcript_scroll.scroll_to_bottom();
+        self.scroll_to_end(id);
         self.refresh(cx);
     }
 
@@ -892,27 +913,168 @@ impl Keystone {
             .on_click(cx.listener(move |this, _, window, cx| this.start(provider, window, cx)))
     }
 
+    /// The session's conversation. The first call starts loading its saved history.
     fn conversation(&mut self, session: u64) -> &mut Conversation {
-        let dir = &self.sessions_dir;
-        let scroll = &self.transcript_scroll;
+        let logs = &self.logs;
         self.conversations.entry(session).or_insert_with(|| {
-            // Open a conversation at its latest message.
-            scroll.scroll_to_bottom();
-            Conversation::load(dir, session)
+            logs.load(session);
+            Conversation::loading()
         })
     }
 
-    /// Applies every provider event that arrived since the last wake-up.
-    fn pump(&mut self, cx: &mut Context<Self>) {
-        let Some(codex) = &self.codex else { return };
-        let events = codex.drain();
-        if events.is_empty() {
+    /// Queues what the conversation logged and tells its list which rows changed.
+    fn commit(&mut self, session: u64) {
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        self.logs.append(session, conversation.take_writes());
+        let changed = conversation.take_changes();
+        let count = conversation.rows.len() + 1;
+        if let Some(list) = self.transcripts.get(&session) {
+            // Rows are only appended or replaced in place, so every row the list
+            // already shows keeps its index; the status entry is always last.
+            let old = list.item_count();
+            let status = old.saturating_sub(1).min(count - 1);
+            // A splice moves the view to the start of a remeasured entry. Unless it
+            // is following the bottom, which reads as the end of the list, keep it on
+            // the same entry at the same offset.
+            let top = list.logical_scroll_top();
+            let scrolled = top.item_ix < old;
+            let mut remeasured = top.item_ix >= status;
+            for range in changed {
+                remeasured |= range.contains(&top.item_ix);
+                let range = range.start..range.end.min(status);
+                if !range.is_empty() {
+                    list.splice(range.clone(), range.len());
+                }
+            }
+            // The status entry changes with almost anything, so it is always remeasured.
+            list.splice(status..old, count - status);
+            if scrolled {
+                // Rows added before the status entry move it down; follow it.
+                let item_ix = if top.item_ix == status {
+                    count - 1
+                } else {
+                    top.item_ix
+                };
+                list.scroll_to(ListOffset { item_ix, ..top });
+                if remeasured && top.offset_in_item > px(0.) {
+                    self.remeasured_top.insert(session);
+                }
+            }
+        }
+    }
+
+    /// Runs before the transcript list lays out. When the row the user is scrolled
+    /// into was remeasured, the kept offset can now fall past its end, such as when a
+    /// long reasoning summary is replaced by an empty one, or when the transcript
+    /// widens and its text wraps onto fewer lines. The view would then skip the rows
+    /// below it, so it moves to the first row after the place it was. It spans the
+    /// transcript's width so it can measure the row at the width the list is about to
+    /// use.
+    fn transcript_top_check(&self, session: u64, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = cx.weak_entity();
+        canvas(
+            move |bounds, window, cx| {
+                let _ = app.update(cx, |this, cx| {
+                    this.clamp_top(session, bounds.size.width, window, cx)
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h_0()
+    }
+
+    fn clamp_top(
+        &mut self,
+        session: u64,
+        width: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let remeasured = self.remeasured_top.remove(&session);
+        let Some(list) = self.transcripts.get(&session).cloned() else {
+            return;
+        };
+        // The list remeasures every entry when its width changes, and it has not
+        // laid out at this width yet.
+        let resized = list.viewport_bounds().size.width != width;
+        if !(remeasured || resized) || width <= px(0.) {
             return;
         }
-        let dir = self.sessions_dir.clone();
+        let space = size(AvailableSpace::Definite(width), AvailableSpace::MinContent);
+        let mut top = list.logical_scroll_top();
+        let start = top.item_ix;
+        while top.item_ix < list.item_count() {
+            let height = self
+                .transcript_entry(session, top.item_ix, cx)
+                .layout_as_root(space, window, cx)
+                .height;
+            if top.offset_in_item < height {
+                break;
+            }
+            // The place was past this entry's end, or it has nothing to show.
+            top = ListOffset {
+                item_ix: top.item_ix + 1,
+                offset_in_item: px(0.),
+            };
+        }
+        if top.item_ix != start {
+            list.scroll_to(top);
+        }
+    }
+
+    /// Scrolls the session's transcript to its latest row. It then follows new rows
+    /// until the user scrolls up.
+    fn scroll_to_end(&self, session: u64) {
+        if let Some(list) = self.transcripts.get(&session) {
+            list.scroll_to(ListOffset {
+                item_ix: list.item_count(),
+                offset_in_item: px(0.),
+            });
+        }
+    }
+
+    /// Applies loaded history, save results, and every provider event that arrived
+    /// since the last wake-up.
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        let reports = self.logs.drain();
+        let events = self.codex.as_ref().map(|c| c.drain()).unwrap_or_default();
+        self.receive(reports, events, cx);
+    }
+
+    fn receive(&mut self, reports: Vec<Report>, events: Vec<(u64, Event)>, cx: &mut Context<Self>) {
+        if reports.is_empty() && events.is_empty() {
+            return;
+        }
         let mut sidebar_changed = false;
+        for report in reports {
+            let session = match report {
+                Report::Loaded { session, entries } => {
+                    if let Some(conversation) = self.conversations.get_mut(&session) {
+                        conversation.restore(entries);
+                    }
+                    // Events held during the load, such as an approval or a turn's
+                    // end, apply only now.
+                    sidebar_changed = true;
+                    session
+                }
+                Report::Saved { session, error } => {
+                    if let Some(conversation) = self.conversations.get_mut(&session) {
+                        conversation.save_error = error
+                            .map(|error| format!("This conversation is not being saved. {error}"));
+                    }
+                    session
+                }
+            };
+            self.commit(session);
+        }
         for (session, event) in events {
-            let failed = turn_failed(&event, self.conversation(session).stop_requested);
+            let failed = turn_failed(&event);
             let saved = match (&event, failed) {
                 (Event::TurnStarted, _) => self.store.record_turn_start(session).map(drop),
                 (_, Some(failed)) => self
@@ -929,7 +1091,8 @@ impl Keystone {
                     event,
                     Event::ApprovalRequested(_) | Event::ApprovalResolved { .. }
                 );
-            let thread = self.conversation(session).apply(&dir, session, event);
+            let thread = self.conversation(session).apply(event);
+            self.commit(session);
             if let Some(thread) = thread {
                 let known = self
                     .store
@@ -942,7 +1105,6 @@ impl Keystone {
                 }
             }
         }
-        self.transcript_scroll.scroll_to_bottom();
         // Streamed text redraws only this view. The sidebar refreshes when a row changes.
         if sidebar_changed {
             self.refresh(cx);
@@ -951,19 +1113,52 @@ impl Keystone {
         }
     }
 
-    fn codex(&mut self) -> Result<&CodexConnection, String> {
-        if self.codex.is_none() {
-            let program = std::env::var_os("KEYSTONE_CODEX_PATH")
-                .map(PathBuf::from)
-                .or_else(|| keystone_agent::find::program("codex"))
-                .ok_or("Codex is not installed. Install the codex CLI and run `codex login`.")?;
-            self.codex = Some(CodexConnection::new(
-                program,
+    /// The shared Codex connection. It finds and starts `codex` on its own thread.
+    fn codex(&mut self) -> &CodexConnection {
+        let wake = self.wake.clone();
+        self.codex.get_or_insert_with(|| {
+            CodexConnection::new(
+                std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
                 env!("CARGO_PKG_VERSION"),
-                self.wake.clone(),
-            ));
+                wake,
+            )
+        })
+    }
+
+    /// Writes everything queued for the session logs. Used before the app closes.
+    ///
+    /// A conversation still loading its history holds what was sent meanwhile, and
+    /// logs it only once the history is applied. So apply every load first, or those
+    /// messages would be lost. A read can hang, such as on a stalled network disk, so
+    /// the wait for loads is bounded: a conversation whose history has not arrived by
+    /// then goes on without it, which still logs what it holds after the history.
+    fn flush_logs(&mut self, cx: &mut Context<Self>) {
+        let deadline = std::time::Instant::now() + LOAD_WAIT;
+        loop {
+            let all = self.logs.wait_for_loads(deadline);
+            self.pump(cx);
+            // Applying events can start loading another session; finish that too.
+            let loading: Vec<u64> = self
+                .conversations
+                .iter()
+                .filter(|(_, c)| c.is_loading())
+                .map(|(id, _)| *id)
+                .collect();
+            if loading.is_empty() {
+                break;
+            }
+            if !all || std::time::Instant::now() >= deadline {
+                for session in loading {
+                    self.conversations
+                        .get_mut(&session)
+                        .expect("listed above")
+                        .restore(Err("it did not load before Keystone closed".into()));
+                    self.commit(session);
+                }
+                break;
+            }
         }
-        Ok(self.codex.as_ref().expect("set above"))
+        self.logs.flush();
     }
 
     /// Sends the composer text: a new turn, or a steer for the running one.
@@ -1000,33 +1195,21 @@ impl Keystone {
             .iter()
             .find(|s| s.id() == id)
             .and_then(|s| s.provider_thread().map(str::to_owned));
-        let result = self.codex().and_then(|codex| {
-            codex
-                .send(id, &cwd, resume.as_deref(), text.clone())
-                .map_err(|e| {
-                    format!(
-                        "Could not start Codex at {}. {e}",
-                        codex.program().display()
-                    )
-                })
-        });
-        match result {
-            Ok(()) => {
-                self.error = None;
-                let dir = self.sessions_dir.clone();
-                self.conversation(id).push_local(&dir, id, &text);
-                if let Err(error) = self.store.record_message(id, now_ms()) {
-                    self.error = Some(format!("Could not save the session. {error}"));
-                }
-                self.composer
-                    .update(cx, |input, cx| input.set_value(String::new(), cx));
-                self.save_draft(cx);
-                self.transcript_scroll.scroll_to_bottom();
-                // Clicking Send moves focus off the composer; put it back for the next message.
-                self.composer.focus_handle(cx).focus(window);
-            }
-            Err(message) => self.error = Some(message),
+        // A failure to start Codex arrives later as an error in this conversation.
+        self.codex().send(id, &cwd, resume.as_deref(), text.clone());
+        self.error = None;
+        self.conversation(id).push_local(&text);
+        self.commit(id);
+        if let Err(error) = self.store.record_message(id, now_ms()) {
+            self.error = Some(format!("Could not save the session. {error}"));
         }
+        self.composer
+            .update(cx, |input, cx| input.set_value(String::new(), cx));
+        self.save_draft(cx);
+        self.scroll_to_end(id);
+        // Clicking Send moves focus off the composer; put it back for the next message.
+        self.composer.focus_handle(cx).focus(window);
+        // The session moves to Working and shows its new time.
         self.refresh(cx);
     }
 
@@ -1035,11 +1218,7 @@ impl Keystone {
         let (Some(id), Some(codex)) = (self.store.workspace().selected(), &self.codex) else {
             return;
         };
-        if let Err(error) = codex.command(Command::Interrupt { session: id }) {
-            self.error = Some(format!("Could not stop the turn. {error}"));
-        } else {
-            self.conversation(id).stop_requested = true;
-        }
+        codex.command(Command::Interrupt { session: id });
         cx.notify();
     }
 
@@ -1049,120 +1228,87 @@ impl Keystone {
         let Some(id) = self.store.workspace().selected() else {
             return;
         };
-        let dir = self.sessions_dir.clone();
-        let Some(approval) = self.conversation(id).decide(&dir, id, allow) else {
+        let Some(approval) = self.conversation(id).decide(allow) else {
             return;
         };
-        if let Some(codex) = &self.codex
-            && let Err(error) = codex.command(Command::Answer {
+        self.commit(id);
+        if let Some(codex) = &self.codex {
+            codex.command(Command::Answer {
                 session: id,
                 request: approval.request,
                 allow,
-            })
-        {
-            self.error = Some(format!("Could not send the answer. {error}"));
+            });
         }
         self.refresh(cx);
     }
 
-    fn conversation_view(&self, session: u64, cx: &mut Context<Self>) -> gpui::Div {
+    /// The session's transcript: a virtualized list, so a long session lays out and
+    /// paints only the rows in view. It sticks to the bottom while new rows arrive,
+    /// unless the user has scrolled up.
+    fn transcript_list(&mut self, session: u64, cx: &mut Context<Self>) -> gpui::List {
+        let count = self.conversations.get(&session).map_or(0, |c| c.rows.len()) + 1;
+        let state = self
+            .transcripts
+            .entry(session)
+            .or_insert_with(|| ListState::new(count, ListAlignment::Bottom, px(600.)))
+            .clone();
+        let app = cx.weak_entity();
+        list(state, move |index, _, cx| {
+            app.update(cx, |this, cx| this.transcript_entry(session, index, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .size_full()
+        .py_6()
+    }
+
+    /// One list entry: a row, or after the last row, the turn's status. Each entry is
+    /// laid out on its own, so it carries the transcript's width and text style.
+    fn transcript_entry(&self, session: u64, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(conversation) = self.conversations.get(&session) else {
-            return v_flex();
+            return div().into_any_element();
         };
+        let content = match conversation.rows.get(index) {
+            Some(row) if conversation::visible(row) => Some(transcript::row(row, cx)),
+            Some(_) => None,
+            None => self.transcript_status(conversation, cx),
+        };
+        let Some(content) = content else {
+            // Nothing to show takes no space, gap included.
+            return div().into_any_element();
+        };
+        let name = match conversation.rows.len() {
+            count if index < count => format!("transcript-row-{index}"),
+            _ => "transcript-status".to_owned(),
+        };
+        h_flex()
+            .automation_id(name)
+            .w_full()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_WIDTH))
+                    .when(index > 0, |d| d.pt_4())
+                    .text_size(TextSize::Body.px())
+                    .line_height(px(22.))
+                    .child(content),
+            )
+            .into_any_element()
+    }
+
+    /// What follows the last row: an approval request or the working indicator, and any
+    /// errors. `None` when there is nothing to say.
+    fn transcript_status(
+        &self,
+        conversation: &Conversation,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let colors = cx.theme().colors;
         let mono = cx.theme().fonts.mono.clone();
-        let mut view = v_flex()
-            .gap_4()
-            .text_size(TextSize::Body.px())
-            .line_height(px(22.));
-        for row in conversation
-            .rows
-            .iter()
-            .filter(|row| conversation::visible(row))
-        {
-            view = view.child(match row {
-                Row::Item(item) => match &item.kind {
-                    ItemKind::UserMessage => v_flex().items_end().child(
-                        div()
-                            .max_w(px(620.))
-                            .px_3()
-                            .py_2()
-                            .rounded(radius::ROW)
-                            .bg(colors.element_selected)
-                            .child(item.text.clone()),
-                    ),
-                    ItemKind::AgentMessage => div().child(item.text.clone()),
-                    ItemKind::Reasoning => div()
-                        .text_size(TextSize::Ui.px())
-                        .text_color(colors.text_muted)
-                        .child(item.text.clone()),
-                    ItemKind::Command { command, exit_code } => {
-                        let status = match (item.status, exit_code) {
-                            (ItemStatus::InProgress, _) => "Running".to_owned(),
-                            (ItemStatus::Declined, _) => "Not run".to_owned(),
-                            (ItemStatus::Failed, None) => "Stopped".to_owned(),
-                            (_, Some(code)) => format!("Exit {code}"),
-                            (_, None) => String::new(),
-                        };
-                        v_flex()
-                            .surface(Elevation::Raised, cx)
-                            .overflow_hidden()
-                            .child(
-                                h_flex()
-                                    .px_3()
-                                    .py_2()
-                                    .gap_2()
-                                    .hairline_b(cx)
-                                    .font_family(mono.clone())
-                                    .text_size(TextSize::Ui.px())
-                                    .child(div().flex_1().min_w_0().child(format!("$ {command}")))
-                                    .child(
-                                        Label::new(status).size(TextSize::Sm).color(Color::Muted),
-                                    ),
-                            )
-                            .when(!item.text.trim_end().is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .px_3()
-                                        .py_2()
-                                        .font_family(mono.clone())
-                                        .text_size(TextSize::Ui.px())
-                                        .text_color(colors.text_muted)
-                                        .child(item.text.trim_end().to_owned()),
-                                )
-                            })
-                    }
-                    ItemKind::FileChange { paths } => div()
-                        .text_size(TextSize::Ui.px())
-                        .text_color(colors.text_muted)
-                        .child(format!("Changed {}", paths.join(", "))),
-                    ItemKind::Tool { name } | ItemKind::Other { name } => div()
-                        .text_size(TextSize::Ui.px())
-                        .text_color(colors.text_muted)
-                        .child(format!("Used {name}")),
-                },
-                Row::TurnEnded { status, error } => {
-                    let (text, color) = match status {
-                        TurnStatus::Interrupted => ("Stopped", Color::Muted),
-                        _ => ("Failed", Color::Danger),
-                    };
-                    let text = match error {
-                        Some(error) => format!("{text}: {error}"),
-                        None => text.to_owned(),
-                    };
-                    div().child(Label::new(text).size(TextSize::Ui).color(color))
-                }
-                Row::Decision { action, allowed } => div().child(
-                    Label::new(format!(
-                        "{} {action}",
-                        if *allowed { "Allowed:" } else { "Denied:" }
-                    ))
-                    .size(TextSize::Ui)
-                    .color(Color::Muted),
-                ),
-            });
-        }
+        let mut view = v_flex().gap_4();
+        let mut empty = true;
         if let Some(approval) = conversation.approvals.first() {
+            empty = false;
             view = view.child(
                 v_flex()
                     .id("approval")
@@ -1212,6 +1358,7 @@ impl Keystone {
                     ),
             );
         } else if conversation.running {
+            empty = false;
             view = view.child(
                 div().id("turn-status").automation_id("turn-status").child(
                     Label::new("Working…")
@@ -1220,14 +1367,20 @@ impl Keystone {
                 ),
             );
         }
-        for error in conversation.error.iter().chain(&conversation.save_error) {
+        for error in conversation
+            .load_error
+            .iter()
+            .chain(&conversation.error)
+            .chain(&conversation.save_error)
+        {
+            empty = false;
             view = view.child(
                 Label::new(error.clone())
                     .size(TextSize::Ui)
                     .color(Color::Danger),
             );
         }
-        view
+        (!empty).then(|| view.into_any_element())
     }
 
     fn error_line(&self) -> Option<impl IntoElement> {
@@ -1628,13 +1781,22 @@ impl Render for Keystone {
             .find(|s| Some(s.id()) == self.store.workspace().selected());
         let session = current.map(|s| (s.title().to_owned(), s.settled()));
         let selected = current.map(|s| s.id());
+        // A session that has reached its provider has history, so while that history
+        // loads, the transcript layout is shown rather than the welcome screen.
+        let has_thread = current.is_some_and(|s| s.provider_thread().is_some());
         let current = current.map(|s| (s.provider(), s.settled()));
         if let Some(id) = selected {
             self.conversation(id);
         }
         let has_conversation = selected
             .and_then(|id| self.conversations.get(&id))
-            .is_some_and(|c| !c.is_empty());
+            .is_some_and(|c| {
+                if c.is_loading() {
+                    has_thread || c.running
+                } else {
+                    !c.is_empty()
+                }
+            });
         let composer = self.composer(current, cx);
         let error = self.error_line().map(|error| {
             div()
@@ -1674,61 +1836,74 @@ impl Render for Keystone {
                 .child(composer)
                 .children(error)
         } else {
-            let body = if self.fixture || has_conversation {
-                v_flex()
+            let body = match selected.filter(|_| !self.fixture) {
+                Some(id) if has_conversation => div()
                     .id("conversation")
                     .automation_id("conversation")
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.transcript_scroll)
-                    .items_center()
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(CONTENT_WIDTH))
-                            .py_6()
-                            .when(self.fixture, |d| d.child(self.transcript(cx)))
-                            .when_some(selected.filter(|_| !self.fixture), |d, id| {
-                                d.child(self.conversation_view(id, cx))
-                            }),
-                    )
-            } else {
-                let hint = match current {
-                    Some((Provider::Claude, _)) => {
-                        "Claude Code isn’t connected in this preview. Your draft is saved on this machine."
-                    }
-                    _ => "Your draft is saved on this machine. Ctrl Enter sends it to Codex.",
-                };
-                v_flex()
-                    .id("empty-conversation")
+                    .child(self.transcript_top_check(id, cx))
+                    .child(self.transcript_list(id, cx))
+                    .into_any_element(),
+                None if self.fixture => div()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(10.))
                     .child(
-                        Icon::new(IconName::Wedge)
-                            .size(px(28.))
-                            .color(Color::Custom(cx.theme().colors.border_strong)),
+                        v_flex()
+                            .id("conversation")
+                            .automation_id("conversation")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.transcript_scroll)
+                            .items_center()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(CONTENT_WIDTH))
+                                    .py_6()
+                                    .child(self.transcript(cx)),
+                            ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("No messages yet"),
-                    )
-                    .child(
-                        div()
-                            .w(px(320.))
-                            .text_center()
-                            .text_size(TextSize::Ui.px())
-                            .line_height(px(18.))
-                            .text_color(cx.theme().colors.text_muted)
-                            .child(hint),
-                    )
+                    .into_any_element(),
+                _ => {
+                    let hint = match current {
+                        Some((Provider::Claude, _)) => {
+                            "Claude Code isn’t connected in this preview. Your draft is saved on this machine."
+                        }
+                        _ => "Your draft is saved on this machine. Ctrl Enter sends it to Codex.",
+                    };
+                    v_flex()
+                        .id("empty-conversation")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(10.))
+                        .child(
+                            Icon::new(IconName::Wedge)
+                                .size(px(28.))
+                                .color(Color::Custom(cx.theme().colors.border_strong)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("No messages yet"),
+                        )
+                        .child(
+                            div()
+                                .w(px(320.))
+                                .text_center()
+                                .text_size(TextSize::Ui.px())
+                                .line_height(px(18.))
+                                .text_color(cx.theme().colors.text_muted)
+                                .child(hint),
+                        )
+                        .into_any_element()
+                }
             };
             v_flex()
                 .flex_1()
@@ -1801,6 +1976,8 @@ impl Render for Keystone {
 #[cfg(all(test, feature = "ui-tests"))]
 mod tests {
     use super::*;
+    use conversation::Row;
+    use keystone_agent::{Event, Item, ItemKind, ItemStatus, TurnStatus};
 
     #[gpui::test]
     fn welcome_action_focuses_composer_and_preserves_draft_on_session_switch(
@@ -1879,6 +2056,638 @@ mod tests {
                 total.as_secs_f64() * 1000. / frames as f64
             );
         }
+    }
+
+    /// Writes a session log with `turns` completed turns: a question, a command, and a
+    /// several-line reply each.
+    fn seed_long_session(dir: &Path, session: u64, turns: usize) {
+        use keystone_agent::log::{Entry, SessionLog};
+        let mut log = SessionLog::open(dir, session).unwrap();
+        for turn in 0..turns {
+            let item = |id: &str, kind: ItemKind, text: String| Entry::Item {
+                item: Item {
+                    id: format!("{id}-{turn}"),
+                    kind,
+                    text,
+                    status: ItemStatus::Completed,
+                },
+                seq: None,
+                run: None,
+            };
+            log.append(&Entry::TurnStarted).unwrap();
+            log.append(&item(
+                "u",
+                ItemKind::UserMessage,
+                format!("Question {turn}"),
+            ))
+            .unwrap();
+            log.append(&item(
+                "c",
+                ItemKind::Command {
+                    command: "cargo test".into(),
+                    exit_code: Some(0),
+                },
+                "running 12 tests\ntest result: ok".into(),
+            ))
+            .unwrap();
+            log.append(&item(
+                "a",
+                ItemKind::AgentMessage,
+                format!("Reply {turn}. ").repeat(40),
+            ))
+            .unwrap();
+            log.append(&Entry::TurnEnded {
+                status: TurnStatus::Completed,
+                error: None,
+                seq: None,
+                run: None,
+            })
+            .unwrap();
+        }
+        log.sync().unwrap();
+    }
+
+    #[gpui::test]
+    #[ignore = "benchmark; run through scripts/perf.py"]
+    fn perf_transcript_draw(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 1000);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 3000)
+        });
+        // A composer keystroke notifies the root view, which rebuilds the transcript.
+        let mut total = std::time::Duration::ZERO;
+        let frames = 30;
+        for _ in 0..frames {
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let start = std::time::Instant::now();
+                window.draw(cx).clear();
+                total += start.elapsed();
+            });
+        }
+        eprintln!(
+            "PERF transcript_draw_ms={:.2}",
+            total.as_secs_f64() * 1000. / frames as f64
+        );
+
+        // A reply streaming at the end of the same transcript: one delta per frame.
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            conversation.apply(Event::ItemStarted(Item {
+                id: "live".into(),
+                kind: ItemKind::AgentMessage,
+                text: String::new(),
+                status: ItemStatus::InProgress,
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        let mut total = std::time::Duration::ZERO;
+        for _ in 0..frames {
+            view.update(cx, |this, cx| {
+                this.conversation(1).apply(Event::ItemDelta {
+                    item_id: "live".into(),
+                    text: "More streamed text. ".into(),
+                });
+                this.commit(1);
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                let start = std::time::Instant::now();
+                window.draw(cx).clear();
+                total += start.elapsed();
+            });
+        }
+        eprintln!(
+            "PERF transcript_stream_ms={:.2}",
+            total.as_secs_f64() * 1000. / frames as f64
+        );
+    }
+
+    #[gpui::test]
+    fn a_long_transcript_draws_only_rows_in_view_and_follows_new_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 200);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 600)
+        });
+        cx.run_until_parked();
+        // Opened at the latest row. Rows far above were never laid out.
+        assert!(cx.debug_bounds("transcript-row-599").is_some());
+        assert!(cx.debug_bounds("transcript-row-0").is_none());
+        assert!(cx.debug_bounds("transcript-row-300").is_none());
+
+        // A row that arrives while at the bottom is followed.
+        let reply = |id: &str| {
+            Event::ItemCompleted(Item {
+                id: id.into(),
+                kind: ItemKind::AgentMessage,
+                text: format!("Reply {id}"),
+                status: ItemStatus::Completed,
+            })
+        };
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(reply("new"));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let composer = cx.debug_bounds("composer-field").unwrap();
+        let newest = cx
+            .debug_bounds("transcript-row-600")
+            .expect("new row drawn");
+        assert!(newest.bottom() <= composer.top(), "the new row is in view");
+
+        // The mouse wheel scrolls up through the history.
+        let last = cx.debug_bounds("transcript-row-600").unwrap();
+        let over = cx.debug_bounds("conversation").unwrap().center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(30.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let moved = cx.debug_bounds("transcript-row-600").unwrap();
+        assert_eq!(moved.top() - last.top(), px(30.), "scrolled by the wheel");
+
+        // Scrolled to the top, the first rows draw and a new row does not pull the
+        // view back down.
+        view.update(cx, |this, cx| {
+            this.transcripts[&1].scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let first = cx
+            .debug_bounds("transcript-row-0")
+            .expect("first row drawn");
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(reply("later"));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("transcript-row-0").unwrap(), first);
+        assert!(cx.debug_bounds("transcript-row-601").is_none());
+        // Sending, or selecting the session, returns to the latest row.
+        view.update(cx, |this, cx| {
+            this.scroll_to_end(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("transcript-row-601").is_some());
+    }
+
+    #[gpui::test]
+    fn streaming_keeps_the_place_of_a_reader_who_scrolled_up(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 200);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 600)
+        });
+        let message = |id: &str, text: String| Item {
+            id: id.into(),
+            kind: ItemKind::AgentMessage,
+            text,
+            status: ItemStatus::InProgress,
+        };
+        // A short item, then a reply taller than the view, both still streaming.
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            conversation.apply(Event::ItemStarted(message("early", "Thinking".into())));
+            conversation.apply(Event::ItemStarted(message(
+                "long",
+                "Streamed words. ".repeat(600),
+            )));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // Scroll up partway into the long reply.
+        let over = cx.debug_bounds("conversation").unwrap().center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(200.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let view_top = cx.debug_bounds("conversation").unwrap().top();
+        let read = cx.debug_bounds("transcript-row-601").unwrap();
+        assert!(read.top() < view_top, "the reply starts above the view");
+        assert!(cx.debug_bounds("transcript-row-600").is_none());
+
+        // More of the reply streams in: the text being read stays where it is.
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(Event::ItemDelta {
+                item_id: "long".into(),
+                text: "More. ".repeat(50),
+            });
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("transcript-row-601").unwrap().top(),
+            read.top()
+        );
+
+        // An item above the view completes: still no jump.
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(Event::ItemCompleted(Item {
+                status: ItemStatus::Completed,
+                ..message("early", "Thought for a while. ".repeat(20))
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("transcript-row-601").unwrap().top(),
+            read.top()
+        );
+        assert!(cx.debug_bounds("transcript-row-600").is_none());
+    }
+
+    /// Opens a long session and returns its view once the history is shown.
+    fn long_session(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<Keystone>,
+        &mut gpui::VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 200);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 600)
+        });
+        (view, cx, dir)
+    }
+
+    fn at(item_ix: usize, offset: f32) -> ListOffset {
+        ListOffset {
+            item_ix,
+            offset_in_item: px(offset),
+        }
+    }
+
+    fn scroll_to(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, top: ListOffset) {
+        view.update(cx, |this, cx| {
+            this.transcripts[&1].scroll_to(top);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_reader_scrolled_into_a_row_that_shrinks_sees_the_next_row(cx: &mut gpui::TestAppContext) {
+        let (view, cx, _dir) = long_session(cx);
+        let item = |id: &str, kind: ItemKind, text: String| Item {
+            id: id.into(),
+            kind,
+            text,
+            status: ItemStatus::InProgress,
+        };
+        let long = || "Streamed words. ".repeat(600);
+        let update = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, event| {
+            view.update(cx, |this, cx| {
+                this.conversation(1).apply(event);
+                this.commit(1);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            conversation.apply(Event::ItemStarted(item(
+                "a",
+                ItemKind::AgentMessage,
+                long(),
+            )));
+            conversation.apply(Event::ItemStarted(item("r", ItemKind::Reasoning, long())));
+            conversation.apply(Event::ItemStarted(item(
+                "b",
+                ItemKind::AgentMessage,
+                long(),
+            )));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        scroll_to(&view, cx, at(600, 0.));
+        let content_top = cx.debug_bounds("transcript-row-600").unwrap().top();
+
+        // Reading 1000px into a reply that is then replaced by a short one.
+        scroll_to(&view, cx, at(600, 1000.));
+        update(
+            &view,
+            cx,
+            Event::ItemCompleted(Item {
+                status: ItemStatus::Completed,
+                ..item("a", ItemKind::AgentMessage, "Short.".into())
+            }),
+        );
+        assert_eq!(
+            cx.debug_bounds("transcript-row-601").unwrap().top(),
+            content_top,
+            "the next row starts at the top, not above it"
+        );
+
+        // Reading inside a reasoning summary that completes empty, so it is not shown.
+        scroll_to(&view, cx, at(601, 500.));
+        update(
+            &view,
+            cx,
+            Event::ItemCompleted(Item {
+                status: ItemStatus::Completed,
+                ..item("r", ItemKind::Reasoning, String::new())
+            }),
+        );
+        assert_eq!(
+            cx.debug_bounds("transcript-row-602").unwrap().top(),
+            content_top
+        );
+    }
+
+    /// Opens a long session in a window of the given width, with three long replies
+    /// streaming at its end, scrolled to the start of the first.
+    fn long_replies(
+        cx: &mut gpui::TestAppContext,
+        width: f32,
+    ) -> (
+        Entity<Keystone>,
+        &mut gpui::VisualTestContext,
+        tempfile::TempDir,
+        Pixels,
+    ) {
+        let (view, cx, dir) = long_session(cx);
+        cx.simulate_resize(size(px(width), px(700.)));
+        cx.run_until_parked();
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            for id in ["a", "b", "c"] {
+                conversation.apply(Event::ItemStarted(Item {
+                    id: id.into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Streamed words. ".repeat(600),
+                    status: ItemStatus::InProgress,
+                }));
+            }
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        scroll_to(&view, cx, at(600, 0.));
+        let content_top = cx.debug_bounds("transcript-row-600").unwrap().top();
+        (view, cx, dir, content_top)
+    }
+
+    #[gpui::test]
+    fn a_reader_scrolled_into_a_row_that_a_wider_window_shortens_sees_the_next_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx, _dir, content_top) = long_replies(cx, 700.);
+        let narrow = cx.debug_bounds("transcript-row-600").unwrap().size.height;
+        let offset = narrow * 0.8;
+        scroll_to(&view, cx, at(600, offset.into()));
+
+        // The reply wraps onto fewer lines, ending before the place being read.
+        cx.simulate_resize(size(px(1500.), px(700.)));
+        cx.run_until_parked();
+        let next = cx.debug_bounds("transcript-row-601").unwrap();
+        assert!(
+            next.size.height < offset,
+            "the replies are as long as each other"
+        );
+        assert_eq!(
+            next.top(),
+            content_top,
+            "the next row starts at the top, not above it"
+        );
+
+        // Following the bottom is unchanged by a resize.
+        view.update(cx, |this, cx| {
+            this.scroll_to_end(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(900.), px(700.)));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            let list = &this.transcripts[&1];
+            assert_eq!(list.logical_scroll_top().item_ix, list.item_count());
+        });
+    }
+
+    #[gpui::test]
+    fn a_reader_scrolled_into_a_row_that_a_narrower_window_lengthens_keeps_their_place(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx, _dir, content_top) = long_replies(cx, 1500.);
+        scroll_to(&view, cx, at(600, 1000.));
+
+        // The reply wraps onto more lines; the place being read is still inside it.
+        cx.simulate_resize(size(px(700.), px(700.)));
+        cx.run_until_parked();
+        let row = cx.debug_bounds("transcript-row-600").unwrap();
+        assert!(row.size.height > px(2000.));
+        assert_eq!(row.top(), content_top - px(1000.));
+    }
+
+    #[gpui::test]
+    fn a_reader_scrolled_into_the_status_keeps_their_place(cx: &mut gpui::TestAppContext) {
+        let (view, cx, _dir) = long_session(cx);
+        // A tall approval card in the status entry.
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            conversation.apply(Event::ApprovalRequested(keystone_agent::Approval {
+                request: keystone_agent::RequestId("1".into()),
+                item_id: None,
+                action: "cargo test".into(),
+                detail: Some("A long reason to run it. ".repeat(400)),
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        scroll_to(&view, cx, at(600, 300.));
+        let read = cx.debug_bounds("transcript-status").unwrap();
+        let view_top = cx.debug_bounds("conversation").unwrap().top();
+        assert!(read.top() < view_top, "scrolled into the card");
+
+        // A row arrives before the status entry: the card stays where it was read.
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(Event::ItemStarted(Item {
+                id: "m".into(),
+                kind: ItemKind::AgentMessage,
+                text: "Starting.".into(),
+                status: ItemStatus::InProgress,
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("transcript-status").unwrap().top(),
+            read.top()
+        );
+        assert!(cx.debug_bounds("transcript-row-600").is_none());
+    }
+
+    #[gpui::test]
+    fn a_message_sent_while_history_loads_is_saved_on_quit(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        // Selected, so session 1's history is not loaded until it is used below.
+        store.create(Provider::Codex, 1).unwrap();
+        let sessions = dir.path().join("sessions");
+        seed_long_session(&sessions, 1, 3);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        // Sent and quit before the loaded history is applied.
+        view.update(cx, |this, cx| {
+            assert!(!this.conversations.contains_key(&1));
+            assert!(this.conversation(1).is_loading());
+            this.conversation(1).push_local("Sent while loading");
+            this.commit(1);
+            this.flush_logs(cx);
+        });
+        let entries = keystone_agent::log::read(&sessions, 1).unwrap();
+        assert!(
+            matches!(entries.last(), Some(keystone_agent::log::Entry::Item { item, .. })
+                if item.text == "Sent while loading"),
+            "the message was saved: {:?}",
+            entries.last()
+        );
+    }
+
+    #[gpui::test]
+    fn closing_does_not_wait_for_a_history_read_that_never_returns(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        let sessions = dir.path().join("sessions");
+        seed_long_session(&sessions, 1, 3);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        // Session 1's history read never returns, as on a stalled network disk.
+        view.update(cx, |this, _| {
+            let read: keystone_agent::log::Reader = Arc::new(|dir, session| {
+                if session == 1 {
+                    loop {
+                        std::thread::park();
+                    }
+                }
+                keystone_agent::log::read(dir, session)
+            });
+            this.logs = Logs::with_reader(sessions.clone(), this.wake.clone(), read);
+            this.conversations.clear();
+            this.conversation(2);
+        });
+        wait_until(cx, &view, |view| !view.conversations[&2].is_loading());
+        let started = std::time::Instant::now();
+        view.update(cx, |this, cx| {
+            this.conversation(2).push_local("In another session");
+            this.commit(2);
+            assert!(this.conversation(1).is_loading());
+            this.conversation(1).push_local("Sent while loading");
+            this.commit(1);
+            this.flush_logs(cx);
+        });
+        assert!(
+            started.elapsed() < LOAD_WAIT + std::time::Duration::from_secs(3),
+            "closing waited {:?}",
+            started.elapsed()
+        );
+        let texts = |session| {
+            let mut restored = Conversation::loading();
+            restored.restore(Ok(keystone_agent::log::read(&sessions, session).unwrap()));
+            restored
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    Row::Item(item) => Some(item.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(2), ["In another session"]);
+        // The held message was saved, and still restores after the history.
+        let held = texts(1);
+        assert_eq!(held.first().map(String::as_str), Some("Question 0"));
+        assert_eq!(held.last().map(String::as_str), Some("Sent while loading"));
+        assert_eq!(held.len(), 3 * 3 + 1);
+    }
+
+    #[gpui::test]
+    fn a_save_failure_shows_in_the_conversation_until_saving_works(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        // A file where the sessions directory belongs makes every write fail.
+        let sessions = dir.path().join("sessions");
+        std::fs::write(&sessions, "").unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let turn = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |this, cx| {
+                let conversation = this.conversation(1);
+                conversation.push_local("hello");
+                conversation.apply(Event::TurnStarted);
+                this.commit(1);
+                cx.notify();
+            });
+        };
+        wait_until(cx, &view, |view| !view.conversations[&1].is_loading());
+        turn(&view, cx);
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].save_error.is_some()
+        });
+        assert!(cx.debug_bounds("transcript-status").is_some());
+        std::fs::remove_file(&sessions).unwrap();
+        turn(&view, cx);
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].save_error.is_none()
+        });
+        view.update(cx, |view, cx| view.flush_logs(cx));
+        assert!(
+            !keystone_agent::log::read(&sessions, 1).unwrap().is_empty(),
+            "written once saving works"
+        );
     }
 
     #[gpui::test]
@@ -2121,10 +2930,13 @@ mod tests {
         });
 
         // A fresh window reads the conversation back from the session's log.
+        view.update(cx, |view, cx| view.flush_logs(cx));
         let store = Store::open(&path).unwrap();
         let (restored, cx) =
             cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        cx.run_until_parked();
+        wait_until(cx, &restored, |view| {
+            view.conversations.get(&1).is_some_and(|c| !c.is_loading())
+        });
         restored.read_with(cx, |view, _| {
             let rows = &view.conversations[&1].rows;
             assert!(rows.contains(&Row::Decision { action: "echo scripted".into(), allowed: true }));
@@ -2235,6 +3047,91 @@ mod tests {
             let sidebar = this.session_sidebar.read(cx);
             assert!(sidebar.shows_time);
         });
+    }
+
+    #[gpui::test]
+    fn a_codex_that_fails_to_start_moves_the_session_to_needs_action(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        store.create(Provider::Codex, 2).unwrap();
+        store.select(1, 3).unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let missing = dir.path().join("no-such-codex");
+        view.update_in(cx, |this, window, cx| {
+            this.codex = Some(CodexConnection::new(Some(missing), "0", this.wake.clone()));
+            this.composer
+                .update(cx, |input, cx| input.set_value("hello".into(), cx));
+            this.send_message(window, cx);
+        });
+        cx.run_until_parked();
+        // The start fails on the connection's worker, after the send returned. Until
+        // then the turn is running.
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].error.is_some() && !view.conversations[&1].running
+        });
+        cx.run_until_parked();
+        let header = y(cx, "attention-section");
+        assert!(header < y(cx, "session-1") && y(cx, "session-1") < y(cx, "working-section"));
+        assert!(y(cx, "working-section") < y(cx, "session-2"));
+        view.read_with(cx, |this, _| {
+            let session = &this.store.workspace().sessions()[0];
+            assert_eq!(session.last_turn(), Some(keystone_core::LastTurn::Failed));
+            assert_eq!(session.attention(false, false), Some(Attention::Failed));
+        });
+    }
+
+    #[gpui::test]
+    fn an_approval_held_while_history_loads_needs_action_once_it_loads(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        // Selected, so session 1 loads only when the test asks for it.
+        store.create(Provider::Codex, 2).unwrap();
+        let sessions = dir.path().join("sessions");
+        seed_long_session(&sessions, 1, 3);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        // Session 1's history arrives only when the test releases it.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        view.update(cx, |this, cx| {
+            let read: keystone_agent::log::Reader = Arc::new(move |dir, session| {
+                if session == 1 {
+                    let _ = released.lock().unwrap().recv();
+                }
+                keystone_agent::log::read(dir, session)
+            });
+            this.logs = Logs::with_reader(sessions.clone(), this.wake.clone(), read);
+            this.conversations.clear();
+            this.conversation(2);
+            assert!(this.conversation(1).is_loading());
+            this.conversation(1)
+                .apply(Event::ApprovalRequested(keystone_agent::Approval {
+                    request: keystone_agent::RequestId("1".into()),
+                    item_id: None,
+                    action: "cargo test".into(),
+                    detail: None,
+                }));
+            this.refresh(cx);
+        });
+        cx.run_until_parked();
+        // Held with the history, as the approval card is.
+        assert!(y(cx, "working-section") < y(cx, "session-1"));
+
+        release.send(()).unwrap();
+        wait_until(cx, &view, |view| !view.conversations[&1].is_loading());
+        cx.run_until_parked();
+        view.read_with(cx, |this, _| {
+            assert_eq!(this.conversations[&1].approvals.len(), 1)
+        });
+        let header = y(cx, "attention-section");
+        assert!(header < y(cx, "session-1") && y(cx, "session-1") < y(cx, "working-section"));
     }
 
     #[gpui::test]
@@ -2397,29 +3294,261 @@ mod tests {
     }
 
     #[test]
-    fn only_the_users_stop_makes_an_interrupted_turn_a_normal_end() {
-        let ended = |status| Event::TurnCompleted {
+    fn only_a_turn_the_user_ended_is_interrupted_without_failing() {
+        let ended = |status, stopped| Event::TurnCompleted {
             status,
             error: None,
+            stopped,
         };
         assert_eq!(
-            turn_failed(&ended(TurnStatus::Completed), false),
+            turn_failed(&ended(TurnStatus::Completed, false)),
             Some(false)
         );
         assert_eq!(
-            turn_failed(&ended(TurnStatus::Interrupted), true),
+            turn_failed(&ended(TurnStatus::Interrupted, true)),
             Some(false)
         );
         assert_eq!(
-            turn_failed(&ended(TurnStatus::Interrupted), false),
+            turn_failed(&ended(TurnStatus::Interrupted, false)),
             Some(true)
         );
-        assert_eq!(turn_failed(&ended(TurnStatus::Failed), true), Some(true));
+        assert_eq!(turn_failed(&ended(TurnStatus::Failed, true)), Some(true));
         let failed = Event::Failed {
             message: "Codex exited".into(),
         };
-        assert_eq!(turn_failed(&failed, false), Some(true));
-        assert_eq!(turn_failed(&Event::TurnStarted, false), None);
+        assert_eq!(turn_failed(&failed), Some(true));
+        assert_eq!(turn_failed(&Event::TurnStarted), None);
+    }
+
+    /// A Codex driver with session 1's thread open, standing in for the app-server.
+    struct Codex {
+        driver: keystone_agent::codex::CodexDriver,
+        events: Vec<(u64, Event)>,
+    }
+
+    impl Codex {
+        const THREAD: &str = "thread";
+
+        fn open() -> Self {
+            use keystone_agent::codex::{CodexDriver, Outputs};
+            let mut out = Outputs::default();
+            let mut driver = CodexDriver::new("0", &mut out);
+            driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
+            driver.command(
+                Command::Open {
+                    session: 1,
+                    cwd: "/tmp".into(),
+                    resume: None,
+                },
+                &mut out,
+            );
+            let thread = format!(
+                r#"{{"id":2,"result":{{"thread":{{"id":"{}"}}}}}}"#,
+                Self::THREAD
+            );
+            driver.on_line(thread.as_bytes(), &mut out);
+            Self {
+                driver,
+                events: Vec::new(),
+            }
+        }
+
+        fn command(&mut self, command: Command) {
+            let mut out = keystone_agent::codex::Outputs::default();
+            self.driver.command(command, &mut out);
+            self.events.extend(out.events);
+        }
+
+        fn line(&mut self, line: String) {
+            let mut out = keystone_agent::codex::Outputs::default();
+            self.driver.on_line(line.as_bytes(), &mut out);
+            self.events.extend(out.events);
+        }
+
+        fn send(&mut self, turn: &str) {
+            self.command(Command::Send {
+                session: 1,
+                text: turn.into(),
+            });
+            self.line(format!(
+                r#"{{"method":"turn/started","params":{{"threadId":"{}","turn":{{"id":"{turn}"}}}}}}"#,
+                Self::THREAD
+            ));
+        }
+
+        fn end(&mut self, turn: &str, status: &str) {
+            self.line(format!(
+                r#"{{"method":"turn/completed","params":{{"threadId":"{}","turn":{{"id":"{turn}","status":"{status}"}}}}}}"#,
+                Self::THREAD
+            ));
+        }
+
+        fn stop(&mut self) {
+            self.command(Command::Interrupt { session: 1 });
+        }
+
+        /// Asks to run a command, offering `decisions`, and answers it.
+        fn ask(&mut self, request: u64, decisions: &[&str], allow: bool) {
+            self.line(format!(
+                r#"{{"id":{request},"method":"item/commandExecution/requestApproval","params":{{"threadId":"{}","itemId":"exec","command":"touch x","availableDecisions":{decisions:?}}}}}"#,
+                Self::THREAD
+            ));
+            self.command(Command::Answer {
+                session: 1,
+                request: keystone_agent::RequestId(request.to_string()),
+                allow,
+            });
+        }
+    }
+
+    /// Session 1 with three saved turns whose history loads only when `release` is
+    /// sent, and session 2 selected.
+    fn held_history(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        gpui::Entity<Keystone>,
+        &mut gpui::VisualTestContext,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        store.create(Provider::Codex, 2).unwrap();
+        let sessions = dir.path().join("sessions");
+        seed_long_session(&sessions, 1, 3);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        view.update(cx, |this, _| {
+            let read: keystone_agent::log::Reader = Arc::new(move |dir, session| {
+                if session == 1 {
+                    let _ = released.lock().unwrap().recv();
+                }
+                keystone_agent::log::read(dir, session)
+            });
+            this.logs = Logs::with_reader(sessions.clone(), this.wake.clone(), read);
+            this.conversations.clear();
+            this.conversation(2);
+            assert!(this.conversation(1).is_loading());
+        });
+        (dir, view, cx, release)
+    }
+
+    fn deliver(view: &gpui::Entity<Keystone>, cx: &mut gpui::VisualTestContext, codex: &mut Codex) {
+        let events = std::mem::take(&mut codex.events);
+        view.update(cx, |this, cx| this.receive(Vec::new(), events, cx));
+    }
+
+    fn load(
+        view: &gpui::Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+        release: &std::sync::mpsc::Sender<()>,
+    ) {
+        release.send(()).unwrap();
+        wait_until(cx, view, |view| !view.conversations[&1].is_loading());
+    }
+
+    fn last_turn(
+        view: &gpui::Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<keystone_core::LastTurn> {
+        view.read_with(cx, |this, _| {
+            this.store.workspace().sessions()[0].last_turn()
+        })
+    }
+
+    #[gpui::test]
+    fn a_stop_while_history_loads_does_not_excuse_the_next_turn(cx: &mut gpui::TestAppContext) {
+        let (_dir, view, cx, release) = held_history(cx);
+        let mut codex = Codex::open();
+        codex.send("a");
+        codex.stop();
+        codex.end("a", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(
+            last_turn(&view, cx),
+            Some(keystone_core::LastTurn::Finished)
+        );
+        // A second turn is sent before the history arrives, and is cut off by Codex.
+        codex.send("b");
+        codex.end("b", "interrupted");
+        deliver(&view, cx, &mut codex);
+        load(&view, cx, &release);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+    }
+
+    #[gpui::test]
+    fn a_stop_survives_history_replaying_an_earlier_turn(cx: &mut gpui::TestAppContext) {
+        let (_dir, view, cx, release) = held_history(cx);
+        let mut codex = Codex::open();
+        codex.send("a");
+        codex.end("a", "completed");
+        deliver(&view, cx, &mut codex);
+        codex.send("b");
+        codex.stop();
+        deliver(&view, cx, &mut codex);
+        // The history arrives and replays turn a's end before turn b's arrives.
+        load(&view, cx, &release);
+        codex.end("b", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(
+            last_turn(&view, cx),
+            Some(keystone_core::LastTurn::Finished)
+        );
+    }
+
+    #[gpui::test]
+    fn a_denial_excuses_an_interruption_only_when_it_ends_the_turn(cx: &mut gpui::TestAppContext) {
+        let (_dir, view, cx, release) = held_history(cx);
+        load(&view, cx, &release);
+        let mut codex = Codex::open();
+        // Denying with "decline" lets the turn go on; a later interruption is a failure,
+        // even after another request was allowed.
+        codex.send("a");
+        codex.ask(10, &["accept", "decline", "cancel"], false);
+        codex.ask(11, &["accept", "decline", "cancel"], true);
+        codex.end("a", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+        // With no "decline" offered, denying cancels the turn.
+        codex.send("b");
+        codex.ask(12, &["accept", "cancel"], false);
+        codex.end("b", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(
+            last_turn(&view, cx),
+            Some(keystone_core::LastTurn::Finished)
+        );
+        // A Stop of one turn and a denial in another stay with their own turns.
+        codex.send("c");
+        codex.stop();
+        codex.end("c", "interrupted");
+        codex.send("d");
+        codex.ask(13, &["accept", "decline"], false);
+        codex.end("d", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+    }
+
+    #[gpui::test]
+    fn a_late_stop_keeps_the_failure_it_arrived_after(cx: &mut gpui::TestAppContext) {
+        let (_dir, view, cx, release) = held_history(cx);
+        load(&view, cx, &release);
+        let mut codex = Codex::open();
+        codex.send("a");
+        codex.end("a", "failed");
+        deliver(&view, cx, &mut codex);
+        let rows = view.read_with(cx, |this, _| this.conversations[&1].rows.len());
+        // The user pressed Stop before the failure reached them.
+        codex.stop();
+        deliver(&view, cx, &mut codex);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+        assert_eq!(
+            view.read_with(cx, |this, _| this.conversations[&1].rows.len()),
+            rows
+        );
     }
 
     #[test]

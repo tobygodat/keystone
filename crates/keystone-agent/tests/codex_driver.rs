@@ -108,7 +108,8 @@ fn recorded_thread_produces_turns_items_and_an_approval() {
         Event::ItemStarted(item) if item.kind == ItemKind::AgentMessage && item.status == ItemStatus::InProgress)));
     assert!(events.contains(&Event::TurnCompleted {
         status: TurnStatus::Completed,
-        error: None
+        error: None,
+        stopped: false
     }));
 
     // The second turn asks to run a command. Codex offered no plain "decline", so a
@@ -146,7 +147,8 @@ fn recorded_thread_produces_turns_items_and_an_approval() {
         events.last(),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Interrupted,
-            error: None
+            error: None,
+            stopped: false
         })
     );
     assert!(!driver.is_running(SESSION));
@@ -412,7 +414,8 @@ fn a_stop_while_opening_ends_the_turn_and_drops_the_message() {
             SESSION,
             Event::TurnCompleted {
                 status: TurnStatus::Interrupted,
-                error: None
+                error: None,
+                stopped: true
             }
         )]
     );
@@ -454,7 +457,8 @@ fn unknown_server_requests_get_an_error_and_exit_fails_the_running_turn() {
             SESSION,
             Event::TurnCompleted {
                 status: TurnStatus::Failed,
-                error: Some("Codex stopped".into())
+                error: Some("Codex stopped".into()),
+                stopped: false
             }
         )]
     );
@@ -491,4 +495,174 @@ fn a_thread_that_cannot_resume_reports_it_instead_of_starting_fresh() {
     assert!(out.writes.is_empty(), "no fresh thread and no turn");
     assert!(matches!(&out.events[..], [(_, Event::Failed { message })]
         if message.contains("Could not resume") && message.contains("thread not found")));
+}
+
+fn interrupted(turn: &str) -> String {
+    format!(
+        r#"{{"method":"turn/completed","params":{{"threadId":"{THREAD}","turn":{{"id":"{turn}","status":"interrupted"}}}}}}"#
+    )
+}
+
+fn approval(request: u64, decisions: &str) -> String {
+    format!(
+        r#"{{"id":{request},"method":"item/commandExecution/requestApproval","params":{{"threadId":"{THREAD}","itemId":"exec","command":"touch x","availableDecisions":{decisions}}}}}"#
+    )
+}
+
+fn answer(driver: &mut CodexDriver, request: u64, allow: bool) -> Vec<String> {
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Answer {
+            session: SESSION,
+            request: RequestId(request.to_string()),
+            allow,
+        },
+        &mut out,
+    );
+    out.writes
+}
+
+/// Whether the user ended the turn, as the turn's end reports it.
+fn stopped(out: &Outputs) -> Option<bool> {
+    out.events.iter().find_map(|(_, e)| match e {
+        Event::TurnCompleted { stopped, .. } => Some(*stopped),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_stop_is_reported_by_its_own_turn_only() {
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "one".into(),
+        },
+        &mut out,
+    );
+    feed(&mut driver, &[started("a")]);
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert_eq!(stopped(&feed(&mut driver, &[interrupted("a")])), Some(true));
+
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "two".into(),
+        },
+        &mut out,
+    );
+    feed(&mut driver, &[started("b")]);
+    assert_eq!(
+        stopped(&feed(&mut driver, &[interrupted("b")])),
+        Some(false),
+        "an interruption the user did not ask for is not theirs"
+    );
+}
+
+#[test]
+fn a_stop_after_the_turn_already_ended_leaves_that_end_alone() {
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert!(
+        out.events.is_empty() && out.writes.is_empty(),
+        "nothing to stop"
+    );
+
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "one".into(),
+        },
+        &mut out,
+    );
+    feed(&mut driver, &[started("a")]);
+    let failed = format!(
+        r#"{{"method":"turn/completed","params":{{"threadId":"{THREAD}","turn":{{"id":"a","status":"failed","error":{{"message":"boom"}}}}}}}}"#
+    );
+    assert_eq!(stopped(&feed(&mut driver, &[failed])), Some(false));
+    // The user pressed Stop before the failure reached them.
+    let mut out = Outputs::default();
+    driver.command(Command::Interrupt { session: SESSION }, &mut out);
+    assert!(
+        out.events.is_empty() && out.writes.is_empty(),
+        "a second end would hide the failure"
+    );
+
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "two".into(),
+        },
+        &mut out,
+    );
+    feed(&mut driver, &[started("b")]);
+    assert_eq!(
+        stopped(&feed(&mut driver, &[interrupted("b")])),
+        Some(false)
+    );
+}
+
+#[test]
+fn only_a_denial_that_cancels_the_turn_ends_it_for_the_user() {
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "one".into(),
+        },
+        &mut out,
+    );
+    feed(&mut driver, &[started("a")]);
+
+    // Codex offers "decline": the turn goes on, so a later interruption is not the user's.
+    feed(
+        &mut driver,
+        &[approval(10, r#"["accept","decline","cancel"]"#)],
+    );
+    assert_eq!(
+        answer(&mut driver, 10, false),
+        [r#"{"id":10,"result":{"decision":"decline"}}"#]
+    );
+    feed(
+        &mut driver,
+        &[approval(11, r#"["accept","decline","cancel"]"#)],
+    );
+    answer(&mut driver, 11, true);
+    assert_eq!(
+        stopped(&feed(&mut driver, &[interrupted("a")])),
+        Some(false)
+    );
+
+    // No "decline" offered: denying cancels the turn, and its interruption is the user's.
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "two".into(),
+        },
+        &mut out,
+    );
+    feed(&mut driver, &[started("b")]);
+    feed(&mut driver, &[approval(12, r#"["accept","cancel"]"#)]);
+    assert_eq!(
+        answer(&mut driver, 12, false),
+        [r#"{"id":12,"result":{"decision":"cancel"}}"#]
+    );
+    assert_eq!(stopped(&feed(&mut driver, &[interrupted("b")])), Some(true));
+
+    // ...and that cancel does not carry over to the next turn.
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "three".into(),
+        },
+        &mut out,
+    );
+    feed(&mut driver, &[started("c")]);
+    assert_eq!(
+        stopped(&feed(&mut driver, &[interrupted("c")])),
+        Some(false)
+    );
 }

@@ -87,6 +87,9 @@ pub enum Event {
     TurnCompleted {
         status: TurnStatus,
         error: Option<String>,
+        /// The user ended this turn: with Stop, or with a denial the provider ends the
+        /// turn on. Its interruption is then not a failure.
+        stopped: bool,
     },
     /// A request failed outside any turn, such as starting the conversation.
     Failed {

@@ -75,3 +75,6 @@ Status is fixed in keystone-ui; GPUI itself is unchanged. Native screenshots sho
 
 Status is open with a workaround. On 2026-10-15, with Sway 1.12 nested in Hyprland 0.56.2, every driver `screenshot` call returned `unsupported SHM pixel format`. The pinned driver accepts only 8-bit ARGB, XRGB, ABGR, and XBGR buffers. Setting `render_bit_depth 8` on the nested output through `swaymsg` did not change the result. `grim` captured the same nested output successfully when pointed at the run's Wayland socket, so run screenshots through `grim` and keep using the driver for input. See the setup notes in the verification skill. The failed calls are recorded in `.audit/verify-20261015T165545-settings/actions.jsonl`.
 
+## KS-012. Driver wheel events reach no GPUI view
+
+Status is open. On 2026-10-16, with the nested Sway driver in headless mode, `input` scroll actions (`scroll_x` 0 and `scroll_y` of -5, -10, -120, and -1500, after a pointer move) moved neither the virtualized transcript nor the composer's multiline scroll, which predates that change. Clicks and typing worked in the same run. A GPUI test with a simulated `ScrollWheelEvent` scrolls the transcript, so the gap is in the driver's wheel path or GPUI's handling of the axis events it sends. Native wheel scrolling is unproven until this is resolved. The run is `.audit/verify-20261015T210533-412732`.

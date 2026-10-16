@@ -15,7 +15,7 @@ fn connect() -> (CodexConnection, Receiver<()>) {
         let _ = tx.send(());
     });
     let program = PathBuf::from(env!("CARGO_BIN_EXE_keystone-fake-codex"));
-    (CodexConnection::new(program, "0.0.0-test", wake), rx)
+    (CodexConnection::new(Some(program), "0.0.0-test", wake), rx)
 }
 
 /// Collects events until `done` matches one, waiting on wake-ups.
@@ -45,13 +45,11 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
         session: 1,
         cwd: "/tmp".into(),
         resume: None,
-    })
-    .unwrap();
+    });
     conn.command(Command::Send {
         session: 1,
         text: "hello".into(),
-    })
-    .unwrap();
+    });
     let events = until(&conn, &wake, completed);
     assert!(matches!(events[0], Event::ThreadReady { .. }));
     let reply = events.iter().find_map(|e| match e {
@@ -66,14 +64,12 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     conn.command(Command::Send {
         session: 1,
         text: "long".into(),
-    })
-    .unwrap();
+    });
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
     conn.command(Command::Send {
         session: 1,
         text: "change course".into(),
-    })
-    .unwrap();
+    });
     let events = until(&conn, &wake, completed);
     assert!(events.iter().any(|e| matches!(e,
         Event::ItemCompleted(item) if item.text == "Steered (test data): change course")));
@@ -82,17 +78,17 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     conn.command(Command::Send {
         session: 1,
         text: "another".into(),
-    })
-    .unwrap();
+    });
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
     assert!(conn.is_running(1));
-    conn.command(Command::Interrupt { session: 1 }).unwrap();
+    conn.command(Command::Interrupt { session: 1 });
     let events = until(&conn, &wake, completed);
     assert_eq!(
         events.last(),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Interrupted,
-            error: None
+            error: None,
+            stopped: true
         })
     );
 
@@ -100,8 +96,7 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     conn.command(Command::Send {
         session: 1,
         text: "please run it".into(),
-    })
-    .unwrap();
+    });
     let events = until(&conn, &wake, |e| matches!(e, Event::ApprovalRequested(_)));
     let Some(Event::ApprovalRequested(approval)) = events.last() else {
         unreachable!()
@@ -111,8 +106,7 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
         session: 1,
         request: approval.request.clone(),
         allow: true,
-    })
-    .unwrap();
+    });
     let events = until(&conn, &wake, completed);
     assert!(events.iter().any(|e| matches!(e,
         Event::ItemCompleted(item) if item.text == "scripted\n")));
@@ -126,13 +120,11 @@ fn two_sessions_share_one_process() {
             session,
             cwd: "/tmp".into(),
             resume: None,
-        })
-        .unwrap();
+        });
         conn.command(Command::Send {
             session,
             text: format!("session {session}"),
-        })
-        .unwrap();
+        });
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut done = Vec::new();
@@ -153,7 +145,7 @@ fn two_sessions_share_one_process() {
 #[test]
 fn dropping_the_connection_stops_codex() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    conn.send(1, "/tmp", None, "hello".into());
     until(&conn, &wake, |e| matches!(e, Event::ThreadReady { .. }));
     let pid = conn.pid().expect("app-server running");
     drop(conn);
@@ -174,7 +166,7 @@ fn dropping_the_connection_stops_codex() {
 #[test]
 fn after_a_crash_the_latest_thread_is_resumed_even_if_the_caller_has_none() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    conn.send(1, "/tmp", None, "hello".into());
     let events = until(&conn, &wake, completed);
     let Some(Event::ThreadReady { thread_id: first }) = events.first() else {
         panic!("expected a thread first, got {events:?}");
@@ -192,7 +184,7 @@ fn after_a_crash_the_latest_thread_is_resumed_even_if_the_caller_has_none() {
         conn.drain();
     }
     // The caller passes no saved thread, as if the ID never reached its storage.
-    conn.send(1, "/tmp", None, "again".into()).unwrap();
+    conn.send(1, "/tmp", None, "again".into());
     let events = until(&conn, &wake, completed);
     assert!(
         events.contains(&Event::ThreadReady {
@@ -200,4 +192,31 @@ fn after_a_crash_the_latest_thread_is_resumed_even_if_the_caller_has_none() {
         }),
         "expected a resume of {first}, got {events:?}"
     );
+}
+
+#[test]
+fn a_codex_that_cannot_start_fails_the_session_that_needed_it() {
+    let (tx, wake) = channel();
+    let conn = CodexConnection::new(
+        Some(PathBuf::from("/nonexistent/codex")),
+        "0.0.0-test",
+        Arc::new(move || {
+            let _ = tx.send(());
+        }),
+    );
+    conn.send(7, "/tmp", None, "hello".into());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let events = loop {
+        let events = conn.drain();
+        if !events.is_empty() {
+            break events;
+        }
+        assert!(wake.recv_timeout(deadline - Instant::now()).is_ok());
+    };
+    assert!(
+        matches!(&events[..], [(7, Event::Failed { message })]
+            if message.starts_with("Could not start Codex at /nonexistent/codex.")),
+        "got {events:?}"
+    );
+    assert!(conn.pid().is_none());
 }

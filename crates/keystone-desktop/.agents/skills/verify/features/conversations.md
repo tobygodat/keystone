@@ -33,10 +33,16 @@ Pass that as `start`'s `env`. Build it first with `cargo build -p keystone-agent
 - Steer: send a message, wait about 700 ms, type another, and press Ctrl+Enter. Stop: send a message, wait, and `click` `stop`.
 - Quit with Ctrl+Q, `launch`, `wait_for` `conversation`, and inspect the restored rows. `workspace` shows the session's `provider_thread`.
 
-Named elements: `send`, `stop`, `approval`, `approve`, `deny`, `turn-status`, `conversation`, `project`, `composer-field`.
+Named elements: `send`, `stop`, `approval`, `approve`, `deny`, `turn-status`, `conversation`, `project`, `composer-field`, `transcript-status`, and `transcript-row-N` for row N of the transcript. The transcript is virtualized, so `elements` lists only the rows in view; a row far from the bottom is absent until it is scrolled to.
+
+- Long sessions: create a Codex session, quit, write `sessions/<id>.jsonl` next to the run's `workspace.json` (the `state` path `start` returns), and `launch`. Logs without `seq` are the older format and must still open in file order.
+- Restore order: steer while a reply streams, quit, and relaunch. The steer must follow the reply it interrupted.
+- History that cannot be read: quit, `chmod 000` the session's log, and `launch`. The conversation shows a warning and no history. Restore the mode, send, quit, and relaunch: the new rows follow the history.
+- History that never arrives: quit with the session selected, replace its log with a FIFO (`mkfifo`) that nothing writes to, and `launch`. Other sessions still send and save. Ctrl+Q must close the window in about two seconds. Put the log back before relaunching.
 
 ## Not covered
 
 - Claude Code sessions, which show "not connected yet".
 - Approval modes; Keystone uses the user's own Codex approval settings.
 - Markdown rendering; replies show as plain text.
+- Wheel scrolling. Driver scroll actions reach no GPUI view (KS-012).

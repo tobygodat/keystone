@@ -1,6 +1,6 @@
 # Provider integration design
 
-Status: Codex is implemented as described, in `crates/keystone-agent` (2026-10-15). Claude Code is not built yet. The spike results below have been folded in.
+Status: Codex is implemented as described, in `crates/keystone-agent` (2026-10-15). Claude Code is not built yet. The spike results below have been folded in. Log IO, history loading, and provider startup run off the UI thread, and the transcript is virtualized (2026-10-16; see sections 3 and 10).
 
 Keystone drives the user's own installed `claude` and `codex` programs. This document says how, and where it deliberately differs from Zeron (MIT, Rust, studied at commit `3b2f780`) and T3 Code. Protocol facts were checked against Claude Code 2.1.300 and codex-cli 0.162.1 on 2026-10-15.
 
@@ -53,7 +53,7 @@ The model is a list of items per turn, each with a stable ID: `UserMessage`, `Ag
 
 A delta appends to the live item's text in place. It does not become a message on a channel, a journal line, or a copy. The reader thread updates the session's live turn under a short lock and sets a dirty flag. The UI thread checks the flag once per frame and re-renders only the live item. That limits UI work to the frame rate however fast tokens arrive. It also attacks the cause suspected in KS-005: a backlog of synchronous redraws.
 
-Completed items never change, so their layout can be cached. The transcript uses GPUI's virtualized `list`, so a long session costs only its visible rows.
+Completed items never change, so their layout can be cached. The transcript uses GPUI's virtualized `list` with bottom alignment, so a long session costs only its visible rows. The list has one entry per row plus a status entry (approval card, "Working…", errors) after the last row. The conversation reports which rows it added or changed, and only those are remeasured; the status entry is remeasured on every change. The list follows new rows while it is scrolled to the bottom. Once the user scrolls up, it keeps the row at the top of the view at the same offset, even while that row streams or a row above it changes. Sending a message or selecting a session returns to the bottom. Row content comes from one function, `transcript::row`, so a change to how rows look, such as Markdown, stays out of the list code.
 
 ### 3. Storage: the provider owns the conversation; Keystone keeps a neutral log
 
@@ -65,6 +65,10 @@ Why keep a log when the providers keep transcripts:
 - Showing history should not require starting a provider process.
 
 Provider transcripts are still the source of truth for the conversation itself. Resume uses the provider's session ID (`--resume` for Claude, `thread/resume` for Codex), never a replay of Keystone's log.
+
+**Order.** Each item, decision, and shown turn end carries `seq`, its place in the transcript as it was shown: the order in which its row first appeared. A restore sorts rows by it. Completion order is wrong for steering: a steer is shown, and logged, while the reply it interrupts is still streaming, and that reply is logged only when it completes. Logs written before `seq` existed have none; their rows keep file order, and rows written later are placed after them. Each placed entry also carries `run`, which identifies the run of Keystone that wrote it, and its `seq` counts from the first row that run added. A restore places each run after every row before it. So a run never needs the saved history to log in the right place: when the history cannot be read, or has not arrived when Keystone closes, what happens is still saved and later restores after the history.
+
+**Off the UI thread.** The desktop's conversation state does no IO. It collects entries in an outbox, and `log::Logs` writes them on one worker thread for all sessions, in the order they were queued, so a session's entries stay in order. Each history load reads on a thread of its own, so a read that never returns, such as from a FIFO or a stalled network disk, holds up neither writes nor other sessions' loads. A session's history is requested once, the first time it is needed, before anything is written for it, and arrives as a report; events and sent messages that arrive meanwhile wait and are applied after the history. If the read fails, the conversation goes on without the history and shows a warning for the rest of the session; what was sent meanwhile is shown and saved. A message sent meanwhile has already gone to the provider, so the turn shows as running, with Stop, at once. A write failure is reported to the conversation and shown until a later write succeeds; the next write reopens the file. Quitting and closing the window first wait up to two seconds for history still loading and apply it, so messages waiting on it are logged. A history that has not arrived by then is given up, which logs what was waiting on it; the read is left running and is not joined. Then they wait for every queued write, without a bound, so a disk that stalls writes still holds up quitting. `worker::Worker` is the general piece and does not know about Codex.
 
 On startup, a session whose log has no turn end is marked interrupted. When the user resumes it, Keystone reconciles: it asks Codex for items after the last logged one (`thread/items/list`) or reads the tail of Claude's transcript. That reconciliation tolerates format changes because it is best effort and only fills gaps.
 
@@ -78,6 +82,8 @@ The core runs one lifecycle per session: idle → running → (awaiting approval
 - **Claude:** the turn ends at `result`. A `result` with `origin.kind = "task-notification"` is a turn the agent started itself, shown as such.
 - **Codex:** the turn ends at `turn/completed`.
 - **Process exit:** `on_exit` closes any open turn as failed with the stderr tail.
+
+The driver also reports whether the user ended the turn: with Stop, or with a denial the provider ends the turn on. Codex's `decline` lets the turn go on and its `cancel` ends it; the driver sends `decline` when Codex offers it. Only the driver knows which turn an interrupt or a `cancel` reached, so it carries this on that turn's end (`stopped`), and the desktop counts an interrupted turn as a failure unless it was stopped. A Stop that drops messages Codex has not received yet ends that turn in the driver; a Stop that arrives after the turn ended does nothing, so it never replaces that turn's end. A crash or an explicit failure stays a failure.
 
 There are no watchdogs, heartbeats, or quiet-period timers. Zeron added and later retired several of these after "stuck working" incidents. Capabilities are data detected at startup (Claude's `system/init` capabilities, Codex's `initialize` response), not trait booleans.
 
@@ -122,6 +128,8 @@ A table lists the tested version range for each provider. Keystone reads `--vers
 A new `keystone-agent` crate holds items, drivers, the session lifecycle, the process host, and the log store. It does not depend on GPUI, so its tests compile without the graphics stack. The desktop crate only renders and sends commands.
 
 The process host uses one blocking reader thread per child process for stdout and one for stderr, plus a writer thread with a bounded queue. That is a few threads per active session and no async runtime in Keystone's own code. `async-process` and `smol` are already compiled through GPUI if that changes.
+
+The UI thread never blocks on a provider or the disk. Provider commands go through a `worker::Worker` per connection, in order, so finding the program and spawning it happen there. A start failure arrives as a `Failed` event for the session that needed it. The connection keeps its event inbox under its own lock, so draining events never waits for a process to start. A Claude connection can use the same worker and the same `log::Logs`.
 
 ## Spike results, 2026-10-15
 

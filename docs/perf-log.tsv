@@ -1,9 +1,12 @@
-date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_refresh_ms	note
+date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_refresh_ms	note	transcript_draw_ms	transcript_stream_ms
 2026-10-15T19:40:33Z	7bf19af	1.56	1.47	334	101.46		baseline: debug=1, deps unoptimized
 2026-10-15T19:46:26Z	7bf19af+dirty	1.04	1.13	264	8.22		deps opt-level=2 in dev profile
 2026-10-15T20:19:09Z	6e1c99b	0.56	0.64	262	4.78		baseline on this machine before sidebar caching
 2026-10-15T20:23:35Z	6e1c99b+dirty	0.55	0.64	262	0.42	0.50	sidebar as a cached GPUI view
 2026-10-15T20:36:20Z	0f46b08+dirty	0.55	0.64	264	0.46	0.54	light theme, density, and font settings
 2026-10-15T22:24:41Z	a9ecb75+dirty	0.59	0.68	268	0.48	0.56	Codex conversations (keystone-agent)
-2026-10-16T01:47:09Z	016fa9f	1.01	1.11	271	1.01	2.11	rev2 shell
-2026-10-16T02:59:07Z	4292e65+dirty	0.92	1.00	271	0.77	1.23	rev3 sidebar
+2026-10-16T00:59:17Z	03e41dd	0.60	0.70	269	0.48	0.58	baseline before transcript virtualization	115.14	
+2026-10-16T01:12:59Z	b9e91ec	0.60	0.73	270	0.48	0.57	virtualized transcript; logs and Codex startup on workers	0.67	0.59
+2026-10-16T01:47:09Z	016fa9f	1.01	1.11	271	1.01	2.11	rev2 shell		
+2026-10-16T02:59:07Z	4292e65+dirty	0.92	1.00	271	0.77	1.23	rev3 sidebar		
+2026-10-16T03:32:57Z	1e38881	0.63	0.73	271	0.53	0.73	merge main (Revision 2 shell) into codex-review-followups	0.66	0.59
