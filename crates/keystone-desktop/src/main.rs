@@ -825,8 +825,10 @@ impl Keystone {
             }
         };
         v_flex()
-            .w_full()
-            .max_w(px(CONTENT_WIDTH))
+            // Not `w_full().max_w(..)`: taffy sizes the field from a pass that measures the
+            // draft at the uncapped width, so a wrapped draft overflowed a one-row field.
+            .w(px(CONTENT_WIDTH))
+            .max_w_full()
             .flex_shrink_0()
             .bg(colors.composer)
             .border_1()
@@ -2244,6 +2246,89 @@ mod tests {
             Store::open(&path).unwrap().workspace().sessions()[0].attention(false, false),
             None
         );
+    }
+
+    /// Types a long single line into a Codex composer, clicks `row` (0-based) at its
+    /// left edge, presses `keys`, and types `mark`. Returns the composer's text.
+    fn mark_visual_row(
+        row: usize,
+        keys: &str,
+        mark: &str,
+        cx: &mut gpui::TestAppContext,
+    ) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let line = (0..60)
+            .map(|n| format!("w{n:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        click(cx, "composer-field");
+        cx.simulate_input(&line);
+        let field = cx.debug_bounds("composer-field").unwrap();
+        let point = field.origin + gpui::point(px(1.), px(20.) * row + px(10.));
+        cx.simulate_click(point, gpui::Modifiers::none());
+        if !keys.is_empty() {
+            cx.simulate_keystrokes(keys);
+        }
+        cx.simulate_input(mark);
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| view.composer.read(cx).value().to_owned())
+    }
+
+    #[gpui::test]
+    fn a_long_draft_wraps_and_the_composer_grows_to_its_cap(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let field = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("composer-field").unwrap();
+        let send = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("send").unwrap();
+        let (empty, toolbar) = (field(cx), send(cx));
+        assert_eq!(empty.size.height, px(44.));
+
+        let set = |text: String, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |this, cx| {
+                this.composer
+                    .update(cx, |input, cx| input.set_value(text, cx))
+            });
+            cx.run_until_parked();
+        };
+        set("word ".repeat(60), cx);
+        let wrapped = field(cx);
+        assert!(wrapped.size.height > px(44.) && wrapped.size.height < px(160.));
+        // The composer grows upward; its toolbar stays docked.
+        assert_eq!(wrapped.bottom(), empty.bottom());
+        assert_eq!(send(cx), toolbar);
+        assert_eq!(wrapped.size.width, empty.size.width);
+
+        // Eight rows at most, then the draft scrolls inside the field.
+        set("word ".repeat(600), cx);
+        assert_eq!(field(cx).size.height, px(160.));
+        assert_eq!(send(cx), toolbar);
+    }
+
+    #[gpui::test]
+    fn clicks_and_arrows_follow_wrapped_rows(cx: &mut gpui::TestAppContext) {
+        let words = |text: &str, mark: &str| {
+            let index = text.find(mark).unwrap();
+            // A wrapped row starts at a word, after the space the row above ended on.
+            assert!(index > 0, "{text}");
+            assert_eq!(&text[index - 1..index], " ", "{text}");
+            assert!(text[index + mark.len()..].starts_with('w'), "{text}");
+            text[..index].split(' ').count() - 1
+        };
+        let second = words(&mark_visual_row(1, "", "|", cx), "|");
+        let third = words(&mark_visual_row(1, "down", "|", cx), "|");
+        let back = words(&mark_visual_row(2, "up", "|", cx), "|");
+        assert!(second > 0 && third > second, "{second} {third}");
+        assert_eq!(back, second);
     }
 
     #[gpui::test]
