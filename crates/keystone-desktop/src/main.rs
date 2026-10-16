@@ -7,9 +7,9 @@ mod transcript;
 use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
-    AnyElement, AnyView, App, Application, AvailableSpace, Bounds, BoxShadow, Context, Corner,
-    Entity, FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset, ListState,
-    Pixels, Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
+    Anchor, AnyElement, AnyView, App, AvailableSpace, Bounds, BoxShadow, Context, Entity,
+    FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset, ListState, Pixels,
+    Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
     WindowOptions, canvas, div, list, point, prelude::*, px, size,
 };
 use keystone_agent::log::{Logs, Report};
@@ -443,7 +443,7 @@ impl Keystone {
     fn start(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
         self.create(provider, cx);
         if self.error.is_none() && self.store.workspace().selected().is_some() {
-            self.composer.focus_handle(cx).focus(window);
+            self.composer.focus_handle(cx).focus(window, cx);
         }
     }
 
@@ -594,7 +594,7 @@ impl Keystone {
                 .selected(self.new_menu)
                 .tooltip(Tooltip::text("New session")),
         )
-        .anchor(Corner::TopRight)
+        .anchor(Anchor::TopRight)
         .open(self.new_menu)
         .on_open_change(cx.listener(|this, open: &bool, _, cx| {
             this.new_menu = *open;
@@ -659,7 +659,7 @@ impl Keystone {
                 .selected(self.settings_menu)
                 .tooltip(Tooltip::text("Settings")),
         )
-        .anchor(Corner::BottomLeft)
+        .anchor(Anchor::BottomLeft)
         .open(self.settings_menu)
         .on_open_change(cx.listener(|this, open: &bool, _, cx| {
             this.settings_menu = *open;
@@ -739,7 +739,7 @@ impl Keystone {
                     .gap(px(14.))
                     .child(
                         h_flex()
-                            .flex_shrink()
+                            .flex_shrink(1.)
                             .min_w_0()
                             .gap(px(7.))
                             .child(
@@ -833,7 +833,7 @@ impl Keystone {
                 (
                     field
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.composer.focus_handle(cx).focus(window)
+                            this.composer.focus_handle(cx).focus(window, cx)
                         }))
                         .child(self.composer.clone()),
                     toolbar,
@@ -855,6 +855,7 @@ impl Keystone {
                 offset: point(px(0.), px(10.)),
                 blur_radius: px(30.),
                 spread_radius: px(0.),
+                inset: false,
             }])
             .pt(px(16.))
             .pl(px(18.))
@@ -925,7 +926,7 @@ impl Keystone {
                 .debug_selector(|| "approval-mode".into())
                 .tooltip(Tooltip::text(tooltip)),
         )
-        .anchor(Corner::BottomLeft)
+        .anchor(Anchor::BottomLeft)
         .open(self.approval_menu)
         .on_open_change(cx.listener(|this, open: &bool, _, cx| {
             this.approval_menu = *open;
@@ -957,7 +958,7 @@ impl Keystone {
         };
         let (id, current) = (session.id(), session.approval_mode());
         if mode == current {
-            self.composer.focus_handle(cx).focus(window);
+            self.composer.focus_handle(cx).focus(window, cx);
         } else if mode == ApprovalMode::FullAccess {
             self.confirm_full_access = Some((id, DialogFocus::new(window, cx)));
         } else {
@@ -972,7 +973,7 @@ impl Keystone {
         let provider = provider_name(self.provider(*id)?);
         let cancel = cx.listener(|this, _: &(), window, cx| {
             this.confirm_full_access = None;
-            this.composer.focus_handle(cx).focus(window);
+            this.composer.focus_handle(cx).focus(window, cx);
             cx.notify();
         });
         let confirm = cx.listener(|this, _: &(), window, cx| {
@@ -1018,7 +1019,7 @@ impl Keystone {
             }
             Err(error) => self.error = Some(format!("Approval mode not saved. {error}")),
         }
-        self.composer.focus_handle(cx).focus(window);
+        self.composer.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -1385,13 +1386,13 @@ impl Keystone {
         self.save_draft(cx);
         self.scroll_to_end(id);
         // Clicking Send moves focus off the composer; put it back for the next message.
-        self.composer.focus_handle(cx).focus(window);
+        self.composer.focus_handle(cx).focus(window, cx);
         // The session moves to Working and shows its new time.
         self.refresh(cx);
     }
 
     fn stop_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer.focus_handle(cx).focus(window);
+        self.composer.focus_handle(cx).focus(window, cx);
         let Some(id) = self.store.workspace().selected() else {
             return;
         };
@@ -1403,7 +1404,7 @@ impl Keystone {
 
     fn answer(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The buttons take focus from the composer; give it back for the next message.
-        self.composer.focus_handle(cx).focus(window);
+        self.composer.focus_handle(cx).focus(window, cx);
         let Some(id) = self.store.workspace().selected() else {
             return;
         };
@@ -1917,7 +1918,9 @@ impl SessionSidebar {
             let header = Self::header(section, rows.len(), open, app, cx);
             list = list
                 // Spare height sits above Settled, which keeps it at the bottom.
-                .when(section == Section::Settled, |d| d.child(div().flex_grow()))
+                .when(section == Section::Settled, |d| {
+                    d.child(div().flex_grow(1.))
+                })
                 .child(
                     v_flex()
                         .gap(px(2.))
@@ -2142,14 +2145,14 @@ impl Render for Keystone {
             )
             .on_action(cx.listener(|this, _: &ToggleSettle, _, cx| this.toggle_settle(cx)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
-                this.composer.focus_handle(cx).focus(window)
+                this.composer.focus_handle(cx).focus(window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &SendMessage, window, cx| this.send_message(window, cx)),
             )
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.sidebar = true;
-                this.search.focus_handle(cx).focus(window);
+                this.search.focus_handle(cx).focus(window, cx);
                 this.refresh(cx);
             }))
             .when(self.sidebar, |d| d.child(self.sidebar_column(cx)))
@@ -2179,6 +2182,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         assert!(cx.debug_bounds("welcome-heading").is_some());
         assert!(cx.debug_bounds("welcome-codex").is_some());
@@ -2222,6 +2226,7 @@ mod tests {
             store.create(provider, 1).unwrap();
         }
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         // A composer keystroke notifies only the root view. A session change also
         // invalidates the cached sidebar, so it rebuilds every row.
@@ -2239,7 +2244,7 @@ mod tests {
                 });
                 cx.update(|window, cx| {
                     let start = std::time::Instant::now();
-                    window.draw(cx).clear();
+                    window.draw(cx).clear(cx);
                     total += start.elapsed();
                 });
             }
@@ -2308,6 +2313,7 @@ mod tests {
         store.create(Provider::Codex, 1).unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 1000);
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         wait_until(cx, &view, |view| {
             view.conversations
@@ -2321,7 +2327,7 @@ mod tests {
             view.update(cx, |_, cx| cx.notify());
             cx.update(|window, cx| {
                 let start = std::time::Instant::now();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 total += start.elapsed();
             });
         }
@@ -2355,7 +2361,7 @@ mod tests {
             });
             cx.update(|window, cx| {
                 let start = std::time::Instant::now();
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
                 total += start.elapsed();
             });
         }
@@ -2374,6 +2380,7 @@ mod tests {
         store.create(Provider::Codex, 1).unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         wait_until(cx, &view, |view| {
             view.conversations
@@ -2453,6 +2460,7 @@ mod tests {
         store.create(Provider::Codex, 1).unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         wait_until(cx, &view, |view| {
             view.conversations
@@ -2536,6 +2544,7 @@ mod tests {
         store.create(Provider::Codex, 1).unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         wait_until(cx, &view, |view| {
             view.conversations
@@ -2768,6 +2777,7 @@ mod tests {
         let sessions = dir.path().join("sessions");
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         // Sent and quit before the loaded history is applied.
         view.update(cx, |this, cx| {
@@ -2795,6 +2805,7 @@ mod tests {
         let sessions = dir.path().join("sessions");
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         // Session 1's history read never returns, as on a stalled network disk.
         view.update(cx, |this, _| {
@@ -2854,6 +2865,7 @@ mod tests {
         let sessions = dir.path().join("sessions");
         std::fs::write(&sessions, "").unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let turn = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
             view.update(cx, |this, cx| {
@@ -2889,6 +2901,7 @@ mod tests {
         store.create(Provider::Claude, 1).unwrap();
         store.create(Provider::Codex, 1).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         // GPUI 0.2.2 keeps debug bounds for elements that are no longer drawn, so check
         // which row sits at the top of the list instead of which rows exist.
@@ -2900,14 +2913,14 @@ mod tests {
 
         // Typing in the composer reuses the cached sidebar.
         view.update_in(cx, |this, window, cx| {
-            this.composer.focus_handle(cx).focus(window)
+            this.composer.focus_handle(cx).focus(window, cx)
         });
         cx.simulate_input("Draft text");
         cx.run_until_parked();
         assert_eq!(second(cx), second_row);
 
         view.update_in(cx, |this, window, cx| {
-            this.search.focus_handle(cx).focus(window)
+            this.search.focus_handle(cx).focus(window, cx)
         });
         cx.simulate_input("codex");
         cx.run_until_parked();
@@ -2939,9 +2952,10 @@ mod tests {
         }
         store.select(1, 1).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         view.update_in(cx, |this, window, cx| {
-            this.focus.focus(window);
+            this.focus.focus(window, cx);
             this.settled_open = true;
             this.refresh(cx);
         });
@@ -2964,6 +2978,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let settings_height =
             |cx: &mut gpui::VisualTestContext| cx.debug_bounds("settings").unwrap().size.height;
@@ -3144,6 +3159,7 @@ mod tests {
             keystone_ui::init(cx);
             bind_keys(cx);
         });
+        cx.executor().allow_parking();
         cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx))
     }
 
@@ -3301,6 +3317,7 @@ mod tests {
         // send the user's own.
         view.update(cx, |view, cx| view.flush_logs(cx));
         let store = Store::open(&path).unwrap();
+        cx.executor().allow_parking();
         let (restored, cx) =
             cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         restored.update(cx, |view, _| {
@@ -3630,6 +3647,7 @@ mod tests {
             keystone_ui::init(cx);
             bind_keys(cx);
         });
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let bounds = cx.debug_bounds("welcome-codex").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -3673,7 +3691,7 @@ mod tests {
         let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert!(copied.unwrap().contains("**Approvals:**"));
         view.update_in(cx, |view, window, cx| {
-            view.composer.focus_handle(cx).focus(window)
+            view.composer.focus_handle(cx).focus(window, cx)
         });
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].provider_thread(),
@@ -3705,6 +3723,7 @@ mod tests {
         // A fresh window reads the conversation back from the session's log.
         view.update(cx, |view, cx| view.flush_logs(cx));
         let store = Store::open(&path).unwrap();
+        cx.executor().allow_parking();
         let (restored, cx) =
             cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         wait_until(cx, &restored, |view| {
@@ -3734,6 +3753,7 @@ mod tests {
             keystone_ui::init(cx);
             bind_keys(cx);
         });
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let bounds = cx.debug_bounds("welcome-claude").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -3815,6 +3835,7 @@ mod tests {
         // A fresh window reads the conversation back from the session's log.
         view.update(cx, |view, cx| view.flush_logs(cx));
         let store = Store::open(&path).unwrap();
+        cx.executor().allow_parking();
         let (restored, cx) =
             cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         wait_until(cx, &restored, |view| {
@@ -3843,6 +3864,7 @@ mod tests {
             keystone_ui::init(cx);
             bind_keys(cx);
         });
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         view.update(cx, |view, _| {
             view.claude = Some(ClaudeConnection::new(
@@ -3907,6 +3929,7 @@ mod tests {
             keystone_ui::init(cx);
             bind_keys(cx);
         });
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         view.update(cx, |view, _| {
             view.claude = Some(ClaudeConnection::new(Some(script), view.wake.clone()))
@@ -3953,6 +3976,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         for selector in ["new-session", "new-claude"] {
             let bounds = cx.debug_bounds(selector).expect("control rendered");
@@ -3984,6 +4008,7 @@ mod tests {
         store.create(Provider::Codex, 1).unwrap();
         store.set_settled(1, true).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         assert!(cx.debug_bounds("session-1").is_none());
         assert!(cx.debug_bounds("session-2").is_some());
@@ -4017,6 +4042,7 @@ mod tests {
         store.record_turn_end(5, true, 12).unwrap();
         store.select(4, 13).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         view.update(cx, |this, cx| {
             let mut live = Conversation::default();
@@ -4056,6 +4082,7 @@ mod tests {
         store.create(Provider::Codex, 2).unwrap();
         store.select(1, 3).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let missing = dir.path().join("no-such-codex");
         view.update_in(cx, |this, window, cx| {
@@ -4093,6 +4120,7 @@ mod tests {
         let sessions = dir.path().join("sessions");
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         // Session 1's history arrives only when the test releases it.
         let (release, released) = std::sync::mpsc::channel::<()>();
@@ -4140,6 +4168,7 @@ mod tests {
         store.create(Provider::Codex, 2).unwrap();
         store.record_turn_end(1, false, 3).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         assert!(y(cx, "session-1") < y(cx, "working-section"));
 
@@ -4169,6 +4198,7 @@ mod tests {
             keystone_ui::init(cx);
             bind_keys(cx);
         });
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let line = (0..60)
             .map(|n| format!("w{n:02}"))
@@ -4193,6 +4223,7 @@ mod tests {
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         store.create(Provider::Codex, 1).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let field = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("composer-field").unwrap();
         let send = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("send").unwrap();
@@ -4245,6 +4276,7 @@ mod tests {
         store.create(Provider::Claude, 1).unwrap();
         store.create(Provider::Codex, 1).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let saved = |path: &Path| {
             let store = Store::open(path).unwrap();
@@ -4275,6 +4307,7 @@ mod tests {
             keystone_ui::init(cx);
             bind_keys(cx);
         });
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let toggle_x =
             |cx: &mut gpui::VisualTestContext| cx.debug_bounds("sidebar-toggle").unwrap().origin.x;
@@ -4415,6 +4448,7 @@ mod tests {
         let sessions = dir.path().join("sessions");
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let (release, released) = std::sync::mpsc::channel::<()>();
         let released = std::sync::Mutex::new(released);
@@ -4707,6 +4741,7 @@ mod tests {
         store.select(1, 3).unwrap();
         let script = claude_script(dir.path(), "");
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         view.update(cx, |this, _| {
             this.claude = Some(ClaudeConnection::new(Some(script), this.wake.clone()))
@@ -4762,6 +4797,7 @@ mod tests {
         store.select(1, 3).unwrap();
         let script = claude_script(dir.path(), "KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1");
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         view.update(cx, |this, _| {
             this.claude = Some(ClaudeConnection::new(Some(script), this.wake.clone()))
@@ -4784,6 +4820,7 @@ mod tests {
         store.create(Provider::Claude, 2).unwrap();
         store.select(1, 3).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let missing = dir.path().join("no-such-claude");
         view.update(cx, |this, _| {
@@ -4818,6 +4855,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         for selector in [
             "new-session",
@@ -4861,6 +4899,7 @@ mod tests {
         store.create(Provider::Claude, 1).unwrap();
         store.create(Provider::Codex, 1).unwrap();
         cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         std::fs::rename(&state_dir, dir.path().join("backup")).unwrap();
         let bounds = cx.debug_bounds("composer-field").unwrap();
@@ -4956,7 +4995,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    Application::new()
+    gpui_platform::application()
         .with_assets(keystone_ui::Icons)
         .run(move |cx: &mut App| {
             keystone_ui::init(cx);
@@ -4977,7 +5016,7 @@ fn main() {
                             window,
                             cx,
                         );
-                        view.focus.focus(window);
+                        view.focus.focus(window, cx);
                         view
                     });
                     let weak = view.downgrade();

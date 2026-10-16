@@ -66,7 +66,7 @@ struct VisualRow {
 struct Paragraph {
     start: usize,
     top: Pixels,
-    line: WrappedLine,
+    line: std::rc::Rc<WrappedLine>,
 }
 
 #[derive(Clone)]
@@ -851,7 +851,11 @@ fn shape_layout(
                 top: line_height * rows.len(),
             });
         }
-        paragraphs.push(Paragraph { start, top, line });
+        paragraphs.push(Paragraph {
+            start,
+            top,
+            line: line.into(),
+        });
         start = end + 1;
     }
     TextLayout {
@@ -1121,7 +1125,7 @@ mod tests {
         cx.update(keystone_ui::init);
         let (input, cx) = cx.add_window_view(|window, cx| {
             let input = TextInput::new("Draft", InputMode::Multiline, cx);
-            window.focus(&input.focus_handle);
+            window.focus(&input.focus_handle, cx);
             input
         });
         for navigation in ["end", "shift-end"] {
@@ -1220,7 +1224,7 @@ mod tests {
         cx.update(keystone_ui::init);
         let (input, cx) = cx.add_window_view(|window, cx| {
             let input = TextInput::new("Search", InputMode::SingleLine, cx);
-            window.focus(&input.focus_handle);
+            window.focus(&input.focus_handle, cx);
             input
         });
         cx.simulate_input("query");

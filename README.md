@@ -35,7 +35,7 @@ The composer supports multiline drafts. Enter and Shift+Enter insert a new line.
 
 GPUI input tests do not establish native rendering correctness. Native window checks and live provider checks are separate.
 
-Cargo.lock pins libc 0.2.186 because GPUI 0.2.2 depends on xattr 0.2.3, which references the Linux ENOATTR constant removed in newer libc releases. Recheck this compatibility when upgrading GPUI.
+GPUI comes from gpui-pre 0.3.9, the Zed snapshot that gpui-kit 0.7.3 pins. It no longer depends on xattr, so libc is no longer pinned.
 
 The interface is built from the `keystone-ui` component library. Run `cargo run -p keystone-ui --example gallery` to see every component. See [the design system](docs/design-system.md).
 

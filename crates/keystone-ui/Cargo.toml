@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-gpui = "=0.2.2"
+gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev = "766668f691fa78b37460b1dda3b162e9bb80a3ad" }
 anyhow = "1"
 smallvec = "1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
@@ -15,4 +15,11 @@ ui-tests = ["gpui/test-support"]
 
 [[test]]
 name = "components"
+required-features = ["ui-tests"]
+
+[dev-dependencies]
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "766668f691fa78b37460b1dda3b162e9bb80a3ad", features = ["wayland", "x11"] }
+
+[[test]]
+name = "layout_timing"
 required-features = ["ui-tests"]

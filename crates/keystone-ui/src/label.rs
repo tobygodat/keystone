@@ -4,7 +4,7 @@ use crate::tokens::TextSize;
 use gpui::{
     App, AvailableSpace, Bounds, Element, ElementId, FontWeight, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, Pixels, RenderOnce, ShapedLine, SharedString, Style,
-    Styled, TextRun, Window, div, prelude::*, px, size,
+    Styled, TextAlign, TextRun, Window, div, prelude::*, px, size,
 };
 
 #[derive(IntoElement)]
@@ -176,7 +176,14 @@ impl Element for Truncated {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let _ = line.paint(bounds.origin, window.line_height(), window, cx);
+        let _ = line.paint(
+            bounds.origin,
+            window.line_height(),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 }
 

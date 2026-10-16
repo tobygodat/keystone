@@ -84,11 +84,13 @@ fn popover_opens_from_trigger_and_closes_on_any_outside_press(cx: &mut TestAppCo
     let open = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |h, _| h.open);
     click(cx, "trigger");
     assert!(open(cx));
+    let item = cx.debug_bounds("item").expect("item");
     click(cx, "item");
     click(cx, "outside");
     assert!(!open(cx));
-    // GPUI 0.2.2 keeps stale debug bounds, so this press lands where the closed item was.
-    click(cx, "item");
+    assert!(cx.debug_bounds("item").is_none());
+    cx.simulate_click(item.center(), Modifiers::none());
+    cx.run_until_parked();
     view.read_with(cx, |h, _| assert_eq!(h.clicks, vec!["item"]));
     click(cx, "trigger");
     assert!(open(cx));
@@ -166,7 +168,7 @@ impl Render for Confirm {
             cx.listener(move |this: &mut Confirm, _: &(), window, cx| {
                 this.answers.push(answer);
                 this.focus = None;
-                window.focus(&this.behind);
+                window.focus(&this.behind, cx);
                 cx.notify();
             })
         };

@@ -7,7 +7,7 @@ use crate::styled_ext::{StyledExt, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, TextSize, radius};
 use gpui::{
-    AnyElement, App, ClickEvent, Corner, ElementId, IntoElement, MouseButton, ParentElement,
+    Anchor, AnyElement, App, ClickEvent, ElementId, IntoElement, MouseButton, ParentElement,
     RenderOnce, SharedString, Styled, Window, anchored, deferred, div, prelude::*, px,
 };
 use smallvec::SmallVec;
@@ -23,7 +23,7 @@ pub struct PopoverMenu {
     id: ElementId,
     trigger: AnyElement,
     open: bool,
-    anchor: Corner,
+    anchor: Anchor,
     on_open_change: Option<OpenHandler>,
     children: SmallVec<[AnyElement; 4]>,
 }
@@ -34,7 +34,7 @@ impl PopoverMenu {
             id: id.into(),
             trigger: trigger.into_any_element(),
             open: false,
-            anchor: Corner::TopLeft,
+            anchor: Anchor::TopLeft,
             on_open_change: None,
             children: SmallVec::new(),
         }
@@ -47,7 +47,7 @@ impl PopoverMenu {
 
     /// The menu corner pinned to the matching trigger corner below it. `TopRight` opens
     /// down and aligns right edges.
-    pub fn anchor(mut self, anchor: Corner) -> Self {
+    pub fn anchor(mut self, anchor: Anchor) -> Self {
         self.anchor = anchor;
         self
     }
@@ -94,14 +94,18 @@ impl RenderOnce for PopoverMenu {
                 .children(self.children);
             let pin = div().absolute().size_0();
             let pin = match self.anchor {
-                Corner::TopLeft => pin.bottom_0().left_0(),
-                Corner::TopRight => pin.bottom_0().right_0(),
-                Corner::BottomLeft => pin.top_0().left_0(),
-                Corner::BottomRight => pin.top_0().right_0(),
+                Anchor::TopLeft | Anchor::TopCenter | Anchor::LeftCenter => pin.bottom_0().left_0(),
+                Anchor::TopRight | Anchor::RightCenter => pin.bottom_0().right_0(),
+                Anchor::BottomLeft | Anchor::BottomCenter => pin.top_0().left_0(),
+                Anchor::BottomRight => pin.top_0().right_0(),
             };
             let gap = match self.anchor {
-                Corner::TopLeft | Corner::TopRight => div().pt(px(4.)),
-                Corner::BottomLeft | Corner::BottomRight => div().pb(px(4.)),
+                Anchor::TopLeft
+                | Anchor::TopRight
+                | Anchor::TopCenter
+                | Anchor::LeftCenter
+                | Anchor::RightCenter => div().pt(px(4.)),
+                Anchor::BottomLeft | Anchor::BottomRight | Anchor::BottomCenter => div().pb(px(4.)),
             };
             pin.child(
                 deferred(

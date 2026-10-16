@@ -28,7 +28,7 @@ impl DialogFocus {
             cancel: cx.focus_handle(),
             confirm: cx.focus_handle(),
         };
-        window.focus(&focus.cancel);
+        window.focus(&focus.cancel, cx);
         focus
     }
 }
@@ -116,8 +116,8 @@ impl RenderOnce for ConfirmDialog {
                 match event.keystroke.key.as_str() {
                     "escape" => on_cancel(window, cx),
                     // Two buttons, so Tab and Shift+Tab both move to the other one.
-                    "tab" if confirm_focus.is_focused(window) => window.focus(&cancel_focus),
-                    "tab" => window.focus(&confirm_focus),
+                    "tab" if confirm_focus.is_focused(window) => window.focus(&cancel_focus, cx),
+                    "tab" => window.focus(&confirm_focus, cx),
                     _ => return,
                 }
                 cx.stop_propagation();

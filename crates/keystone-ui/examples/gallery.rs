@@ -2,8 +2,8 @@
 //! Run with `cargo run -p keystone-ui --example gallery`.
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, Corner, IntoElement, Render, SharedString,
-    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    Anchor, AnyElement, App, Bounds, Context, IntoElement, Render, SharedString, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use keystone_ui::prelude::*;
 use keystone_ui::{Appearance, Density, Fonts, Theme, set_theme};
@@ -179,7 +179,7 @@ impl Render for Gallery {
                 .selected(self.menu_open),
         )
         .open(self.menu_open)
-        .anchor(Corner::TopLeft)
+        .anchor(Anchor::TopLeft)
         .on_open_change(cx.listener(|this, open: &bool, _, cx| {
             this.menu_open = *open;
             cx.notify();
@@ -313,7 +313,7 @@ impl Render for Gallery {
 }
 
 fn main() {
-    Application::new()
+    gpui_platform::application()
         .with_assets(keystone_ui::Icons)
         .run(|cx: &mut App| {
             keystone_ui::init(cx);
