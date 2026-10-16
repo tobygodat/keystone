@@ -23,7 +23,7 @@ Status is partially resolved. The composer accepts multiline drafts and normaliz
 
 Status is closed. It no longer reproduces on the current build. Native synthetic typing at 10 ms per character used to overwhelm the debug window and end with process exit -9. Debugger samples showed font shaping, painting, and layout in GPUI's synchronous key-event redraw path. The same long-input flow passed with 100 ms per character. This supported a rendering backlog, not a proven single-function deadlock. Explicit Inter and selective rendering-dependency optimization did not make the rapid-input check pass, and that speculative optimization profile was removed. Evidence is retained in `.audit/evidence/visual-debug/`.
 
-On 2026-10-15 the 10 ms check passed once per build on Hyprland 0.56.2, with dependencies built at `opt-level = 2`. It passed both before and after the sidebar became a cached view. Later that day it was repeated 27 times at 10 ms per character, and every run passed:
+On 2026-10-15 the 10 ms check passed once per build on Hyprland 0.56.2, with dependencies built at `opt-level = 2`. It passed both before and after the sidebar became a cached view. Later that day it was repeated 27 times at 10 ms per character, and every run passed. Those runs checked that each quit ended the process, not how it exited, and set no limit on how long the save could take:
 
 | Desktop | Script | Draft typed at 10 ms | Runs passed |
 | --- | --- | --- | --- |
@@ -33,6 +33,15 @@ On 2026-10-15 the 10 ms check passed once per build on Hyprland 0.56.2, with dep
 | Hyprland 0.56.2 | `scripts/native-smoke.py`, `KEYSTONE_LONG_REPEAT=24` | 1,056-character long tail | 5 of 5 |
 
 Every run persisted the exact draft and showed it in the window. In the headless runs, the draft was saved 0.0 to 0.3 s after `wtype` exited. The app saves 250 ms after the last edit, so none of those runs had a key backlog. An earlier headless batch had 4 setup failures that happened before typing. Those were a click race in the driver, now fixed, not stalls. The evidence is in `.audit/native-stress-*` and `.audit/ks005-hyprland-20261015T211041/`, on this machine only.
+
+Review found both gaps. A crash during quit counted as a graceful exit, and a draft saved 40 s late still passed. The verification server now launches the app under a small parent that records its exit code and keeps its stderr. `native-stress.py` requires exit code 0 from both quits. It fails KS-005 if the draft is saved more than 1 s after `wtype` exits, set by `--max-persist-lag`. That limit is four times the 250 ms save delay and over three times the slowest save seen. It still fails a backlog of about 65 keys at 10 ms. Probes that killed the app with SIGKILL right after Ctrl+Q, or set the limit below the measured lag, now fail. The stricter script was then rerun on headless Sway 1.12:
+
+| Batch | Runs passed | Quits with exit code 0 | Save after last key |
+| --- | --- | --- | --- |
+| 1,093 characters at 10 ms | 10 of 10 | 20 of 20 | 0.1 to 0.3 s |
+| Same, before app stderr was kept | 10 of 10 | 20 of 20 | 0.1 to 0.2 s |
+
+One run in an earlier `--no-prime` batch (see KS-009) typed the whole draft but could not save it. The app showed `Disk quota exceeded (os error 122)` for its state file under `/tmp`, a user-quota tmpfs that other builds had filled at the time. The script correctly reported that run as failed. It was an environment failure, not a stall.
 
 The redraw path remains synchronous per key event, so this shows the current build keeps up at this rate, not that the old cause is gone. Rerun `python3 scripts/native-stress.py --runs 10` after changes to the composer, text layout, or the dependency profile. If the stall returns, reopen this issue.
 
@@ -54,7 +63,7 @@ Status is resolved for verification. The underlying GPUI bug remains. A nested S
 
 The cause is in GPUI's Wayland keyboard handler (`gpui-0.2.2/src/platform/linux/wayland/client.rs`). It unwraps its keymap state on every modifiers event, but that state exists only after an XKB keymap event. When `wtype` exits, Sway destroys its virtual keyboard. That keyboard was the seat's active one, so the seat is left with none, though it still advertises a keyboard. A client that binds the keyboard then gets no keymap event at all. Gaining focus sends it `enter` and `modifiers`, and GPUI panics. A `WAYLAND_DEBUG=1` trace in `.audit/ks009-wayland-debug/20261015T211427/` shows exactly that sequence. After a driver key event, the same launch first receives `keymap(xkb_v1)` and runs normally. The driver's own virtual keyboard becomes the seat's again only once it sends a key. Upstream tracks the same panic as zed-industries/zed#64660.
 
-On 2026-10-15, relaunching after a `wtype` Ctrl+Q without priming reproduced the panic at `client.rs:1267` in 4 of 4 runs (`scripts/native-stress.py --no-prime`). The fix stays out of GPUI. The verification server's `launch` now sends F24 through the driver's keyboard before every start. That reselects a keyboard with a real keymap. With that step, 31 of 31 runs relaunched after `wtype` and kept running. A guard inside the app is not possible, because the panic happens in GPUI's event dispatch before any app code runs. A Linux user on a Wayland seat with no keyboard can still hit this until GPUI is upgraded or patched.
+On 2026-10-15, relaunching after a `wtype` Ctrl+Q without priming reproduced the panic at `client.rs:1267` in 4 of 4 runs (`scripts/native-stress.py --no-prime`). With exit codes recorded, a later unprimed batch failed 3 of 3 runs. Each relaunch exited with code 101 and the panic at `client.rs:1267:64` in its `app-02.stderr.log`, after a first quit with exit code 0. A separate unprimed batch had 2 more such panics and the quota failure noted under KS-005. The fix stays out of GPUI. The verification server's `launch` now sends F24 through the driver's keyboard before every start. That reselects a keyboard with a real keymap. With that step, 31 of 31 runs relaunched after `wtype` and kept running. A further 20 of 20 primed runs did so after the exit code checks were added, and every quit exited with code 0. A guard inside the app is not possible, because the panic happens in GPUI's event dispatch before any app code runs. A Linux user on a Wayland seat with no keyboard can still hit this until GPUI is upgraded or patched.
 
 ## KS-010. GPUI 0.2.2 text ellipsis
 
