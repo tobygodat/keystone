@@ -29,7 +29,7 @@ A successful `start` proves only process creation. Run `doctor`, then `screensho
 
 Require `session_status` to report a running desktop, `windows_list` to contain the launched Keystone PID, and `processes` to show `matches_launch:true` for the live process. Require `binary_unchanged:true`. After restart, older tracked PIDs may be exited. At least the newest PID must be live. Doctor only reads state.
 
-If the window is absent, inspect `driver.stderr.log` in the evidence directory, capture the desktop, and report the concrete startup failure. If the binary changed after launch, quit the app and relaunch before claiming verification of the new build.
+If the window is absent, inspect the evidence directory, capture the desktop, and report the concrete startup failure. Each launch keeps the app's stderr, where a panic goes, in `app-NN.stderr.log`. Its exit code, or the signal that ended it, goes in `exit-NN.json`, and `doctor` reports it for exited PIDs. `driver.stderr.log` holds computer-use-mcp's own output. If the binary changed after launch, quit the app and relaunch before claiming verification of the new build.
 
 ## Drive
 
@@ -52,7 +52,7 @@ Prefer names and waits over coordinates and sleeps:
 
 A named click proves where the input went, not what it did. Confirm each step through the visible result and the saved state. Re-observe after state changes rather than batching across them. The feature map lists mouse and keyboard entry points; proving one does not prove the others.
 
-To restart, press Ctrl+Q through `input`, wait until `windows_list` is empty and the tracked PID has exited, then call `launch`. Launch reuses the run's state file. Run `doctor` again and inspect the restored UI. Never launch twice against a running instance.
+To restart, press Ctrl+Q through `input`, wait until `windows_list` is empty and the tracked PID has exited, then call `launch`. A graceful quit has exit code 0 in `doctor`; a crash during quit also removes the window. Launch reuses the run's state file. Run `doctor` again and inspect the restored UI. Never launch twice against a running instance.
 
 ## Evidence
 
@@ -72,6 +72,6 @@ Require the `stop` result to have an empty `errors` list and `scratch_retained:n
 
 ## Helpers
 
-`python3 scripts/native-stress.py --runs 10` repeats the KS-005 typing stress on fresh headless desktops. Each run types a 1,093-character draft with `wtype -d 10` on the nested socket, quits through `wtype`, and relaunches, which also checks KS-009. `--delay-ms` and `--repeat` change the rate and length. `--no-prime` skips the pre-launch key event and should crash on relaunch. Results go to `.audit/native-stress-*/summary.json`. Pass `--driver` as for the server.
+`python3 scripts/native-stress.py --runs 10` repeats the KS-005 typing stress on fresh headless desktops. Each run types a 1,093-character draft with `wtype -d 10` on the nested socket, quits through `wtype`, and relaunches, which also checks KS-009. Both quits must exit with code 0. The draft must be saved within `--max-persist-lag` seconds of the last key, 1 s by default. `--delay-ms` and `--repeat` change the rate and length. `--no-prime` skips the pre-launch key event and should crash on relaunch. Results go to `.audit/native-stress-*/summary.json`. Pass `--driver` as for the server.
 
 `scripts/native-smoke.py` remains an alternate foreground Hyprland keyboard regression test. Run `python scripts/native-smoke.py` only when foreground desktop control is intended. It does not replace mouse-entry or nested-desktop proof. Run `bash scripts/check.sh ui` for simulated GPUI input tests, but never report those as native visual verification.

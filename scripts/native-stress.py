@@ -7,7 +7,8 @@ per-character delay against that desktop's Wayland socket. It then quits with
 `wtype` Ctrl+Q, so the temporary virtual keyboard is the last one the
 compositor saw, and relaunches. That is the ordering that crashed GPUI in
 KS-009. `--no-prime` skips the driver's pre-launch keyboard event to show the
-crash. Evidence goes to .audit/native-stress-*/run-NN/ and a summary.json.
+crash. Every quit must end with exit code 0, and the draft must be saved
+within --max-persist-lag of the last key. Evidence goes to .audit/native-stress-*/run-NN/ and a summary.json.
 """
 import argparse
 import importlib.util
@@ -82,16 +83,32 @@ class Stress:
     def check(self, name):
         self.checks.append(name)
 
+    def ended(self, pid):
+        status = self.run.exit_status(pid)
+        if status is None:
+            return 'no exit status recorded'
+        if status['signal']:
+            return f'killed by {status["signal"]}'
+        return f'exit code {status["returncode"]}'
+
+    def quit_gracefully(self, label, pid):
+        status = wait(label, lambda: self.run.exit_status(pid), 20)
+        if status['returncode'] != 0:
+            raise RuntimeError(f'{label}: app PID {pid} {self.ended(pid)}; '
+                               f'see {self.run.app_logs[pid].name}')
+
     def launched(self, label):
         pid = self.app()
         try:
             wait(f'{label} window', lambda: not alive(pid) or self.window(), 20)
             if not alive(pid):
-                raise RuntimeError(f'{label}: app PID {pid} exited before its window appeared')
+                raise RuntimeError(f'{label}: app PID {pid} {self.ended(pid)} before its '
+                                   f'window appeared; see {self.run.app_logs[pid].name}')
             self.run.wait_for('composer-field', True, 20000)
         except Exception:
             if not alive(pid):
-                raise RuntimeError(f'{label}: app PID {pid} exited; see driver.stderr.log')
+                raise RuntimeError(f'{label}: app PID {pid} {self.ended(pid)}; '
+                                   f'see {self.run.app_logs[pid].name}')
             raise
         self.check(f'{label}: window shown by PID {pid}')
 
@@ -116,7 +133,8 @@ class Stress:
         while typing.poll() is None:
             if not alive(self.app()):
                 typing.kill()
-                raise RuntimeError(f'App exited while typing ({time.monotonic() - began:.1f} s in)')
+                raise RuntimeError(f'App {self.ended(self.app())} while typing '
+                                   f'({time.monotonic() - began:.1f} s in)')
             if time.monotonic() - began > len(text) * self.args.delay_ms / 1000 * 4 + 60:
                 typing.kill()
                 raise TimeoutError('wtype did not finish')
@@ -128,23 +146,27 @@ class Stress:
         wait('typed draft persisted', lambda: not alive(self.app()) or self.draft() == text,
              self.args.settle_timeout)
         if not alive(self.app()):
-            raise RuntimeError('App exited after typing')
+            raise RuntimeError(f'App {self.ended(self.app())} after typing')
         # The app saves 250 ms after the last edit, so a key backlog shows here.
-        result['persist_lag_s'] = round(time.monotonic() - typed, 2)
-        self.check(f'{len(text)} characters persisted exactly')
+        lag = result['persist_lag_s'] = round(time.monotonic() - typed, 2)
+        if lag > self.args.max_persist_lag:
+            raise RuntimeError(f'KS-005: draft saved {lag} s after the last key, over the '
+                               f'{self.args.max_persist_lag} s limit')
+        self.check(f'{len(text)} characters persisted exactly, {lag} s after the last key')
         self.grim('02-typed')
 
         # KS-009: quit through the temporary virtual keyboard, then relaunch.
         pid = self.app()
         self.wtype('-M', 'ctrl', '-k', 'q', '-m', 'ctrl')
-        wait('graceful quit', lambda: not alive(pid), 20)
+        self.quit_gracefully('quit through wtype', pid)
         wait('empty window list', lambda: not self.window(), 10)
-        self.check('Ctrl+Q through wtype quit the app')
+        self.check('Ctrl+Q through wtype quit the app with exit code 0')
         self.run.launch()
         self.launched('relaunch after wtype')
         time.sleep(1)
         if not alive(self.app()):
-            raise RuntimeError('Relaunched app exited within a second of its window')
+            raise RuntimeError(f'Relaunched app {self.ended(self.app())} within a second '
+                               'of its window')
         if self.draft() != text:
             raise RuntimeError('Draft changed across restart')
         self.check('Relaunch after wtype kept running with the draft')
@@ -152,8 +174,8 @@ class Stress:
 
         pid = self.app()
         self.run.call('input', {'actions': [{'action': 'keypress', 'keys': ['ctrl', 'q']}]})
-        wait('second graceful quit', lambda: not alive(pid), 20)
-        self.check('Ctrl+Q through the driver quit the app')
+        self.quit_gracefully('quit through the driver', pid)
+        self.check('Ctrl+Q through the driver quit the app with exit code 0')
 
     def __call__(self):
         result = {'status': 'failed', 'delay_ms': self.args.delay_ms, 'prime': not self.args.no_prime,
@@ -171,6 +193,9 @@ class Stress:
                 pass
         finally:
             result['checks'] = self.checks
+            # Read before stop, which tears down whatever is still running.
+            result['exits'] = [{'pid': pid, **(self.run.exit_status(pid) or {'running': True})}
+                               for pid in self.run.app_pids]
             try:
                 result['cleanup'] = self.run.stop()
             except Exception as error:
@@ -187,7 +212,12 @@ def main():
     parser.add_argument('--repeat', type=int, default=24,
                         help='Sentences appended to the draft; 6 matches native-smoke.py')
     parser.add_argument('--settle-timeout', type=float, default=60,
-                        help='Seconds the typed draft may take to persist after wtype exits')
+                        help='Seconds to wait for the typed draft to persist after wtype exits, '
+                             'so a slow run still records its lag')
+    # The app saves 250 ms after the last edit and headless runs saved within
+    # 0.3 s. One second still fails a backlog of about 65 keys at 10 ms each.
+    parser.add_argument('--max-persist-lag', type=float, default=1.0,
+                        help='Seconds after wtype exits by which the draft must be saved (KS-005)')
     parser.add_argument('--width', type=int, default=1280)
     parser.add_argument('--height', type=int, default=900)
     parser.add_argument('--no-prime', action='store_true',
