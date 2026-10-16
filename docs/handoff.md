@@ -29,7 +29,7 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 
 - **Licensing.** Zed's `ui`, `theme`, and `component` crates are GPL-3.0-or-later. No Zed code was copied, only patterns. Zeron (`github.com/zeronsh/zeron`) is MIT, and only design values were adapted from it. Keep it that way unless the project accepts the GPL.
 - **GPUI version.** GPUI stays pinned at crates.io `=0.2.2`, the latest published. Zed and Zeron run newer GPUI, and Zeron uses a fork with blur and edge-fade features. Their components need porting, not copying.
-- **Ellipsis workaround.** `Label::truncate` clips without an ellipsis. GPUI 0.2.2 caches the first measured size of non-wrapping text, so `text_ellipsis` rendered titles as a bare "...". This is logged as KS-010. Recheck it on a GPUI upgrade.
+- **Ellipsis workaround.** GPUI 0.2.2 caches the first measured size of non-wrapping text, so `text_ellipsis` rendered titles as a bare "..." (KS-010). `Label::truncate` therefore measures and cuts the text itself, ending it with "…". Recheck `text_ellipsis` on a GPUI upgrade.
 - **Popover open and close.** `PopoverMenu` opens on mouse down and closes on any press outside the card. That includes the trigger itself, so a click-based toggle would reopen the menu. The caller owns the `open` state.
 
 ## Verification notes
@@ -46,10 +46,10 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 ## Open work, in priority order
 
 0. **Providers.** Codex works end to end (`crates/keystone-agent`, `docs/design/providers.md`). Next: the Claude Code driver against the same item model; an approval-mode control per session; Markdown rendering of replies. The Codex review follow-ups are done (2026-10-16): session logs and history loading run on a worker (`log::Logs`), Codex is found and started on a worker, a restored transcript keeps the order it was shown in (`seq` in the log), and the transcript is a virtualized GPUI `list`. Known limits: theme, density, or font changes leave the cached heights of off-screen rows stale until they scroll into view, which can make the scroll extent briefly inaccurate. Native wheel scrolling is unproven because the driver's wheel events reach no GPUI view (KS-012); the GPUI test covers the wheel.
-1. **KS-005 confirmation.** The sidebar is now a cached view (see `docs/performance.md`). The 10 ms native typing check passed on 2026-10-15 both before and after that change, so the dependency optimization is the more likely fix. Repeat it several times before closing KS-005.
+1. **Stability.** KS-005 is closed. The 10 ms typing check passed 27 times on headless Sway and Hyprland, including a 2,677-character draft. Rerun `python3 scripts/native-stress.py --runs 10` after composer or text-layout changes. KS-009 is fixed in the verification server: `launch` primes the driver keyboard first. The GPUI bug itself remains (zed-industries/zed#64660), so recheck it on a GPUI upgrade.
 2. **Appearance follow-ups.** The light theme, density, and font settings are built and saved in the workspace file. The interface font list only offers installed fonts from a fixed candidate list. Text size and the monospace font are not configurable yet. System mode follows GPUI's reported window appearance. On Hyprland with the portal reporting `prefer-dark`, it opened dark. A light desktop setting and switching while the app runs have not been tested.
 3. **Small polish.** Escape closes menus, selected rows have a hover state, and the color check catches `Hsla { .. }` literals. Nothing else is queued.
-4. **Prior open issues.** KS-002 partial, KS-004 partial, KS-005, and KS-009 in `docs/issues.md`.
+4. **Prior open issues.** KS-002 partial and KS-004 partial in `docs/issues.md`. KS-009 remains upstream in GPUI.
 
 ## Review follow-ups landed 2026-10-16
 

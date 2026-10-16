@@ -45,6 +45,8 @@ pub struct Conversation {
     /// Set when the saved history could not be read. It stays for the session: the
     /// history is not shown, but what happens now is still saved after it.
     pub load_error: Option<String>,
+    /// The user pressed Stop, so the turn's interruption is not a failure.
+    pub stop_requested: bool,
     /// Where the current turn's rows begin. Item IDs are matched only from here, so
     /// an ID a provider reuses in a later turn never replaces an earlier row.
     turn_start: usize,
@@ -273,6 +275,7 @@ impl Conversation {
             Event::ApprovalResolved { request } => self.approvals.retain(|a| a.request != request),
             Event::TurnCompleted { status, error } => {
                 self.running = false;
+                self.stop_requested = false;
                 self.approvals.clear();
                 // A stopped turn leaves items the provider never completes. Keep what
                 // streamed, so the partial reply survives a restart.
@@ -309,6 +312,7 @@ impl Conversation {
             }
             Event::Failed { message } => {
                 self.running = false;
+                self.stop_requested = false;
                 self.error = Some(message);
                 self.turn_start = self.rows.len();
             }
@@ -554,6 +558,17 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_failure_ends_the_turn_and_forgets_a_stop() {
+        let mut live = Conversation::default();
+        live.push_local("hello");
+        live.stop_requested = true;
+        live.apply(Event::Failed {
+            message: "Could not start Codex".into(),
+        });
+        assert!(!live.running && !live.stop_requested);
     }
 
     #[test]

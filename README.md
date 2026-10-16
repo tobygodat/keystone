@@ -2,11 +2,11 @@
 
 A Rust and GPUI desktop workspace for Claude Code and Codex.
 
-This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, filter settled sessions, save multiline drafts, settle and un-settle them, and restore them on restart. Codex sessions send messages to your installed `codex` and stream the reply, with approvals, steering, and stop. Claude Code sessions are not connected yet. The optional visual fixture is labeled as sample content.
+This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, save multiline drafts, see the sessions that need you (an approval, a failed turn, or an unread reply) above the ones still working, settle and un-settle them into a collapsible Settled section, and restore them on restart. Codex sessions send messages to your installed `codex` and stream the reply, with approvals, steering, and stop. Claude Code sessions are not connected yet. The optional visual fixture is labeled as sample content.
 
 ## Run the preview
 
-Run `cargo run -p keystone-desktop --locked` in a Linux graphical session. Press Ctrl+Q to quit. The gear at the bottom of the left rail chooses the theme (System, Light, or Dark), the density, and the interface font. Escape closes an open menu. Ctrl+N creates a Claude session, Ctrl+Shift+N creates a Codex session, Ctrl+L focuses the composer, Ctrl+Enter sends, Ctrl+F focuses search, and Ctrl+Shift+S toggles settlement.
+Run `cargo run -p keystone-desktop --locked` in a Linux graphical session. Press Ctrl+Q to quit. The gear at the bottom of the sidebar chooses the theme (System, Light, or Dark), the density, and the interface font. Escape closes an open menu. Ctrl+N creates a Claude session, Ctrl+Shift+N creates a Codex session, Ctrl+L focuses the composer, Ctrl+Enter sends, Ctrl+F focuses search, and Ctrl+Shift+S toggles settlement.
 
 Codex runs with your own `codex` login and approval settings, in the directory Keystone was started from. Set `KEYSTONE_PROJECT_DIR` to choose another directory, or `KEYSTONE_CODEX_PATH` to use a specific `codex` binary. Each session's completed messages are kept in `sessions/<id>.jsonl` next to the workspace file. See [the provider design](docs/design/providers.md).
 
@@ -26,7 +26,7 @@ The driver was proved against the actual GPUI binary. It runs as the `keystone-v
 - Run `python scripts/perf.py --note "what changed"` to record build and render timings. See [performance](docs/performance.md).
 - Run `python scripts/native-smoke.py` on Hyprland with the Lua dispatcher API to exercise native keyboard creation, settlement, draft entry, and restart with isolated state. It captures empty, populated, and restored screenshots. It restores the previous window focus and stops its own preview process.
 
-Set `KEYSTONE_VISUAL_FIXTURE=1` to show a labeled sample transcript with a table and code block. It uses the same window and layout as the normal preview. Set `KEYSTONE_CAPTURE_DIR` to choose a separate native evidence directory. On the current Hyprland Lua profile, `KEYSTONE_TEST_CLOSE=1` also checks that failed storage blocks a compositor close request. Native typing defaults to 100 ms per character. The 10 ms stress case remains an open rendering issue.
+Set `KEYSTONE_VISUAL_FIXTURE=1` to show a labeled sample transcript with a table and code block. It uses the same window and layout as the normal preview. Set `KEYSTONE_CAPTURE_DIR` to choose a separate native evidence directory. On the current Hyprland Lua profile, `KEYSTONE_TEST_CLOSE=1` also checks that failed storage blocks a compositor close request. Native typing defaults to 100 ms per character. `KEYSTONE_KEY_DELAY_MS=10` runs the rapid-typing case, and `KEYSTONE_LONG_REPEAT` lengthens the long draft. `scripts/native-stress.py` repeats that case on headless desktops (KS-005, closed).
 
 The composer supports multiline drafts. Enter and Shift+Enter insert a new line. Text wraps to the available width, grows to eight visible rows, and scrolls vertically for longer drafts. Home and End move within a visual row. Ctrl+Home and Ctrl+End move to the beginning and end of the draft. Search remains single-line. Live providers and attachments remain future work.
 
