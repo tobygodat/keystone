@@ -72,4 +72,6 @@ Require the `stop` result to have an empty `errors` list and `scratch_retained:n
 
 ## Helpers
 
+`python3 scripts/native-stress.py --runs 10` repeats the KS-005 typing stress on fresh headless desktops. Each run types a 1,093-character draft with `wtype -d 10` on the nested socket, quits through `wtype`, and relaunches, which also checks KS-009. `--delay-ms` and `--repeat` change the rate and length. `--no-prime` skips the pre-launch key event and should crash on relaunch. Results go to `.audit/native-stress-*/summary.json`. Pass `--driver` as for the server.
+
 `scripts/native-smoke.py` remains an alternate foreground Hyprland keyboard regression test. Run `python scripts/native-smoke.py` only when foreground desktop control is intended. It does not replace mouse-entry or nested-desktop proof. Run `bash scripts/check.sh ui` for simulated GPUI input tests, but never report those as native visual verification.

@@ -38,7 +38,7 @@ Preconditions:
 
 - Autosave waits 250 ms after changes. Observe the file instead of assuming a fixed wait always suffices.
 - `stop` forcibly ends remaining apps. It does not prove graceful-save behavior. Quit through the UI first.
-- Very rapid long text input has a known rendering issue. A short passing draft does not resolve it.
+- Very rapid long text input used to stall the app (KS-005, closed). Use `scripts/native-stress.py` to recheck it. A short passing draft does not prove it.
 - `type` sends native key events. It is not clipboard paste. Use a native clipboard owner such as `wl-copy` on the observed nested Wayland socket before Ctrl+V.
 - A temporary virtual keyboard, such as `wtype` on the nested socket, leaves Sway's seat without a keyboard when it exits. GPUI 0.2.2 then panics on startup. `launch` sends F24 through the driver's own keyboard first to restore it. Starting the app any other way after `wtype` needs the same step. See KS-009 in `docs/issues.md`.
 - Storage-failure close blocking requires fault injection in the disposable state path and is not covered by this normal-save journey.

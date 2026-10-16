@@ -8,7 +8,7 @@ Durability of newly created ancestor directories remains open. These checks do n
 
 ## KS-002. Native desktop smoke automation
 
-Status is partially resolved. `scripts/native-smoke.py` passes native Wayland keyboard creation, settlement, draft entry, and process-restart checks on the current Hyprland desktop. It captures empty, populated, and restored states. Long-input scrolling and failed-storage compositor-close protection also passed at 100 ms per character. The nested driver now proves native mouse creation through the Claude welcome button, its input focus, and short-draft restart. Other mouse entry points and input-method composition coverage remain open. GPUI simulated-input tests cover mouse creation and settlement separately.
+Status is partially resolved. `scripts/native-smoke.py` passes native Wayland keyboard creation, settlement, draft entry, and process-restart checks on the current Hyprland desktop. It captures empty, populated, and restored states. Long-input scrolling and failed-storage compositor-close protection also passed at 100 ms per character. Long input also passed at 10 ms per character (KS-005). The nested driver now proves native mouse creation through the Claude welcome button, its input focus, and short-draft restart. Other mouse entry points and input-method composition coverage remain open. GPUI simulated-input tests cover mouse creation and settlement separately.
 
 
 ## KS-003. Draft navigation after a storage failure
@@ -21,9 +21,20 @@ Status is partially resolved. The composer accepts multiline drafts and normaliz
 
 ## KS-005. Native long-input stall
 
-Status is open. Native synthetic typing at 10 ms per character can overwhelm the debug window and end with process exit -9. Debugger samples showed font shaping, painting, and layout in GPUI's synchronous key-event redraw path. The same long-input flow passed with 100 ms per character. This supports a rendering backlog, not a proven single-function deadlock. Explicit Inter and selective rendering-dependency optimization did not make the rapid-input check pass. The speculative optimization profile was removed. `KEYSTONE_KEY_DELAY_MS=10` reproduces the stress case; the default native check uses 100 ms. Evidence is retained in `.audit/evidence/visual-debug/`.
+Status is closed. It no longer reproduces on the current build. Native synthetic typing at 10 ms per character used to overwhelm the debug window and end with process exit -9. Debugger samples showed font shaping, painting, and layout in GPUI's synchronous key-event redraw path. The same long-input flow passed with 100 ms per character. This supported a rendering backlog, not a proven single-function deadlock. Explicit Inter and selective rendering-dependency optimization did not make the rapid-input check pass, and that speculative optimization profile was removed. Evidence is retained in `.audit/evidence/visual-debug/`.
 
-On 2026-10-15 the 10 ms check passed natively on Hyprland 0.56.2 with dependencies built at `opt-level = 2`, both before and after the sidebar became a cached view (`.audit/ks005-baseline/` and `.audit/ks005-sidebar/`, on this machine only). The stall did not reproduce, but one pass per build is not enough to close the issue.
+On 2026-10-15 the 10 ms check passed once per build on Hyprland 0.56.2, with dependencies built at `opt-level = 2`. It passed both before and after the sidebar became a cached view. Later that day it was repeated 27 times at 10 ms per character, and every run passed:
+
+| Desktop | Script | Draft typed at 10 ms | Runs passed |
+| --- | --- | --- | --- |
+| Headless Sway 1.12 | `scripts/native-stress.py` | 1,093 characters | 12 of 12 |
+| Headless Sway 1.12 | `scripts/native-stress.py --repeat 60` | 2,677 characters, composer scrolled | 5 of 5 |
+| Hyprland 0.56.2 | `scripts/native-smoke.py` | 264-character long tail, as before | 5 of 5 |
+| Hyprland 0.56.2 | `scripts/native-smoke.py`, `KEYSTONE_LONG_REPEAT=24` | 1,056-character long tail | 5 of 5 |
+
+Every run persisted the exact draft and showed it in the window. In the headless runs, the draft was saved 0.0 to 0.3 s after `wtype` exited. The app saves 250 ms after the last edit, so none of those runs had a key backlog. An earlier headless batch had 4 setup failures that happened before typing. Those were a click race in the driver, now fixed, not stalls. The evidence is in `.audit/native-stress-*` and `.audit/ks005-hyprland-20261015T211041/`, on this machine only.
+
+The redraw path remains synchronous per key event, so this shows the current build keeps up at this rate, not that the old cause is gone. Rerun `python3 scripts/native-stress.py --runs 10` after changes to the composer, text layout, or the dependency profile. If the stall returns, reopen this issue.
 
 ## KS-006. Nested desktop capture depends on host visibility
 
