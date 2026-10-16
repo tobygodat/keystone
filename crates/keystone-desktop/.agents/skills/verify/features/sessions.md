@@ -8,7 +8,7 @@ Create a local Claude or Codex session and select it from the sidebar. These rec
 - `session-menu` creates a session from the sidebar plus menu.
 - `session-keyboard` creates a session with a shortcut.
 - `session-select` switches between existing sessions.
-- `session-attention` lists sessions that need the user in a **Needs action (n)** section above **Working**. A session needs action while it waits for approval, after its last turn failed (including a turn cut off when Keystone closed), or when a reply landed after the user last viewed it. The second line names the reason.
+- `session-attention` lists sessions that need the user in a **Needs action (n)** section above **Working**. A session needs action while it waits for approval, after its last turn failed (including a turn cut off when Keystone closed, but not one the user stopped or that ended because they denied an approval), or when a reply landed after the user last viewed it. The second line names the reason.
 - `session-time` shows how long ago each session last changed: `now`, `5m`, `3h`, a weekday within a week, then a date such as `Oct 3`. Sessions saved before times were recorded show none.
 
 ## How to get to it (user POV)

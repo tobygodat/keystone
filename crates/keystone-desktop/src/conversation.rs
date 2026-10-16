@@ -45,7 +45,8 @@ pub struct Conversation {
     /// Set when the saved history could not be read. It stays for the session: the
     /// history is not shown, but what happens now is still saved after it.
     pub load_error: Option<String>,
-    /// The user pressed Stop, so the turn's interruption is not a failure.
+    /// The user pressed Stop or denied an approval, so the turn's interruption is
+    /// not a failure. Codex interrupts a turn whose command was denied.
     pub stop_requested: bool,
     /// Where the current turn's rows begin. Item IDs are matched only from here, so
     /// an ID a provider reuses in a later turn never replaces an earlier row.
@@ -327,6 +328,9 @@ impl Conversation {
             return None;
         }
         let approval = self.approvals.remove(0);
+        if !allowed {
+            self.stop_requested = true;
+        }
         let entry = Entry::Approval {
             action: approval.action.clone(),
             allowed,

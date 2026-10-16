@@ -3315,6 +3315,37 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_interrupted_after_a_denial_is_not_a_failure() {
+        let mut live = Conversation::default();
+        live.push_local("Run it");
+        live.apply(Event::ApprovalRequested(keystone_agent::Approval {
+            request: keystone_agent::RequestId("1".into()),
+            item_id: None,
+            action: "touch denied.txt".into(),
+            detail: None,
+        }));
+        let interrupted = Event::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            error: None,
+        };
+        assert_eq!(turn_failed(&interrupted, live.stop_requested), Some(true));
+        live.decide(false);
+        assert_eq!(turn_failed(&interrupted, live.stop_requested), Some(false));
+        live.apply(interrupted);
+        assert!(!live.stop_requested);
+        // Allowing leaves a later interruption a failure.
+        live.push_local("Run it again");
+        live.apply(Event::ApprovalRequested(keystone_agent::Approval {
+            request: keystone_agent::RequestId("2".into()),
+            item_id: None,
+            action: "touch allowed.txt".into(),
+            detail: None,
+        }));
+        live.decide(true);
+        assert!(!live.stop_requested);
+    }
+
+    #[test]
     fn excerpt_is_the_first_written_line_or_the_provider() {
         assert_eq!(
             excerpt(
