@@ -60,6 +60,26 @@ write({'pid': child.pid, 'returncode': code,
 """
 
 
+def default_driver():
+    """This checkout's driver, else the main checkout's, which git worktrees share."""
+    local = ROOT / '.audit/tools/computer-use-mcp'
+    if local.exists():
+        return local
+    try:
+        common = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                                cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return local
+    shared = Path(common).parent / '.audit/tools/computer-use-mcp' if common else local
+    return shared if shared.exists() else local
+
+
+def add_binary_argument(parser):
+    parser.add_argument('--binary', default=os.environ.get(
+        'KEYSTONE_BINARY', str(ROOT / 'target/debug/keystone-desktop')),
+        help='App executable to launch; defaults to $KEYSTONE_BINARY, then this checkout\'s debug build')
+
+
 def timestamp():
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
@@ -70,10 +90,10 @@ def digest(path):
 
 
 class Run:
-    def __init__(self, driver, root, evidence):
+    def __init__(self, driver, root, evidence, binary):
         self.env = {}
         self.prime_keyboard = True
-        self.binary = Path(root).resolve() / 'target/debug/keystone-desktop'
+        self.binary = Path(binary).resolve()
         self.binary_sha = digest(self.binary)
         driver_sha = digest(driver)
         self.evidence = Path(evidence).resolve()
@@ -384,7 +404,8 @@ def schema(properties=None, required=()):
 
 ID = {'type': 'string', 'description': 'Element name, as listed by `elements`'}
 TOOLS = [
-    ('start', 'Build nothing; launch target/debug/keystone-desktop on a new private desktop with an '
+    ('start', 'Build nothing; launch the --binary build (default target/debug/keystone-desktop) on a new '
+     'private desktop with an '
      'empty disposable workspace and a new evidence directory. One run at a time.',
      schema({'width': {'type': 'integer', 'default': 1280}, 'height': {'type': 'integer', 'default': 900},
              'headless': {'type': 'boolean', 'default': True,
@@ -435,7 +456,7 @@ class Server:
             if self.run is not None and not self.run.closed:
                 raise RuntimeError('A run is active; stop it first')
             evidence = ROOT / '.audit' / f'verify-{time.strftime("%Y%m%dT%H%M%S")}-{os.getpid()}'
-            self.run = Run(self.args.driver, ROOT, evidence)
+            self.run = Run(self.args.driver, ROOT, evidence, self.args.binary)
             started = self.run.start(arguments.get('width', 1280), arguments.get('height', 900),
                                      arguments.get('headless', True), arguments.get('env'))
             return {**started, 'evidence': str(evidence), 'state': str(self.run.state)}, None
@@ -543,7 +564,8 @@ class Server:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--driver', default=str(ROOT / '.audit/tools/computer-use-mcp'))
+    parser.add_argument('--driver', default=str(default_driver()))
+    add_binary_argument(parser)
     args = parser.parse_args()
     server = Server(args)
     server.serve()

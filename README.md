@@ -26,6 +26,7 @@ The driver was proved against the actual GPUI binary. It runs as the `keystone-v
 - Run `bash scripts/check.sh ui` for GPUI simulated-input tests of the app and its components.
 - Run `bash scripts/check.sh build` to compile the native application and the component gallery.
 - Run `python scripts/perf.py --note "what changed"` to record build and render timings. See [performance](docs/performance.md).
+- Install sccache and mold (`sudo pacman -S --needed sccache mold`) to share dependency builds across worktrees and link faster. Builds still work without them. See [performance](docs/performance.md#decisions).
 - Run `python scripts/native-smoke.py` on Hyprland with the Lua dispatcher API to exercise native keyboard creation, settlement, draft entry, and restart with isolated state. It captures empty, populated, and restored screenshots. It restores the previous window focus and stops its own preview process.
 
 Set `KEYSTONE_VISUAL_FIXTURE=1` to show a labeled sample transcript, written in Markdown, with a list, a table, and a code block. It uses the same window and layout as the normal preview. Set `KEYSTONE_CAPTURE_DIR` to choose a separate native evidence directory. On the current Hyprland Lua profile, `KEYSTONE_TEST_CLOSE=1` also checks that failed storage blocks a compositor close request. Native typing defaults to 100 ms per character. `KEYSTONE_KEY_DELAY_MS=10` runs the rapid-typing case, and `KEYSTONE_LONG_REPEAT` lengthens the long draft. `scripts/native-stress.py` repeats that case on headless desktops (KS-005, closed).

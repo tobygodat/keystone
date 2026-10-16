@@ -18,7 +18,7 @@ mkdir -p .audit/tools
 install -m 755 "$checkout/target/debug/computer-use-mcp" .audit/tools/computer-use-mcp
 ```
 
-Keep the checkout until the build succeeds. Its removal is optional and must target that exact directory. The debug build is intentional. No performance claim depends on its build profile.
+Build it once, in the main checkout. `native-driver.py` and `native-stress.py` in a git worktree fall back to that copy, or take it through `--driver` as [SKILL.md](SKILL.md) describes. Keep the checkout until the build succeeds. Its removal is optional and must target that exact directory. The debug build is intentional. No performance claim depends on its build profile.
 
 Headless runs need only GPU access, through a DRM render node. They need no host `WAYLAND_DISPLAY`, so they work from SSH and remote agent shells. `headless:false` still needs a graphical Wayland session with valid `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`. There the host may choose a different size than requested. Read actual screenshot dimensions before clicking.
 

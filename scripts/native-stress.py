@@ -50,7 +50,7 @@ def wait(description, check, timeout):
 class Stress:
     def __init__(self, args, evidence):
         self.args = args
-        self.run = driver.Run(args.driver, ROOT, evidence)
+        self.run = driver.Run(args.driver, ROOT, evidence, args.binary)
         self.run.prime_keyboard = not args.no_prime
         self.socket = None
         self.checks = []
@@ -230,7 +230,8 @@ def main():
     parser.add_argument('--height', type=int, default=900)
     parser.add_argument('--no-prime', action='store_true',
                         help='Skip the pre-launch driver key event; reproduces KS-009')
-    parser.add_argument('--driver', default=str(ROOT / '.audit/tools/computer-use-mcp'))
+    parser.add_argument('--driver', default=str(driver.default_driver()))
+    driver.add_binary_argument(parser)
     args = parser.parse_args()
 
     directory = ROOT / '.audit' / f'native-stress-{time.strftime("%Y%m%dT%H%M%S")}-{os.getpid()}'
