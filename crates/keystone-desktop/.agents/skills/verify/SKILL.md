@@ -39,7 +39,7 @@ If the window is absent, inspect `driver.stderr.log` in the evidence directory, 
 {"id":"welcome-claude","bounds":{"x":893,"y":503,"w":172,"h":28},"visible":{"x":893,"y":503,"w":172,"h":28},"center":{"x":979,"y":517}}
 ```
 
-The app writes this itself. Names are the GPUI debug selectors used by simulated tests, so they match the test suite. `visible` is the part inside its clip. An open menu covering an element is not subtracted, so check the screenshot when menus are open. Unnamed controls, such as the titlebar tab, still need screenshot coordinates. Name a control with `debug_selector` on a component or `automation_id` on a div when a journey needs it.
+The app writes this itself. Until a frame's viewport matches the window, which can take a moment after launch, `elements` reports not ready and `wait_for` keeps waiting. Names are the GPUI debug selectors used by simulated tests, so they match the test suite. `visible` is the part inside its clip. An open menu covering an element is not subtracted, so check the screenshot when menus are open. Unnamed controls, such as the titlebar tab, still need screenshot coordinates. Name a control with `debug_selector` on a component or `automation_id` on a div when a journey needs it.
 
 Prefer names and waits over coordinates and sleeps:
 

@@ -189,11 +189,11 @@ class Run:
         self.record('doctor', result)
         return result
 
-    def window_origin(self, pid):
+    def window_rect(self, pid):
         windows = self.call('windows_list').get('structuredContent', {})
         for window in windows.get('windows', windows if isinstance(windows, list) else []):
             if window.get('pid') == pid:
-                return window['rect']['x'], window['rect']['y']
+                return window['rect']
         raise RuntimeError(f'No window for app PID {pid}: {json.dumps(windows)}')
 
     def elements(self):
@@ -203,7 +203,18 @@ class Run:
         frame = json.loads(self.geometry.read_text())
         if frame['pid'] not in self.app_pids:
             raise NotReady(f'Geometry is from PID {frame["pid"]}, not a launched app')
-        ox, oy = self.window_origin(frame['pid'])
+        rect = self.window_rect(frame['pid'])
+        ox, oy = rect['x'], rect['y']
+        # The first frame can predate the compositor's configure, and its
+        # layout then belongs to another size. Clicking it misses. The
+        # tolerance covers the window's own inset, 1 px a side under Sway.
+        viewport = frame.get('viewport')
+        if viewport and (abs(viewport['w'] - rect['width']) > 8
+                         or abs(viewport['h'] - rect['height']) > 8):
+            self.record('elements_not_ready', {'revision': frame['revision'],
+                                               'viewport': viewport, 'window': rect})
+            raise NotReady(f'Frame is {viewport["w"]}x{viewport["h"]}, '
+                           f'window is {rect["width"]}x{rect["height"]}')
 
         def place(b):
             return None if b is None else {'x': round(ox + b['x']), 'y': round(oy + b['y']),
