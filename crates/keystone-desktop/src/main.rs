@@ -393,7 +393,7 @@ impl Keystone {
     }
 
     fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rail_bg = cx.theme().colors.rail;
+        let rail_bg = cx.theme().colors.sidebar;
         v_flex()
             .w(px(46.))
             .flex_shrink_0()
