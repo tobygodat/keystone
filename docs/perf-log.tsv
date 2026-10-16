@@ -5,4 +5,5 @@ date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_
 2026-10-15T20:23:35Z	6e1c99b+dirty	0.55	0.64	262	0.42	0.50	sidebar as a cached GPUI view
 2026-10-15T20:36:20Z	0f46b08+dirty	0.55	0.64	264	0.46	0.54	light theme, density, and font settings
 2026-10-15T22:24:41Z	a9ecb75+dirty	0.59	0.68	268	0.48	0.56	Codex conversations (keystone-agent)
-2026-10-16T00:59:17Z	43430b1	0.60	0.70	269	0.48	0.58	baseline before transcript virtualization	115.14	
+2026-10-16T00:59:17Z	03e41dd	0.60	0.70	269	0.48	0.58	baseline before transcript virtualization	115.14	
+2026-10-16T01:12:59Z	b9e91ec	0.60	0.73	270	0.48	0.57	virtualized transcript; logs and Codex startup on workers	0.67	0.59
