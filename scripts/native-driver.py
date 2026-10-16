@@ -42,6 +42,7 @@ def digest(path):
 class Run:
     def __init__(self, driver, root, evidence):
         self.env = {}
+        self.prime_keyboard = True
         self.binary = Path(root).resolve() / 'target/debug/keystone-desktop'
         self.binary_sha = digest(self.binary)
         driver_sha = digest(driver)
@@ -153,6 +154,13 @@ class Run:
         return {'session': session.get('structuredContent'), 'launch': self.launch()}
 
     def launch(self):
+        # KS-009: once a temporary virtual keyboard such as wtype's goes away,
+        # Sway's seat has no keyboard. A new client then gets no keymap, and
+        # GPUI 0.2.2 unwraps the missing keymap on its first modifiers event.
+        # A key event from the driver's own keyboard makes it the seat
+        # keyboard again; F24 has no binding in the private desktop or the app.
+        if self.prime_keyboard:
+            self.call('input', {'actions': [{'action': 'keypress', 'keys': ['F24']}]})
         self.geometry.unlink(missing_ok=True)
         extra = [f'{key}={value}' for key, value in sorted(self.env.items())]
         result = self.call('app_launch', {'argv': [

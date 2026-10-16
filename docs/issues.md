@@ -39,7 +39,11 @@ Verification reproduced an empty-composer crash after End followed by typing. Th
 
 ## KS-009. Native verification keyboard restart
 
-Status is open. A nested Sway restart after temporary `wtype` keyboard use hit GPUI 0.2.2's `keymap_state.as_mut().unwrap()` while handling a Wayland keyboard modifiers event, before a window appeared. Sending a fresh keyboard event through the driver before launch recovered that session. Virtual keyboard event ordering is the suspected cause. The exact dependency panic was observed by launching the app against the same disposable state and compositor. This is separate from snapshot restoration and the fixed composer geometry crash.
+Status is resolved for verification. The underlying GPUI bug remains. A nested Sway restart after temporary `wtype` keyboard use hit GPUI 0.2.2's `keymap_state.as_mut().unwrap()` while handling a Wayland keyboard modifiers event, before a window appeared.
+
+The cause is in GPUI's Wayland keyboard handler (`gpui-0.2.2/src/platform/linux/wayland/client.rs`). It unwraps its keymap state on every modifiers event, but that state exists only after an XKB keymap event. When `wtype` exits, Sway destroys its virtual keyboard. That keyboard was the seat's active one, so the seat is left with none, though it still advertises a keyboard. A client that binds the keyboard then gets no keymap event at all. Gaining focus sends it `enter` and `modifiers`, and GPUI panics. A `WAYLAND_DEBUG=1` trace in `.audit/ks009-wayland-debug/20261015T211427/` shows exactly that sequence. After a driver key event, the same launch first receives `keymap(xkb_v1)` and runs normally. The driver's own virtual keyboard becomes the seat's again only once it sends a key. Upstream tracks the same panic as zed-industries/zed#64660.
+
+On 2026-10-15, relaunching after a `wtype` Ctrl+Q without priming reproduced the panic at `client.rs:1267` in 4 of 4 runs (`scripts/native-stress.py --no-prime`). The fix stays out of GPUI. The verification server's `launch` now sends F24 through the driver's keyboard before every start. That reselects a keyboard with a real keymap. With that step, 31 of 31 runs relaunched after `wtype` and kept running. A guard inside the app is not possible, because the panic happens in GPUI's event dispatch before any app code runs. A Linux user on a Wayland seat with no keyboard can still hit this until GPUI is upgraded or patched.
 
 ## KS-010. GPUI 0.2.2 text ellipsis
 

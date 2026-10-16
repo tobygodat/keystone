@@ -40,5 +40,5 @@ Preconditions:
 - `stop` forcibly ends remaining apps. It does not prove graceful-save behavior. Quit through the UI first.
 - Very rapid long text input has a known rendering issue. A short passing draft does not resolve it.
 - `type` sends native key events. It is not clipboard paste. Use a native clipboard owner such as `wl-copy` on the observed nested Wayland socket before Ctrl+V.
-- Temporary virtual keyboard use can affect later GPUI startup in the same nested desktop. Record failures separately from restoration. A clean restart run that uses only the driver's persistent keyboard passed. See KS-009 in `docs/issues.md`.
+- A temporary virtual keyboard, such as `wtype` on the nested socket, leaves Sway's seat without a keyboard when it exits. GPUI 0.2.2 then panics on startup. `launch` sends F24 through the driver's own keyboard first to restore it. Starting the app any other way after `wtype` needs the same step. See KS-009 in `docs/issues.md`.
 - Storage-failure close blocking requires fault injection in the disposable state path and is not covered by this normal-save journey.
