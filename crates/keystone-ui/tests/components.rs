@@ -118,3 +118,38 @@ fn markdown_code_blocks_copy_their_code(cx: &mut TestAppContext) {
     let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
     assert_eq!(copied.as_deref(), Some("second"));
 }
+
+/// Agent replies are untrusted, so nesting far past any real reply must still render.
+struct Adversarial(&'static str);
+
+impl Render for Adversarial {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let deep = |unit: &str, n: usize| unit.repeat(n);
+        let source = match self.0 {
+            "quotes" => deep("> ", 5_000) + "hello\n\n```\ndeep\n```\n",
+            "lists" => (0..2_000)
+                .map(|i| format!("{}- item {i}\n", "  ".repeat(i)))
+                .collect(),
+            "mixed" => deep("> - 1. ", 1_500) + "hello\n\n```\ndeep\n```\n",
+            _ => deep("*_", 5_000) + "hello" + &deep("_*", 5_000),
+        };
+        div()
+            .size_full()
+            .child(Markdown::from_source("deep", &source))
+    }
+}
+
+#[gpui::test]
+fn markdown_renders_adversarial_nesting(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    for kind in ["quotes", "lists", "mixed", "emphasis"] {
+        let (_view, cx) = cx.add_window_view(|_, _| Adversarial(kind));
+        cx.run_until_parked();
+        if kind == "quotes" || kind == "mixed" {
+            // The code block under the nesting still renders and copies.
+            click(cx, "deep-copy-1");
+            let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+            assert_eq!(copied.as_deref(), Some("deep"), "{kind}");
+        }
+    }
+}

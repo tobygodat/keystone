@@ -3,6 +3,10 @@
 //!
 //! Parsing never fails, so a reply can be rendered at every streamed delta. An open
 //! code fence runs to the end of the text, which keeps a streaming code block stable.
+//!
+//! Replies are untrusted, so quotes and lists nest at most [`MAX_NESTING`] deep. Deeper
+//! containers are flattened into the innermost kept one, which bounds the recursion in
+//! rendering and in dropping a [`Document`]. Inline styles are flat ranges, never a tree.
 
 use crate::button::IconButton;
 use crate::color::Color;
@@ -21,6 +25,10 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// How deeply quotes and lists nest. Real replies rarely pass four levels, and each level
+/// costs several GPUI elements and render stack frames.
+pub const MAX_NESTING: usize = 8;
 
 /// A parsed reply: a list of blocks.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -119,6 +127,9 @@ struct Builder {
     /// Nesting depth of each inline style, so `**a *b* c**` keeps bold after the inner end.
     depth: [u32; 4],
     links: Vec<(usize, SharedString)>,
+    /// Open quotes, lists, and items past [`MAX_NESTING`]. Their content goes to the
+    /// innermost kept container.
+    flattened: usize,
 }
 
 #[derive(Default)]
@@ -224,6 +235,32 @@ impl Builder {
         self.style.link = self.depth[3] > 0;
     }
 
+    /// Whether a new quote or list would nest too deeply, or sits inside one that did.
+    /// Counting it as flattened keeps its end from closing a kept container.
+    fn flatten(&mut self) -> bool {
+        let depth = self
+            .stack
+            .iter()
+            .filter(|frame| matches!(frame, Frame::Quote(_) | Frame::List { .. }))
+            .count();
+        if self.flattened > 0 || depth >= MAX_NESTING {
+            self.flush_inline();
+            self.flattened += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Closes a flattened quote, list, or item, if the closing tag belongs to one.
+    fn unflatten(&mut self) -> bool {
+        if self.flattened == 0 {
+            return false;
+        }
+        self.flush_inline();
+        self.flattened -= 1;
+        true
+    }
+
     fn start_inline(&mut self, target: Target) {
         self.flush_inline();
         self.inline = Some((target, InlineBuilder::default()));
@@ -258,6 +295,9 @@ impl Builder {
         match tag {
             Tag::Paragraph => self.start_inline(Target::Paragraph),
             Tag::Heading { level, .. } => self.start_inline(Target::Heading(level as u8)),
+            Tag::BlockQuote(_) | Tag::List(_) if self.flatten() => {}
+            // An item of a flattened list is flattened too.
+            Tag::Item if self.flattened > 0 => self.flattened += 1,
             Tag::BlockQuote(_) => {
                 self.flush_inline();
                 self.stack.push(Frame::Quote(Vec::new()));
@@ -332,6 +372,7 @@ impl Builder {
                     });
                 }
             }
+            TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item if self.unflatten() => {}
             TagEnd::BlockQuote(_) => {
                 self.flush_inline();
                 if let Some(Frame::Quote(blocks)) = self.stack.pop() {
@@ -936,6 +977,119 @@ mod tests {
                 }
                 Block::Code { .. } | Block::Rule => {}
             }
+        }
+    }
+
+    /// How deeply quotes and lists nest, counting a list and its items as one level.
+    fn nesting(blocks: &[Block]) -> usize {
+        blocks
+            .iter()
+            .map(|block| match block {
+                Block::Quote(b) => 1 + nesting(b),
+                Block::List { items, .. } => {
+                    1 + items.iter().map(|b| nesting(b)).max().unwrap_or(0)
+                }
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn texts(blocks: &[Block], out: &mut Vec<String>) {
+        for block in blocks {
+            match block {
+                Block::Paragraph(i) | Block::Heading { text: i, .. } => {
+                    out.push(i.text.to_string())
+                }
+                Block::Code { code, .. } => out.push(code.to_string()),
+                Block::List { items, .. } => items.iter().for_each(|b| texts(b, out)),
+                Block::Quote(b) => texts(b, out),
+                Block::Table { .. } | Block::Rule => {}
+            }
+        }
+    }
+
+    /// Replies are untrusted. Deep nesting parses, keeps its text, and drops without
+    /// recursing past the limit, all on the test thread's small stack.
+    #[test]
+    fn nesting_is_bounded_and_keeps_text() {
+        let cases = [
+            "> ".repeat(100_000) + "hello",
+            (0..3_000)
+                .map(|i| format!("{}- item {i}\n", "  ".repeat(i)))
+                .collect(),
+            "> - 1. ".repeat(20_000) + "hello",
+            "- > ".repeat(20_000) + "hello\n\n```\ncode\n```",
+        ];
+        for source in &cases {
+            let doc = Document::parse(source);
+            assert_eq!(nesting(&doc.blocks), MAX_NESTING, "{}", &source[..40]);
+            let mut out = Vec::new();
+            texts(&doc.blocks, &mut out);
+            assert!(
+                out.iter()
+                    .any(|t| t.contains("hello") || t.contains("item 2999"))
+            );
+            check_ranges(&doc.blocks);
+        }
+        // Lists past the limit keep their items, in order, as flat blocks.
+        let doc = Document::parse(&cases[1]);
+        let mut out = Vec::new();
+        texts(&doc.blocks, &mut out);
+        let expected: Vec<String> = (0..3_000).map(|i| format!("item {i}")).collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn nesting_up_to_the_limit_is_kept() {
+        let doc = Document::parse(&("> ".repeat(MAX_NESTING) + "deep"));
+        assert_eq!(nesting(&doc.blocks), MAX_NESTING);
+        let mut block = &doc.blocks[0];
+        for _ in 1..MAX_NESTING {
+            let Block::Quote(inner) = block else {
+                panic!("{block:?}")
+            };
+            assert_eq!(inner.len(), 1);
+            block = &inner[0];
+        }
+        assert!(
+            matches!(block, Block::Quote(b) if b == &[Block::Paragraph(Inline { text: "deep".into(), ..Default::default() })])
+        );
+        // One more level is flattened into the innermost kept quote.
+        let doc = Document::parse(&("> ".repeat(MAX_NESTING + 1) + "deep\n\nafter"));
+        assert_eq!(nesting(&doc.blocks), MAX_NESTING);
+        let mut out = Vec::new();
+        texts(&doc.blocks, &mut out);
+        assert_eq!(out, ["deep", "after"]);
+    }
+
+    /// Inline styles and links are flat ranges, so their nesting has no depth to bound.
+    #[test]
+    fn deep_inline_nesting_stays_flat() {
+        let source = "*_".repeat(20_000)
+            + "hi"
+            + &"_*".repeat(20_000)
+            + " "
+            + &"**~~".repeat(10_000)
+            + "x"
+            + &"~~**".repeat(10_000)
+            + " "
+            + &"[".repeat(10_000)
+            + "link"
+            + &"](https://e.x)".repeat(10_000);
+        let doc = Document::parse(&source);
+        assert!(paragraph(&doc).text.contains("hi"));
+        check_ranges(&doc.blocks);
+    }
+
+    /// Every prefix of an adversarial reply parses within the limit, as it streams in.
+    #[test]
+    fn every_streamed_prefix_of_deep_nesting_parses() {
+        let reply = "> - 1. **a *b ".repeat(60) + "[x](https://e.x)\n\n```\ncode";
+        for end in (0..=reply.len()).filter(|&i| reply.is_char_boundary(i)) {
+            let doc = Document::parse(&reply[..end]);
+            assert!(nesting(&doc.blocks) <= MAX_NESTING);
+            check_ranges(&doc.blocks);
         }
     }
 
