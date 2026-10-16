@@ -1,11 +1,14 @@
-//! Per-session conversation state: rows to show, the running turn, a pending approval,
-//! and the session's log. Provider events are applied here in batches.
+//! Per-session conversation state: rows to show, the running turn, and pending
+//! approvals. Provider events are applied here in batches.
+//!
+//! Nothing here touches the disk. Entries to log collect in an outbox that the app
+//! hands to [`keystone_agent::log::Logs`], and saved history arrives through
+//! [`Conversation::restore`].
 
-use keystone_agent::log::{self, Entry, SessionLog};
+use keystone_agent::log::{Entry, Write};
 use keystone_agent::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, TurnStatus, cap_output,
 };
-use std::path::Path;
 
 /// ID prefix for a sent message shown before the provider echoes it.
 const LOCAL: &str = "local:";
@@ -27,6 +30,7 @@ pub enum Row {
 
 #[derive(Default)]
 pub struct Conversation {
+    /// In the order they first appeared. Rows are only appended or replaced in place.
     pub rows: Vec<Row>,
     pub running: bool,
     /// Approval requests waiting for an answer, oldest first.
@@ -38,53 +42,86 @@ pub struct Conversation {
     /// Where the current turn's rows begin. Item IDs are matched only from here, so
     /// an ID a provider reuses in a later turn never replaces an earlier row.
     turn_start: usize,
-    log: Option<SessionLog>,
+    /// While saved history is loading, what happens meanwhile waits here.
+    pending: Option<Vec<Pending>>,
+    writes: Vec<Write>,
+}
+
+enum Pending {
+    Local(String),
+    Event(Event),
 }
 
 impl Conversation {
-    /// Rebuilds the visible rows from the session's log.
-    pub fn load(dir: &Path, session: u64) -> Self {
-        let mut conversation = Self::default();
-        let entries = match log::read(dir, session) {
-            Ok(entries) => entries,
-            Err(error) => {
-                conversation.error = Some(format!("Could not read this conversation. {error}"));
-                return conversation;
-            }
+    /// A conversation whose saved history has been requested but not restored yet.
+    pub fn loading() -> Self {
+        Self {
+            pending: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Rebuilds the rows from the session's log, then applies anything that happened
+    /// while loading.
+    pub fn restore(&mut self, entries: Result<Vec<Entry>, String>) {
+        let Some(pending) = self.pending.take() else {
+            return;
         };
+        match entries {
+            Ok(entries) => self.rebuild(entries),
+            Err(error) => self.error = Some(format!("Could not read this conversation. {error}")),
+        }
+        for pending in pending {
+            match pending {
+                Pending::Local(text) => self.push_local(&text),
+                Pending::Event(event) => {
+                    self.apply(event);
+                }
+            }
+        }
+    }
+
+    fn rebuild(&mut self, entries: Vec<Entry>) {
         let mut open_turn = false;
         for entry in entries {
             match entry {
                 Entry::TurnStarted => open_turn = true,
-                Entry::Item { item } => match conversation.position_for(&item) {
-                    Some(index) => conversation.rows[index] = Row::Item(item),
-                    None => conversation.rows.push(Row::Item(item)),
+                Entry::Item { item } => match self.position_for(&item) {
+                    Some(index) => self.rows[index] = Row::Item(item),
+                    None => self.rows.push(Row::Item(item)),
                 },
                 Entry::Approval { action, allowed } => {
-                    conversation.rows.push(Row::Decision { action, allowed })
+                    self.rows.push(Row::Decision { action, allowed })
                 }
                 Entry::TurnEnded { status, error } => {
                     open_turn = false;
                     if status != TurnStatus::Completed {
-                        conversation.rows.push(Row::TurnEnded { status, error });
+                        self.rows.push(Row::TurnEnded { status, error });
                     }
-                    conversation.turn_start = conversation.rows.len();
+                    self.turn_start = self.rows.len();
                 }
             }
         }
         if open_turn {
-            conversation.rows.push(Row::TurnEnded {
+            self.rows.push(Row::TurnEnded {
                 status: TurnStatus::Interrupted,
                 error: Some("Keystone closed during this turn".into()),
             });
         }
-        conversation.turn_start = conversation.rows.len();
-        conversation
+        self.turn_start = self.rows.len();
     }
 
-    /// Shows and saves a sent message at once. Steers are not always echoed back, so
+    /// Shows and logs a sent message at once. Steers are not always echoed back, so
     /// the message is logged now; the provider's copy replaces it if one arrives.
-    pub fn push_local(&mut self, dir: &Path, session: u64, text: &str) {
+    pub fn push_local(&mut self, text: &str) {
+        if let Some(pending) = &mut self.pending {
+            pending.push(Pending::Local(text.to_owned()));
+            return;
+        }
         // Unique across restarts: a reloaded log already holds earlier local IDs.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -95,11 +132,11 @@ impl Conversation {
             text: text.to_owned(),
             status: ItemStatus::Completed,
         };
-        self.write(dir, session, &Entry::Item { item: item.clone() }, false);
         if !self.running {
             self.turn_start = self.rows.len();
         }
-        self.rows.push(Row::Item(item));
+        self.push(Row::Item(item.clone()));
+        self.write(Entry::Item { item }, false);
         self.running = true;
         self.error = None;
     }
@@ -109,18 +146,25 @@ impl Conversation {
     }
 
     /// Applies one provider event. Returns the thread ID when the provider opened one.
-    pub fn apply(&mut self, dir: &Path, session: u64, event: Event) -> Option<String> {
+    pub fn apply(&mut self, event: Event) -> Option<String> {
+        if let Some(pending) = &mut self.pending {
+            // The thread is saved with the session, not in this log, so it never waits.
+            if let Event::ThreadReady { thread_id } = event {
+                return Some(thread_id);
+            }
+            pending.push(Pending::Event(event));
+            return None;
+        }
         match event {
             Event::ThreadReady { thread_id } => return Some(thread_id),
             Event::TurnStarted => {
                 self.running = true;
                 self.error = None;
-                self.write(dir, session, &Entry::TurnStarted, false);
+                self.write(Entry::TurnStarted, false);
             }
-            Event::ItemStarted(item) => match self.position_for(&item) {
-                Some(index) => self.rows[index] = Row::Item(item),
-                None => self.rows.push(Row::Item(item)),
-            },
+            Event::ItemStarted(item) => {
+                self.place(item);
+            }
             Event::ItemDelta { item_id, text } => {
                 if let Some(index) = self.position(&item_id)
                     && let Row::Item(item) = &mut self.rows[index]
@@ -136,11 +180,8 @@ impl Conversation {
                 }
             }
             Event::ItemCompleted(item) => {
-                self.write(dir, session, &Entry::Item { item: item.clone() }, false);
-                match self.position_for(&item) {
-                    Some(index) => self.rows[index] = Row::Item(item),
-                    None => self.rows.push(Row::Item(item)),
-                }
+                self.place(item.clone());
+                self.write(Entry::Item { item }, false);
             }
             Event::ApprovalRequested(approval) => self.approvals.push(approval),
             Event::ApprovalResolved { request } => self.approvals.retain(|a| a.request != request),
@@ -161,15 +202,15 @@ impl Conversation {
                     })
                     .collect();
                 for item in unfinished {
-                    self.write(dir, session, &Entry::Item { item }, false);
+                    self.write(Entry::Item { item }, false);
                 }
                 let entry = Entry::TurnEnded {
                     status,
                     error: error.clone(),
                 };
-                self.write(dir, session, &entry, true);
+                self.write(entry, true);
                 if status != TurnStatus::Completed {
-                    self.rows.push(Row::TurnEnded { status, error });
+                    self.push(Row::TurnEnded { status, error });
                 }
                 self.turn_start = self.rows.len();
             }
@@ -184,7 +225,7 @@ impl Conversation {
     }
 
     /// Records the user's answer to the oldest pending approval.
-    pub fn decide(&mut self, dir: &Path, session: u64, allowed: bool) -> Option<Approval> {
+    pub fn decide(&mut self, allowed: bool) -> Option<Approval> {
         if self.approvals.is_empty() {
             return None;
         }
@@ -193,12 +234,37 @@ impl Conversation {
             action: approval.action.clone(),
             allowed,
         };
-        self.write(dir, session, &entry, true);
-        self.rows.push(Row::Decision {
+        self.write(entry, true);
+        self.push(Row::Decision {
             action: approval.action.clone(),
             allowed,
         });
         Some(approval)
+    }
+
+    /// Entries to append to the session's log, in order.
+    pub fn take_writes(&mut self) -> Vec<Write> {
+        std::mem::take(&mut self.writes)
+    }
+
+    /// Puts `item` in its existing row, or a new one, and returns the row.
+    fn place(&mut self, item: Item) -> usize {
+        match self.position_for(&item) {
+            Some(index) => {
+                self.rows[index] = Row::Item(item);
+                index
+            }
+            None => self.push(Row::Item(item)),
+        }
+    }
+
+    fn push(&mut self, row: Row) -> usize {
+        self.rows.push(row);
+        self.rows.len() - 1
+    }
+
+    fn write(&mut self, entry: Entry, sync: bool) {
+        self.writes.push(Write { entry, sync });
     }
 
     /// The row for `item`: the same ID, or the local copy of the same user message.
@@ -221,25 +287,6 @@ impl Conversation {
             .rposition(|row| matches!(row, Row::Item(item) if item.id == id))
             .map(|index| self.turn_start + index)
     }
-
-    /// Appends to the log, reopening it if an earlier write failed.
-    fn write(&mut self, dir: &Path, session: u64, entry: &Entry, sync: bool) {
-        let result = (|| {
-            if self.log.is_none() {
-                self.log = Some(SessionLog::open(dir, session)?);
-            }
-            let log = self.log.as_mut().expect("opened above");
-            log.append(entry)?;
-            if sync { log.sync() } else { Ok(()) }
-        })();
-        match result {
-            Ok(()) => self.save_error = None,
-            Err(error) => {
-                self.log = None;
-                self.save_error = Some(format!("This conversation is not being saved. {error}"));
-            }
-        }
-    }
 }
 
 /// Whether a row has anything to show. Reasoning without a summary is skipped.
@@ -261,39 +308,80 @@ mod tests {
         }
     }
 
+    fn user(id: &str, text: &str) -> Item {
+        Item {
+            id: id.into(),
+            kind: ItemKind::UserMessage,
+            text: text.into(),
+            status: ItemStatus::Completed,
+        }
+    }
+
+    fn texts(conversation: &Conversation) -> Vec<&str> {
+        conversation
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) => Some(item.text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Stands in for the session's log file: keeps what was written, in order.
+    #[derive(Default)]
+    struct Log(Vec<Entry>);
+
+    impl Log {
+        fn save(&mut self, conversation: &mut Conversation) {
+            let writes = conversation.take_writes();
+            self.0.extend(writes.into_iter().map(|write| write.entry));
+        }
+
+        fn restore(&self) -> Conversation {
+            let mut conversation = Conversation::loading();
+            conversation.restore(Ok(self.0.clone()));
+            conversation
+        }
+    }
+
+    /// Applies each event and saves what it logged, as the app does.
+    fn feed(live: &mut Conversation, log: &mut Log, events: impl IntoIterator<Item = Event>) {
+        for event in events {
+            live.apply(event);
+            log.save(live);
+        }
+    }
+
+    fn completed() -> Event {
+        Event::TurnCompleted {
+            status: TurnStatus::Completed,
+            error: None,
+        }
+    }
+
     #[test]
     fn events_stream_into_rows_and_reload_from_the_log() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut live = Conversation::default();
-        let thread = live.apply(
-            dir.path(),
-            3,
-            Event::ThreadReady {
-                thread_id: "t".into(),
-            },
-        );
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        let thread = live.apply(Event::ThreadReady {
+            thread_id: "t".into(),
+        });
         assert_eq!(thread.as_deref(), Some("t"));
-        live.apply(dir.path(), 3, Event::TurnStarted);
-        live.apply(
-            dir.path(),
-            3,
-            Event::ItemStarted(message("m", "", ItemStatus::InProgress)),
-        );
-        live.apply(
-            dir.path(),
-            3,
-            Event::ItemDelta {
-                item_id: "m".into(),
-                text: "Hel".into(),
-            },
-        );
-        live.apply(
-            dir.path(),
-            3,
-            Event::ItemDelta {
-                item_id: "m".into(),
-                text: "lo".into(),
-            },
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::TurnStarted,
+                Event::ItemStarted(message("m", "", ItemStatus::InProgress)),
+                Event::ItemDelta {
+                    item_id: "m".into(),
+                    text: "Hel".into(),
+                },
+                Event::ItemDelta {
+                    item_id: "m".into(),
+                    text: "lo".into(),
+                },
+            ],
         );
         assert_eq!(
             live.rows,
@@ -301,36 +389,31 @@ mod tests {
         );
         assert!(live.running);
 
-        live.apply(
-            dir.path(),
-            3,
-            Event::ApprovalRequested(Approval {
-                request: RequestId("1".into()),
-                item_id: None,
-                action: "rm -rf build".into(),
-                detail: None,
-            }),
-        );
-        assert_eq!(
-            live.decide(dir.path(), 3, false).unwrap().action,
-            "rm -rf build"
-        );
-        live.apply(
-            dir.path(),
-            3,
-            Event::ItemCompleted(message("m", "Hello", ItemStatus::Completed)),
-        );
-        live.apply(
-            dir.path(),
-            3,
-            Event::TurnCompleted {
-                status: TurnStatus::Interrupted,
-                error: None,
-            },
+        live.apply(Event::ApprovalRequested(Approval {
+            request: RequestId("1".into()),
+            item_id: None,
+            action: "rm -rf build".into(),
+            detail: None,
+        }));
+        assert_eq!(live.decide(false).unwrap().action, "rm -rf build");
+        log.save(&mut live);
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::ItemCompleted(message("m", "Hello", ItemStatus::Completed)),
+                Event::TurnCompleted {
+                    status: TurnStatus::Interrupted,
+                    error: None,
+                },
+            ],
         );
         assert!(!live.running);
+        // The sync points: the decision and the end of the turn.
+        let synced: Vec<_> = live.take_writes();
+        assert!(synced.is_empty(), "everything was saved");
 
-        let reloaded = Conversation::load(dir.path(), 3);
+        let reloaded = log.restore();
         assert_eq!(
             reloaded.rows,
             vec![
@@ -348,63 +431,87 @@ mod tests {
     }
 
     #[test]
+    fn what_happens_while_loading_is_applied_after_the_history() {
+        let mut log = Log::default();
+        let mut first = Conversation::default();
+        first.push_local("Earlier");
+        log.save(&mut first);
+        feed(&mut first, &mut log, [Event::TurnStarted, completed()]);
+
+        let mut live = Conversation::loading();
+        live.push_local("Sent while loading");
+        let thread = live.apply(Event::ThreadReady {
+            thread_id: "t".into(),
+        });
+        assert_eq!(thread.as_deref(), Some("t"), "the thread is not held back");
+        live.apply(Event::TurnStarted);
+        assert!(live.rows.is_empty() && live.take_writes().is_empty());
+        assert!(live.is_loading());
+
+        live.restore(Ok(log.0.clone()));
+        log.save(&mut live);
+        assert!(!live.is_loading() && live.running);
+        assert_eq!(texts(&live), ["Earlier", "Sent while loading"]);
+        assert_eq!(texts(&log.restore()), ["Earlier", "Sent while loading"]);
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_read_shows_an_error() {
+        let mut live = Conversation::loading();
+        live.restore(Err("permission denied".into()));
+        assert!(!live.is_loading());
+        assert!(live.error.as_deref().unwrap().contains("permission denied"));
+    }
+
+    #[test]
     fn the_providers_copy_replaces_a_locally_shown_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut live = Conversation::default();
-        live.push_local(dir.path(), 5, "Fix the build");
-        live.push_local(dir.path(), 5, "Never echoed");
-        let echoed = Item {
-            id: "u1".into(),
-            kind: ItemKind::UserMessage,
-            text: "Fix the build".into(),
-            status: ItemStatus::Completed,
-        };
-        live.apply(dir.path(), 5, Event::ItemStarted(echoed.clone()));
-        live.apply(dir.path(), 5, Event::ItemCompleted(echoed.clone()));
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        live.push_local("Fix the build");
+        live.push_local("Never echoed");
+        log.save(&mut live);
+        let echoed = user("u1", "Fix the build");
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::ItemStarted(echoed.clone()),
+                Event::ItemCompleted(echoed.clone()),
+            ],
+        );
         assert_eq!(live.rows[0], Row::Item(echoed.clone()));
 
         // After a restart: the echoed message once, and the un-echoed steer kept.
-        let mut reloaded = Conversation::load(dir.path(), 5);
+        let mut reloaded = log.restore();
         assert_eq!(reloaded.rows.len(), 2);
         assert_eq!(reloaded.rows[0], Row::Item(echoed));
         assert!(matches!(&reloaded.rows[1], Row::Item(item) if item.text == "Never echoed"));
 
         // Messages sent after the restart never take the place of earlier ones.
-        reloaded.push_local(dir.path(), 5, "After restart");
-        let again = Conversation::load(dir.path(), 5);
-        let texts: Vec<_> = again
-            .rows
-            .iter()
-            .filter_map(|row| match row {
-                Row::Item(item) => Some(item.text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(texts, ["Fix the build", "Never echoed", "After restart"]);
+        reloaded.push_local("After restart");
+        log.save(&mut reloaded);
+        assert_eq!(
+            texts(&log.restore()),
+            ["Fix the build", "Never echoed", "After restart"]
+        );
     }
 
     #[test]
     fn an_id_reused_in_a_later_turn_adds_a_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut live = Conversation::default();
+        let (mut live, mut log) = (Conversation::default(), Log::default());
         for text in ["first", "second"] {
-            live.push_local(dir.path(), 9, text);
-            live.apply(dir.path(), 9, Event::TurnStarted);
-            live.apply(
-                dir.path(),
-                9,
-                Event::ItemCompleted(message("reused", text, ItemStatus::Completed)),
-            );
-            live.apply(
-                dir.path(),
-                9,
-                Event::TurnCompleted {
-                    status: TurnStatus::Completed,
-                    error: None,
-                },
+            live.push_local(text);
+            log.save(&mut live);
+            feed(
+                &mut live,
+                &mut log,
+                [
+                    Event::TurnStarted,
+                    Event::ItemCompleted(message("reused", text, ItemStatus::Completed)),
+                    completed(),
+                ],
             );
         }
-        for conversation in [&live, &Conversation::load(dir.path(), 9)] {
+        for conversation in [&live, &log.restore()] {
             let replies: Vec<_> = conversation
                 .rows
                 .iter()
@@ -421,7 +528,6 @@ mod tests {
 
     #[test]
     fn approvals_wait_in_order_and_each_is_answered() {
-        let dir = tempfile::tempdir().unwrap();
         let mut live = Conversation::default();
         let approval = |id: &str| Approval {
             request: RequestId(id.into()),
@@ -429,38 +535,15 @@ mod tests {
             action: format!("cmd {id}"),
             detail: None,
         };
-        live.apply(dir.path(), 10, Event::ApprovalRequested(approval("1")));
-        live.apply(dir.path(), 10, Event::ApprovalRequested(approval("2")));
-        assert_eq!(live.decide(dir.path(), 10, true).unwrap().action, "cmd 1");
+        live.apply(Event::ApprovalRequested(approval("1")));
+        live.apply(Event::ApprovalRequested(approval("2")));
+        assert_eq!(live.decide(true).unwrap().action, "cmd 1");
         assert_eq!(live.approvals, vec![approval("2")]);
-        live.apply(
-            dir.path(),
-            10,
-            Event::ApprovalResolved {
-                request: RequestId("2".into()),
-            },
-        );
+        assert!(live.take_writes()[0].sync, "a decision is synced");
+        live.apply(Event::ApprovalResolved {
+            request: RequestId("2".into()),
+        });
         assert!(live.approvals.is_empty());
-    }
-
-    #[test]
-    fn a_save_error_stays_visible_until_saving_works() {
-        let dir = tempfile::tempdir().unwrap();
-        let blocked = dir.path().join("not-a-directory");
-        std::fs::write(&blocked, "").unwrap();
-        let mut live = Conversation::default();
-        live.push_local(&blocked, 11, "hello");
-        live.apply(&blocked, 11, Event::TurnStarted);
-        assert!(live.save_error.is_some(), "a later event must not hide it");
-        live.apply(
-            dir.path(),
-            11,
-            Event::TurnCompleted {
-                status: TurnStatus::Completed,
-                error: None,
-            },
-        );
-        assert!(live.save_error.is_none(), "cleared once a write succeeds");
     }
 
     /// Real codex-cli 0.162.1 traffic through the driver: the third turn was stopped
@@ -471,7 +554,6 @@ mod tests {
         const THREAD: &str = "01a1418d-549d-7553-bd08-4183fac44aa7";
         let fixture =
             include_str!("../../keystone-agent/tests/fixtures/codex-0.162.1-thread.jsonl");
-        let dir = tempfile::tempdir().unwrap();
         let mut out = Outputs::default();
         let mut driver = CodexDriver::new("test", &mut out);
         driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
@@ -490,10 +572,8 @@ mod tests {
         for line in fixture.lines() {
             driver.on_line(line.as_bytes(), &mut out);
         }
-        let mut live = Conversation::default();
-        for (session, event) in out.events {
-            live.apply(dir.path(), session, event);
-        }
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        feed(&mut live, &mut log, out.events.into_iter().map(|(_, e)| e));
         let last_reply = |c: &Conversation| {
             c.rows.iter().rev().find_map(|row| match row {
                 Row::Item(item) if item.kind == ItemKind::AgentMessage => Some(item.text.clone()),
@@ -502,59 +582,48 @@ mod tests {
         };
         let streamed = last_reply(&live).expect("the stopped reply streamed some text");
         assert!(!streamed.is_empty());
-        assert_eq!(
-            last_reply(&Conversation::load(dir.path(), 12)),
-            Some(streamed)
-        );
+        let reloaded = log.restore();
+        assert_eq!(last_reply(&reloaded), Some(streamed));
     }
 
     #[test]
     fn a_stopped_reply_keeps_its_streamed_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut live = Conversation::default();
-        live.apply(dir.path(), 6, Event::TurnStarted);
-        live.apply(
-            dir.path(),
-            6,
-            Event::ItemStarted(message("m", "", ItemStatus::InProgress)),
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::TurnStarted,
+                Event::ItemStarted(message("m", "", ItemStatus::InProgress)),
+                Event::ItemDelta {
+                    item_id: "m".into(),
+                    text: "1\n2".into(),
+                },
+                Event::TurnCompleted {
+                    status: TurnStatus::Interrupted,
+                    error: None,
+                },
+            ],
         );
-        live.apply(
-            dir.path(),
-            6,
-            Event::ItemDelta {
-                item_id: "m".into(),
-                text: "1\n2".into(),
-            },
-        );
-        live.apply(
-            dir.path(),
-            6,
-            Event::TurnCompleted {
-                status: TurnStatus::Interrupted,
-                error: None,
-            },
-        );
-        let reloaded = Conversation::load(dir.path(), 6);
         assert_eq!(
-            reloaded.rows[0],
+            log.restore().rows[0],
             Row::Item(message("m", "1\n2", ItemStatus::Failed))
         );
     }
 
     #[test]
     fn a_turn_open_at_shutdown_reloads_as_interrupted() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut live = Conversation::default();
-        live.apply(dir.path(), 4, Event::TurnStarted);
-        live.apply(
-            dir.path(),
-            4,
-            Event::ItemCompleted(message("m", "partial", ItemStatus::Completed)),
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::TurnStarted,
+                Event::ItemCompleted(message("m", "partial", ItemStatus::Completed)),
+            ],
         );
-        drop(live);
-        let reloaded = Conversation::load(dir.path(), 4);
         assert!(matches!(
-            reloaded.rows.last(),
+            log.restore().rows.last(),
             Some(Row::TurnEnded {
                 status: TurnStatus::Interrupted,
                 error: Some(_)

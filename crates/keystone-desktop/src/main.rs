@@ -10,6 +10,7 @@ use gpui::{
     WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use keystone_agent::codex::Command;
+use keystone_agent::log::{Logs, Report};
 use keystone_agent::{CodexConnection, ItemKind, ItemStatus, TurnStatus, Wake};
 use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
 use keystone_ui::{automation, prelude::*};
@@ -59,8 +60,8 @@ struct Keystone {
     /// The shared Codex app-server connection, created on the first message.
     codex: Option<CodexConnection>,
     conversations: HashMap<u64, Conversation>,
-    /// Where each session's log of completed items is kept.
-    sessions_dir: PathBuf,
+    /// Each session's log of completed items, read and written off the UI thread.
+    logs: Logs,
     /// The directory agents work in.
     project_dir: PathBuf,
     wake: Wake,
@@ -128,7 +129,7 @@ impl Keystone {
             fixture,
             codex: None,
             conversations: HashMap::new(),
-            sessions_dir,
+            logs: Logs::new(sessions_dir, wake.clone()),
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
@@ -675,26 +676,54 @@ impl Keystone {
         )
     }
 
+    /// The session's conversation. The first call starts loading its saved history.
     fn conversation(&mut self, session: u64) -> &mut Conversation {
-        let dir = &self.sessions_dir;
+        let logs = &self.logs;
         let scroll = &self.transcript_scroll;
         self.conversations.entry(session).or_insert_with(|| {
             // Open a conversation at its latest message.
             scroll.scroll_to_bottom();
-            Conversation::load(dir, session)
+            logs.load(session);
+            Conversation::loading()
         })
     }
 
-    /// Applies every provider event that arrived since the last wake-up.
+    /// Queues what the conversation logged.
+    fn commit(&mut self, session: u64) {
+        if let Some(conversation) = self.conversations.get_mut(&session) {
+            self.logs.append(session, conversation.take_writes());
+        }
+    }
+
+    /// Applies loaded history, save results, and every provider event that arrived
+    /// since the last wake-up.
     fn pump(&mut self, cx: &mut Context<Self>) {
-        let Some(codex) = &self.codex else { return };
-        let events = codex.drain();
-        if events.is_empty() {
+        let reports = self.logs.drain();
+        let events = self.codex.as_ref().map(|c| c.drain()).unwrap_or_default();
+        if reports.is_empty() && events.is_empty() {
             return;
         }
-        let dir = self.sessions_dir.clone();
+        for report in reports {
+            let session = match report {
+                Report::Loaded { session, entries } => {
+                    if let Some(conversation) = self.conversations.get_mut(&session) {
+                        conversation.restore(entries);
+                    }
+                    session
+                }
+                Report::Saved { session, error } => {
+                    if let Some(conversation) = self.conversations.get_mut(&session) {
+                        conversation.save_error = error
+                            .map(|error| format!("This conversation is not being saved. {error}"));
+                    }
+                    session
+                }
+            };
+            self.commit(session);
+        }
         for (session, event) in events {
-            let thread = self.conversation(session).apply(&dir, session, event);
+            let thread = self.conversation(session).apply(event);
+            self.commit(session);
             if let Some(thread) = thread {
                 let known = self
                     .store
@@ -711,19 +740,21 @@ impl Keystone {
         cx.notify();
     }
 
-    fn codex(&mut self) -> Result<&CodexConnection, String> {
-        if self.codex.is_none() {
-            let program = std::env::var_os("KEYSTONE_CODEX_PATH")
-                .map(PathBuf::from)
-                .or_else(|| keystone_agent::find::program("codex"))
-                .ok_or("Codex is not installed. Install the codex CLI and run `codex login`.")?;
-            self.codex = Some(CodexConnection::new(
-                program,
+    /// The shared Codex connection. It finds and starts `codex` on its own thread.
+    fn codex(&mut self) -> &CodexConnection {
+        let wake = self.wake.clone();
+        self.codex.get_or_insert_with(|| {
+            CodexConnection::new(
+                std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
                 env!("CARGO_PKG_VERSION"),
-                self.wake.clone(),
-            ));
-        }
-        Ok(self.codex.as_ref().expect("set above"))
+                wake,
+            )
+        })
+    }
+
+    /// Writes everything queued for the session logs. Used before the app closes.
+    fn flush_logs(&self) {
+        self.logs.flush();
     }
 
     /// Sends the composer text: a new turn, or a steer for the running one.
@@ -760,30 +791,17 @@ impl Keystone {
             .iter()
             .find(|s| s.id() == id)
             .and_then(|s| s.provider_thread().map(str::to_owned));
-        let result = self.codex().and_then(|codex| {
-            codex
-                .send(id, &cwd, resume.as_deref(), text.clone())
-                .map_err(|e| {
-                    format!(
-                        "Could not start Codex at {}. {e}",
-                        codex.program().display()
-                    )
-                })
-        });
-        match result {
-            Ok(()) => {
-                self.error = None;
-                let dir = self.sessions_dir.clone();
-                self.conversation(id).push_local(&dir, id, &text);
-                self.composer
-                    .update(cx, |input, cx| input.set_value(String::new(), cx));
-                self.save_draft(cx);
-                self.transcript_scroll.scroll_to_bottom();
-                // Clicking Send moves focus off the composer; put it back for the next message.
-                self.composer.focus_handle(cx).focus(window);
-            }
-            Err(message) => self.error = Some(message),
-        }
+        // A failure to start Codex arrives later as an error in this conversation.
+        self.codex().send(id, &cwd, resume.as_deref(), text.clone());
+        self.error = None;
+        self.conversation(id).push_local(&text);
+        self.commit(id);
+        self.composer
+            .update(cx, |input, cx| input.set_value(String::new(), cx));
+        self.save_draft(cx);
+        self.transcript_scroll.scroll_to_bottom();
+        // Clicking Send moves focus off the composer; put it back for the next message.
+        self.composer.focus_handle(cx).focus(window);
         cx.notify();
     }
 
@@ -792,9 +810,7 @@ impl Keystone {
         let (Some(id), Some(codex)) = (self.store.workspace().selected(), &self.codex) else {
             return;
         };
-        if let Err(error) = codex.command(Command::Interrupt { session: id }) {
-            self.error = Some(format!("Could not stop the turn. {error}"));
-        }
+        codex.command(Command::Interrupt { session: id });
         cx.notify();
     }
 
@@ -804,18 +820,16 @@ impl Keystone {
         let Some(id) = self.store.workspace().selected() else {
             return;
         };
-        let dir = self.sessions_dir.clone();
-        let Some(approval) = self.conversation(id).decide(&dir, id, allow) else {
+        let Some(approval) = self.conversation(id).decide(allow) else {
             return;
         };
-        if let Some(codex) = &self.codex
-            && let Err(error) = codex.command(Command::Answer {
+        self.commit(id);
+        if let Some(codex) = &self.codex {
+            codex.command(Command::Answer {
                 session: id,
                 request: approval.request,
                 allow,
-            })
-        {
-            self.error = Some(format!("Could not send the answer. {error}"));
+            });
         }
         cx.notify();
     }
@@ -1190,13 +1204,22 @@ impl Render for Keystone {
             .map(|s| s.title().to_owned())
             .unwrap_or_else(|| "Workspace".into());
         let selected = current.map(|s| s.id());
+        // A session that has reached its provider has history, so while that history
+        // loads, the transcript layout is shown rather than the welcome screen.
+        let has_thread = current.is_some_and(|s| s.provider_thread().is_some());
         let current = current.map(|s| (s.provider(), s.settled()));
         if let Some(id) = selected {
             self.conversation(id);
         }
         let has_conversation = selected
             .and_then(|id| self.conversations.get(&id))
-            .is_some_and(|c| !c.is_empty());
+            .is_some_and(|c| {
+                if c.is_loading() {
+                    has_thread
+                } else {
+                    !c.is_empty()
+                }
+            });
         let composer = self.composer(current, cx);
         let main = if self.fixture || has_conversation {
             v_flex()
@@ -1283,6 +1306,7 @@ impl Render for Keystone {
             }))
             .on_action(cx.listener(|this, _: &Quit, _, cx| {
                 if this.save_draft(cx) {
+                    this.flush_logs();
                     cx.quit();
                 }
             }))
@@ -1353,6 +1377,7 @@ impl Render for Keystone {
 #[cfg(all(test, feature = "ui-tests"))]
 mod tests {
     use super::*;
+    use keystone_agent::{Event, Item};
 
     #[gpui::test]
     fn welcome_action_focuses_composer_and_preserves_draft_on_session_switch(
@@ -1436,7 +1461,6 @@ mod tests {
     /// Writes a session log with `turns` completed turns: a question, a command, and a
     /// several-line reply each.
     fn seed_long_session(dir: &Path, session: u64, turns: usize) {
-        use keystone_agent::Item;
         use keystone_agent::log::{Entry, SessionLog};
         let mut log = SessionLog::open(dir, session).unwrap();
         for turn in 0..turns {
@@ -1508,6 +1532,76 @@ mod tests {
         eprintln!(
             "PERF transcript_draw_ms={:.2}",
             total.as_secs_f64() * 1000. / frames as f64
+        );
+
+        // A reply streaming at the end of the same transcript: one delta per frame.
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            conversation.apply(Event::ItemStarted(Item {
+                id: "live".into(),
+                kind: ItemKind::AgentMessage,
+                text: String::new(),
+                status: ItemStatus::InProgress,
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        let mut total = std::time::Duration::ZERO;
+        for _ in 0..frames {
+            view.update(cx, |this, cx| {
+                this.conversation(1).apply(Event::ItemDelta {
+                    item_id: "live".into(),
+                    text: "More streamed text. ".into(),
+                });
+                this.commit(1);
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                let start = std::time::Instant::now();
+                window.draw(cx).clear();
+                total += start.elapsed();
+            });
+        }
+        eprintln!(
+            "PERF transcript_stream_ms={:.2}",
+            total.as_secs_f64() * 1000. / frames as f64
+        );
+    }
+
+    #[gpui::test]
+    fn a_save_failure_shows_in_the_conversation_until_saving_works(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex).unwrap();
+        // A file where the sessions directory belongs makes every write fail.
+        let sessions = dir.path().join("sessions");
+        std::fs::write(&sessions, "").unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let turn = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |this, cx| {
+                let conversation = this.conversation(1);
+                conversation.push_local("hello");
+                conversation.apply(Event::TurnStarted);
+                this.commit(1);
+                cx.notify();
+            });
+        };
+        wait_until(cx, &view, |view| !view.conversations[&1].is_loading());
+        turn(&view, cx);
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].save_error.is_some()
+        });
+        std::fs::remove_file(&sessions).unwrap();
+        turn(&view, cx);
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].save_error.is_none()
+        });
+        view.read_with(cx, |view, _| view.flush_logs());
+        assert!(
+            !keystone_agent::log::read(&sessions, 1).unwrap().is_empty(),
+            "written once saving works"
         );
     }
 
@@ -1746,10 +1840,13 @@ mod tests {
         });
 
         // A fresh window reads the conversation back from the session's log.
+        view.read_with(cx, |view, _| view.flush_logs());
         let store = Store::open(&path).unwrap();
         let (restored, cx) =
             cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        cx.run_until_parked();
+        wait_until(cx, &restored, |view| {
+            view.conversations.get(&1).is_some_and(|c| !c.is_loading())
+        });
         restored.read_with(cx, |view, _| {
             let rows = &view.conversations[&1].rows;
             assert!(rows.contains(&Row::Decision { action: "echo scripted".into(), allowed: true }));
@@ -1945,8 +2042,12 @@ fn main() {
                     });
                     let weak = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
-                        weak.update(cx, |view, cx| view.save_draft(cx))
-                            .unwrap_or(true)
+                        weak.update(cx, |view, cx| {
+                            let saved = view.save_draft(cx);
+                            view.flush_logs();
+                            saved
+                        })
+                        .unwrap_or(true)
                     });
                     view
                 },
