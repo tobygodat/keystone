@@ -701,14 +701,24 @@ impl Keystone {
         let changed = conversation.take_changes();
         let count = conversation.rows.len() + 1;
         if let Some(list) = self.transcripts.get(&session) {
+            // Rows are only appended or replaced in place, so every row the list
+            // already shows keeps its index; the status entry is always last.
             let old = list.item_count();
-            // The status entry after the last row changes with almost anything, so it
-            // is always remeasured.
-            let from = changed
-                .unwrap_or(usize::MAX)
-                .min(old.saturating_sub(1))
-                .min(count - 1);
-            list.splice(from..old, count - from);
+            let status = old.saturating_sub(1).min(count - 1);
+            // A splice moves the view to the start of a remeasured entry. Unless it
+            // is following the bottom, keep it on the same row at the same offset.
+            let top = list.logical_scroll_top();
+            for range in changed {
+                let range = range.start..range.end.min(status);
+                if !range.is_empty() {
+                    list.splice(range.clone(), range.len());
+                }
+            }
+            // The status entry changes with almost anything, so it is always remeasured.
+            list.splice(status..old, count - status);
+            if top.item_ix < status {
+                list.scroll_to(top);
+            }
         }
     }
 
@@ -780,7 +790,19 @@ impl Keystone {
     }
 
     /// Writes everything queued for the session logs. Used before the app closes.
-    fn flush_logs(&self) {
+    ///
+    /// A conversation still loading its history holds what was sent meanwhile, and
+    /// logs it only once the history is applied. So finish every load and apply it
+    /// first, or those messages would be lost.
+    fn flush_logs(&mut self, cx: &mut Context<Self>) {
+        loop {
+            self.logs.flush();
+            self.pump(cx);
+            // Applying events can start loading another session; finish that too.
+            if !self.conversations.values().any(Conversation::is_loading) {
+                break;
+            }
+        }
         self.logs.flush();
     }
 
@@ -1214,7 +1236,7 @@ impl Render for Keystone {
             .and_then(|id| self.conversations.get(&id))
             .is_some_and(|c| {
                 if c.is_loading() {
-                    has_thread
+                    has_thread || c.running
                 } else {
                     !c.is_empty()
                 }
@@ -1309,7 +1331,7 @@ impl Render for Keystone {
             }))
             .on_action(cx.listener(|this, _: &Quit, _, cx| {
                 if this.save_draft(cx) {
-                    this.flush_logs();
+                    this.flush_logs(cx);
                     cx.quit();
                 }
             }))
@@ -1657,6 +1679,111 @@ mod tests {
     }
 
     #[gpui::test]
+    fn streaming_keeps_the_place_of_a_reader_who_scrolled_up(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 200);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 600)
+        });
+        let message = |id: &str, text: String| Item {
+            id: id.into(),
+            kind: ItemKind::AgentMessage,
+            text,
+            status: ItemStatus::InProgress,
+        };
+        // A short item, then a reply taller than the view, both still streaming.
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            conversation.apply(Event::ItemStarted(message("early", "Thinking".into())));
+            conversation.apply(Event::ItemStarted(message(
+                "long",
+                "Streamed words. ".repeat(600),
+            )));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // Scroll up partway into the long reply.
+        let over = cx.debug_bounds("conversation").unwrap().center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(200.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let view_top = cx.debug_bounds("conversation").unwrap().top();
+        let read = cx.debug_bounds("transcript-row-601").unwrap();
+        assert!(read.top() < view_top, "the reply starts above the view");
+        assert!(cx.debug_bounds("transcript-row-600").is_none());
+
+        // More of the reply streams in: the text being read stays where it is.
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(Event::ItemDelta {
+                item_id: "long".into(),
+                text: "More. ".repeat(50),
+            });
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("transcript-row-601").unwrap().top(),
+            read.top()
+        );
+
+        // An item above the view completes: still no jump.
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(Event::ItemCompleted(Item {
+                status: ItemStatus::Completed,
+                ..message("early", "Thought for a while. ".repeat(20))
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("transcript-row-601").unwrap().top(),
+            read.top()
+        );
+        assert!(cx.debug_bounds("transcript-row-600").is_none());
+    }
+
+    #[gpui::test]
+    fn a_message_sent_while_history_loads_is_saved_on_quit(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex).unwrap();
+        // Selected, so session 1's history is not loaded until it is used below.
+        store.create(Provider::Codex).unwrap();
+        let sessions = dir.path().join("sessions");
+        seed_long_session(&sessions, 1, 3);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        // Sent and quit before the loaded history is applied.
+        view.update(cx, |this, cx| {
+            assert!(!this.conversations.contains_key(&1));
+            assert!(this.conversation(1).is_loading());
+            this.conversation(1).push_local("Sent while loading");
+            this.commit(1);
+            this.flush_logs(cx);
+        });
+        let entries = keystone_agent::log::read(&sessions, 1).unwrap();
+        assert!(
+            matches!(entries.last(), Some(keystone_agent::log::Entry::Item { item, .. })
+                if item.text == "Sent while loading"),
+            "the message was saved: {:?}",
+            entries.last()
+        );
+    }
+
+    #[gpui::test]
     fn a_save_failure_shows_in_the_conversation_until_saving_works(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
@@ -1686,7 +1813,7 @@ mod tests {
         wait_until(cx, &view, |view| {
             view.conversations[&1].save_error.is_none()
         });
-        view.read_with(cx, |view, _| view.flush_logs());
+        view.update(cx, |view, cx| view.flush_logs(cx));
         assert!(
             !keystone_agent::log::read(&sessions, 1).unwrap().is_empty(),
             "written once saving works"
@@ -1928,7 +2055,7 @@ mod tests {
         });
 
         // A fresh window reads the conversation back from the session's log.
-        view.read_with(cx, |view, _| view.flush_logs());
+        view.update(cx, |view, cx| view.flush_logs(cx));
         let store = Store::open(&path).unwrap();
         let (restored, cx) =
             cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -2132,7 +2259,7 @@ fn main() {
                     window.on_window_should_close(cx, move |_, cx| {
                         weak.update(cx, |view, cx| {
                             let saved = view.save_draft(cx);
-                            view.flush_logs();
+                            view.flush_logs(cx);
                             saved
                         })
                         .unwrap_or(true)

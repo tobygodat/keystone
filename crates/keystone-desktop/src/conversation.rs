@@ -9,6 +9,8 @@ use keystone_agent::log::{Entry, Write};
 use keystone_agent::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, TurnStatus, cap_output,
 };
+use std::collections::BTreeSet;
+use std::ops::Range;
 
 /// ID prefix for a sent message shown before the provider echoes it.
 const LOCAL: &str = "local:";
@@ -48,8 +50,8 @@ pub struct Conversation {
     /// While saved history is loading, what happens meanwhile waits here.
     pending: Option<Vec<Pending>>,
     writes: Vec<Write>,
-    /// The lowest row changed since [`Conversation::take_changes`].
-    changed: Option<usize>,
+    /// Rows added or changed since [`Conversation::take_changes`].
+    changed: BTreeSet<usize>,
 }
 
 enum Pending {
@@ -80,7 +82,7 @@ impl Conversation {
             Ok(entries) => self.rebuild(entries),
             Err(error) => self.error = Some(format!("Could not read this conversation. {error}")),
         }
-        self.changed = Some(0);
+        self.changed.extend(0..self.rows.len());
         for pending in pending {
             match pending {
                 Pending::Local(text) => self.push_local(&text),
@@ -146,6 +148,10 @@ impl Conversation {
     pub fn push_local(&mut self, text: &str) {
         if let Some(pending) = &mut self.pending {
             pending.push(Pending::Local(text.to_owned()));
+            // The message has already gone to the provider, so the turn is running
+            // now, and Stop is offered before the history arrives.
+            self.running = true;
+            self.error = None;
             return;
         }
         // Unique across restarts: a reloaded log already holds earlier local IDs.
@@ -279,10 +285,16 @@ impl Conversation {
         std::mem::take(&mut self.writes)
     }
 
-    /// The lowest row added or changed since the last call. Every row after it may
-    /// have changed too.
-    pub fn take_changes(&mut self) -> Option<usize> {
-        self.changed.take()
+    /// The rows added or changed since the last call, as ascending, separate ranges.
+    pub fn take_changes(&mut self) -> Vec<Range<usize>> {
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        for index in std::mem::take(&mut self.changed) {
+            match ranges.last_mut() {
+                Some(range) if range.end == index => range.end += 1,
+                _ => ranges.push(index..index + 1),
+            }
+        }
+        ranges
     }
 
     /// Puts `item` in its existing row, or a new one, and returns the row.
@@ -304,7 +316,7 @@ impl Conversation {
     }
 
     fn mark(&mut self, index: usize) {
-        self.changed = Some(self.changed.map_or(index, |changed| changed.min(index)));
+        self.changed.insert(index);
     }
 
     fn seq(&self, index: usize) -> u64 {
@@ -348,6 +360,8 @@ pub fn visible(row: &Row) -> bool {
 }
 
 #[cfg(test)]
+// Changes are compared as lists of ranges.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
     use keystone_agent::RequestId;
@@ -598,29 +612,46 @@ mod tests {
         log.save(&mut live);
         assert!(!live.is_loading() && live.running);
         assert_eq!(texts(&live), ["Earlier", "Sent while loading"]);
-        assert_eq!(live.take_changes(), Some(0));
+        assert_eq!(live.take_changes(), [0..2]);
         assert_eq!(texts(&log.restore()), ["Earlier", "Sent while loading"]);
     }
 
     #[test]
-    fn changes_report_the_lowest_changed_row() {
+    fn a_message_sent_while_loading_shows_the_turn_running_at_once() {
+        // The message has already gone to the provider, so Stop must be offered now,
+        // not only once the history arrives.
+        let mut live = Conversation::loading();
+        live.push_local("Sent while loading");
+        assert!(live.running);
+        live.restore(Ok(Vec::new()));
+        assert!(live.running);
+        assert_eq!(texts(&live), ["Sent while loading"]);
+    }
+
+    #[test]
+    fn changes_report_only_the_rows_that_changed() {
         let mut live = Conversation::default();
         live.push_local("one");
         live.apply(Event::ItemStarted(message("m", "", ItemStatus::InProgress)));
-        assert_eq!(live.take_changes(), Some(0));
-        assert_eq!(live.take_changes(), None);
+        assert_eq!(live.take_changes(), [0..2]);
+        assert!(live.take_changes().is_empty());
         live.apply(Event::ItemDelta {
             item_id: "m".into(),
             text: "streamed".into(),
         });
-        assert_eq!(live.take_changes(), Some(1));
+        assert_eq!(live.take_changes(), [1..2]);
+        // A row above changes and one is added: the row between is left alone.
+        live.apply(Event::ItemStarted(message("n", "", ItemStatus::InProgress)));
+        live.apply(Event::ItemCompleted(user("u", "one")));
+        live.apply(Event::ItemStarted(message("o", "", ItemStatus::InProgress)));
+        assert_eq!(live.take_changes(), [0..1, 2..4]);
         live.apply(Event::ApprovalRequested(Approval {
             request: RequestId("1".into()),
             item_id: None,
             action: "ls".into(),
             detail: None,
         }));
-        assert_eq!(live.take_changes(), None, "approvals are not rows");
+        assert!(live.take_changes().is_empty(), "approvals are not rows");
     }
 
     #[test]
