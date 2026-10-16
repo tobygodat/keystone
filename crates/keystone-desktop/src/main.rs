@@ -10,7 +10,7 @@ use gpui::{
     WeakEntity, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
 };
 use keystone_agent::codex::Command;
-use keystone_agent::{CodexConnection, ItemKind, ItemStatus, TurnStatus, Wake};
+use keystone_agent::{CodexConnection, Event, ItemKind, ItemStatus, TurnStatus, Wake};
 use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
 use keystone_ui::{automation, prelude::*};
 use std::collections::HashMap;
@@ -65,6 +65,13 @@ fn arch_mark(size: Pixels) -> impl IntoElement {
         )
 }
 
+/// The wall clock in unix milliseconds. Tests swap in a fixed clock.
+fn system_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 fn durability_warning(durability: Durability) -> Option<String> {
     match durability {
         Durability::Synced => None,
@@ -98,6 +105,7 @@ struct Keystone {
     project_dir: PathBuf,
     wake: Wake,
     transcript_scroll: ScrollHandle,
+    clock: fn() -> u64,
 }
 
 impl Keystone {
@@ -170,6 +178,7 @@ impl Keystone {
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
+            clock: system_now,
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -248,11 +257,30 @@ impl Keystone {
         }
     }
 
+    /// Saves the draft and marks the open session viewed. Returns false, with the error
+    /// shown, when either fails, so the app stays open.
+    fn save_before_exit(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.save_draft(cx) {
+            return false;
+        }
+        match self.store.leave((self.clock)()) {
+            Ok(applied) => {
+                self.error = durability_warning(applied.durability);
+                self.error.is_none()
+            }
+            Err(error) => {
+                self.error = Some(format!("Could not save before closing. {error}"));
+                cx.notify();
+                false
+            }
+        }
+    }
+
     fn create(&mut self, provider: Provider, cx: &mut Context<Self>) {
         if !self.save_draft(cx) {
             return;
         }
-        self.error = match self.store.create(provider) {
+        self.error = match self.store.create(provider, (self.clock)()) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
@@ -368,7 +396,7 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
-        self.error = match self.store.select(id) {
+        self.error = match self.store.select(id, (self.clock)()) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
@@ -432,7 +460,7 @@ impl Keystone {
                 IconButton::new("close", IconName::Close)
                     .tooltip(Tooltip::with_key("Close window", "Ctrl+Q"))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if this.save_draft(cx) {
+                        if this.save_before_exit(cx) {
                             window.remove_window();
                         }
                     })),
@@ -844,7 +872,14 @@ impl Keystone {
             return;
         }
         let dir = self.sessions_dir.clone();
+        let mut sidebar_changed = false;
         for (session, event) in events {
+            if matches!(event, Event::TurnCompleted { .. } | Event::Failed { .. }) {
+                sidebar_changed = true;
+                if let Err(error) = self.store.record_turn_end(session, (self.clock)()) {
+                    self.error = Some(format!("Could not save the session. {error}"));
+                }
+            }
             let thread = self.conversation(session).apply(&dir, session, event);
             if let Some(thread) = thread {
                 let known = self
@@ -859,7 +894,12 @@ impl Keystone {
             }
         }
         self.transcript_scroll.scroll_to_bottom();
-        cx.notify();
+        // Streamed text redraws only this view. The sidebar refreshes when a row changes.
+        if sidebar_changed {
+            self.refresh(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn codex(&mut self) -> Result<&CodexConnection, String> {
@@ -926,6 +966,9 @@ impl Keystone {
                 self.error = None;
                 let dir = self.sessions_dir.clone();
                 self.conversation(id).push_local(&dir, id, &text);
+                if let Err(error) = self.store.record_message(id, (self.clock)()) {
+                    self.error = Some(format!("Could not save the session. {error}"));
+                }
                 self.composer
                     .update(cx, |input, cx| input.set_value(String::new(), cx));
                 self.save_draft(cx);
@@ -935,7 +978,7 @@ impl Keystone {
             }
             Err(message) => self.error = Some(message),
         }
-        cx.notify();
+        self.refresh(cx);
     }
 
     fn stop_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1589,7 +1632,7 @@ impl Render for Keystone {
                 }
             }))
             .on_action(cx.listener(|this, _: &Quit, _, cx| {
-                if this.save_draft(cx) {
+                if this.save_before_exit(cx) {
                     cx.quit();
                 }
             }))
@@ -1677,7 +1720,7 @@ mod tests {
             } else {
                 Provider::Codex
             };
-            store.create(provider).unwrap();
+            store.create(provider, 1).unwrap();
         }
         cx.update(keystone_ui::init);
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -1712,8 +1755,8 @@ mod tests {
     fn cached_sidebar_follows_search_and_settlement(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Claude).unwrap();
-        store.create(Provider::Codex).unwrap();
+        store.create(Provider::Claude, 1).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
         cx.update(keystone_ui::init);
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         // GPUI 0.2.2 keeps debug bounds for elements that are no longer drawn, so check
@@ -1760,10 +1803,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         for provider in [Provider::Claude, Provider::Codex] {
-            let id = store.create(provider).unwrap().value;
+            let id = store.create(provider, 1).unwrap().value;
             store.set_settled(id, true).unwrap();
         }
-        store.select(1).unwrap();
+        store.select(1, 1).unwrap();
         cx.update(keystone_ui::init);
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         view.update_in(cx, |this, window, cx| {
@@ -1998,8 +2041,8 @@ mod tests {
     fn settled_section_starts_collapsed_and_opens_below_active(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Claude).unwrap();
-        store.create(Provider::Codex).unwrap();
+        store.create(Provider::Claude, 1).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
         store.set_settled(1, true).unwrap();
         cx.update(keystone_ui::init);
         let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -2023,8 +2066,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Claude).unwrap();
-        store.create(Provider::Codex).unwrap();
+        store.create(Provider::Claude, 1).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
         cx.update(keystone_ui::init);
         let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let saved = |path: &Path| {
@@ -2130,8 +2173,8 @@ mod tests {
         std::fs::create_dir(&state_dir).unwrap();
         let path = state_dir.join("workspace.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Claude).unwrap();
-        store.create(Provider::Codex).unwrap();
+        store.create(Provider::Claude, 1).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
         cx.update(keystone_ui::init);
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         std::fs::rename(&state_dir, dir.path().join("backup")).unwrap();
@@ -2254,7 +2297,7 @@ fn main() {
                     });
                     let weak = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
-                        weak.update(cx, |view, cx| view.save_draft(cx))
+                        weak.update(cx, |view, cx| view.save_before_exit(cx))
                             .unwrap_or(true)
                     });
                     view
