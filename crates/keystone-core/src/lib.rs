@@ -48,6 +48,71 @@ pub struct Session {
     /// The provider's own conversation ID, used to resume after a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_thread: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    approval_mode: ApprovalMode,
+    /// Whether Keystone sent this session's provider an approval override. Providers keep
+    /// an override on the conversation, so returning to the provider's own settings must
+    /// restore them explicitly, even after a restart.
+    #[serde(default, skip_serializing_if = "is_default")]
+    approval_overridden: bool,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+/// How much a session's agent may do before asking. Each provider maps a mode to its own
+/// settings; see `docs/design/providers.md`. The default sends nothing, so the user's own
+/// provider configuration decides, as it did before modes existed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum ApprovalMode {
+    #[default]
+    Provider,
+    ReadOnly,
+    Ask,
+    Auto,
+    FullAccess,
+}
+
+impl ApprovalMode {
+    pub const ALL: [ApprovalMode; 5] = [
+        ApprovalMode::Provider,
+        ApprovalMode::ReadOnly,
+        ApprovalMode::Ask,
+        ApprovalMode::Auto,
+        ApprovalMode::FullAccess,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Provider => "Provider settings",
+            Self::ReadOnly => "Read only",
+            Self::Ask => "Ask first",
+            Self::Auto => "Auto",
+            Self::FullAccess => "Full access",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Provider => "Use your own Codex or Claude Code configuration",
+            Self::ReadOnly => "Reads files; asks before any change",
+            Self::Ask => "Asks before commands not known to be safe",
+            Self::Auto => "Edits and runs in the project; asks to go further",
+            Self::FullAccess => "Never asks, with no sandbox",
+        }
+    }
+
+    /// A short stable name, used in automation selectors.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::ReadOnly => "read-only",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+            Self::FullAccess => "full-access",
+        }
+    }
 }
 
 impl Session {
@@ -73,6 +138,14 @@ impl Session {
 
     pub fn provider_thread(&self) -> Option<&str> {
         self.provider_thread.as_deref()
+    }
+
+    pub fn approval_mode(&self) -> ApprovalMode {
+        self.approval_mode
+    }
+
+    pub fn approval_overridden(&self) -> bool {
+        self.approval_overridden
     }
 }
 
@@ -191,6 +264,8 @@ impl Store {
             settled: false,
             draft: String::new(),
             provider_thread: None,
+            approval_mode: ApprovalMode::default(),
+            approval_overridden: false,
         });
         next.selected = Some(id);
         let applied = self.commit(next, next_id)?;
@@ -232,6 +307,22 @@ impl Store {
 
     pub fn set_provider_thread(&mut self, id: u64, thread: String) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.provider_thread = Some(thread))
+    }
+
+    /// Takes effect from the session's next turn. Any mode but the default also records,
+    /// in the same write, that the provider may now hold an override, so the record is
+    /// saved before an override can be sent. The record is never cleared: returning to
+    /// the default then restores the provider's own settings explicitly.
+    pub fn set_approval_mode(&mut self, id: u64, mode: ApprovalMode) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            session.approval_mode = mode;
+            session.approval_overridden |= mode != ApprovalMode::Provider;
+        })
+    }
+
+    /// Records that the provider may hold an approval override for this session.
+    pub fn set_approval_overridden(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.approval_overridden = true)
     }
 
     pub fn set_draft(&mut self, id: u64, text: String) -> StoreResult<Applied<()>> {

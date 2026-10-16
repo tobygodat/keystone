@@ -1,5 +1,6 @@
 //! The full stack against the scripted Claude: process host, connection, and driver.
 
+use keystone_agent::ApprovalState;
 use keystone_agent::{
     Approval, ClaudeConnection, Command, Event, ItemKind, ItemStatus, TurnStatus,
 };
@@ -13,6 +14,10 @@ use std::time::{Duration, Instant};
 
 mod gate;
 use gate::Gate;
+const NO_MODE: ApprovalState = ApprovalState {
+    mode: keystone_core::ApprovalMode::Provider,
+    overridden: false,
+};
 
 fn connect() -> (ClaudeConnection, Receiver<()>) {
     // SAFETY: tests in this file set the same values and run no other code that reads them.
@@ -79,7 +84,7 @@ fn reply(events: &[Event]) -> Option<String> {
 #[test]
 fn turns_stream_steer_stop_and_ask_for_approval() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "hello".into()).unwrap();
     let events = until(&conn, &wake, completed);
     assert_eq!(events[0], Event::TurnStarted);
     assert!(
@@ -92,9 +97,10 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
 
     // A message during the turn steers it: the reply is cut short and the steer is
     // answered in the same turn.
-    conn.send(1, "/tmp", None, "long".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "long".into()).unwrap();
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
-    conn.send(1, "/tmp", None, "change course".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "change course".into())
+        .unwrap();
     let events = until(&conn, &wake, completed);
     assert!(reply(&events).unwrap().contains("You wrote: change course"));
     assert_eq!(
@@ -104,7 +110,7 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     );
 
     // Stop ends the turn as interrupted.
-    conn.send(1, "/tmp", None, "another long one".into())
+    conn.send(1, "/tmp", None, NO_MODE, "another long one".into())
         .unwrap();
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
     assert!(conn.is_running(1));
@@ -119,7 +125,8 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     );
 
     // A command needs approval; allowing it runs it.
-    conn.send(1, "/tmp", None, "please run it".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "please run it".into())
+        .unwrap();
     let events = until(&conn, &wake, |e| matches!(e, Event::ApprovalRequested(_)));
     let Some(Event::ApprovalRequested(approval)) = events.last() else {
         unreachable!()
@@ -136,7 +143,8 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
             && item.kind == ItemKind::Command { command: "echo scripted".into(), exit_code: Some(0) })));
 
     // Denying it declines the command.
-    conn.send(1, "/tmp", None, "run again".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "run again".into())
+        .unwrap();
     let events = until(&conn, &wake, |e| matches!(e, Event::ApprovalRequested(_)));
     let Some(Event::ApprovalRequested(approval)) = events.last() else {
         unreachable!()
@@ -154,8 +162,8 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
 #[test]
 fn each_session_has_its_own_process_and_dropping_ends_them() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, "one".into()).unwrap();
-    conn.send(2, "/tmp", None, "two".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "one".into()).unwrap();
+    conn.send(2, "/tmp", None, NO_MODE, "two".into()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut done = Vec::new();
     while done.len() < 2 {
@@ -191,7 +199,7 @@ fn each_session_has_its_own_process_and_dropping_ends_them() {
 #[test]
 fn after_an_exit_the_conversation_is_resumed() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "hello".into()).unwrap();
     let events = until(&conn, &wake, completed);
     let first = events
         .iter()
@@ -212,7 +220,7 @@ fn after_an_exit_the_conversation_is_resumed() {
         conn.drain();
     }
     // The caller passes no saved ID, as if it never reached its storage.
-    conn.send(1, "/tmp", None, "again".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "again".into()).unwrap();
     let events = until(&conn, &wake, completed);
     assert!(
         events.contains(&Event::ThreadReady {
@@ -225,7 +233,7 @@ fn after_an_exit_the_conversation_is_resumed() {
 #[test]
 fn a_missing_conversation_fails_with_a_clear_error() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", Some("missing"), "hello".into())
+    conn.send(1, "/tmp", Some("missing"), NO_MODE, "hello".into())
         .unwrap();
     let events = until(&conn, &wake, completed);
     let Some(Event::TurnCompleted { status, error }) = events.last() else {
@@ -279,7 +287,8 @@ fn stale_answers_after_stop_and_restart_are_not_applied() {
         })
     };
 
-    conn.send(1, "/tmp", None, "run it".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "run it".into())
+        .unwrap();
     let stopped = approval(&until(&conn, &wake, |e| {
         matches!(e, Event::ApprovalRequested(_))
     }));
@@ -292,14 +301,16 @@ fn stale_answers_after_stop_and_restart_are_not_applied() {
     }));
     deny(&stopped.request);
 
-    conn.send(1, "/tmp", None, "run again".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "run again".into())
+        .unwrap();
     let orphaned = approval(&until(&conn, &wake, |e| {
         matches!(e, Event::ApprovalRequested(_))
     }));
     kill(&conn, &wake, 1);
 
     // The new process's first request has the same Claude ID as `stopped` had.
-    conn.send(1, "/tmp", None, "run once more".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "run once more".into())
+        .unwrap();
     let current = approval(&until(&conn, &wake, |e| {
         matches!(e, Event::ApprovalRequested(_))
     }));
@@ -375,7 +386,7 @@ fn a_claude_that_cannot_start_fails_the_session_that_needed_it() {
         }),
     );
     // Accepted at once: starting happens on the worker.
-    conn.send(7, "/tmp", None, "hello".into()).unwrap();
+    conn.send(7, "/tmp", None, NO_MODE, "hello".into()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     let events = loop {
         let events = conn.drain();
@@ -391,7 +402,7 @@ fn a_claude_that_cannot_start_fails_the_session_that_needed_it() {
     );
     assert!(conn.pid(7).is_none());
     // Nothing is left queued, so the next message is a new turn, not a refused steer.
-    conn.send(7, "/tmp", None, "again".into()).unwrap();
+    conn.send(7, "/tmp", None, NO_MODE, "again".into()).unwrap();
 }
 
 /// A message sent while the first one is still starting Claude would steer a turn
@@ -402,11 +413,11 @@ fn a_steer_before_claude_reports_anything_is_refused() {
     let (conn, wake) = connect();
     let gate = Gate::new(Some(&[1]));
     conn.hold_starts(gate.hook());
-    conn.send(1, "/tmp", None, "long".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "long".into()).unwrap();
     gate.reached(1);
     let started = Instant::now();
     assert_eq!(
-        conn.send(1, "/tmp", None, "change course".into()),
+        conn.send(1, "/tmp", None, NO_MODE, "change course".into()),
         Err(keystone_agent::claude::STEER_NOT_YET)
     );
     assert!(started.elapsed() < PROMPT, "took {:?}", started.elapsed());
@@ -459,11 +470,11 @@ fn stop_and_answers_reach_a_session_while_another_is_starting() {
     let (conn, wake) = connect();
     let gate = Gate::new(Some(&[2]));
     conn.hold_starts(gate.hook());
-    conn.send(1, "/tmp", None, "long".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "long".into()).unwrap();
     session_until(&conn, &wake, 1, Duration::from_secs(5), |e| {
         matches!(e, Event::ItemDelta { .. })
     });
-    conn.send(2, "/tmp", None, "two".into()).unwrap();
+    conn.send(2, "/tmp", None, NO_MODE, "two".into()).unwrap();
     gate.reached(2);
 
     conn.command(Command::Interrupt { session: 1 });
@@ -476,7 +487,8 @@ fn stop_and_answers_reach_a_session_while_another_is_starting() {
         })
     );
 
-    conn.send(1, "/tmp", None, "please run it".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "please run it".into())
+        .unwrap();
     let events = session_until(&conn, &wake, 1, Duration::from_secs(2), |e| {
         matches!(e, Event::ApprovalRequested(_))
     });
@@ -501,16 +513,17 @@ fn sending_returns_at_once_while_another_session_is_starting() {
     let (conn, wake) = connect();
     let gate = Gate::new(Some(&[2]));
     conn.hold_starts(gate.hook());
-    conn.send(1, "/tmp", None, "long".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "long".into()).unwrap();
     session_until(&conn, &wake, 1, Duration::from_secs(5), |e| {
         matches!(e, Event::ItemDelta { .. })
     });
-    conn.send(2, "/tmp", None, "two".into()).unwrap();
+    conn.send(2, "/tmp", None, NO_MODE, "two".into()).unwrap();
     gate.reached(2);
 
     let started = Instant::now();
-    conn.send(3, "/tmp", None, "three".into()).unwrap();
-    conn.send(1, "/tmp", None, "change course".into()).unwrap();
+    conn.send(3, "/tmp", None, NO_MODE, "three".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "change course".into())
+        .unwrap();
     assert!(started.elapsed() < PROMPT, "took {:?}", started.elapsed());
 
     let events = session_until(&conn, &wake, 3, Duration::from_secs(3), completed);
@@ -544,10 +557,10 @@ fn dropping_gives_up_on_a_stuck_start_and_ends_what_it_starts() {
     let (conn, wake) = connect();
     let gate = Gate::new(Some(&[2]));
     conn.hold_starts(gate.hook());
-    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    conn.send(1, "/tmp", None, NO_MODE, "hello".into()).unwrap();
     session_until(&conn, &wake, 1, Duration::from_secs(5), completed);
     let running = conn.pid(1).unwrap();
-    conn.send(2, dir.to_str().unwrap(), None, "two".into())
+    conn.send(2, dir.to_str().unwrap(), None, NO_MODE, "two".into())
         .unwrap();
     gate.reached(2);
 
@@ -578,7 +591,7 @@ fn dropping_waits_briefly_for_a_start_and_ends_its_process() {
     let (conn, _wake) = connect();
     let gate = Gate::new(Some(&[2]));
     conn.hold_starts(gate.hook());
-    conn.send(2, dir.to_str().unwrap(), None, "two".into())
+    conn.send(2, dir.to_str().unwrap(), None, NO_MODE, "two".into())
         .unwrap();
     gate.reached(2);
     let releaser = {
@@ -597,4 +610,109 @@ fn dropping_waits_briefly_for_a_start_and_ends_its_process() {
         panic!("expected one process, got {:?}", started_in(&dir));
     };
     gate::gone(late);
+}
+
+fn mode(mode: keystone_core::ApprovalMode) -> ApprovalState {
+    ApprovalState {
+        mode,
+        overridden: true,
+    }
+}
+
+/// The permission mode the scripted Claude reports in its reply.
+fn mode_of(events: &[Event]) -> String {
+    let reply = reply(events).expect("a reply");
+    let start = reply.find("**Mode:** `").expect("a mode") + "**Mode:** `".len();
+    reply[start..].split('`').next().unwrap().to_owned()
+}
+
+/// Each mode reaches Claude. A process changes mode in place where Claude allows it, and
+/// is replaced, resuming its conversation, where Claude does not: entering or leaving
+/// Full access, and returning to the user's own settings.
+#[test]
+fn approval_modes_reach_claude_and_restart_it_only_when_needed() {
+    use keystone_core::ApprovalMode::*;
+    let (conn, wake) = connect();
+    conn.send(1, "/tmp", None, mode(Auto), "first".into())
+        .unwrap();
+    let events = until(&conn, &wake, completed);
+    assert_eq!(mode_of(&events), "acceptEdits");
+    let pid = conn.pid(1).unwrap();
+    let thread = events.iter().find_map(|e| match e {
+        Event::ThreadReady { thread_id } => Some(thread_id.clone()),
+        _ => None,
+    });
+
+    conn.set_approval(1, mode(ReadOnly));
+    conn.send(1, "/tmp", None, mode(ReadOnly), "second".into())
+        .unwrap();
+    assert_eq!(mode_of(&until(&conn, &wake, completed)), "plan");
+    assert_eq!(conn.pid(1), Some(pid), "changed in place");
+
+    // Full access runs the command without asking, in a new process.
+    conn.send(1, "/tmp", None, mode(FullAccess), "run it".into())
+        .unwrap();
+    let events = until(&conn, &wake, completed);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ApprovalRequested(_)))
+    );
+    assert_eq!(mode_of(&events), "bypassPermissions");
+    let full = conn.pid(1).unwrap();
+    assert_ne!(full, pid);
+    assert!(events.contains(&Event::ThreadReady {
+        thread_id: thread.clone().unwrap()
+    }));
+
+    // Back to the user's own settings: a process launched with no mode.
+    conn.send(1, "/tmp", None, mode(Provider), "run again".into())
+        .unwrap();
+    let events = until(&conn, &wake, |e| matches!(e, Event::ApprovalRequested(_)));
+    assert_ne!(conn.pid(1), Some(full));
+    conn.command(keystone_agent::Command::Interrupt { session: 1 });
+    until(&conn, &wake, completed);
+    assert!(events.contains(&Event::ThreadReady {
+        thread_id: thread.unwrap()
+    }));
+    conn.send(1, "/tmp", None, mode(Provider), "last".into())
+        .unwrap();
+    assert_eq!(mode_of(&until(&conn, &wake, completed)), "default");
+}
+
+/// A change while a turn runs applies from the next turn, and a message sent before the
+/// change but still waiting runs under the new mode.
+#[test]
+fn a_mode_change_during_a_turn_applies_to_the_next_one() {
+    use keystone_core::ApprovalMode::*;
+    let (conn, wake) = connect();
+    conn.send(1, "/tmp", None, mode(Provider), "long".into())
+        .unwrap();
+    until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
+    conn.set_approval(1, mode(Ask));
+    let events = until(&conn, &wake, completed);
+    assert_eq!(mode_of(&events), "default");
+    conn.set_approval(1, mode(Auto));
+    conn.send(1, "/tmp", None, mode(Ask), "next".into())
+        .unwrap();
+    conn.set_approval(1, mode(ReadOnly));
+    assert_eq!(mode_of(&until(&conn, &wake, completed)), "plan");
+}
+
+/// While a message waits to start a turn in a new process, a second one cannot steer
+/// yet: the new process has not said whether it reports lifecycle frames.
+#[test]
+fn a_message_behind_a_restart_is_refused_until_claude_reports() {
+    use keystone_core::ApprovalMode::*;
+    let (conn, wake) = connect();
+    conn.send(1, "/tmp", None, mode(Provider), "hello".into())
+        .unwrap();
+    until(&conn, &wake, completed);
+    conn.send(1, "/tmp", None, mode(FullAccess), "long".into())
+        .unwrap();
+    assert_eq!(
+        conn.send(1, "/tmp", None, mode(FullAccess), "steer".into()),
+        Err(keystone_agent::claude::STEER_NOT_YET)
+    );
+    until(&conn, &wake, completed);
 }

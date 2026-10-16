@@ -2893,6 +2893,7 @@ dependencies = [
 name = "keystone-agent"
 version = "0.1.0"
 dependencies = [
+ "keystone-core",
  "libc",
  "serde",
  "serde_json",

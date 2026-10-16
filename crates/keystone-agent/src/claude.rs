@@ -10,17 +10,19 @@
 //! completes, or cancels it. A steer can fold into the running turn (one `result`) or
 //! abort it and run next (two), so counting results alone is not enough.
 
-use crate::driver::{Command, Outputs};
+use crate::driver::{ApprovalState, Command, Outputs};
 use crate::item::{Approval, Event, Item, ItemKind, ItemStatus, RequestId, TurnStatus, cap_output};
+use keystone_core::ApprovalMode;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-/// The arguments Keystone passes, before any `--resume`. Permission prompts come to
-/// Keystone as `can_use_tool` requests. No permission mode is set, so the user's own
-/// Claude configuration decides what needs approval.
+/// The arguments Keystone always passes, before any `--permission-mode` and `--resume`.
+/// Permission prompts come to Keystone as `can_use_tool` requests. With the default
+/// approval mode no permission mode is set, so the user's own Claude configuration
+/// decides what needs approval.
 pub const ARGS: [&str; 12] = [
     "-p",
     "--input-format",
@@ -40,6 +42,27 @@ pub const ARGS: [&str; 12] = [
 /// frames.
 pub const STEER_NOT_YET: &str = "Claude Code has not reported this turn's progress yet, so the message cannot steer it. Wait a moment and send again.";
 
+/// Claude's `--permission-mode` for an approval mode, or `None` to pass none.
+/// `default` is the mode Claude 2.1.300 also calls `manual`.
+pub fn permission_mode(mode: ApprovalMode) -> Option<&'static str> {
+    match mode {
+        ApprovalMode::Provider => None,
+        ApprovalMode::ReadOnly => Some("plan"),
+        ApprovalMode::Ask => Some("default"),
+        ApprovalMode::Auto => Some("acceptEdits"),
+        ApprovalMode::FullAccess => Some("bypassPermissions"),
+    }
+}
+
+/// The arguments for a process launched in `mode`, before any `--resume`.
+pub fn args(mode: ApprovalMode) -> Vec<&'static str> {
+    let mut args = ARGS.to_vec();
+    if let Some(mode) = permission_mode(mode) {
+        args.extend(["--permission-mode", mode]);
+    }
+    args
+}
+
 /// What Claude is told when the user denies a tool call.
 const DENIED: &str = "The user denied this in Keystone.";
 
@@ -57,11 +80,17 @@ struct Turn {
     /// The latest result's status and error. A later result replaces it.
     result: Option<(TurnStatus, Option<String>)>,
     stopping: bool,
+    /// Messages not written yet: the turn waits for Claude to confirm its permission
+    /// mode, or a steer waits to learn whether Claude reports lifecycle frames.
+    held: Vec<String>,
+    /// Whether the turn's first message was written.
+    written: bool,
 }
 
 enum Request {
     Initialize,
     Interrupt,
+    SetMode,
 }
 
 struct Pending {
@@ -95,14 +124,33 @@ pub struct ClaudeDriver {
     approvals: HashMap<RequestId, Pending>,
     /// An API error Claude reported as a synthetic assistant message, for the result.
     api_error: Option<String>,
+    /// The approval mode the process was launched with.
+    launched: ApprovalMode,
+    /// The approval mode for the next turn.
+    mode: ApprovalMode,
+    /// The permission mode Claude last reported, or the one it was launched with.
+    current: Option<String>,
+    /// Whether Keystone changed the permission mode in this process.
+    changed: bool,
+    /// A `set_permission_mode` request the turn's messages wait for.
+    gate: Option<String>,
+    /// The ID of the latest control request Keystone sent.
+    last_request: Option<String>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
 
 impl ClaudeDriver {
     /// Starts the handshake. `seed` makes message UUIDs unique to this process; tests
-    /// pass a fixed one. `resume` says whether the process was started with `--resume`.
-    pub fn new(session: u64, resume: bool, seed: u64, out: &mut Outputs) -> Self {
+    /// pass a fixed one. `resume` says whether the process was started with `--resume`,
+    /// and `mode` is the approval mode it was launched with ([`args`]).
+    pub fn new(
+        session: u64,
+        resume: bool,
+        seed: u64,
+        mode: ApprovalMode,
+        out: &mut Outputs,
+    ) -> Self {
         let mut driver = Self {
             session,
             resume,
@@ -119,6 +167,12 @@ impl ClaudeDriver {
             denied: HashSet::new(),
             approvals: HashMap::new(),
             api_error: None,
+            launched: mode,
+            mode,
+            current: permission_mode(mode).map(str::to_owned),
+            changed: false,
+            gate: None,
+            last_request: None,
             unknown: 0,
         };
         let line = driver.request(json!({"subtype": "initialize"}), Request::Initialize);
@@ -128,6 +182,21 @@ impl ClaudeDriver {
 
     pub fn is_running(&self) -> bool {
         self.turn.is_some()
+    }
+
+    /// Whether the next turn needs a new process to run in its approval mode. A
+    /// running process cannot enter `bypassPermissions` unless launched in it, and
+    /// one launched in it is never lowered in place: approving Claude's `ExitPlanMode`
+    /// returns to the mode before plan mode. The user's own settings come back only
+    /// in a process launched without a mode, since Claude does not keep a mode across
+    /// `--resume`.
+    pub fn needs_restart(&self) -> bool {
+        match self.mode {
+            ApprovalMode::FullAccess => self.launched != ApprovalMode::FullAccess,
+            _ if self.launched == ApprovalMode::FullAccess => true,
+            ApprovalMode::Provider => self.launched != ApprovalMode::Provider || self.changed,
+            _ => false,
+        }
     }
 
     /// Why a message sent now could not steer the running turn, if it could not.
@@ -150,12 +219,25 @@ impl ClaudeDriver {
         match command {
             // The process is started with the directory and `--resume`.
             Command::Open { .. } => {}
+            // Applied when the next turn starts. Claude does not keep a mode across
+            // `--resume`, so an earlier process's mode is never left behind.
+            Command::Configure {
+                approval: ApprovalState { mode, .. },
+                ..
+            } => self.mode = mode,
             Command::Send { text, .. } => self.send(text, out),
             Command::Interrupt { .. } => {
+                // Nothing reached Claude yet, so the turn ends here.
+                if let Some(turn) = &self.turn
+                    && !turn.written
+                {
+                    return self.finish(TurnStatus::Interrupted, None, out);
+                }
                 if let Some(turn) = &mut self.turn {
                     turn.stopping = true;
-                    // `cancel_queued` drops steers Claude has not started, so Stop ends
-                    // all of the turn.
+                    // Held steers never reach Claude, and `cancel_queued` drops those it
+                    // has not started, so Stop ends all of the turn.
+                    turn.held.clear();
                     let line = self.request(
                         json!({"subtype": "interrupt", "cancel_queued": true}),
                         Request::Interrupt,
@@ -196,6 +278,15 @@ impl ClaudeDriver {
         }
         match (&*envelope.kind, envelope.subtype.as_deref()) {
             ("system", Some("init")) => self.on_init(line, out),
+            // Claude reports a mode change, such as after an approved `ExitPlanMode`.
+            ("system", Some("status")) => {
+                if let Ok(Status {
+                    permission_mode: Some(mode),
+                }) = serde_json::from_slice(line)
+                {
+                    self.current = Some(mode);
+                }
+            }
             ("command_lifecycle", _) => self.on_lifecycle(line, out),
             ("stream_event", _) => self.on_stream(line, out),
             ("assistant", _) => self.on_assistant(line, out),
@@ -234,6 +325,7 @@ impl ClaudeDriver {
     fn request(&mut self, request: Value, purpose: Request) -> String {
         self.next_request += 1;
         let id = format!("keystone-{}", self.next_request);
+        self.last_request = Some(id.clone());
         let line =
             json!({"type": "control_request", "request_id": id, "request": request}).to_string();
         self.requests.insert(id, purpose);
@@ -241,11 +333,72 @@ impl ClaudeDriver {
     }
 
     /// Starts a turn, or steers the running one. Claude queues a message sent before
-    /// it is ready, so nothing waits here.
+    /// it is ready. A new turn first sets the approval mode when Claude's differs, and
+    /// its messages wait for Claude to confirm it.
     fn send(&mut self, text: String, out: &mut Outputs) {
+        let Some(turn) = &mut self.turn else {
+            if self.needs_restart() {
+                // The connection starts a new process first; this is the backstop.
+                out.event(self.session, Event::TurnStarted);
+                return out.event(
+                    self.session,
+                    Event::TurnCompleted {
+                        status: TurnStatus::Failed,
+                        error: Some(
+                            "Claude Code must restart to use this approval mode. Send again."
+                                .into(),
+                        ),
+                    },
+                );
+            }
+            self.turn = Some(Turn {
+                held: vec![text],
+                ..Turn::default()
+            });
+            out.event(self.session, Event::TurnStarted);
+            let target = permission_mode(self.mode);
+            if target.is_some() && self.current.as_deref() != target {
+                let line = self.request(
+                    json!({"subtype": "set_permission_mode", "mode": target}),
+                    Request::SetMode,
+                );
+                self.gate = self.last_request.clone();
+                self.changed = true;
+                out.writes.push(line);
+            }
+            return self.release(out);
+        };
+        // Held messages go first, in order.
+        if self.gate.is_some() || (turn.written && self.lifecycle.is_none()) {
+            return turn.held.push(text);
+        }
+        self.write(text, out);
+    }
+
+    /// Writes the messages held for the turn, once nothing holds them.
+    fn release(&mut self, out: &mut Outputs) {
+        if self.gate.is_some() {
+            return;
+        }
+        let Some(turn) = &mut self.turn else { return };
+        for text in std::mem::take(&mut turn.held) {
+            match &mut self.turn {
+                // A steer waits until Claude says whether it reports lifecycle frames.
+                Some(turn) if turn.written && self.lifecycle.is_none() => turn.held.push(text),
+                Some(_) => self.write(text, out),
+                None => {}
+            }
+        }
+    }
+
+    /// Writes one message: the turn's first, or a steer.
+    fn write(&mut self, text: String, out: &mut Outputs) {
         // Without lifecycle frames, the steered turn's first `result` would end it while
         // the steer still runs. The connection refuses these first; this is the backstop.
-        if let Some(reason) = self.steer_blocked() {
+        if let Some(turn) = &self.turn
+            && turn.written
+            && let Some(reason) = self.steer_unsupported()
+        {
             out.event(
                 self.session,
                 Event::Warning {
@@ -262,17 +415,15 @@ impl ClaudeDriver {
             "parent_tool_use_id": null,
             "uuid": uuid,
         });
-        if self.turn.is_some() {
+        let tools = self.tools.is_empty();
+        let Some(turn) = &mut self.turn else { return };
+        if turn.written {
             // `now` aborts the response so the steer is read at once, but it would also
             // abort a running tool call, so wait for the tool to finish.
-            message["priority"] = json!(if self.tools.is_empty() { "now" } else { "next" });
-        } else {
-            self.turn = Some(Turn::default());
-            out.event(self.session, Event::TurnStarted);
+            message["priority"] = json!(if tools { "now" } else { "next" });
         }
-        if let Some(turn) = &mut self.turn {
-            turn.outstanding.insert(uuid, false);
-        }
+        turn.written = true;
+        turn.outstanding.insert(uuid, false);
         out.writes.push(message.to_string());
     }
 
@@ -282,6 +433,8 @@ impl ClaudeDriver {
         if self.turn.is_none() {
             self.turn = Some(Turn {
                 started: true,
+                // Claude is already working, so a message steers it.
+                written: true,
                 ..Turn::default()
             });
             out.event(self.session, Event::TurnStarted);
@@ -334,6 +487,9 @@ impl ClaudeDriver {
         if self.lifecycle != Some(true) {
             self.lifecycle = Some(init.capabilities.iter().any(|c| c == "msg_lifecycle_v1"));
         }
+        if init.permission_mode.is_some() {
+            self.current = init.permission_mode;
+        }
         // Claude repeats `init` before each turn; report the ID once.
         if self.conversation.as_deref() != Some(init.session_id.as_str()) {
             self.conversation = Some(init.session_id.clone());
@@ -344,6 +500,7 @@ impl ClaudeDriver {
                 },
             );
         }
+        self.release(out);
     }
 
     fn on_lifecycle(&mut self, line: &[u8], out: &mut Outputs) {
@@ -351,6 +508,7 @@ impl ClaudeDriver {
             return self.unknown += 1;
         };
         self.lifecycle = Some(true);
+        self.release(out);
         let Some(turn) = &mut self.turn else { return };
         match frame.state.as_str() {
             "started" => {
@@ -670,19 +828,48 @@ impl ClaudeDriver {
         else {
             return;
         };
+        let failed = match purpose {
+            Request::SetMode => return self.on_mode_set(response, out),
+            Request::Initialize => "Claude Code did not start",
+            Request::Interrupt => "Could not stop the turn",
+        };
         if response.subtype != "error" {
             return;
         }
         let error = response.error.unwrap_or_else(|| "no reason given".into());
+        let message = format!("{failed}: {error}");
         let event = match purpose {
-            Request::Initialize => Event::Failed {
-                message: format!("Claude Code did not start: {error}"),
-            },
-            Request::Interrupt => Event::Warning {
-                message: format!("Could not stop the turn: {error}"),
-            },
+            Request::Initialize => Event::Failed { message },
+            _ => Event::Warning { message },
         };
         out.event(self.session, event);
+    }
+
+    /// Claude answered the turn's `set_permission_mode`. Its messages go out only
+    /// under the mode the user chose; if Claude refused it, the turn fails unsent.
+    fn on_mode_set(&mut self, response: ControlResult, out: &mut Outputs) {
+        let id = response.request_id.as_str().map(str::to_owned);
+        let gated = id.is_some() && self.gate == id;
+        if gated {
+            self.gate = None;
+        }
+        if response.subtype == "error" {
+            if gated && self.turn.is_some() {
+                let error = response.error.unwrap_or_else(|| "no reason given".into());
+                self.finish(
+                    TurnStatus::Failed,
+                    Some(format!(
+                        "Claude Code did not accept the approval mode, so nothing was sent: {error}"
+                    )),
+                    out,
+                );
+            }
+            return;
+        }
+        if let Some(mode) = response.response.and_then(|r| r.mode) {
+            self.current = Some(mode);
+        }
+        self.release(out);
     }
 
     fn on_result(&mut self, line: &[u8], out: &mut Outputs) {
@@ -804,6 +991,14 @@ struct Init {
     session_id: String,
     #[serde(default)]
     capabilities: Vec<String>,
+    #[serde(rename = "permissionMode")]
+    permission_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Status {
+    #[serde(rename = "permissionMode")]
+    permission_mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -919,6 +1114,12 @@ struct ControlResult {
     subtype: String,
     request_id: Value,
     error: Option<String>,
+    response: Option<ModeSet>,
+}
+
+#[derive(Deserialize)]
+struct ModeSet {
+    mode: Option<String>,
 }
 
 #[derive(Deserialize)]

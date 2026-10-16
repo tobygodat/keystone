@@ -3,10 +3,11 @@
 
 use crate::claude::{self, ClaudeDriver};
 use crate::codex::CodexDriver;
-use crate::driver::{Command, Outputs};
+use crate::driver::{ApprovalState, Command, Outputs};
 use crate::host::{Exit, Process};
 use crate::item::Event;
 use crate::worker::Worker;
+use keystone_core::ApprovalMode;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -29,15 +30,22 @@ pub type StartHook = Arc<dyn Fn(u64) + Send + Sync>;
 pub trait Connection {
     /// Opens the session's conversation if needed, then sends `text`: a new turn, or a
     /// steer for the running one. `resume` is the saved provider conversation ID.
-    /// Returns the reason, without sending, when the provider cannot take a steer now,
-    /// so the caller can keep the text.
+    /// `approval` is the session's approval state, which a turn this message starts
+    /// runs under unless [`Connection::set_approval`] changes it first. Returns the
+    /// reason, without sending, when the provider cannot take a steer now, so the
+    /// caller can keep the text.
     fn send(
         &self,
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str>;
+    /// Changes the session's approval state at once. It applies to the next turn the
+    /// provider starts for the session, including one for a message already sent and
+    /// still waiting, and survives a provider restart.
+    fn set_approval(&self, session: u64, approval: ApprovalState);
     /// Stops or answers within a session.
     fn command(&self, command: Command);
     /// Takes every event that arrived since the last call.
@@ -67,7 +75,8 @@ fn command_session(command: &Command) -> u64 {
         Command::Open { session, .. }
         | Command::Send { session, .. }
         | Command::Interrupt { session }
-        | Command::Answer { session, .. } => *session,
+        | Command::Answer { session, .. }
+        | Command::Configure { session, .. } => *session,
     }
 }
 
@@ -110,11 +119,28 @@ struct Shared {
     /// The latest thread per session, kept across process restarts. A thread opened
     /// just before a crash may not have reached the caller's saved state yet.
     threads: HashMap<u64, String>,
+    /// Each session's approval state, kept across process restarts and given to every
+    /// driver before it handles the session's messages.
+    approvals: HashMap<u64, ApprovalState>,
     /// Incremented per process, so a late exit from an old one is ignored.
     generation: u64,
     /// Set when the connection is dropped, so queued commands start nothing.
     closed: bool,
     before_start: Option<StartHook>,
+}
+
+impl Shared {
+    /// Records the session's approval state and gives it to the driver, under the lock
+    /// its turns start under, so no turn can start with an older one.
+    fn set_approval(&mut self, session: u64, approval: ApprovalState) {
+        self.approvals.insert(session, approval);
+        if let Some(driver) = &mut self.driver {
+            driver.command(
+                Command::Configure { session, approval },
+                &mut Outputs::default(),
+            );
+        }
+    }
 }
 
 impl CodexConnection {
@@ -158,13 +184,25 @@ impl CodexConnection {
     }
 
     /// Opens the session's conversation if this process has not, then sends `text`,
-    /// all under one lock so a process restart cannot fall between the two.
-    pub fn send(&self, session: u64, cwd: &str, resume: Option<&str>, text: String) {
+    /// all under one lock so a process restart cannot fall between the two. The driver
+    /// gets the session's latest approval state under the same lock, so a replacement
+    /// process runs the turn under it too.
+    pub fn send(
+        &self,
+        session: u64,
+        cwd: &str,
+        resume: Option<&str>,
+        approval: ApprovalState,
+        text: String,
+    ) {
+        self.set_approval(session, approval);
         let cwd = cwd.to_owned();
         let resume = resume.map(str::to_owned);
-        self.with_driver(session, move |driver, threads, out| {
+        self.with_driver(session, move |driver, shared, out| {
+            let approval = shared.approvals.get(&session).copied().unwrap_or_default();
+            driver.command(Command::Configure { session, approval }, out);
             if !driver.is_open(session) {
-                let resume = threads.get(&session).cloned().or(resume);
+                let resume = shared.threads.get(&session).cloned().or(resume);
                 driver.command(
                     Command::Open {
                         session,
@@ -184,10 +222,15 @@ impl CodexConnection {
         self.with_driver(session, move |driver, _, out| driver.command(command, out));
     }
 
+    /// Changes the session's approval state at once; see [`Connection::set_approval`].
+    pub fn set_approval(&self, session: u64, approval: ApprovalState) {
+        self.shared.lock().unwrap().set_approval(session, approval);
+    }
+
     fn with_driver(
         &self,
         session: u64,
-        act: impl FnOnce(&mut CodexDriver, &HashMap<u64, String>, &mut Outputs) + Send + 'static,
+        act: impl FnOnce(&mut CodexDriver, &Shared, &mut Outputs) + Send + 'static,
     ) {
         let starter = self.starter();
         let Some(worker) = &self.worker else { return };
@@ -226,11 +269,7 @@ struct Starter {
 
 impl Starter {
     /// Starts the app-server if it is not running, then runs `act` on its driver.
-    fn run(
-        &self,
-        session: u64,
-        act: impl FnOnce(&mut CodexDriver, &HashMap<u64, String>, &mut Outputs),
-    ) {
+    fn run(&self, session: u64, act: impl FnOnce(&mut CodexDriver, &Shared, &mut Outputs)) {
         let mut shared = self.shared.lock().unwrap();
         if shared.closed {
             return;
@@ -280,15 +319,12 @@ impl Starter {
             self.started.notify_all();
         }
         let mut out = Outputs::default();
-        let shared_ref = &mut *shared;
-        act(
-            shared_ref
-                .driver
-                .as_mut()
-                .expect("driver exists while the process runs"),
-            &shared_ref.threads,
-            &mut out,
-        );
+        let mut driver = shared
+            .driver
+            .take()
+            .expect("driver exists while the process runs");
+        act(&mut driver, &shared, &mut out);
+        shared.driver = Some(driver);
         let wake = deliver(&mut shared, &self.inbox, out);
         drop(shared);
         if wake {
@@ -383,10 +419,15 @@ impl Connection for CodexConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
-        CodexConnection::send(self, session, cwd, resume, text);
+        CodexConnection::send(self, session, cwd, resume, approval, text);
         Ok(())
+    }
+
+    fn set_approval(&self, session: u64, approval: ApprovalState) {
+        CodexConnection::set_approval(self, session, approval);
     }
 
     fn command(&self, command: Command) {
@@ -474,6 +515,9 @@ struct ClaudeShared {
     threads: HashMap<u64, String>,
     /// Messages per session that `send` accepted and the worker has not sent yet.
     queued: HashMap<u64, usize>,
+    /// Each session's approval state. A process is launched in its mode, and replaced
+    /// before a turn that its mode cannot run.
+    approvals: HashMap<u64, ApprovalState>,
     /// Processes being started, outside the lock.
     starting: usize,
     /// Incremented per process, so a late exit from an old one is ignored.
@@ -502,9 +546,27 @@ impl ClaudeShared {
     fn steer_blocked(&self, session: u64) -> Option<&'static str> {
         let live = self.live.get(&session).map(|live| &live.driver);
         if self.queued.get(&session).is_some_and(|n| *n > 0) {
-            return live.map_or(Some(claude::STEER_NOT_YET), ClaudeDriver::steer_unsupported);
+            // The queued message will start a turn, in a new process when this one
+            // cannot run its approval mode.
+            return match live {
+                Some(driver) if !(driver.needs_restart() && !driver.is_running()) => {
+                    driver.steer_unsupported()
+                }
+                _ => Some(claude::STEER_NOT_YET),
+            };
         }
         live.and_then(ClaudeDriver::steer_blocked)
+    }
+
+    /// Records the session's approval state and gives it to its driver.
+    fn set_approval(&mut self, session: u64, approval: ApprovalState) {
+        self.approvals.insert(session, approval);
+        if let Some(live) = self.live.get_mut(&session) {
+            live.driver.command(
+                Command::Configure { session, approval },
+                &mut Outputs::default(),
+            );
+        }
     }
 
     /// Counts one of the session's queued messages as handled.
@@ -556,10 +618,12 @@ impl ClaudeConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
         {
             let mut shared = self.shared.lock().unwrap();
+            shared.set_approval(session, approval);
             if let Some(reason) = shared.steer_blocked(session) {
                 return Err(reason);
             }
@@ -579,6 +643,11 @@ impl ClaudeConnection {
         self.run(session, None, move |driver, out| {
             driver.command(command, out)
         });
+    }
+
+    /// Changes the session's approval state at once; see [`Connection::set_approval`].
+    pub fn set_approval(&self, session: u64, approval: ApprovalState) {
+        self.shared.lock().unwrap().set_approval(session, approval);
     }
 
     /// Takes every event that arrived since the last call.
@@ -639,6 +708,17 @@ impl ClaudeStarter {
         if shared.closed {
             return;
         }
+        // A message that starts a turn the process cannot run in the session's approval
+        // mode replaces the idle process, resuming its conversation. This worker runs
+        // the session's commands in order, so no start of its own is in progress.
+        if message
+            && let Some(live) = shared.live.get(&session)
+            && !live.driver.is_running()
+            && live.driver.needs_restart()
+        {
+            // Dropping the handle ends the process; its late exit is ignored.
+            drop(shared.live.remove(&session));
+        }
         if !shared.live.contains_key(&session) {
             let Some((cwd, resume)) = start else { return };
             self.start(shared, session, &cwd, resume, act);
@@ -671,8 +751,13 @@ impl ClaudeStarter {
         let resume = shared.threads.get(&session).cloned().or(resume);
         shared.generation += 1;
         let generation = shared.generation;
+        let mode = shared
+            .approvals
+            .get(&session)
+            .map_or(ApprovalMode::Provider, |a| a.mode);
         let mut pending = Outputs::default();
-        let mut driver = ClaudeDriver::new(session, resume.is_some(), random_seed(), &mut pending);
+        let mut driver =
+            ClaudeDriver::new(session, resume.is_some(), random_seed(), mode, &mut pending);
         act(&mut driver, &mut pending);
         // Counted only now that the driver has the turn, so a message sent during the
         // start is refused like any steer too early to send.
@@ -691,7 +776,7 @@ impl ClaudeStarter {
         let program = shared.program.clone();
         let hook = shared.before_start.clone();
         drop(shared);
-        let spawned = self.spawn(session, generation, program, hook, cwd, resume);
+        let spawned = self.spawn(session, generation, program, hook, cwd, resume, mode);
 
         let mut shared = self.shared.lock().unwrap();
         let current = shared
@@ -755,6 +840,7 @@ impl ClaudeStarter {
         hook: Option<StartHook>,
         cwd: &Path,
         resume: Option<String>,
+        mode: ApprovalMode,
     ) -> Result<Process, String> {
         if let Some(hook) = hook {
             hook(session);
@@ -769,7 +855,7 @@ impl ClaudeStarter {
                 found
             }
         };
-        let mut args: Vec<&str> = claude::ARGS.to_vec();
+        let mut args = claude::args(mode);
         if let Some(resume) = &resume {
             args.extend(["--resume", resume]);
         }
@@ -832,9 +918,14 @@ impl Connection for ClaudeConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
-        ClaudeConnection::send(self, session, cwd, resume, text)
+        ClaudeConnection::send(self, session, cwd, resume, approval, text)
+    }
+
+    fn set_approval(&self, session: u64, approval: ApprovalState) {
+        ClaudeConnection::set_approval(self, session, approval);
     }
 
     fn command(&self, command: Command) {

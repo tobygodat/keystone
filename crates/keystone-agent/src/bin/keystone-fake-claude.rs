@@ -10,6 +10,12 @@
 //! `msg_lifecycle_v1`: no `command_lifecycle` frames and no such capability.
 //! `--resume missing` fails like a conversation Claude no longer has.
 //!
+//! Permission modes work like Claude Code 2.1.300's: `--permission-mode` at launch,
+//! else `KEYSTONE_FAKE_CLAUDE_USER_MODE` (the user's own setting, `default` when unset),
+//! and `set_permission_mode`, which refuses `bypassPermissions` unless the process was
+//! launched in it. No mode is kept across `--resume`. `init` reports the mode, and each
+//! reply names the mode it ran under.
+//!
 //! An answer applies only to the approval it names, and an approval Claude withdrew
 //! takes no answer. Request IDs restart in each process, as a stale answer from an
 //! earlier process would find them. With `KEYSTONE_FAKE_CLAUDE_LOG_DIR` set, each
@@ -58,6 +64,9 @@ struct State {
 
 struct Shared {
     state: Mutex<State>,
+    /// The permission mode, and whether the process may enter `bypassPermissions`.
+    mode: Mutex<String>,
+    bypass: bool,
     wake: Condvar,
     /// Whether to send `command_lifecycle` frames.
     lifecycle: bool,
@@ -100,8 +109,17 @@ fn main() {
     {
         let _ = writeln!(pids, "{}", std::process::id());
     }
+    let launch_mode = args
+        .iter()
+        .position(|a| a == "--permission-mode")
+        .and_then(|i| args.get(i + 1).cloned());
+    let mode = launch_mode.clone().unwrap_or_else(|| {
+        std::env::var("KEYSTONE_FAKE_CLAUDE_USER_MODE").unwrap_or_else(|_| "default".into())
+    });
     let shared = Arc::new(Shared {
         state: Mutex::default(),
+        bypass: launch_mode.as_deref() == Some("bypassPermissions"),
+        mode: Mutex::new(mode),
         wake: Condvar::new(),
         lifecycle: frames,
     });
@@ -127,6 +145,26 @@ fn main() {
                 };
                 match message["request"]["subtype"].as_str() {
                     Some("initialize") => reply(json!({"commands": []})),
+                    Some("set_permission_mode") => {
+                        let mode = message["request"]["mode"].as_str().unwrap_or_default();
+                        let mode = if mode == "manual" { "default" } else { mode };
+                        if mode == "bypassPermissions" && !shared.bypass {
+                            emit(
+                                &out,
+                                json!({"type": "control_response", "response":
+                                    {"subtype": "error", "request_id": id, "error_code": "bypass_not_launched",
+                                     "error": "Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"}}),
+                            );
+                        } else {
+                            *shared.mode.lock().unwrap() = mode.to_owned();
+                            reply(json!({"mode": mode}));
+                            emit(
+                                &out,
+                                json!({"type": "system", "subtype": "status", "status": null,
+                                       "permissionMode": mode, "session_id": session}),
+                            );
+                        }
+                    }
                     Some("interrupt") => {
                         let mut state = shared.state.lock().unwrap();
                         let cancelled: Vec<String> =
@@ -233,10 +271,11 @@ fn work(out: &Out, shared: &Shared, session: &str, delay: Duration, signed_out: 
         } else {
             &[]
         };
+        let mode = shared.mode.lock().unwrap().clone();
         emit(
             out,
             json!({"type": "system", "subtype": "init", "session_id": session,
-                   "capabilities": capabilities}),
+                   "capabilities": capabilities, "permissionMode": mode}),
         );
         emit(
             out,
@@ -257,7 +296,7 @@ fn work(out: &Out, shared: &Shared, session: &str, delay: Duration, signed_out: 
             );
             "cancelled"
         } else {
-            answer(out, shared, turn, &next.text, delay)
+            answer(out, shared, turn, &next.text, &mode, delay)
         };
         lifecycle(out, shared, session, &next.uuid, ended);
         shared.state.lock().unwrap().busy = false;
@@ -265,8 +304,15 @@ fn work(out: &Out, shared: &Shared, session: &str, delay: Duration, signed_out: 
 }
 
 /// Runs one message's turn and returns its lifecycle end state.
-fn answer(out: &Out, shared: &Shared, turn: u64, text: &str, delay: Duration) -> &'static str {
-    let mut reply = format!("Claude test reply (test data): You wrote: {text}");
+fn answer(
+    out: &Out,
+    shared: &Shared,
+    turn: u64,
+    text: &str,
+    mode: &str,
+    delay: Duration,
+) -> &'static str {
+    let mut reply = format!("Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`");
     if text.contains("long") {
         for n in 1..=200 {
             reply.push_str(&format!(" word{n}"));
@@ -292,13 +338,20 @@ fn answer(out: &Out, shared: &Shared, turn: u64, text: &str, delay: Duration) ->
         );
         let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
         let request = format!("fake-request-{turn}");
-        shared.state.lock().unwrap().approval = Some((request.clone(), tx));
-        emit(
-            out,
-            json!({"type": "control_request", "request_id": request, "request":
+        // `bypassPermissions` runs it without asking.
+        if mode == "bypassPermissions" {
+            let _ = tx.send(true);
+        } else {
+            shared.state.lock().unwrap().approval = Some((request.clone(), tx));
+        }
+        if mode != "bypassPermissions" {
+            emit(
+                out,
+                json!({"type": "control_request", "request_id": request, "request":
                    {"subtype": "can_use_tool", "tool_name": "Bash", "display_name": "Bash", "input": input,
                     "description": "Print a scripted line", "tool_use_id": tool}}),
-        );
+            );
+        }
         let allow = loop {
             match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(allow) => break Some(allow),
