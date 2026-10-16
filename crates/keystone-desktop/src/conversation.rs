@@ -11,6 +11,7 @@ use keystone_agent::{
 };
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// ID prefix for a sent message shown before the provider echoes it.
 const LOCAL: &str = "local:";
@@ -41,17 +42,38 @@ pub struct Conversation {
     /// Set while the log cannot be written. Kept apart from provider errors, so it
     /// stays visible until saving works again.
     pub save_error: Option<String>,
+    /// Set when the saved history could not be read. It stays for the session: the
+    /// history is not shown, but what happens now is still saved after it.
+    pub load_error: Option<String>,
     /// Where the current turn's rows begin. Item IDs are matched only from here, so
     /// an ID a provider reuses in a later turn never replaces an earlier row.
     turn_start: usize,
-    /// The logged place of `rows[0]`; row `i` is logged as `seq_base + i`. After a
-    /// restore it continues past every place already in the log.
-    seq_base: u64,
+    /// This run of the app, logged with every placed entry.
+    run: Run,
+    /// The first row this run added; row `i` is logged as `seq` `i - run_start`. The
+    /// log places each run after every row before it, so logging never depends on
+    /// knowing the saved history.
+    run_start: usize,
     /// While saved history is loading, what happens meanwhile waits here.
     pending: Option<Vec<Pending>>,
     writes: Vec<Write>,
     /// Rows added or changed since [`Conversation::take_changes`].
     changed: BTreeSet<usize>,
+}
+
+/// Identifies a run of the app in the log. Each conversation takes a new one, unique
+/// across restarts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Run(u64);
+
+impl Default for Run {
+    fn default() -> Self {
+        static COUNT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        Self(nanos.wrapping_add(COUNT.fetch_add(1, Ordering::Relaxed)))
+    }
 }
 
 enum Pending {
@@ -74,14 +96,24 @@ impl Conversation {
 
     /// Rebuilds the rows from the session's log, in the order they were first shown,
     /// then applies anything that happened while loading.
+    ///
+    /// When the log could not be read, the conversation goes on without its history
+    /// and says so. What was sent meanwhile is shown and saved: it is logged as this
+    /// run's, so a later restore still places it after the history.
     pub fn restore(&mut self, entries: Result<Vec<Entry>, String>) {
         let Some(pending) = self.pending.take() else {
             return;
         };
         match entries {
             Ok(entries) => self.rebuild(entries),
-            Err(error) => self.error = Some(format!("Could not read this conversation. {error}")),
+            Err(error) => {
+                self.load_error = Some(format!(
+                    "Could not read this conversation's history: {error}. \
+                     New messages are still saved after it."
+                ))
+            }
         }
+        self.run_start = self.rows.len();
         self.changed.extend(0..self.rows.len());
         for pending in pending {
             match pending {
@@ -94,53 +126,74 @@ impl Conversation {
     }
 
     fn rebuild(&mut self, entries: Vec<Entry>) {
-        // Each row's place: its logged `seq`, or for older logs, its order in the file.
+        // Each row's place: its logged `seq`, counted from the start of its run, or
+        // for older logs, its order in the file.
         let mut places: Vec<u64> = Vec::new();
         let mut next = 0;
-        let mut add = |rows: &mut Vec<Row>, row: Row, seq: Option<u64>| {
-            let place = seq.unwrap_or(next);
-            next = next.max(place + 1);
-            rows.push(row);
-            places.push(place);
-        };
+        let mut run = None;
+        let mut base = 0;
         let mut open_turn = false;
         for entry in entries {
-            match entry {
-                Entry::TurnStarted => open_turn = true,
-                Entry::Item { item, seq } => match self.position_for(&item) {
-                    Some(index) => self.rows[index] = Row::Item(item),
-                    None => add(&mut self.rows, Row::Item(item), seq),
+            let (seq, entry_run) = match &entry {
+                Entry::TurnStarted => (None, None),
+                Entry::Item { seq, run, .. }
+                | Entry::Approval { seq, run, .. }
+                | Entry::TurnEnded { seq, run, .. } => (*seq, *run),
+            };
+            if entry_run.is_some() && entry_run != run {
+                // A new run starts after every row before it, and never replaces them.
+                run = entry_run;
+                base = next;
+                self.turn_start = self.rows.len();
+            }
+            let place = match (seq, entry_run) {
+                (Some(seq), Some(_)) => base + seq,
+                (Some(seq), None) => seq,
+                (None, _) => next,
+            };
+            let mut ended = false;
+            let row = match entry {
+                Entry::TurnStarted => {
+                    open_turn = true;
+                    None
+                }
+                Entry::Item { item, .. } => match self.position_for(&item) {
+                    Some(index) => {
+                        self.rows[index] = Row::Item(item);
+                        None
+                    }
+                    None => Some(Row::Item(item)),
                 },
                 Entry::Approval {
-                    action,
-                    allowed,
-                    seq,
-                } => add(&mut self.rows, Row::Decision { action, allowed }, seq),
-                Entry::TurnEnded { status, error, seq } => {
+                    action, allowed, ..
+                } => Some(Row::Decision { action, allowed }),
+                Entry::TurnEnded { status, error, .. } => {
                     open_turn = false;
-                    if status != TurnStatus::Completed {
-                        add(&mut self.rows, Row::TurnEnded { status, error }, seq);
-                    }
-                    self.turn_start = self.rows.len();
+                    ended = true;
+                    (status != TurnStatus::Completed).then_some(Row::TurnEnded { status, error })
                 }
+            };
+            if let Some(row) = row {
+                next = next.max(place + 1);
+                self.rows.push(row);
+                places.push(place);
+            }
+            if ended {
+                self.turn_start = self.rows.len();
             }
         }
         if open_turn {
-            add(
-                &mut self.rows,
-                Row::TurnEnded {
-                    status: TurnStatus::Interrupted,
-                    error: Some("Keystone closed during this turn".into()),
-                },
-                None,
-            );
+            self.rows.push(Row::TurnEnded {
+                status: TurnStatus::Interrupted,
+                error: Some("Keystone closed during this turn".into()),
+            });
+            places.push(next);
         }
         let mut ordered: Vec<(u64, Row)> = places.into_iter().zip(self.rows.drain(..)).collect();
         // Stable, so rows with the same place keep their order in the file.
         ordered.sort_by_key(|(place, _)| *place);
         self.rows = ordered.into_iter().map(|(_, row)| row).collect();
         self.turn_start = self.rows.len();
-        self.seq_base = next.saturating_sub(self.rows.len() as u64);
     }
 
     /// Shows and logs a sent message at once. Steers are not always echoed back, so
@@ -174,7 +227,7 @@ impl Conversation {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty() && !self.running && self.error.is_none()
+        self.rows.is_empty() && !self.running && self.error.is_none() && self.load_error.is_none()
     }
 
     /// Applies one provider event. Returns the thread ID when the provider opened one.
@@ -223,10 +276,12 @@ impl Conversation {
                 self.approvals.clear();
                 // A stopped turn leaves items the provider never completes. Keep what
                 // streamed, so the partial reply survives a restart.
-                let unfinished: Vec<(usize, Item)> = self
-                    .rows
+                // Restored rows finished in an earlier run.
+                let start = self.run_start;
+                let unfinished: Vec<(usize, Item)> = self.rows[start..]
                     .iter_mut()
                     .enumerate()
+                    .map(|(index, row)| (start + index, row))
                     .filter_map(|(index, row)| match row {
                         Row::Item(item) if item.status == ItemStatus::InProgress => {
                             item.status = ItemStatus::Failed;
@@ -244,6 +299,7 @@ impl Conversation {
                     status,
                     error: error.clone(),
                     seq: shown.then(|| self.seq(self.rows.len())),
+                    run: shown.then_some(self.run.0),
                 };
                 self.write(entry, true);
                 if shown {
@@ -271,6 +327,7 @@ impl Conversation {
             action: approval.action.clone(),
             allowed,
             seq: Some(self.seq(self.rows.len())),
+            run: Some(self.run.0),
         };
         self.write(entry, true);
         self.push(Row::Decision {
@@ -320,12 +377,13 @@ impl Conversation {
     }
 
     fn seq(&self, index: usize) -> u64 {
-        self.seq_base + index as u64
+        (index - self.run_start) as u64
     }
 
     fn log_item(&mut self, index: usize, item: Item) {
         let seq = Some(self.seq(index));
-        self.write(Entry::Item { item, seq }, false);
+        let run = Some(self.run.0);
+        self.write(Entry::Item { item, seq, run }, false);
     }
 
     fn write(&mut self, entry: Entry, sync: bool) {
@@ -655,11 +713,53 @@ mod tests {
     }
 
     #[test]
-    fn a_log_that_cannot_be_read_shows_an_error() {
+    fn a_log_that_cannot_be_read_shows_an_error_and_keeps_what_was_sent() {
+        let (mut first, mut log) = (Conversation::default(), Log::default());
+        first.push_local("Old question");
+        log.save(&mut first);
+        feed(
+            &mut first,
+            &mut log,
+            [
+                Event::TurnStarted,
+                Event::ItemCompleted(message("m", "Old reply", ItemStatus::Completed)),
+                completed(),
+            ],
+        );
+
+        // The read fails once, but writing still works.
         let mut live = Conversation::loading();
+        live.push_local("New question");
+        live.apply(Event::TurnStarted);
         live.restore(Err("permission denied".into()));
-        assert!(!live.is_loading());
-        assert!(live.error.as_deref().unwrap().contains("permission denied"));
+        assert!(!live.is_loading() && live.running);
+        assert_eq!(texts(&live), ["New question"], "what was sent is shown");
+        log.save(&mut live);
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::ItemCompleted(message("m2", "New reply", ItemStatus::Completed)),
+                completed(),
+            ],
+        );
+        live.push_local("Another");
+        log.save(&mut live);
+        let warning = live.load_error.as_deref().expect("the warning stays");
+        assert!(warning.contains("permission denied"));
+        assert!(!live.is_empty());
+
+        // Once it can be read, the history comes first and what was sent follows it.
+        assert_eq!(
+            texts(&log.restore()),
+            [
+                "Old question",
+                "Old reply",
+                "New question",
+                "New reply",
+                "Another"
+            ]
+        );
     }
 
     #[test]

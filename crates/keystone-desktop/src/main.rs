@@ -6,17 +6,17 @@ mod transcript;
 use conversation::Conversation;
 use futures::StreamExt;
 use gpui::{
-    AnyElement, AnyView, App, Application, Bounds, Context, Corner, Entity, FocusHandle, Focusable,
-    FontWeight, IntoElement, ListAlignment, ListOffset, ListState, Render, ScrollHandle,
-    StyleRefinement, Subscription, WeakEntity, Window, WindowBounds, WindowOptions, div, list,
-    prelude::*, px, size,
+    AnyElement, AnyView, App, Application, AvailableSpace, Bounds, Context, Corner, Entity,
+    FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset, ListState, Render,
+    ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds, WindowOptions,
+    canvas, div, list, prelude::*, px, size,
 };
 use keystone_agent::codex::Command;
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{CodexConnection, Wake};
 use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
 use keystone_ui::{automation, prelude::*};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use text_input::{Changed, InputMode, TextInput};
@@ -35,6 +35,9 @@ gpui::actions!(
 );
 
 const CONTENT_WIDTH: f32 = 884.;
+
+/// How long closing waits for saved histories to finish loading.
+const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn durability_warning(durability: Durability) -> Option<String> {
     match durability {
@@ -67,6 +70,9 @@ struct Keystone {
     /// The virtualized transcript list for each session shown so far. It holds one
     /// entry per conversation row plus a status entry after the last row.
     transcripts: HashMap<u64, ListState>,
+    /// Sessions whose list top row was remeasured while the user was scrolled into it,
+    /// to check against the row's new height before the list lays out.
+    remeasured_top: HashSet<u64>,
     /// The directory agents work in.
     project_dir: PathBuf,
     wake: Wake,
@@ -137,6 +143,7 @@ impl Keystone {
             conversations: HashMap::new(),
             logs: Logs::new(sessions_dir, wake.clone()),
             transcripts: HashMap::new(),
+            remeasured_top: HashSet::new(),
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
@@ -706,9 +713,13 @@ impl Keystone {
             let old = list.item_count();
             let status = old.saturating_sub(1).min(count - 1);
             // A splice moves the view to the start of a remeasured entry. Unless it
-            // is following the bottom, keep it on the same row at the same offset.
+            // is following the bottom, which reads as the end of the list, keep it on
+            // the same entry at the same offset.
             let top = list.logical_scroll_top();
+            let scrolled = top.item_ix < old;
+            let mut remeasured = top.item_ix >= status;
             for range in changed {
+                remeasured |= range.contains(&top.item_ix);
                 let range = range.start..range.end.min(status);
                 if !range.is_empty() {
                     list.splice(range.clone(), range.len());
@@ -716,9 +727,68 @@ impl Keystone {
             }
             // The status entry changes with almost anything, so it is always remeasured.
             list.splice(status..old, count - status);
-            if top.item_ix < status {
-                list.scroll_to(top);
+            if scrolled {
+                // Rows added before the status entry move it down; follow it.
+                let item_ix = if top.item_ix == status {
+                    count - 1
+                } else {
+                    top.item_ix
+                };
+                list.scroll_to(ListOffset { item_ix, ..top });
+                if remeasured && top.offset_in_item > px(0.) {
+                    self.remeasured_top.insert(session);
+                }
             }
+        }
+    }
+
+    /// Runs before the transcript list lays out. When the row the user is scrolled
+    /// into was remeasured, the kept offset can now fall past its end, such as when a
+    /// long reasoning summary is replaced by an empty one. The view would then skip
+    /// the rows below it, so it moves to the first row after the place it was.
+    fn transcript_top_check(&self, session: u64, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = cx.weak_entity();
+        canvas(
+            move |_, window, cx| {
+                let _ = app.update(cx, |this, cx| this.clamp_top(session, window, cx));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+    }
+
+    fn clamp_top(&mut self, session: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.remeasured_top.remove(&session) {
+            return;
+        }
+        let Some(list) = self.transcripts.get(&session).cloned() else {
+            return;
+        };
+        // The list measures entries at its own width, as of its last layout.
+        let width = list.viewport_bounds().size.width;
+        if width <= px(0.) {
+            return;
+        }
+        let space = size(AvailableSpace::Definite(width), AvailableSpace::MinContent);
+        let mut top = list.logical_scroll_top();
+        let start = top.item_ix;
+        while top.item_ix < list.item_count() {
+            let height = self
+                .transcript_entry(session, top.item_ix, cx)
+                .layout_as_root(space, window, cx)
+                .height;
+            if top.offset_in_item < height {
+                break;
+            }
+            // The place was past this entry's end, or it has nothing to show.
+            top = ListOffset {
+                item_ix: top.item_ix + 1,
+                offset_in_item: px(0.),
+            };
+        }
+        if top.item_ix != start {
+            list.scroll_to(top);
         }
     }
 
@@ -792,14 +862,33 @@ impl Keystone {
     /// Writes everything queued for the session logs. Used before the app closes.
     ///
     /// A conversation still loading its history holds what was sent meanwhile, and
-    /// logs it only once the history is applied. So finish every load and apply it
-    /// first, or those messages would be lost.
+    /// logs it only once the history is applied. So apply every load first, or those
+    /// messages would be lost. A read can hang, such as on a stalled network disk, so
+    /// the wait for loads is bounded: a conversation whose history has not arrived by
+    /// then goes on without it, which still logs what it holds after the history.
     fn flush_logs(&mut self, cx: &mut Context<Self>) {
+        let deadline = std::time::Instant::now() + LOAD_WAIT;
         loop {
-            self.logs.flush();
+            let all = self.logs.wait_for_loads(deadline);
             self.pump(cx);
             // Applying events can start loading another session; finish that too.
-            if !self.conversations.values().any(Conversation::is_loading) {
+            let loading: Vec<u64> = self
+                .conversations
+                .iter()
+                .filter(|(_, c)| c.is_loading())
+                .map(|(id, _)| *id)
+                .collect();
+            if loading.is_empty() {
+                break;
+            }
+            if !all || std::time::Instant::now() >= deadline {
+                for session in loading {
+                    self.conversations
+                        .get_mut(&session)
+                        .expect("listed above")
+                        .restore(Err("it did not load before Keystone closed".into()));
+                    self.commit(session);
+                }
                 break;
             }
         }
@@ -1009,7 +1098,12 @@ impl Keystone {
                 ),
             );
         }
-        for error in conversation.error.iter().chain(&conversation.save_error) {
+        for error in conversation
+            .load_error
+            .iter()
+            .chain(&conversation.error)
+            .chain(&conversation.save_error)
+        {
             empty = false;
             view = view.child(
                 Label::new(error.clone())
@@ -1255,6 +1349,7 @@ impl Render for Keystone {
                         .flex_1()
                         .min_h_0()
                         .w_full()
+                        .child(self.transcript_top_check(id, cx))
                         .child(self.transcript_list(id, cx)),
                     None => v_flex()
                         .id("conversation")
@@ -1498,6 +1593,7 @@ mod tests {
                     status: ItemStatus::Completed,
                 },
                 seq: None,
+                run: None,
             };
             log.append(&Entry::TurnStarted).unwrap();
             log.append(&item(
@@ -1525,6 +1621,7 @@ mod tests {
                 status: TurnStatus::Completed,
                 error: None,
                 seq: None,
+                run: None,
             })
             .unwrap();
         }
@@ -1755,6 +1852,155 @@ mod tests {
         assert!(cx.debug_bounds("transcript-row-600").is_none());
     }
 
+    /// Opens a long session and returns its view once the history is shown.
+    fn long_session(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<Keystone>,
+        &mut gpui::VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 200);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 600)
+        });
+        (view, cx, dir)
+    }
+
+    fn at(item_ix: usize, offset: f32) -> ListOffset {
+        ListOffset {
+            item_ix,
+            offset_in_item: px(offset),
+        }
+    }
+
+    fn scroll_to(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, top: ListOffset) {
+        view.update(cx, |this, cx| {
+            this.transcripts[&1].scroll_to(top);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_reader_scrolled_into_a_row_that_shrinks_sees_the_next_row(cx: &mut gpui::TestAppContext) {
+        let (view, cx, _dir) = long_session(cx);
+        let item = |id: &str, kind: ItemKind, text: String| Item {
+            id: id.into(),
+            kind,
+            text,
+            status: ItemStatus::InProgress,
+        };
+        let long = || "Streamed words. ".repeat(600);
+        let update = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, event| {
+            view.update(cx, |this, cx| {
+                this.conversation(1).apply(event);
+                this.commit(1);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            conversation.apply(Event::ItemStarted(item(
+                "a",
+                ItemKind::AgentMessage,
+                long(),
+            )));
+            conversation.apply(Event::ItemStarted(item("r", ItemKind::Reasoning, long())));
+            conversation.apply(Event::ItemStarted(item(
+                "b",
+                ItemKind::AgentMessage,
+                long(),
+            )));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        scroll_to(&view, cx, at(600, 0.));
+        let content_top = cx.debug_bounds("transcript-row-600").unwrap().top();
+
+        // Reading 1000px into a reply that is then replaced by a short one.
+        scroll_to(&view, cx, at(600, 1000.));
+        update(
+            &view,
+            cx,
+            Event::ItemCompleted(Item {
+                status: ItemStatus::Completed,
+                ..item("a", ItemKind::AgentMessage, "Short.".into())
+            }),
+        );
+        assert_eq!(
+            cx.debug_bounds("transcript-row-601").unwrap().top(),
+            content_top,
+            "the next row starts at the top, not above it"
+        );
+
+        // Reading inside a reasoning summary that completes empty, so it is not shown.
+        scroll_to(&view, cx, at(601, 500.));
+        update(
+            &view,
+            cx,
+            Event::ItemCompleted(Item {
+                status: ItemStatus::Completed,
+                ..item("r", ItemKind::Reasoning, String::new())
+            }),
+        );
+        assert_eq!(
+            cx.debug_bounds("transcript-row-602").unwrap().top(),
+            content_top
+        );
+    }
+
+    #[gpui::test]
+    fn a_reader_scrolled_into_the_status_keeps_their_place(cx: &mut gpui::TestAppContext) {
+        let (view, cx, _dir) = long_session(cx);
+        // A tall approval card in the status entry.
+        view.update(cx, |this, cx| {
+            let conversation = this.conversation(1);
+            conversation.apply(Event::TurnStarted);
+            conversation.apply(Event::ApprovalRequested(keystone_agent::Approval {
+                request: keystone_agent::RequestId("1".into()),
+                item_id: None,
+                action: "cargo test".into(),
+                detail: Some("A long reason to run it. ".repeat(400)),
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        scroll_to(&view, cx, at(600, 300.));
+        let read = cx.debug_bounds("transcript-status").unwrap();
+        let view_top = cx.debug_bounds("conversation").unwrap().top();
+        assert!(read.top() < view_top, "scrolled into the card");
+
+        // A row arrives before the status entry: the card stays where it was read.
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(Event::ItemStarted(Item {
+                id: "m".into(),
+                kind: ItemKind::AgentMessage,
+                text: "Starting.".into(),
+                status: ItemStatus::InProgress,
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("transcript-status").unwrap().top(),
+            read.top()
+        );
+        assert!(cx.debug_bounds("transcript-row-600").is_none());
+    }
+
     #[gpui::test]
     fn a_message_sent_while_history_loads_is_saved_on_quit(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1781,6 +2027,65 @@ mod tests {
             "the message was saved: {:?}",
             entries.last()
         );
+    }
+
+    #[gpui::test]
+    fn closing_does_not_wait_for_a_history_read_that_never_returns(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex).unwrap();
+        store.create(Provider::Codex).unwrap();
+        let sessions = dir.path().join("sessions");
+        seed_long_session(&sessions, 1, 3);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        // Session 1's history read never returns, as on a stalled network disk.
+        view.update(cx, |this, _| {
+            let read: keystone_agent::log::Reader = Arc::new(|dir, session| {
+                if session == 1 {
+                    loop {
+                        std::thread::park();
+                    }
+                }
+                keystone_agent::log::read(dir, session)
+            });
+            this.logs = Logs::with_reader(sessions.clone(), this.wake.clone(), read);
+            this.conversations.clear();
+            this.conversation(2);
+        });
+        wait_until(cx, &view, |view| !view.conversations[&2].is_loading());
+        let started = std::time::Instant::now();
+        view.update(cx, |this, cx| {
+            this.conversation(2).push_local("In another session");
+            this.commit(2);
+            assert!(this.conversation(1).is_loading());
+            this.conversation(1).push_local("Sent while loading");
+            this.commit(1);
+            this.flush_logs(cx);
+        });
+        assert!(
+            started.elapsed() < LOAD_WAIT + std::time::Duration::from_secs(3),
+            "closing waited {:?}",
+            started.elapsed()
+        );
+        let texts = |session| {
+            let mut restored = Conversation::loading();
+            restored.restore(Ok(keystone_agent::log::read(&sessions, session).unwrap()));
+            restored
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    Row::Item(item) => Some(item.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(2), ["In another session"]);
+        // The held message was saved, and still restores after the history.
+        let held = texts(1);
+        assert_eq!(held.first().map(String::as_str), Some("Question 0"));
+        assert_eq!(held.last().map(String::as_str), Some("Sent while loading"));
+        assert_eq!(held.len(), 3 * 3 + 1);
     }
 
     #[gpui::test]

@@ -37,6 +37,8 @@ Named elements: `send`, `stop`, `approval`, `approve`, `deny`, `turn-status`, `c
 
 - Long sessions: create a Codex session, quit, write `sessions/<id>.jsonl` next to the run's `workspace.json` (the `state` path `start` returns), and `launch`. Logs without `seq` are the older format and must still open in file order.
 - Restore order: steer while a reply streams, quit, and relaunch. The steer must follow the reply it interrupted.
+- History that cannot be read: quit, `chmod 000` the session's log, and `launch`. The conversation shows a warning and no history. Restore the mode, send, quit, and relaunch: the new rows follow the history.
+- History that never arrives: quit with the session selected, replace its log with a FIFO (`mkfifo`) that nothing writes to, and `launch`. Other sessions still send and save. Ctrl+Q must close the window in about two seconds. Put the log back before relaunching.
 
 ## Not covered
 

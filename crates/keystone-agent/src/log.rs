@@ -2,7 +2,7 @@
 //!
 //! Nothing is written per streamed chunk. Each completed item is appended once, and
 //! the file is synced when a turn ends and after each approval decision. [`Logs`] does
-//! the reading and writing on a worker thread.
+//! the reading and writing off the UI thread.
 
 use crate::connection::Wake;
 use crate::item::{Item, TurnStatus};
@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::Instant;
 
 /// One line of a session log.
 ///
@@ -20,6 +22,11 @@ use std::sync::{Arc, Mutex};
 /// first appeared, not the order they completed. A steer appears before the reply it
 /// interrupted completes, so completion order would put it first. Logs written before
 /// `seq` existed have none and are shown in file order.
+///
+/// `run` identifies the run of Keystone that wrote the entry, and `seq` counts from the
+/// first row that run added. A restore places each run after every row before it, so
+/// a run can log without knowing the saved history, such as when reading it failed.
+/// Entries without a `run` count from the start of the log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "entry", rename_all = "snake_case")]
 pub enum Entry {
@@ -28,18 +35,24 @@ pub enum Entry {
         item: Item,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<u64>,
     },
     Approval {
         action: String,
         allowed: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<u64>,
     },
     TurnEnded {
         status: TurnStatus,
         error: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<u64>,
     },
 }
 
@@ -119,13 +132,25 @@ pub enum Report {
     Saved { session: u64, error: Option<String> },
 }
 
-/// Every session's log, read and written on one worker thread so the UI never waits on
-/// the disk. Jobs run in the order they were queued: a session's entries are written in
-/// order, and a load sees every entry queued before it.
+/// Reads a session's saved entries. [`read`], unless a test needs a slower disk.
+pub type Reader = Arc<dyn Fn(&Path, u64) -> io::Result<Vec<Entry>> + Send + Sync>;
+
+/// Every session's log, read and written off the UI thread so the UI never waits on
+/// the disk.
+///
+/// Writes run on one worker thread in the order they were queued, so a session's
+/// entries are written in order. Each load reads on a thread of its own, so a read that
+/// never returns, such as from a stalled network disk, holds up neither the writes nor
+/// other sessions' loads, and quitting need not wait for it. A session is loaded once,
+/// before anything is written for it, so a load never races that session's writes.
 pub struct Logs {
-    worker: Worker,
+    writer: Worker,
+    dir: PathBuf,
+    read: Reader,
     files: Arc<Mutex<Files>>,
     reports: Arc<Mutex<Vec<Report>>>,
+    /// How many loads have not reported yet.
+    loading: Arc<(Mutex<usize>, Condvar)>,
     wake: Wake,
 }
 
@@ -137,32 +162,68 @@ struct Files {
 }
 
 impl Logs {
-    /// `wake` runs on the worker after a report is queued; then call [`Logs::drain`].
+    /// `wake` runs after a report is queued; then call [`Logs::drain`].
     pub fn new(dir: PathBuf, wake: Wake) -> Self {
+        Self::with_reader(dir, wake, Arc::new(read))
+    }
+
+    pub fn with_reader(dir: PathBuf, wake: Wake, read: Reader) -> Self {
         Self {
-            worker: Worker::new("session-logs"),
+            writer: Worker::new("session-logs"),
             files: Arc::new(Mutex::new(Files {
-                dir,
+                dir: dir.clone(),
                 open: HashMap::new(),
                 failing: HashSet::new(),
             })),
+            dir,
+            read,
             reports: Arc::default(),
+            loading: Arc::default(),
             wake,
         }
     }
 
     /// Reads the session's entries and reports them as [`Report::Loaded`].
     pub fn load(&self, session: u64) {
-        let (files, reports, wake) = self.parts();
-        self.worker.run(move || {
-            let dir = files.lock().unwrap().dir.clone();
-            let entries = read(&dir, session).map_err(|e| e.to_string());
+        let (dir, read) = (self.dir.clone(), self.read.clone());
+        let (reports, loading, wake) = (
+            self.reports.clone(),
+            self.loading.clone(),
+            self.wake.clone(),
+        );
+        *loading.0.lock().unwrap() += 1;
+        let finish = move |entries: Result<Vec<Entry>, String>| {
+            // Reported before the count drops, so a finished wait finds the report.
             reports
                 .lock()
                 .unwrap()
                 .push(Report::Loaded { session, entries });
+            *loading.0.lock().unwrap() -= 1;
+            loading.1.notify_all();
             wake();
-        });
+        };
+        let on_thread = finish.clone();
+        let spawned = thread::Builder::new()
+            .name("session-log-read".into())
+            .spawn(move || on_thread(read(&dir, session).map_err(|e| e.to_string())));
+        if let Err(error) = spawned {
+            finish(Err(error.to_string()));
+        }
+    }
+
+    /// Waits until every load has reported, or `deadline` passes. Returns whether
+    /// they all reported.
+    pub fn wait_for_loads(&self, deadline: Instant) -> bool {
+        let (count, reported) = &*self.loading;
+        let mut count = count.lock().unwrap();
+        while *count > 0 {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            count = reported.wait_timeout(count, deadline - now).unwrap().0;
+        }
+        true
     }
 
     /// Appends entries in order. A failure is reported, and the next append reopens the file.
@@ -170,8 +231,8 @@ impl Logs {
         if writes.is_empty() {
             return;
         }
-        let (files, reports, wake) = self.parts();
-        self.worker.run(move || {
+        let (files, reports, wake) = (self.files.clone(), self.reports.clone(), self.wake.clone());
+        self.writer.run(move || {
             let mut files = files.lock().unwrap();
             let report = match files.write(session, &writes) {
                 Ok(()) => files.failing.remove(&session).then_some(Report::Saved {
@@ -195,18 +256,15 @@ impl Logs {
         });
     }
 
-    /// Blocks until everything queued so far is written, such as before quitting.
+    /// Blocks until everything queued so far is written, such as before quitting. It
+    /// does not wait for loads; see [`Logs::wait_for_loads`].
     pub fn flush(&self) {
-        self.worker.flush();
+        self.writer.flush();
     }
 
     /// Takes every report since the last call.
     pub fn drain(&self) -> Vec<Report> {
         std::mem::take(&mut self.reports.lock().unwrap())
-    }
-
-    fn parts(&self) -> (Arc<Mutex<Files>>, Arc<Mutex<Vec<Report>>>, Wake) {
-        (self.files.clone(), self.reports.clone(), self.wake.clone())
     }
 }
 
@@ -249,7 +307,8 @@ mod tests {
             entry,
             Entry::Item {
                 item: item("a"),
-                seq: None
+                seq: None,
+                run: None,
             }
         );
         // And an entry without a place is written the old way.
@@ -265,22 +324,41 @@ mod tests {
         (Logs::new(dir.path().join("sessions"), wake), rx, dir)
     }
 
-    #[test]
-    fn a_load_sees_every_write_queued_before_it() {
-        let (logs, wake, _dir) = logs();
-        for n in 0..50 {
-            logs.append(
-                1,
-                vec![Write {
-                    entry: Entry::Item {
-                        item: item(&n.to_string()),
-                        seq: Some(n),
-                    },
-                    sync: n % 10 == 0,
-                }],
-            );
+    fn entry(n: u64) -> Write {
+        Write {
+            entry: Entry::Item {
+                item: item(&n.to_string()),
+                seq: Some(n),
+                run: Some(1),
+            },
+            sync: n.is_multiple_of(10),
         }
+    }
+
+    fn seqs(entries: &[Entry]) -> Vec<u64> {
+        entries
+            .iter()
+            .map(|e| match e {
+                Entry::Item { seq, .. } => seq.unwrap(),
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn writes_land_in_order_and_a_load_reports_them() {
+        let (logs, wake, dir) = logs();
+        for n in 0..50 {
+            logs.append(1, vec![entry(n)]);
+        }
+        logs.flush();
+        let sessions = dir.path().join("sessions");
+        assert_eq!(
+            seqs(&read(&sessions, 1).unwrap()),
+            (0..50).collect::<Vec<_>>()
+        );
         logs.load(1);
+        assert!(logs.wait_for_loads(Instant::now() + std::time::Duration::from_secs(5)));
         wake.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         let [
@@ -292,16 +370,60 @@ mod tests {
         else {
             panic!("expected one load report");
         };
-        let seqs: Vec<_> = entries
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|e| match e {
-                Entry::Item { seq, .. } => seq.unwrap(),
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(seqs, (0..50).collect::<Vec<_>>());
+        assert_eq!(seqs(entries.as_ref().unwrap()), (0..50).collect::<Vec<_>>());
+    }
+
+    /// A read that never returns, here from a FIFO nothing writes to, must not hold up
+    /// other sessions' writes and loads, or quitting.
+    #[test]
+    fn a_read_that_never_returns_holds_up_neither_writes_nor_quitting() {
+        use std::time::Duration;
+        let (logs, wake, dir) = logs();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(path(&sessions, 1))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            logs.load(1);
+            logs.load(3);
+            logs.append(2, vec![entry(0)]);
+            logs.flush();
+            // Session 3's load reports although session 1's never does.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut reports = Vec::new();
+            while !reports
+                .iter()
+                .any(|r| matches!(r, Report::Loaded { session: 3, .. }))
+                && Instant::now() < deadline
+            {
+                let _ = wake.recv_timeout(Duration::from_millis(100));
+                reports.extend(logs.drain());
+            }
+            let waited = Instant::now();
+            let all = logs.wait_for_loads(waited + Duration::from_millis(200));
+            let bounded = waited.elapsed() < Duration::from_secs(2);
+            // Dropping, as quitting does, must not wait for the read.
+            drop(logs);
+            let _ = done.send((reports, all, bounded));
+        });
+        let (reports, all, bounded) = finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("writes and quitting waited for a read that never returns");
+        assert!(
+            reports.iter().any(
+                |r| matches!(r, Report::Loaded { session: 3, entries: Ok(e) } if e.is_empty())
+            ),
+            "{reports:?}"
+        );
+        assert!(
+            !all && bounded,
+            "the wait for loads gives up at its deadline"
+        );
+        assert_eq!(seqs(&read(&sessions, 2).unwrap()), [0]);
     }
 
     #[test]
@@ -352,6 +474,7 @@ mod tests {
         log.append(&Entry::Item {
             item: item.clone(),
             seq: Some(0),
+            run: None,
         })
         .unwrap();
         log.sync().unwrap();
@@ -369,6 +492,7 @@ mod tests {
                 Entry::Item {
                     item: item.clone(),
                     seq: Some(0),
+                    run: None,
                 }
             ]
         );
@@ -381,7 +505,11 @@ mod tests {
             read(dir.path(), 7).unwrap(),
             vec![
                 Entry::TurnStarted,
-                Entry::Item { item, seq: Some(0) },
+                Entry::Item {
+                    item,
+                    seq: Some(0),
+                    run: None
+                },
                 Entry::TurnStarted
             ]
         );
