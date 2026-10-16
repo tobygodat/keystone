@@ -71,6 +71,9 @@ struct Keystone {
     new_menu: bool,
     settings_menu: bool,
     approval_menu: bool,
+    /// Full access chosen from the menu for this session, waiting in the confirmation
+    /// dialog. Nothing is saved or sent until Confirm.
+    confirm_full_access: Option<(u64, DialogFocus)>,
     settled_only: bool,
     sidebar: bool,
     fixture: bool,
@@ -156,6 +159,7 @@ impl Keystone {
             new_menu: false,
             settings_menu: false,
             approval_menu: false,
+            confirm_full_access: None,
             settled_only: false,
             sidebar: true,
             fixture,
@@ -713,34 +717,85 @@ impl Keystone {
                 .checked(choice == mode)
                 .debug_selector(|| format!("approval-{}", choice.slug()))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.set_approval_mode(choice, window, cx)
+                    this.choose_approval_mode(choice, window, cx)
                 }))
         }))
     }
 
-    /// Saves the selected session's mode, then hands it to its provider at once, so a
-    /// message already waiting to start a turn, or a steer that becomes the next turn,
-    /// runs under it. The save comes first: it also records that the provider may hold
-    /// an override, and nothing reaches the provider unless that is saved.
-    fn set_approval_mode(
+    /// A choice from the approval menu. The current mode changes nothing, and Full
+    /// access asks first; any other mode is saved and applied at once.
+    fn choose_approval_mode(
         &mut self,
         mode: ApprovalMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.approval_menu = false;
-        if let Some(id) = self.store.workspace().selected() {
-            match self.store.set_approval_mode(id, mode) {
-                Ok(applied) => {
-                    self.error = durability_warning(applied.durability);
-                    if let Some((provider, approval)) = self.approval(id)
-                        && let Some(connection) = self.started(provider)
-                    {
-                        connection.set_approval(id, approval);
-                    }
-                }
-                Err(error) => self.error = Some(format!("Approval mode not saved. {error}")),
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let (id, current) = (session.id(), session.approval_mode());
+        if mode == current {
+            self.composer.focus_handle(cx).focus(window);
+        } else if mode == ApprovalMode::FullAccess {
+            self.confirm_full_access = Some((id, DialogFocus::new(window, cx)));
+        } else {
+            self.set_approval_mode(id, mode, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The confirmation for Full access, while it is open.
+    fn full_access_dialog(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (id, focus) = self.confirm_full_access.as_ref()?;
+        let provider = provider_name(self.provider(*id)?);
+        let cancel = cx.listener(|this, _: &(), window, cx| {
+            this.confirm_full_access = None;
+            this.composer.focus_handle(cx).focus(window);
+            cx.notify();
+        });
+        let confirm = cx.listener(|this, _: &(), window, cx| {
+            if let Some((id, _)) = this.confirm_full_access.take() {
+                this.set_approval_mode(id, ApprovalMode::FullAccess, window, cx);
             }
+        });
+        Some(
+            ConfirmDialog::new(
+                "full-access-dialog",
+                focus,
+                "Turn on Full access?",
+                format!(
+                    "{provider} will run commands and edit files without asking, \
+                     until you choose another approval mode."
+                ),
+            )
+            .tone(Color::Warning)
+            .on_cancel(move |window, cx| cancel(&(), window, cx))
+            .on_confirm(move |window, cx| confirm(&(), window, cx)),
+        )
+    }
+
+    /// Saves the session's mode, then hands it to its provider at once, so a
+    /// message already waiting to start a turn, or a steer that becomes the next turn,
+    /// runs under it. The save comes first: it also records that the provider may hold
+    /// an override, and nothing reaches the provider unless that is saved.
+    fn set_approval_mode(
+        &mut self,
+        id: u64,
+        mode: ApprovalMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.store.set_approval_mode(id, mode) {
+            Ok(applied) => {
+                self.error = durability_warning(applied.durability);
+                if let Some((provider, approval)) = self.approval(id)
+                    && let Some(connection) = self.started(provider)
+                {
+                    connection.set_approval(id, approval);
+                }
+            }
+            Err(error) => self.error = Some(format!("Approval mode not saved. {error}")),
         }
         self.composer.focus_handle(cx).focus(window);
         cx.notify();
@@ -1561,6 +1616,7 @@ impl Render for Keystone {
             .text_color(text)
             .text_size(TextSize::Base.px())
             .track_focus(&self.focus)
+            .key_context("Keystone")
             .when(automation::enabled(), |d| {
                 d.child(automation::frame_writer())
             })
@@ -1643,6 +1699,7 @@ impl Render for Keystone {
                             .color(Color::Muted),
                     ),
             )
+            .children(self.full_access_dialog(cx))
     }
 }
 
@@ -2522,10 +2579,40 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// Chooses an approval mode the way a user does: the shield button, then the mode.
+    /// Chooses an approval mode the way a user does: the shield button, then the mode,
+    /// then Confirm when the mode asks for it.
     fn choose_mode(cx: &mut gpui::VisualTestContext, mode: ApprovalMode) {
+        pick_mode(cx, mode);
+        if mode == ApprovalMode::FullAccess {
+            click(cx, "full-access-dialog-confirm");
+        }
+    }
+
+    /// Picks a mode from the menu and stops there.
+    fn pick_mode(cx: &mut gpui::VisualTestContext, mode: ApprovalMode) {
         click(cx, "approval-mode");
         click(cx, format!("approval-{}", mode.slug()).leak());
+    }
+
+    fn asking(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> bool {
+        view.read_with(cx, |view, _| view.confirm_full_access.is_some())
+    }
+
+    fn composer_focused(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> bool {
+        cx.update(|window, cx| view.read(cx).composer.focus_handle(cx).is_focused(window))
+    }
+
+    /// What the window's store and the saved file say about session 1, and how many
+    /// times the store has written.
+    fn saved_mode(
+        view: &Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> (ApprovalMode, ApprovalMode, u64) {
+        view.read_with(cx, |view, _| {
+            let mode = |store: &Store| store.workspace().sessions()[0].approval_mode();
+            let on_disk = Store::open(view.store.path()).unwrap();
+            (mode(&view.store), mode(&on_disk), view.store.writes())
+        })
     }
 
     fn send_text(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, text: &str) {
@@ -2760,6 +2847,216 @@ mod tests {
             setting_of_reply(&restored, cx, "You wrote: third"),
             "on-request / workspaceWrite"
         );
+    }
+
+    /// Full access asks first. Cancel, Escape, Enter (Cancel has focus), and a press
+    /// outside the dialog each leave the mode as it was: nothing is saved, the
+    /// connection keeps its state, and the next turn runs under the old mode.
+    #[gpui::test]
+    fn full_access_changes_nothing_until_confirmed(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let codex = wrapper(
+            dir.path(),
+            "keystone-fake-codex",
+            "KEYSTONE_FAKE_CODEX_DELAY_MS=2",
+        );
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, _| {
+            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        });
+        click(cx, "welcome-codex");
+        choose_mode(cx, ApprovalMode::Auto);
+        send_text(&view, cx, "first");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: first"),
+            "on-request / workspaceWrite"
+        );
+        let connection = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| view.codex.as_ref().unwrap().approval(1))
+        };
+        let auto = Some(ApprovalState {
+            mode: ApprovalMode::Auto,
+            overridden: true,
+        });
+        assert_eq!(connection(&view, cx), auto);
+        let before = saved_mode(&view, cx);
+        let file = std::fs::read(&path).unwrap();
+        for how in ["cancel", "escape", "enter", "outside"] {
+            pick_mode(cx, ApprovalMode::FullAccess);
+            assert!(asking(&view, cx), "{how}: the dialog shows");
+            assert!(cx.debug_bounds("full-access-dialog").is_some(), "{how}");
+            assert!(!composer_focused(&view, cx), "{how}: the dialog has focus");
+            match how {
+                "cancel" => click(cx, "full-access-dialog-cancel"),
+                "escape" => cx.simulate_keystrokes("escape"),
+                "enter" => {
+                    cx.simulate_keystrokes("enter");
+                    cx.simulate_event(gpui::KeyUpEvent {
+                        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                    });
+                }
+                _ => {
+                    cx.simulate_click(gpui::point(px(4.), px(4.)), gpui::Modifiers::none());
+                    cx.run_until_parked();
+                }
+            }
+            assert!(!asking(&view, cx), "{how}: the dialog closed");
+            assert!(composer_focused(&view, cx), "{how}: focus is back");
+            assert_eq!(saved_mode(&view, cx), before, "{how}: nothing saved");
+            assert_eq!(std::fs::read(&path).unwrap(), file, "{how}");
+            assert_eq!(connection(&view, cx), auto, "{how}: nothing sent");
+        }
+        send_text(&view, cx, "second");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: second"),
+            "on-request / workspaceWrite"
+        );
+    }
+
+    /// Work already handed to Codex keeps the old mode while the dialog is open: a
+    /// steer Codex rejects becomes the next turn, under Read only. While the dialog is
+    /// open the shortcut sends nothing. Confirm saves Full access once, gives it to the
+    /// connection, and the next turn runs in it.
+    #[gpui::test]
+    fn pending_work_never_runs_in_full_access_before_confirm(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let codex = wrapper(
+            dir.path(),
+            "keystone-fake-codex",
+            "KEYSTONE_FAKE_CODEX_DELAY_MS=20",
+        );
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, _| {
+            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        });
+        click(cx, "welcome-codex");
+        choose_mode(cx, ApprovalMode::ReadOnly);
+        send_text(&view, cx, "end on steer");
+        wait_until(cx, &view, |view| {
+            view.conversations[&1].rows.iter().any(|row| {
+                matches!(row, Row::Item(item)
+                    if item.kind == ItemKind::AgentMessage && !item.text.is_empty())
+            })
+        });
+        send_text(&view, cx, "late");
+        // Codex holds the steer for 300 ms; pick Full access while it waits there.
+        pick_mode(cx, ApprovalMode::FullAccess);
+        assert!(asking(&view, cx));
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: late"),
+            "on-request / readOnly"
+        );
+        view.update(cx, |view, cx| {
+            view.composer
+                .update(cx, |input, cx| input.set_value("blocked".into(), cx))
+        });
+        cx.simulate_keystrokes("ctrl-enter");
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.composer.read(cx).value(), "blocked", "not sent");
+        });
+        let (_, _, writes) = saved_mode(&view, cx);
+        click(cx, "full-access-dialog-confirm");
+        assert!(!asking(&view, cx));
+        assert!(composer_focused(&view, cx));
+        let full = ApprovalMode::FullAccess;
+        assert_eq!(
+            saved_mode(&view, cx),
+            (full, full, writes + 1),
+            "saved once"
+        );
+        view.read_with(cx, |view, _| {
+            assert!(view.store.workspace().sessions()[0].approval_overridden());
+            assert_eq!(
+                view.codex.as_ref().unwrap().approval(1),
+                Some(ApprovalState {
+                    mode: full,
+                    overridden: true
+                })
+            );
+        });
+        cx.simulate_keystrokes("ctrl-enter");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: blocked"),
+            "never / dangerFullAccess"
+        );
+    }
+
+    /// Only entering Full access from the menu asks. A saved Full access session opens
+    /// without the dialog, choosing it again changes nothing, and leaving it applies at
+    /// once.
+    #[gpui::test]
+    fn only_entering_full_access_from_the_menu_asks(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":2,"workspace":{"sessions":[
+                {"id":1,"title":"Full","provider":"Codex","settled":false,"draft":"",
+                 "approval_mode":"FullAccess","approval_overridden":true}],"selected":1}}"#,
+        )
+        .unwrap();
+        let (view, cx) = open_window(&path, cx);
+        cx.run_until_parked();
+        assert!(!asking(&view, cx), "restoring a saved mode asks nothing");
+        assert!(cx.debug_bounds("full-access-dialog").is_none());
+        let full = ApprovalMode::FullAccess;
+        assert_eq!(saved_mode(&view, cx), (full, full, 0));
+
+        pick_mode(cx, full);
+        assert!(!asking(&view, cx), "already in Full access");
+        assert_eq!(saved_mode(&view, cx), (full, full, 0), "nothing saved");
+
+        let read_only = ApprovalMode::ReadOnly;
+        pick_mode(cx, read_only);
+        assert!(!asking(&view, cx), "leaving Full access asks nothing");
+        assert_eq!(saved_mode(&view, cx), (read_only, read_only, 1));
+    }
+
+    /// For Claude, Cancel keeps the running process and its mode; only Confirm replaces
+    /// it with one in Full access.
+    #[gpui::test]
+    fn claude_keeps_its_process_until_full_access_is_confirmed(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let claude = wrapper(
+            dir.path(),
+            "keystone-fake-claude",
+            "KEYSTONE_FAKE_CLAUDE_DELAY_MS=5",
+        );
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, _| {
+            view.claude = Some(ClaudeConnection::new(Some(claude), view.wake.clone()))
+        });
+        let pid = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| view.claude.as_ref().unwrap().pid(1))
+        };
+        click(cx, "welcome-claude");
+        choose_mode(cx, ApprovalMode::Auto);
+        send_text(&view, cx, "hello");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: hello"),
+            "acceptEdits"
+        );
+        let first = pid(&view, cx);
+
+        pick_mode(cx, ApprovalMode::FullAccess);
+        click(cx, "full-access-dialog-cancel");
+        send_text(&view, cx, "again");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: again"),
+            "acceptEdits"
+        );
+        assert_eq!(pid(&view, cx), first, "Cancel kept the process");
+
+        choose_mode(cx, ApprovalMode::FullAccess);
+        send_text(&view, cx, "full");
+        assert_eq!(
+            setting_of_reply(&view, cx, "You wrote: full"),
+            "bypassPermissions"
+        );
+        assert_ne!(pid(&view, cx), first, "Confirm replaced it");
     }
 
     /// Claude sessions apply each mode from the menu. Full access and a return to
@@ -3296,12 +3593,12 @@ fn bind_keys(cx: &mut App) {
     TextInput::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new("ctrl-q", Quit, None),
-        gpui::KeyBinding::new("ctrl-n", NewClaude, None),
-        gpui::KeyBinding::new("ctrl-shift-n", NewCodex, None),
-        gpui::KeyBinding::new("ctrl-shift-s", ToggleSettle, None),
-        gpui::KeyBinding::new("ctrl-l", FocusComposer, None),
-        gpui::KeyBinding::new("ctrl-f", FocusSearch, None),
-        gpui::KeyBinding::new("ctrl-enter", SendMessage, None),
+        gpui::KeyBinding::new("ctrl-n", NewClaude, Some("!Dialog")),
+        gpui::KeyBinding::new("ctrl-shift-n", NewCodex, Some("!Dialog")),
+        gpui::KeyBinding::new("ctrl-shift-s", ToggleSettle, Some("!Dialog")),
+        gpui::KeyBinding::new("ctrl-l", FocusComposer, Some("!Dialog")),
+        gpui::KeyBinding::new("ctrl-f", FocusSearch, Some("!Dialog")),
+        gpui::KeyBinding::new("ctrl-enter", SendMessage, Some("!Dialog")),
     ]);
 }
 

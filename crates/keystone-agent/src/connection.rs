@@ -227,6 +227,12 @@ impl CodexConnection {
         self.shared.lock().unwrap().set_approval(session, approval);
     }
 
+    /// The approval state the connection holds for the session, if it was given one.
+    #[doc(hidden)]
+    pub fn approval(&self, session: u64) -> Option<ApprovalState> {
+        self.shared.lock().unwrap().approvals.get(&session).copied()
+    }
+
     fn with_driver(
         &self,
         session: u64,

@@ -210,6 +210,7 @@ pub struct Store {
     workspace: Workspace,
     next_id: u64,
     pending_directory: Option<File>,
+    writes: u64,
     #[cfg(test)]
     sync_directory: fn(&File) -> io::Result<()>,
 }
@@ -225,6 +226,7 @@ impl Store {
                     workspace: Workspace::default(),
                     next_id: 1,
                     pending_directory: None,
+                    writes: 0,
                     #[cfg(test)]
                     sync_directory: File::sync_all,
                 });
@@ -237,6 +239,7 @@ impl Store {
             workspace: snapshot.workspace,
             next_id: snapshot.next_id,
             pending_directory: None,
+            writes: 0,
             #[cfg(test)]
             sync_directory: File::sync_all,
         })
@@ -249,6 +252,12 @@ impl Store {
     /// The workspace file this store saves to.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// How many times this store has written the workspace file since it opened.
+    #[doc(hidden)]
+    pub fn writes(&self) -> u64 {
+        self.writes
     }
 
     pub fn create(&mut self, provider: Provider) -> StoreResult<Applied<u64>> {
@@ -385,6 +394,7 @@ impl Store {
         file.flush()?;
         file.as_file().sync_all()?;
         file.persist(&self.path)?;
+        self.writes += 1;
         self.workspace = snapshot.workspace;
         self.next_id = snapshot.next_id;
         self.pending_directory = Some(directory);
