@@ -20,7 +20,7 @@ The draw benchmark runs in the GPUI test platform, so it measures layout and sce
 
 Dependencies build at `opt-level = 2` in the dev profile, and workspace crates stay unoptimized. GPUI, taffy, and text shaping dominate render cost. On 2026-10-15 this change cut `sidebar_draw_ms` from a 52–101 ms range to 8–11 ms. Incremental rebuilds fell from about 1.5 s to about 1.1 s because the binary shrank. The cost is a one-time dependency rebuild, which took 205 s for the app and 70 s for the test build on a 22-core machine.
 
-This is separate from KS-005. That rapid-typing stall was not fixed by an earlier optimization profile. With this change in place, the 10 ms native check passed once on 2026-10-15. See KS-005 in [issues.md](issues.md).
+This is separate from KS-005. That rapid-typing stall was not fixed by an earlier optimization profile. With this change in place, the 10 ms native check passed in 27 of 27 repeated runs on 2026-10-15, on headless Sway and Hyprland, and KS-005 is closed. See [issues.md](issues.md).
 
 The session sidebar is a cached GPUI view (`SessionSidebar`). GPUI reuses its previous layout and paint until that entity is notified, so composer keystrokes skip every session row. `Keystone::refresh` notifies it; call `refresh` instead of `cx.notify()` for any change the sidebar shows. On 2026-10-15 this cut `sidebar_draw_ms` from 4.78 ms to 0.42 ms. A full sidebar rebuild costs 0.50 ms. The same entity without caching measured 5.9 ms for both cases. The likely reason a cached rebuild is still cheap is that GPUI lays out a cached view as a separate root with fixed bounds. That explanation was not profiled.
 

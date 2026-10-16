@@ -46,10 +46,10 @@ After a fresh clone, the first build rebuilds every dependency, because dev buil
 ## Open work, in priority order
 
 0. **Providers.** Codex works end to end (`crates/keystone-agent`, `docs/design/providers.md`). Next: the Claude Code driver against the same item model; an approval-mode control per session; Markdown rendering of replies; a virtualized transcript list for long sessions. Known limit: after a restart, a steer message is listed before the reply it interrupted, because the log is ordered by completion. Review follow-ups: log writes, history loading, and starting Codex still run on the UI thread; move them to a worker. Completed transcript rows are not virtualized yet.
-1. **KS-005 confirmation.** The sidebar is now a cached view (see `docs/performance.md`). The 10 ms native typing check passed on 2026-10-15 both before and after that change, so the dependency optimization is the more likely fix. Repeat it several times before closing KS-005.
+1. **Stability.** KS-005 is closed. The 10 ms typing check passed 27 times on headless Sway and Hyprland, including a 2,677-character draft. Rerun `python3 scripts/native-stress.py --runs 10` after composer or text-layout changes. KS-009 is fixed in the verification server: `launch` primes the driver keyboard first. The GPUI bug itself remains (zed-industries/zed#64660), so recheck it on a GPUI upgrade.
 2. **Appearance follow-ups.** The light theme, density, and font settings are built and saved in the workspace file. The interface font list only offers installed fonts from a fixed candidate list. Text size and the monospace font are not configurable yet. System mode follows GPUI's reported window appearance. On Hyprland with the portal reporting `prefer-dark`, it opened dark. A light desktop setting and switching while the app runs have not been tested.
 3. **Small polish.** Escape closes menus, selected rows have a hover state, and the color check catches `Hsla { .. }` literals. Nothing else is queued.
-4. **Prior open issues.** KS-002 partial, KS-004 partial, KS-005, and KS-009 in `docs/issues.md`.
+4. **Prior open issues.** KS-002 partial and KS-004 partial in `docs/issues.md`. KS-009 remains upstream in GPUI.
 
 ## Working preferences learned
 
