@@ -39,6 +39,6 @@ The component shapes follow Zed's `ui` crate, and the visual values follow Zeron
 
 ## Known limits
 
-GPUI 0.2.2 cannot render a reliable text ellipsis, so `Label::truncate` clips. See KS-010 in [the issue list](issues.md).
+GPUI 0.2.2's `text_ellipsis` truncates to the first width it measured, so `Label::truncate` uses its own element. It measures the text on every layout and cuts it to its final width with a trailing "…". See KS-010 in [the issue list](issues.md).
 
 Text sizes and the monospace font do not change with density or font choice yet. The default fonts, Inter and GeistMono Nerd Font Mono, are not bundled. GPUI falls back to a system font when they are missing.
