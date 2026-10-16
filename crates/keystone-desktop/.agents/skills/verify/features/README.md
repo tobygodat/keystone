@@ -16,8 +16,8 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools only obser
 - [Drafts and restart](drafts.md) covers focus, typing, autosave, and restoration.
 - [Settlement](settlement.md) covers settling, un-settling, and settled filtering.
 - [Search and navigation](search.md) covers search entry points, matching, clearing, and sidebar visibility.
-- [Codex conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, and restoring a conversation.
+- [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, and restoring a conversation.
 
 ## Coverage rules
 
-For each run, record the entry points actually exercised. Do not mark an entire feature complete when only a shortcut passed. Record precondition failures rather than removing the failing step. Claude Code execution, PR viewing, saved prompts, split panes, and model controls are accepted future scope, not implemented journeys.
+For each run, record the entry points actually exercised. Do not mark an entire feature complete when only a shortcut passed. Record precondition failures rather than removing the failing step. PR viewing, saved prompts, split panes, and model controls are accepted future scope, not implemented journeys.

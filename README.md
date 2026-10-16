@@ -2,13 +2,13 @@
 
 A Rust and GPUI desktop workspace for Claude Code and Codex.
 
-This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, filter settled sessions, save multiline drafts, settle and un-settle them, and restore them on restart. Codex sessions send messages to your installed `codex` and stream the reply, with approvals, steering, and stop. Claude Code sessions are not connected yet. The optional visual fixture is labeled as sample content.
+This is a native UI preview styled after the supplied MonoCode reference. Create and select local session records, search them, filter settled sessions, save multiline drafts, settle and un-settle them, and restore them on restart. Codex sessions send messages to your installed `codex`, and Claude Code sessions to your installed `claude`. Both stream the reply, with approvals, steering, stop, and the conversation restored after a restart. The optional visual fixture is labeled as sample content.
 
 ## Run the preview
 
 Run `cargo run -p keystone-desktop --locked` in a Linux graphical session. Press Ctrl+Q to quit. The gear at the bottom of the left rail chooses the theme (System, Light, or Dark), the density, and the interface font. Escape closes an open menu. Ctrl+N creates a Claude session, Ctrl+Shift+N creates a Codex session, Ctrl+L focuses the composer, Ctrl+Enter sends, Ctrl+F focuses search, and Ctrl+Shift+S toggles settlement.
 
-Codex runs with your own `codex` login and approval settings, in the directory Keystone was started from. Set `KEYSTONE_PROJECT_DIR` to choose another directory, or `KEYSTONE_CODEX_PATH` to use a specific `codex` binary. Each session's completed messages are kept in `sessions/<id>.jsonl` next to the workspace file. See [the provider design](docs/design/providers.md).
+Codex and Claude Code run with your own `codex` and `claude` logins and approval settings, in the directory Keystone was started from. Set `KEYSTONE_PROJECT_DIR` to choose another directory, or `KEYSTONE_CODEX_PATH` and `KEYSTONE_CLAUDE_PATH` to use specific binaries. Each Claude session runs its own `claude` process until Keystone quits. Each session's completed messages are kept in `sessions/<id>.jsonl` next to the workspace file. See [the provider design](docs/design/providers.md).
 
 The preview saves to `$XDG_DATA_HOME/keystone/workspace.json`, or `$HOME/.local/share/keystone/workspace.json`. Set `KEYSTONE_STATE_PATH` to use an isolated state file. A file lock prevents concurrent desktop processes from writing the same workspace. Draft writes wait 250 ms after typing stops. Session changes and normal window close flush the visible draft immediately; failed saves keep the session open.
 
