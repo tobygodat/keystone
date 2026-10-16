@@ -1,4 +1,5 @@
 mod conversation;
+mod relative_time;
 mod settings;
 mod text_input;
 
@@ -11,8 +12,9 @@ use gpui::{
 };
 use keystone_agent::codex::Command;
 use keystone_agent::{CodexConnection, Event, ItemKind, ItemStatus, TurnStatus, Wake};
-use keystone_core::{Density, Durability, Preferences, Provider, Store, ThemeMode};
+use keystone_core::{Attention, Density, Durability, Preferences, Provider, Store, ThemeMode};
 use keystone_ui::{automation, prelude::*};
+use relative_time::{LocalTime, relative};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -134,13 +136,34 @@ impl Keystone {
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
         ];
         let app = cx.weak_entity();
-        let session_sidebar = cx.new(|_| SessionSidebar { app, hovered: None });
+        let session_sidebar = cx.new(|_| SessionSidebar {
+            app,
+            hovered: None,
+            shows_time: false,
+        });
         // Reader threads wake this task when provider events arrive. Each wake-up drains
         // everything that arrived, so a burst of streamed text costs one update.
         let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
         cx.spawn(async move |this, cx| {
             while wake_rx.next().await.is_some() {
                 if this.update(cx, |this, cx| this.pump(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // Relative times age, so the sidebar redraws once a minute while it shows one.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let aged = this.update(cx, |this, cx| {
+                    if this.session_sidebar.read(cx).shows_time {
+                        this.refresh(cx);
+                    }
+                });
+                if aged.is_err() {
                     break;
                 }
             }
@@ -874,12 +897,25 @@ impl Keystone {
         let dir = self.sessions_dir.clone();
         let mut sidebar_changed = false;
         for (session, event) in events {
-            if matches!(event, Event::TurnCompleted { .. } | Event::Failed { .. }) {
-                sidebar_changed = true;
-                if let Err(error) = self.store.record_turn_end(session, (self.clock)()) {
-                    self.error = Some(format!("Could not save the session. {error}"));
-                }
+            let failed = match &event {
+                Event::TurnCompleted { status, .. } => Some(match status {
+                    TurnStatus::Completed => false,
+                    TurnStatus::Interrupted => !self.conversation(session).stop_requested,
+                    TurnStatus::Failed => true,
+                }),
+                Event::Failed { .. } => Some(true),
+                _ => None,
+            };
+            if let Some(failed) = failed
+                && let Err(error) = self.store.record_turn_end(session, failed, (self.clock)())
+            {
+                self.error = Some(format!("Could not save the session. {error}"));
             }
+            sidebar_changed |= failed.is_some()
+                || matches!(
+                    event,
+                    Event::ApprovalRequested(_) | Event::ApprovalResolved { .. }
+                );
             let thread = self.conversation(session).apply(&dir, session, event);
             if let Some(thread) = thread {
                 let known = self
@@ -988,6 +1024,8 @@ impl Keystone {
         };
         if let Err(error) = codex.command(Command::Interrupt { session: id }) {
             self.error = Some(format!("Could not stop the turn. {error}"));
+        } else {
+            self.conversation(id).stop_requested = true;
         }
         cx.notify();
     }
@@ -1011,7 +1049,7 @@ impl Keystone {
         {
             self.error = Some(format!("Could not send the answer. {error}"));
         }
-        cx.notify();
+        self.refresh(cx);
     }
 
     fn conversation_view(&self, session: u64, cx: &mut Context<Self>) -> gpui::Div {
@@ -1193,6 +1231,8 @@ struct SessionSidebar {
     app: WeakEntity<Keystone>,
     /// The row under the pointer. Only it and the selected row build a Settle button.
     hovered: Option<u64>,
+    /// Whether the last render showed a relative time, which the minute timer must age.
+    shows_time: bool,
 }
 
 /// One session as the sidebar shows it, built once per sidebar render.
@@ -1203,33 +1243,61 @@ struct SessionRow {
     provider: Provider,
     settled: bool,
     selected: bool,
+    attention: Option<Attention>,
+    /// How long ago the session last changed, or `None` for sessions saved before times.
+    time: Option<String>,
 }
 
-/// The sidebar's sections, top to bottom. Active always shows its rows; Settled
-/// collapses and starts collapsed (see `Keystone::settled_open`).
+/// The sidebar's sections, top to bottom.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
-    Active,
+    /// Unsettled sessions waiting on the user. Shown only when it has rows.
+    Attention,
+    /// Every other unsettled session.
+    Working,
+    /// Pinned to the bottom and collapsed until opened (see `Keystone::settled_open`).
     Settled,
 }
 
 impl Section {
+    const ALL: [Section; 3] = [Section::Attention, Section::Working, Section::Settled];
+
+    /// Settling is how the user puts a session away, so it outranks attention: a stale
+    /// failure would otherwise pin a settled session to the top until its next message.
+    fn of(row: &SessionRow) -> Self {
+        match (row.settled, row.attention) {
+            (true, _) => Section::Settled,
+            (false, Some(_)) => Section::Attention,
+            (false, None) => Section::Working,
+        }
+    }
+
     fn label(self, count: usize) -> String {
         match self {
-            Section::Active => "Active".into(),
+            Section::Attention => format!("Needs action ({count})"),
+            Section::Working => "Working".into(),
             Section::Settled => format!("Settled ({count})"),
         }
     }
 
     fn id(self) -> &'static str {
         match self {
-            Section::Active => "active-section",
+            Section::Attention => "attention-section",
+            Section::Working => "working-section",
             Section::Settled => "settled-section",
         }
     }
 
     fn collapsible(self) -> bool {
         self == Section::Settled
+    }
+}
+
+fn attention_reason(attention: Attention) -> (&'static str, Color) {
+    match attention {
+        Attention::Approval => ("Waiting for approval", Color::Warning),
+        Attention::Failed => ("Turn failed", Color::Warning),
+        Attention::Replied => ("New reply", Color::Default),
     }
 }
 
@@ -1244,6 +1312,29 @@ fn excerpt(draft: &str, provider: Provider) -> String {
 }
 
 impl SessionSidebar {
+    /// The 12 px slot left of the title: a wedge for the session's state, or a dot
+    /// for an unseen reply.
+    fn state_mark(row: &SessionRow, cx: &App) -> gpui::AnyElement {
+        let wedge = |name, color| {
+            Icon::new(name)
+                .size(px(10.))
+                .color(color)
+                .into_any_element()
+        };
+        match (row.attention, row.settled) {
+            (_, true) => wedge(IconName::WedgeFilled, Color::Muted),
+            (Some(Attention::Replied), false) => div()
+                .size(px(10.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(px(6.)).rounded_full().bg(cx.theme().colors.text))
+                .into_any_element(),
+            (Some(_), false) => wedge(IconName::WedgeFilled, Color::Warning),
+            (None, false) => wedge(IconName::Wedge, Color::Accent),
+        }
+    }
+
     fn row(
         row: SessionRow,
         hovered: bool,
@@ -1251,6 +1342,7 @@ impl SessionSidebar {
         sidebar: &WeakEntity<Self>,
         cx: &App,
     ) -> impl IntoElement {
+        let mark = Self::state_mark(&row, cx);
         let SessionRow {
             id,
             title,
@@ -1258,6 +1350,8 @@ impl SessionSidebar {
             provider,
             settled,
             selected,
+            attention,
+            time,
         } = row;
         let title = Label::new(title).truncate();
         let title = if selected {
@@ -1266,6 +1360,26 @@ impl SessionSidebar {
             title.color(Color::Muted)
         } else {
             title
+        };
+        let show_settle = selected || hovered;
+        let detail = match attention.filter(|_| !settled) {
+            Some(attention) => {
+                let (reason, color) = attention_reason(attention);
+                h_flex().child(Label::new(reason).size(TextSize::Sm).color(color))
+            }
+            None => h_flex()
+                .gap(px(6.))
+                .child(
+                    Icon::new(IconName::Diamond)
+                        .size(px(10.))
+                        .color(provider_color(provider, cx)),
+                )
+                .child(
+                    Label::new(excerpt)
+                        .size(TextSize::Sm)
+                        .color(Color::Muted)
+                        .truncate(),
+                ),
         };
         let (select, settle, sidebar) = (app.downgrade(), app.downgrade(), sidebar.clone());
         ListItem::new(("session", id))
@@ -1294,39 +1408,22 @@ impl SessionSidebar {
                             .gap(px(4.))
                             .child(
                                 h_flex()
-                                    // A 10 px wedge centred in a 12 px state slot.
+                                    // A 10 px mark centred in a 12 px state slot.
                                     .pl_px()
                                     .gap(px(10.))
-                                    .child(if settled {
-                                        Icon::new(IconName::WedgeFilled)
-                                            .size(px(10.))
-                                            .color(Color::Muted)
-                                    } else {
-                                        Icon::new(IconName::Wedge)
-                                            .size(px(10.))
-                                            .color(Color::Accent)
-                                    })
-                                    .child(title),
+                                    .child(mark)
+                                    .child(div().flex_1().min_w_0().child(title))
+                                    // The Settle button takes this slot while it shows.
+                                    .when_some(time.filter(|_| !show_settle), |d, time| {
+                                        d.child(
+                                            Label::new(time).size(TextSize::Sm).color(Color::Faint),
+                                        )
+                                    }),
                             )
-                            .child(
-                                h_flex()
-                                    // Under the title, past the 12 px state slot and its gap.
-                                    .pl(px(21.))
-                                    .gap(px(6.))
-                                    .child(
-                                        Icon::new(IconName::Diamond)
-                                            .size(px(10.))
-                                            .color(provider_color(provider, cx)),
-                                    )
-                                    .child(
-                                        Label::new(excerpt)
-                                            .size(TextSize::Sm)
-                                            .color(Color::Muted)
-                                            .truncate(),
-                                    ),
-                            ),
+                            // Under the title, past the 12 px state slot and its gap.
+                            .child(detail.pl(px(21.))),
                     )
-                    .when(selected || hovered, |d| {
+                    .when(show_settle, |d| {
                         d.child(
                             Button::new(
                                 ("settle", id),
@@ -1402,72 +1499,91 @@ impl SessionSidebar {
             })
     }
 
-    fn sections(&self, app: &Entity<Keystone>, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn sections(
+        &mut self,
+        app: &Entity<Keystone>,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let sidebar = cx.entity().downgrade();
         let this = app.read(cx);
         let workspace = this.store.workspace();
         let query = this.search.read(cx).value().to_lowercase();
-        let rows = workspace
-            .sessions()
-            .iter()
-            .filter(|s| {
-                format!("{} {}", s.title(), s.provider())
-                    .to_lowercase()
-                    .contains(&query)
-            })
-            .map(|s| SessionRow {
-                id: s.id(),
-                title: s.title().to_owned(),
-                excerpt: excerpt(s.draft(), s.provider()),
-                provider: s.provider(),
-                settled: s.settled(),
-                selected: Some(s.id()) == workspace.selected(),
-            })
-            .collect::<Vec<_>>();
-        let empty = match (rows.is_empty(), workspace.sessions().is_empty()) {
+        let now = LocalTime::at((this.clock)());
+        let mut sections: [Vec<SessionRow>; 3] = Default::default();
+        for session in workspace.sessions().iter().filter(|s| {
+            format!("{} {}", s.title(), s.provider())
+                .to_lowercase()
+                .contains(&query)
+        }) {
+            let live = this.conversations.get(&session.id());
+            let row = SessionRow {
+                id: session.id(),
+                title: session.title().to_owned(),
+                excerpt: excerpt(session.draft(), session.provider()),
+                provider: session.provider(),
+                settled: session.settled(),
+                selected: Some(session.id()) == workspace.selected(),
+                attention: session.attention(
+                    live.is_some_and(|c| !c.approvals.is_empty()),
+                    live.is_some_and(|c| c.running),
+                ),
+                time: session
+                    .updated_at()
+                    .map(|then| relative(now, LocalTime::at(then))),
+            };
+            sections[Section::of(&row) as usize].push(row);
+        }
+        let empty = match (
+            sections.iter().all(Vec::is_empty),
+            workspace.sessions().is_empty(),
+        ) {
             (false, _) => None,
             (true, true) => Some("No sessions yet. Start one from the composer or press Ctrl N."),
             (true, false) => Some("No sessions match this search."),
         };
         let settled_open = this.settled_open;
-        let (settled, active): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| row.settled);
+        self.shows_time = false;
         let mut list = v_flex()
             .id("session-list")
             .size_full()
             .overflow_y_scroll()
             .px_2()
             .py(px(6.));
-        for (section, rows) in [(Section::Active, active), (Section::Settled, settled)] {
-            let message = empty.filter(|_| section == Section::Active);
+        for (section, rows) in Section::ALL.into_iter().zip(sections) {
+            let message = empty.filter(|_| section == Section::Working);
             if rows.is_empty() && message.is_none() {
                 continue;
             }
             let open = !section.collapsible() || settled_open;
+            if open {
+                self.shows_time |= rows.iter().any(|row| row.time.is_some());
+            }
             let header = Self::header(section, rows.len(), open, app, cx);
-            list = list.child(
-                v_flex()
-                    .gap(px(2.))
-                    // Active takes the spare height, which keeps Settled at the bottom.
-                    .when(section == Section::Active, |d| d.flex_grow())
-                    .child(header)
-                    .when_some(message, |d, message| {
-                        d.child(
-                            div()
-                                .px_2()
-                                .py(px(6.))
-                                .text_size(TextSize::Ui.px())
-                                .line_height(px(18.))
-                                .text_color(cx.theme().colors.text_muted)
-                                .child(message),
-                        )
-                    })
-                    .when(open, |d| {
-                        d.children(rows.into_iter().map(|row| {
-                            let hovered = self.hovered == Some(row.id);
-                            Self::row(row, hovered, app, &sidebar, cx)
-                        }))
-                    }),
-            );
+            list = list
+                // Spare height sits above Settled, which keeps it at the bottom.
+                .when(section == Section::Settled, |d| d.child(div().flex_grow()))
+                .child(
+                    v_flex()
+                        .gap(px(2.))
+                        .child(header)
+                        .when_some(message, |d, message| {
+                            d.child(
+                                div()
+                                    .px_2()
+                                    .py(px(6.))
+                                    .text_size(TextSize::Ui.px())
+                                    .line_height(px(18.))
+                                    .text_color(cx.theme().colors.text_muted)
+                                    .child(message),
+                            )
+                        })
+                        .when(open, |d| {
+                            d.children(rows.into_iter().map(|row| {
+                                let hovered = self.hovered == Some(row.id);
+                                Self::row(row, hovered, app, &sidebar, cx)
+                            }))
+                        }),
+                );
         }
         list
     }
@@ -1788,7 +1904,7 @@ mod tests {
         assert_eq!(second(cx), second_row);
 
         // Settling the selected row moves it into the collapsed Settled section,
-        // which sits below the Active rows.
+        // which sits below the Working rows.
         let bounds = cx
             .debug_bounds("settle-2")
             .expect("selected row shows Settle");
@@ -2059,6 +2175,75 @@ mod tests {
             y(cx, "session-1"),
         );
         assert!(active < header && header < settled);
+    }
+
+    fn y(cx: &mut gpui::VisualTestContext, selector: &'static str) -> Pixels {
+        cx.debug_bounds(selector).expect("rendered").origin.y
+    }
+
+    #[gpui::test]
+    fn needs_action_holds_approval_failure_and_reply_above_working(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        for now in 1..=5 {
+            store.create(Provider::Codex, now).unwrap();
+        }
+        store.record_turn_end(1, true, 10).unwrap();
+        store.record_turn_end(2, false, 11).unwrap();
+        store.set_settled(5, true).unwrap();
+        store.record_turn_end(5, true, 12).unwrap();
+        store.select(4, 13).unwrap();
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        view.update(cx, |this, cx| {
+            let mut live = Conversation::default();
+            live.running = true;
+            live.approvals.push(keystone_agent::Approval {
+                request: keystone_agent::RequestId("1".into()),
+                item_id: None,
+                action: "cargo test".into(),
+                detail: None,
+            });
+            this.conversations.insert(3, live);
+            this.refresh(cx);
+        });
+        cx.run_until_parked();
+
+        let header = y(cx, "attention-section");
+        let rows = [y(cx, "session-1"), y(cx, "session-2"), y(cx, "session-3")];
+        let working = y(cx, "working-section");
+        assert!(rows.iter().all(|&row| header < row && row < working));
+        assert!(working < y(cx, "session-4"));
+        assert!(y(cx, "session-4") < y(cx, "settled-section"));
+        // A settled session stays in collapsed Settled even with a failed turn.
+        assert!(cx.debug_bounds("session-5").is_none());
+        view.read_with(cx, |this, cx| {
+            let sidebar = this.session_sidebar.read(cx);
+            assert!(sidebar.shows_time);
+        });
+    }
+
+    #[gpui::test]
+    fn an_unread_row_stays_in_needs_action_until_the_user_leaves_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        store.create(Provider::Codex, 2).unwrap();
+        store.record_turn_end(1, false, 3).unwrap();
+        cx.update(keystone_ui::init);
+        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        assert!(y(cx, "session-1") < y(cx, "working-section"));
+
+        click(cx, "session-1");
+        assert!(y(cx, "session-1") < y(cx, "working-section"));
+
+        click(cx, "session-2");
+        assert!(y(cx, "session-1") > y(cx, "working-section"));
+        assert_eq!(
+            Store::open(&path).unwrap().workspace().sessions()[0].attention(false, false),
+            None
+        );
     }
 
     #[gpui::test]
