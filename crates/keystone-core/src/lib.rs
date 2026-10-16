@@ -43,9 +43,9 @@ impl fmt::Display for Provider {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum LastTurn {
     Running,
-    /// Completed, or stopped by the user.
+    /// Completed, or ended by the user: Stop, or a denial that ends the turn.
     Finished,
-    /// Failed, or interrupted by anything but the user's own Stop.
+    /// Failed, or interrupted by anything but the user.
     Failed,
 }
 

@@ -78,13 +78,15 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Whether `event` ends a turn, and if so whether the turn failed. Only the user's own
-/// Stop makes an interruption a normal end.
-fn turn_failed(event: &Event, stop_requested: bool) -> Option<bool> {
+/// Whether `event` ends a turn, and if so whether the turn failed. An interruption is a
+/// normal end only when the user ended that turn, which the provider reports with it.
+fn turn_failed(event: &Event) -> Option<bool> {
     match event {
-        Event::TurnCompleted { status, .. } => Some(match status {
+        Event::TurnCompleted {
+            status, stopped, ..
+        } => Some(match status {
             TurnStatus::Completed => false,
-            TurnStatus::Interrupted => !stop_requested,
+            TurnStatus::Interrupted => !stopped,
             TurnStatus::Failed => true,
         }),
         Event::Failed { .. } => Some(true),
@@ -1042,6 +1044,10 @@ impl Keystone {
     fn pump(&mut self, cx: &mut Context<Self>) {
         let reports = self.logs.drain();
         let events = self.codex.as_ref().map(|c| c.drain()).unwrap_or_default();
+        self.receive(reports, events, cx);
+    }
+
+    fn receive(&mut self, reports: Vec<Report>, events: Vec<(u64, Event)>, cx: &mut Context<Self>) {
         if reports.is_empty() && events.is_empty() {
             return;
         }
@@ -1068,7 +1074,7 @@ impl Keystone {
             self.commit(session);
         }
         for (session, event) in events {
-            let failed = turn_failed(&event, self.conversation(session).stop_requested);
+            let failed = turn_failed(&event);
             let saved = match (&event, failed) {
                 (Event::TurnStarted, _) => self.store.record_turn_start(session).map(drop),
                 (_, Some(failed)) => self
@@ -1213,7 +1219,6 @@ impl Keystone {
             return;
         };
         codex.command(Command::Interrupt { session: id });
-        self.conversation(id).stop_requested = true;
         cx.notify();
     }
 
@@ -3289,60 +3294,242 @@ mod tests {
     }
 
     #[test]
-    fn only_the_users_stop_makes_an_interrupted_turn_a_normal_end() {
-        let ended = |status| Event::TurnCompleted {
+    fn only_a_turn_the_user_ended_is_interrupted_without_failing() {
+        let ended = |status, stopped| Event::TurnCompleted {
             status,
             error: None,
+            stopped,
         };
         assert_eq!(
-            turn_failed(&ended(TurnStatus::Completed), false),
+            turn_failed(&ended(TurnStatus::Completed, false)),
             Some(false)
         );
         assert_eq!(
-            turn_failed(&ended(TurnStatus::Interrupted), true),
+            turn_failed(&ended(TurnStatus::Interrupted, true)),
             Some(false)
         );
         assert_eq!(
-            turn_failed(&ended(TurnStatus::Interrupted), false),
+            turn_failed(&ended(TurnStatus::Interrupted, false)),
             Some(true)
         );
-        assert_eq!(turn_failed(&ended(TurnStatus::Failed), true), Some(true));
+        assert_eq!(turn_failed(&ended(TurnStatus::Failed, true)), Some(true));
         let failed = Event::Failed {
             message: "Codex exited".into(),
         };
-        assert_eq!(turn_failed(&failed, false), Some(true));
-        assert_eq!(turn_failed(&Event::TurnStarted, false), None);
+        assert_eq!(turn_failed(&failed), Some(true));
+        assert_eq!(turn_failed(&Event::TurnStarted), None);
     }
 
-    #[test]
-    fn a_turn_interrupted_after_a_denial_is_not_a_failure() {
-        let mut live = Conversation::default();
-        live.push_local("Run it");
-        live.apply(Event::ApprovalRequested(keystone_agent::Approval {
-            request: keystone_agent::RequestId("1".into()),
-            item_id: None,
-            action: "touch denied.txt".into(),
-            detail: None,
-        }));
-        let interrupted = Event::TurnCompleted {
-            status: TurnStatus::Interrupted,
-            error: None,
-        };
-        assert_eq!(turn_failed(&interrupted, live.stop_requested), Some(true));
-        live.decide(false);
-        assert_eq!(turn_failed(&interrupted, live.stop_requested), Some(false));
-        live.apply(interrupted);
-        assert!(!live.stop_requested);
-        // Allowing leaves a later interruption a failure.
-        live.push_local("Run it again");
-        live.apply(Event::ApprovalRequested(keystone_agent::Approval {
-            request: keystone_agent::RequestId("2".into()),
-            item_id: None,
-            action: "touch allowed.txt".into(),
-            detail: None,
-        }));
-        live.decide(true);
-        assert!(!live.stop_requested);
+    /// A Codex driver with session 1's thread open, standing in for the app-server.
+    struct Codex {
+        driver: keystone_agent::codex::CodexDriver,
+        events: Vec<(u64, Event)>,
+    }
+
+    impl Codex {
+        const THREAD: &str = "thread";
+
+        fn open() -> Self {
+            use keystone_agent::codex::{CodexDriver, Outputs};
+            let mut out = Outputs::default();
+            let mut driver = CodexDriver::new("0", &mut out);
+            driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
+            driver.command(
+                Command::Open {
+                    session: 1,
+                    cwd: "/tmp".into(),
+                    resume: None,
+                },
+                &mut out,
+            );
+            let thread = format!(
+                r#"{{"id":2,"result":{{"thread":{{"id":"{}"}}}}}}"#,
+                Self::THREAD
+            );
+            driver.on_line(thread.as_bytes(), &mut out);
+            Self {
+                driver,
+                events: Vec::new(),
+            }
+        }
+
+        fn command(&mut self, command: Command) {
+            let mut out = keystone_agent::codex::Outputs::default();
+            self.driver.command(command, &mut out);
+            self.events.extend(out.events);
+        }
+
+        fn line(&mut self, line: String) {
+            let mut out = keystone_agent::codex::Outputs::default();
+            self.driver.on_line(line.as_bytes(), &mut out);
+            self.events.extend(out.events);
+        }
+
+        fn send(&mut self, turn: &str) {
+            self.command(Command::Send {
+                session: 1,
+                text: turn.into(),
+            });
+            self.line(format!(
+                r#"{{"method":"turn/started","params":{{"threadId":"{}","turn":{{"id":"{turn}"}}}}}}"#,
+                Self::THREAD
+            ));
+        }
+
+        fn end(&mut self, turn: &str, status: &str) {
+            self.line(format!(
+                r#"{{"method":"turn/completed","params":{{"threadId":"{}","turn":{{"id":"{turn}","status":"{status}"}}}}}}"#,
+                Self::THREAD
+            ));
+        }
+
+        fn stop(&mut self) {
+            self.command(Command::Interrupt { session: 1 });
+        }
+
+        /// Asks to run a command, offering `decisions`, and answers it.
+        fn ask(&mut self, request: u64, decisions: &[&str], allow: bool) {
+            self.line(format!(
+                r#"{{"id":{request},"method":"item/commandExecution/requestApproval","params":{{"threadId":"{}","itemId":"exec","command":"touch x","availableDecisions":{decisions:?}}}}}"#,
+                Self::THREAD
+            ));
+            self.command(Command::Answer {
+                session: 1,
+                request: keystone_agent::RequestId(request.to_string()),
+                allow,
+            });
+        }
+    }
+
+    /// Session 1 with three saved turns whose history loads only when `release` is
+    /// sent, and session 2 selected.
+    fn held_history(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        gpui::Entity<Keystone>,
+        &mut gpui::VisualTestContext,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        store.create(Provider::Codex, 2).unwrap();
+        let sessions = dir.path().join("sessions");
+        seed_long_session(&sessions, 1, 3);
+        cx.update(keystone_ui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        view.update(cx, |this, _| {
+            let read: keystone_agent::log::Reader = Arc::new(move |dir, session| {
+                if session == 1 {
+                    let _ = released.lock().unwrap().recv();
+                }
+                keystone_agent::log::read(dir, session)
+            });
+            this.logs = Logs::with_reader(sessions.clone(), this.wake.clone(), read);
+            this.conversations.clear();
+            this.conversation(2);
+            assert!(this.conversation(1).is_loading());
+        });
+        (dir, view, cx, release)
+    }
+
+    fn deliver(view: &gpui::Entity<Keystone>, cx: &mut gpui::VisualTestContext, codex: &mut Codex) {
+        let events = std::mem::take(&mut codex.events);
+        view.update(cx, |this, cx| this.receive(Vec::new(), events, cx));
+    }
+
+    fn load(
+        view: &gpui::Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+        release: &std::sync::mpsc::Sender<()>,
+    ) {
+        release.send(()).unwrap();
+        wait_until(cx, view, |view| !view.conversations[&1].is_loading());
+    }
+
+    fn last_turn(
+        view: &gpui::Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<keystone_core::LastTurn> {
+        view.read_with(cx, |this, _| {
+            this.store.workspace().sessions()[0].last_turn()
+        })
+    }
+
+    #[gpui::test]
+    fn a_stop_while_history_loads_does_not_excuse_the_next_turn(cx: &mut gpui::TestAppContext) {
+        let (_dir, view, cx, release) = held_history(cx);
+        let mut codex = Codex::open();
+        codex.send("a");
+        codex.stop();
+        codex.end("a", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(
+            last_turn(&view, cx),
+            Some(keystone_core::LastTurn::Finished)
+        );
+        // A second turn is sent before the history arrives, and is cut off by Codex.
+        codex.send("b");
+        codex.end("b", "interrupted");
+        deliver(&view, cx, &mut codex);
+        load(&view, cx, &release);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+    }
+
+    #[gpui::test]
+    fn a_stop_survives_history_replaying_an_earlier_turn(cx: &mut gpui::TestAppContext) {
+        let (_dir, view, cx, release) = held_history(cx);
+        let mut codex = Codex::open();
+        codex.send("a");
+        codex.end("a", "completed");
+        deliver(&view, cx, &mut codex);
+        codex.send("b");
+        codex.stop();
+        deliver(&view, cx, &mut codex);
+        // The history arrives and replays turn a's end before turn b's arrives.
+        load(&view, cx, &release);
+        codex.end("b", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(
+            last_turn(&view, cx),
+            Some(keystone_core::LastTurn::Finished)
+        );
+    }
+
+    #[gpui::test]
+    fn a_denial_excuses_an_interruption_only_when_it_ends_the_turn(cx: &mut gpui::TestAppContext) {
+        let (_dir, view, cx, release) = held_history(cx);
+        load(&view, cx, &release);
+        let mut codex = Codex::open();
+        // Denying with "decline" lets the turn go on; a later interruption is a failure,
+        // even after another request was allowed.
+        codex.send("a");
+        codex.ask(10, &["accept", "decline", "cancel"], false);
+        codex.ask(11, &["accept", "decline", "cancel"], true);
+        codex.end("a", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
+        // With no "decline" offered, denying cancels the turn.
+        codex.send("b");
+        codex.ask(12, &["accept", "cancel"], false);
+        codex.end("b", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(
+            last_turn(&view, cx),
+            Some(keystone_core::LastTurn::Finished)
+        );
+        // A Stop of one turn and a denial in another stay with their own turns.
+        codex.send("c");
+        codex.stop();
+        codex.end("c", "interrupted");
+        codex.send("d");
+        codex.ask(13, &["accept", "decline"], false);
+        codex.end("d", "interrupted");
+        deliver(&view, cx, &mut codex);
+        assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
     }
 
     #[test]

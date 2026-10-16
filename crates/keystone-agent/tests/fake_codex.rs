@@ -87,7 +87,8 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
         events.last(),
         Some(&Event::TurnCompleted {
             status: TurnStatus::Interrupted,
-            error: None
+            error: None,
+            stopped: true
         })
     );
 

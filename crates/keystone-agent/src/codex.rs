@@ -96,6 +96,9 @@ struct Session {
     waiting: Vec<String>,
     /// Stop was asked while the turn was starting. It is sent once the turn has an ID.
     stop_requested: bool,
+    /// The user ended the running turn, with Stop or a denial that cancels it. Its
+    /// `turn/completed` reports it, so it never carries over to another turn.
+    stopped: bool,
     /// Counts stops. A steer sent before a stop must not start a turn after it.
     epoch: u64,
     /// Open approval requests and the decision that denies each one.
@@ -167,14 +170,15 @@ impl CodexDriver {
                 request,
                 allow,
             } => {
-                let Some(deny) = self
-                    .sessions
-                    .get_mut(&session)
-                    .and_then(|s| s.approvals.remove(&request))
-                else {
+                let Some(state) = self.sessions.get_mut(&session) else {
+                    return;
+                };
+                let Some(deny) = state.approvals.remove(&request) else {
                     return;
                 };
                 let decision = if allow { "accept" } else { deny };
+                // "decline" lets the turn go on; "cancel" ends it.
+                state.stopped |= decision == "cancel";
                 out.writes.push(format!(
                     r#"{{"id":{},"result":{{"decision":"{decision}"}}}}"#,
                     request.0
@@ -207,6 +211,7 @@ impl CodexDriver {
                     Event::TurnCompleted {
                         status: TurnStatus::Failed,
                         error: Some(reason.to_owned()),
+                        stopped: false,
                     },
                 );
             } else if state.opening || !state.waiting.is_empty() {
@@ -311,6 +316,7 @@ impl CodexDriver {
         state.epoch += 1;
         match (state.thread.clone(), state.turn.clone()) {
             (Some(thread), Turn::Running(turn)) => {
+                state.stopped = true;
                 let line = self.request(
                     "turn/interrupt",
                     json!({"threadId": thread, "turnId": turn}),
@@ -328,6 +334,7 @@ impl CodexDriver {
                 Event::TurnCompleted {
                     status: TurnStatus::Interrupted,
                     error: None,
+                    stopped: true,
                 },
             ),
         }
@@ -403,6 +410,7 @@ impl CodexDriver {
                         Event::TurnCompleted {
                             status: TurnStatus::Failed,
                             error: Some(error.message),
+                            stopped: false,
                         },
                     );
                 }
@@ -479,9 +487,11 @@ impl CodexDriver {
                     return self.unknown += 1;
                 };
                 if let Some(session) = self.session_for(&note.thread_id) {
+                    let mut stopped = false;
                     if let Some(state) = self.sessions.get_mut(&session) {
                         state.turn = Turn::Idle;
                         state.stop_requested = false;
+                        stopped = std::mem::take(&mut state.stopped);
                         // Requests from this turn can no longer be answered.
                         for request in state.approvals.drain().map(|(r, _)| r) {
                             out.event(session, Event::ApprovalResolved { request });
@@ -493,7 +503,14 @@ impl CodexDriver {
                         _ => TurnStatus::Failed,
                     };
                     let error = note.turn.error.map(|e| e.message);
-                    out.event(session, Event::TurnCompleted { status, error });
+                    out.event(
+                        session,
+                        Event::TurnCompleted {
+                            status,
+                            error,
+                            stopped,
+                        },
+                    );
                     // Messages that waited for this turn's ID start the next turn.
                     self.flush(session, out);
                 }
