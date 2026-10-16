@@ -7,11 +7,14 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
+type HoverHandler = Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
+
 /// A selectable row, such as a session in the sidebar.
 #[derive(IntoElement)]
 pub struct ListItem {
     id: ElementId,
     selected: bool,
+    on_hover: Option<HoverHandler>,
     on_click: Option<ClickHandler>,
     debug_selector: Option<String>,
     children: SmallVec<[AnyElement; 2]>,
@@ -22,6 +25,7 @@ impl ListItem {
         Self {
             id: id.into(),
             selected: false,
+            on_hover: None,
             on_click: None,
             debug_selector: None,
             children: SmallVec::new(),
@@ -30,6 +34,12 @@ impl ListItem {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Called when the pointer enters (`true`) or leaves (`false`) the row.
+    pub fn on_hover(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
+        self.on_hover = Some(Box::new(handler));
         self
     }
 
@@ -81,5 +91,6 @@ impl RenderOnce for ListItem {
             el = crate::automation::tag(el, selector);
         }
         el.when_some(self.on_click, |d, handler| d.on_click(handler))
+            .when_some(self.on_hover, |d, handler| d.on_hover(handler))
     }
 }
