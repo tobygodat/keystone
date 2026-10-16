@@ -14,7 +14,8 @@
 //! takes no answer. Request IDs restart in each process, as a stale answer from an
 //! earlier process would find them. With `KEYSTONE_FAKE_CLAUDE_LOG_DIR` set, each
 //! answer received is logged to `<dir>/<pid>.answers` as `applied <id>` or
-//! `ignored <id>`.
+//! `ignored <id>`. When its directory holds a `.fake-claude-pids` file, each process
+//! appends its ID to it, so a test can find a process it never saw start.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -92,6 +93,12 @@ fn main() {
     // A file left by an earlier process with the same ID is not this one's.
     if let Some(log) = &log {
         let _ = std::fs::write(log, "");
+    }
+    if let Ok(mut pids) = std::fs::OpenOptions::new()
+        .append(true)
+        .open(".fake-claude-pids")
+    {
+        let _ = writeln!(pids, "{}", std::process::id());
     }
     let shared = Arc::new(Shared {
         state: Mutex::default(),

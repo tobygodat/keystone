@@ -15,7 +15,7 @@ mod item;
 pub mod log;
 pub mod worker;
 
-pub use connection::{ClaudeConnection, CodexConnection, Connection, Wake};
+pub use connection::{ClaudeConnection, CodexConnection, Connection, StartHook, Wake};
 pub use driver::{Command, Outputs};
 pub use item::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,

@@ -1,5 +1,5 @@
 //! A thread that runs blocking jobs off the UI thread, one at a time, in the order they
-//! were queued. Session logs and provider startup each use one.
+//! were queued. Session logs and provider commands use them.
 
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
@@ -33,6 +33,13 @@ impl Worker {
         if let Some(jobs) = &self.jobs {
             let _ = jobs.send(Box::new(job));
         }
+    }
+
+    /// Lets the queued jobs run on without waiting for them, for owners that must
+    /// not block on a job that may never finish.
+    pub fn detach(mut self) {
+        self.jobs = None;
+        self.thread = None;
     }
 
     /// Blocks until every job queued before this call has finished.

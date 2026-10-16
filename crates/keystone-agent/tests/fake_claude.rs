@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
+mod gate;
+use gate::Gate;
+
 fn connect() -> (ClaudeConnection, Receiver<()>) {
     // SAFETY: tests in this file set the same values and run no other code that reads them.
     unsafe {
@@ -392,19 +395,206 @@ fn a_claude_that_cannot_start_fails_the_session_that_needed_it() {
 }
 
 /// A message sent while the first one is still starting Claude would steer a turn
-/// before Claude says whether it can be steered, so it is refused and not sent.
+/// before Claude says whether it can be steered, so it is refused, at once, and not
+/// sent.
 #[test]
 fn a_steer_before_claude_reports_anything_is_refused() {
     let (conn, wake) = connect();
+    let gate = Gate::new(Some(&[1]));
+    conn.hold_starts(gate.hook());
     conn.send(1, "/tmp", None, "long".into()).unwrap();
+    gate.reached(1);
+    let started = Instant::now();
     assert_eq!(
         conn.send(1, "/tmp", None, "change course".into()),
         Err(keystone_agent::claude::STEER_NOT_YET)
     );
+    assert!(started.elapsed() < PROMPT, "took {:?}", started.elapsed());
+    gate.release(1);
     let events = until(&conn, &wake, completed);
     assert!(
         !events.iter().any(|e| matches!(e,
             Event::ItemCompleted(item) if item.text.contains("change course"))),
         "the refused message was sent: {events:?}"
     );
+}
+
+/// How long a call from the UI thread may take while another session starts.
+const PROMPT: Duration = Duration::from_millis(100);
+
+/// Collects events until `done` matches one of `session`'s, failing after `within`.
+fn session_until(
+    conn: &ClaudeConnection,
+    wake: &Receiver<()>,
+    session: u64,
+    within: Duration,
+    done: impl Fn(&Event) -> bool,
+) -> Vec<Event> {
+    let deadline = Instant::now() + within;
+    let mut events = Vec::new();
+    loop {
+        let batch: Vec<Event> = conn
+            .drain()
+            .into_iter()
+            .filter(|(s, _)| *s == session)
+            .map(|(_, e)| e)
+            .collect();
+        let finished = batch.iter().any(&done);
+        events.extend(batch);
+        if finished {
+            return events;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            wake.recv_timeout(left).is_ok(),
+            "session {session} timed out; got {events:?}"
+        );
+    }
+}
+
+/// Stop and an approval's answer reach a running session while another session's
+/// Claude is stuck starting.
+#[test]
+fn stop_and_answers_reach_a_session_while_another_is_starting() {
+    let (conn, wake) = connect();
+    let gate = Gate::new(Some(&[2]));
+    conn.hold_starts(gate.hook());
+    conn.send(1, "/tmp", None, "long".into()).unwrap();
+    session_until(&conn, &wake, 1, Duration::from_secs(5), |e| {
+        matches!(e, Event::ItemDelta { .. })
+    });
+    conn.send(2, "/tmp", None, "two".into()).unwrap();
+    gate.reached(2);
+
+    conn.command(Command::Interrupt { session: 1 });
+    let events = session_until(&conn, &wake, 1, Duration::from_secs(2), completed);
+    assert_eq!(
+        events.last(),
+        Some(&Event::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            error: None
+        })
+    );
+
+    conn.send(1, "/tmp", None, "please run it".into()).unwrap();
+    let events = session_until(&conn, &wake, 1, Duration::from_secs(2), |e| {
+        matches!(e, Event::ApprovalRequested(_))
+    });
+    conn.command(Command::Answer {
+        session: 1,
+        request: approval(&events).request,
+        allow: true,
+    });
+    let events = session_until(&conn, &wake, 1, Duration::from_secs(2), completed);
+    assert!(events.iter().any(|e| matches!(e,
+        Event::ItemCompleted(item) if item.text == "scripted")));
+
+    gate.release(2);
+    let events = session_until(&conn, &wake, 2, Duration::from_secs(5), completed);
+    assert!(reply(&events).unwrap().contains("You wrote: two"));
+}
+
+/// Sending to other sessions, a new turn or a steer, returns at once while another
+/// session's Claude is stuck starting, and their turns run.
+#[test]
+fn sending_returns_at_once_while_another_session_is_starting() {
+    let (conn, wake) = connect();
+    let gate = Gate::new(Some(&[2]));
+    conn.hold_starts(gate.hook());
+    conn.send(1, "/tmp", None, "long".into()).unwrap();
+    session_until(&conn, &wake, 1, Duration::from_secs(5), |e| {
+        matches!(e, Event::ItemDelta { .. })
+    });
+    conn.send(2, "/tmp", None, "two".into()).unwrap();
+    gate.reached(2);
+
+    let started = Instant::now();
+    conn.send(3, "/tmp", None, "three".into()).unwrap();
+    conn.send(1, "/tmp", None, "change course".into()).unwrap();
+    assert!(started.elapsed() < PROMPT, "took {:?}", started.elapsed());
+
+    let events = session_until(&conn, &wake, 3, Duration::from_secs(3), completed);
+    assert!(reply(&events).unwrap().contains("You wrote: three"));
+    gate.release(2);
+}
+
+/// The IDs of fake Claude processes started in `dir`, which has a pid file.
+fn started_in(dir: &std::path::Path) -> Vec<u32> {
+    std::fs::read_to_string(dir.join(".fake-claude-pids"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.parse().unwrap())
+        .collect()
+}
+
+/// A directory, with a pid file, that only one test starts Claude in.
+fn pid_dir(name: &str) -> PathBuf {
+    let dir =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".fake-claude-pids"), "").unwrap();
+    dir
+}
+
+/// Dropping the connection gives up on a stuck start after a bounded wait, and the
+/// process it finally starts is ended.
+#[test]
+fn dropping_gives_up_on_a_stuck_start_and_ends_what_it_starts() {
+    let dir = pid_dir("held-start-after-drop");
+    let (conn, wake) = connect();
+    let gate = Gate::new(Some(&[2]));
+    conn.hold_starts(gate.hook());
+    conn.send(1, "/tmp", None, "hello".into()).unwrap();
+    session_until(&conn, &wake, 1, Duration::from_secs(5), completed);
+    let running = conn.pid(1).unwrap();
+    conn.send(2, dir.to_str().unwrap(), None, "two".into())
+        .unwrap();
+    gate.reached(2);
+
+    let started = Instant::now();
+    drop(conn);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(3), "drop took {took:?}");
+    gate::gone(running);
+    assert_eq!(started_in(&dir), Vec::<u32>::new());
+
+    gate.release(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let late = loop {
+        if let [pid] = started_in(&dir)[..] {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "the held start never ran");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    gate::gone(late);
+}
+
+/// A start that finishes while the connection is being dropped is waited for, and its
+/// process ended before the drop returns.
+#[test]
+fn dropping_waits_briefly_for_a_start_and_ends_its_process() {
+    let dir = pid_dir("held-start-during-drop");
+    let (conn, _wake) = connect();
+    let gate = Gate::new(Some(&[2]));
+    conn.hold_starts(gate.hook());
+    conn.send(2, dir.to_str().unwrap(), None, "two".into())
+        .unwrap();
+    gate.reached(2);
+    let releaser = {
+        let gate = gate.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            gate.release(2);
+        })
+    };
+    let started = Instant::now();
+    drop(conn);
+    let took = started.elapsed();
+    releaser.join().unwrap();
+    assert!(took < Duration::from_secs(3), "drop took {took:?}");
+    let [late] = started_in(&dir)[..] else {
+        panic!("expected one process, got {:?}", started_in(&dir));
+    };
+    gate::gone(late);
 }
