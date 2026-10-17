@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Show Keystone, running on the desktop, in a window on this machine.
+#   scripts/laptop-preview [TARGET]
+# TARGET pins a branch name or desktop worktree path; see scripts/preview.py.
+#
+# `waypipe ssh` doesn't work over Tailscale SSH: it creates forwarded Unix sockets as root with
+# mode 0600, so the desktop's waypipe server can't open them. A localhost TCP forward works.
+set -euo pipefail
+host=${KEYSTONE_PREVIEW_HOST:-tobygodat@desk}
+remote=${KEYSTONE_PREVIEW_REMOTE:-'~/keystone/scripts/preview-serve'}
+port=$((20000 + RANDOM % 20000))
+sock=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/keystone-preview-XXXXXX.sock")
+waypipe --socket "$sock" client &
+client=$!
+trap 'kill "$client" 2>/dev/null; rm -f "$sock"' EXIT
+while [ ! -S "$sock" ]; do sleep 0.1; done
+ssh -t -o ExitOnForwardFailure=yes -R "127.0.0.1:$port:$sock" "$host" "$remote $port $(printf '%q ' "$@")"

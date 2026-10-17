@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Desktop half of scripts/laptop-preview: runs scripts/preview.py under a waypipe server whose
+# connection goes back through the SSH-forwarded TCP port.
+set -euo pipefail
+port=$1
+shift
+# Tailscale SSH skips PAM, so the session has no XDG_RUNTIME_DIR.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+sock=$(mktemp -u "$XDG_RUNTIME_DIR/keystone-preview-XXXXXX.sock")
+socat UNIX-LISTEN:"$sock",fork TCP:127.0.0.1:"$port" &
+bridge=$!
+trap 'kill "$bridge" 2>/dev/null; rm -f "$sock"' EXIT
+while [ ! -S "$sock" ]; do sleep 0.1; done
+waypipe --socket "$sock" server -- python3 "$(dirname "$(readlink -f "$0")")/preview.py" "$@"

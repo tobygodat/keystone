@@ -3,9 +3,7 @@
 
   python3 scripts/preview.py [TARGET] [--once]
 
-From another machine, show the window there with waypipe:
-
-  waypipe ssh HOST ~/keystone/scripts/preview.py
+To show the window on another machine, run scripts/laptop-preview there.
 
 Without TARGET it follows whichever worktree of this repository changed most
 recently, uncommitted edits included. TARGET pins a branch name or worktree path.
