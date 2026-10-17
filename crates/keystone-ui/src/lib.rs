@@ -12,6 +12,7 @@ mod label;
 mod list_item;
 pub mod markdown;
 mod popover;
+mod split;
 mod styled_ext;
 mod tabs;
 pub mod text_input;
@@ -29,6 +30,7 @@ pub use label::Label;
 pub use list_item::ListItem;
 pub use markdown::Markdown;
 pub use popover::{MenuHeader, MenuItem, MenuSeparator, PopoverMenu};
+pub use split::{Edge, PaneEdge, Split, SplitState};
 pub use styled_ext::{StyledExt, h_flex, v_flex};
 pub use tabs::{DraggedTab, Tab, TabBar, TabDot};
 pub use text_input::{InputMode, TextInput};
@@ -58,5 +60,6 @@ pub mod prelude {
         MenuSeparator, PopoverMenu, StyledExt, TextSize, Tooltip, h_flex, radius, spacing, v_flex,
     };
     pub use crate::{DraggedTab, Tab, TabBar, TabDot};
+    pub use crate::{Split, SplitState};
     pub use crate::{VirtualList, VirtualListState};
 }

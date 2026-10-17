@@ -30,6 +30,7 @@
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
 | `TextInput`, `InputMode` | An editable text field. `InputMode::SingleLine` refuses newlines and emits `text_input::RejectedMultiline`, so search typing and paste stay on one line. `InputMode::Multiline` wraps, and arrows, Home, and End move by visual row. Every edit emits `text_input::Changed`. Call `TextInput::bind_keys` once at startup. Bound keys reach the input as actions before any key listener runs, so a host that needs Up, Down, or Enter first, such as a list or palette, wraps it in a div with `capture_action` for `text_input::Up`, `Down`, or `Newline` and stops propagation. |
 | `Tooltip` | A hover card with an optional shortcut. |
+| `Split`, `SplitState`, `PaneEdge`, `Edge` | Resizable panes with draggable dividers and pane-edge drop zones. See below. |
 | `TabBar`, `Tab`, `TabDot`, `DraggedTab` | A row of tabs that scrolls sideways, with close, a status dot, and drag reorder. See below. |
 
 Run `cargo run -p keystone-ui --example gallery` to see every component in every state. Its header switches between themes and densities.
@@ -83,6 +84,18 @@ The gallery's tab bar section has eight tabs and an "Add tab" button that makes 
 
 The gallery's List page shows 50,000 rows.
 
+## Split
+
+`SplitState::new(axis, panes)` holds each pane's share of the container as fractions that sum to 1, and `min_px` sets the shortest a pane may get, 120 px by default. The host keeps it in an `Entity` and renders `Split::new(id, &state)` with one child per pane. `set_fractions` restores saved shares and rejects any that are not finite and positive.
+
+- Dragging a divider moves only the two panes beside it, and both stop at `min_px`. When two neighbours together are shorter than twice `min_px`, their divider stays at the midpoint. A double-click on a divider returns every pane to an equal share.
+- `on_drop_edge::<T>(Fn(&T, PaneEdge, &mut Window, &mut App))` accepts a dragged `T` on a pane. `PaneEdge` names the pane and the `Edge` nearest the pointer in pixels. While a `T` hovers, the half of that pane on that edge shows a `selection` wash with a `border_focused` outline.
+- Panes are absolute children of one container, positioned by fraction, so a split adds no nested flex layout.
+- Panes keep their fractions when the window shrinks, so a window narrower than every pane's `min_px` together shows shorter panes.
+- Debug selectors are `{id}-pane-{n}` and `{id}-divider-{n}`, counting from 0, and `{id}-drop-target` for the highlight.
+
+The gallery's header button "Split" opens a three-pane page with an axis toggle and a draggable tab.
+
 ## Adding a component
 
 Write a `RenderOnce` struct with builder methods, read colors from `cx.theme()`, and add it to the prelude and the gallery. Add a behavior test in `crates/keystone-ui/tests/components.rs` when the component handles input.
@@ -90,6 +103,8 @@ Write a `RenderOnce` struct with builder methods, read colors from `cx.theme()`,
 ## Sources
 
 The component shapes follow Zed's `ui` crate, and the visual values follow Zeron. Zed's UI crates are licensed GPL-3.0-or-later, so no Zed code was copied. Zeron is MIT-licensed, and only design values were adapted from it.
+
+`split.rs` adapts the structure of gpui-component 0.7.3's `resizable.rs` and gpui-base 0.7.3's `resizable/` (Copyright 2024 - 2026 Longbridge, Apache-2.0), with modifications. No code was copied verbatim.
 
 The tab bar's structure, a tracked horizontal scroll strip with a trailing empty slot, follows `tab/tab_bar.rs` and `tab/tab.rs` in [gpui-component](https://github.com/longbridge/gpui-kit) 0.7.3, Copyright 2024 - 2026 Longbridge, licensed Apache-2.0. `crates/keystone-ui/src/tabs.rs` is a modified, rewritten adaptation and says so in its header.
 

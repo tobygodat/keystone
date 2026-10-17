@@ -260,6 +260,224 @@ fn a_confirm_dialog_blocks_presses_behind_it(cx: &mut TestAppContext) {
     view.read_with(cx, |c, _| assert_eq!(c.answers, vec!["cancel"]));
 }
 
+struct DraggedPane;
+
+struct Splits {
+    state: gpui::Entity<keystone_ui::SplitState>,
+    drops: Vec<keystone_ui::PaneEdge>,
+}
+
+impl Render for Splits {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("tab")
+                    .h_8()
+                    .w_32()
+                    .debug_selector(|| "tab".into())
+                    .on_drag(DraggedPane, |_, _, _, cx| cx.new(|_| gpui::Empty)),
+            )
+            .child(
+                div().flex_1().child(
+                    Split::new("split", &self.state)
+                        .on_drop_edge(move |_: &DraggedPane, target, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.drops.push(target);
+                                cx.notify();
+                            })
+                        })
+                        .children((0..3).map(|n| Label::new(format!("Pane {n}")))),
+                ),
+            )
+    }
+}
+
+fn splits(cx: &mut TestAppContext) -> (gpui::Entity<Splits>, &mut gpui::VisualTestContext) {
+    cx.update(keystone_ui::init);
+    cx.add_window_view(|_, cx| Splits {
+        state: cx.new(|_| SplitState::new(gpui::Axis::Horizontal, 3)),
+        drops: Vec::new(),
+    })
+}
+
+#[gpui::test]
+fn split_divider_drags_neighbours_and_double_click_resets(cx: &mut TestAppContext) {
+    let (view, cx) = splits(cx);
+    let widths = |cx: &mut gpui::VisualTestContext| {
+        (0..3)
+            .map(|n| {
+                let pane = format!("split-pane-{n}").leak();
+                f32::from(cx.debug_bounds(pane).expect("pane").size.width).round()
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = widths(cx);
+    let divider = cx
+        .debug_bounds("split-divider-0")
+        .expect("divider")
+        .center();
+    drag(
+        cx,
+        divider,
+        divider + gpui::point(gpui::px(100.), gpui::px(0.)),
+    );
+    let after = widths(cx);
+    assert_eq!(after[0], before[0] + 100., "{before:?} -> {after:?}");
+    assert_eq!(after[1], before[1] - 100., "{before:?} -> {after:?}");
+    assert_eq!(after[2], before[2], "{before:?} -> {after:?}");
+
+    let divider = cx
+        .debug_bounds("split-divider-0")
+        .expect("divider")
+        .center();
+    for _ in 0..2 {
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: divider,
+            modifiers: Modifiers::none(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: divider,
+            modifiers: Modifiers::none(),
+            button: gpui::MouseButton::Left,
+            click_count: 2,
+        });
+    }
+    assert_eq!(widths(cx), before);
+    view.read_with(cx, |s, _| assert!(s.drops.is_empty()));
+}
+
+#[gpui::test]
+fn split_drop_edge_reports_edge(cx: &mut TestAppContext) {
+    let (view, cx) = splits(cx);
+    let tab = cx.debug_bounds("tab").expect("tab").center();
+    let pane = cx.debug_bounds("split-pane-1").expect("pane");
+    let right = gpui::point(pane.right() - gpui::px(10.), pane.center().y);
+    drag(cx, tab, right);
+    view.read_with(cx, |s, _| {
+        assert_eq!(
+            s.drops,
+            vec![keystone_ui::PaneEdge {
+                pane: 1,
+                edge: keystone_ui::Edge::Right
+            }]
+        )
+    });
+    let pane = cx.debug_bounds("split-pane-0").expect("pane");
+    drag(
+        cx,
+        tab,
+        gpui::point(pane.center().x, pane.top() + gpui::px(10.)),
+    );
+    view.read_with(cx, |s, _| {
+        assert_eq!(s.drops[1].pane, 0);
+        assert_eq!(s.drops[1].edge, keystone_ui::Edge::Top);
+    });
+}
+
+#[gpui::test]
+fn split_drop_lands_after_a_single_move(cx: &mut TestAppContext) {
+    use gpui::MouseButton::Left;
+    let (view, cx) = splits(cx);
+    let tab = cx.debug_bounds("tab").expect("tab").center();
+    let pane = cx.debug_bounds("split-pane-2").expect("pane");
+    let bottom = gpui::point(pane.center().x, pane.bottom() - gpui::px(10.));
+    cx.simulate_mouse_down(tab, Left, Modifiers::none());
+    cx.simulate_mouse_move(bottom, Left, Modifiers::none());
+    cx.simulate_mouse_up(bottom, Left, Modifiers::none());
+    view.read_with(cx, |s, _| {
+        assert_eq!(
+            s.drops,
+            vec![keystone_ui::PaneEdge {
+                pane: 2,
+                edge: keystone_ui::Edge::Bottom
+            }]
+        )
+    });
+}
+
+#[gpui::test]
+fn split_drop_highlight_covers_half_the_pane_and_clears_when_the_drag_ends(
+    cx: &mut TestAppContext,
+) {
+    use gpui::MouseButton::Left;
+    let (_view, cx) = splits(cx);
+    let tab = cx.debug_bounds("tab").expect("tab").center();
+    let pane = cx.debug_bounds("split-pane-1").expect("pane");
+    let right = gpui::point(pane.right() - gpui::px(10.), pane.center().y);
+    cx.simulate_mouse_down(tab, Left, Modifiers::none());
+    cx.simulate_mouse_move(pane.center(), Left, Modifiers::none());
+    cx.simulate_mouse_move(right, Left, Modifiers::none());
+    let half = cx.debug_bounds("split-drop-target").expect("highlight");
+    assert_eq!(half.right(), pane.right());
+    assert_eq!(half.size.width, pane.size.width / 2.);
+    assert_eq!(half.size.height, pane.size.height);
+
+    cx.update(|window, cx| cx.stop_active_drag(window));
+    cx.simulate_mouse_up(right, Left, Modifiers::none());
+    let divider = cx
+        .debug_bounds("split-divider-0")
+        .expect("divider")
+        .center();
+    cx.simulate_mouse_down(divider, Left, Modifiers::none());
+    for step in 1..=3 {
+        let at = divider + gpui::point(gpui::px(20. * step as f32), gpui::px(0.));
+        cx.simulate_mouse_move(at, Left, Modifiers::none());
+        assert!(
+            cx.debug_bounds("split-drop-target").is_none(),
+            "step {step}"
+        );
+    }
+    cx.simulate_mouse_up(divider, Left, Modifiers::none());
+}
+
+#[gpui::test]
+#[ignore = "benchmark; run with --release -- --ignored --nocapture"]
+fn perf_split_drag(cx: &mut TestAppContext) {
+    let (view, cx) = splits(cx);
+    // Release builds have no debug selectors. Divider 0 sits a third of the way across.
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let divider = gpui::point(viewport.width / 3., viewport.height / 2.);
+    cx.simulate_mouse_down(divider, gpui::MouseButton::Left, Modifiers::none());
+    // Each move dispatches the drag and then draws the dirtied window, as a frame does.
+    let mut frames = Vec::new();
+    for step in 0..400 {
+        let offset = gpui::px(((step % 100) as f32 - 50.) * 4.);
+        let at = divider + gpui::point(offset, gpui::px(0.));
+        let start = std::time::Instant::now();
+        cx.simulate_mouse_move(at, gpui::MouseButton::Left, Modifiers::none());
+        frames.push(start.elapsed().as_secs_f64() * 1000.);
+    }
+    let moved = view.read_with(cx, |s, cx| s.state.read(cx).fractions()[0]);
+    assert!(
+        (moved - 1. / 3.).abs() > 0.1,
+        "the drag moved divider 0: {moved}"
+    );
+    cx.simulate_mouse_up(divider, gpui::MouseButton::Left, Modifiers::none());
+    let start = std::time::Instant::now();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    eprintln!(
+        "PERF split_full_draw_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.
+    );
+    let frames = &mut frames[20..];
+    frames.sort_by(f64::total_cmp);
+    let at = |q: f64| frames[((frames.len() - 1) as f64 * q).round() as usize];
+    eprintln!(
+        "PERF split_drag_p50_ms={:.3} split_drag_p95_ms={:.3} split_drag_max_ms={:.3}",
+        at(0.5),
+        at(0.95),
+        at(1.)
+    );
+}
+
 struct Tabs {
     order: Vec<usize>,
     selected: usize,

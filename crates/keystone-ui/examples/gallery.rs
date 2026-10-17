@@ -23,6 +23,7 @@ struct Gallery {
     dialog: Option<DialogFocus>,
     selected_row: usize,
     markdown: std::sync::Arc<keystone_ui::markdown::Document>,
+    split: Option<SplitPage>,
     tabs: gpui::Entity<tabs::TabsPage>,
     list: Entity<VirtualListState>,
     confirmed: Option<usize>,
@@ -40,6 +41,114 @@ fn section(title: &'static str, body: impl IntoElement) -> impl IntoElement {
                 .weight(gpui::FontWeight::MEDIUM),
         )
         .child(body)
+}
+
+struct SplitPage {
+    state: gpui::Entity<SplitState>,
+    status: SharedString,
+}
+
+/// The payload of the split page's draggable tab.
+struct GalleryTab;
+
+struct TabPreview;
+
+impl Render for TabPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .surface(Elevation::Overlay, cx)
+            .child(Label::new("Tab").size(TextSize::Ui))
+    }
+}
+
+impl Gallery {
+    fn split_page(&self, page: &SplitPage, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = page.state.clone();
+        let axis = state.read(cx).axis();
+        let fractions = state.read(cx).fractions().to_vec();
+        let view = cx.entity();
+        let toolbar = h_flex()
+            .gap_3()
+            .p_3()
+            .child(
+                Button::new("split-close", "Back")
+                    .style(ButtonStyle::Subtle)
+                    .debug_selector(|| "split-close".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.split = None;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("split-axis", format!("{axis:?}"))
+                    .style(ButtonStyle::Subtle)
+                    .debug_selector(|| "split-axis".into())
+                    .on_click({
+                        let state = state.clone();
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                let axis = match state.axis() {
+                                    gpui::Axis::Horizontal => gpui::Axis::Vertical,
+                                    gpui::Axis::Vertical => gpui::Axis::Horizontal,
+                                };
+                                state.set_axis(axis);
+                                cx.notify();
+                            })
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .id("split-tab")
+                    .automation_id("split-tab")
+                    .px_3()
+                    .py_1()
+                    .surface(Elevation::Raised, cx)
+                    .child(Label::new("Drag this tab onto a pane edge").size(TextSize::Ui))
+                    .on_drag(GalleryTab, |_, _, _, cx| cx.new(|_| TabPreview)),
+            )
+            .child(
+                div()
+                    .id("split-status")
+                    .automation_id("split-status")
+                    .child(Label::new(page.status.clone()).color(Color::Muted)),
+            );
+        let split = Split::new("split", &state)
+            .on_drop_edge(move |_: &GalleryTab, target, _, cx| {
+                view.update(cx, |this, cx| {
+                    if let Some(page) = &mut this.split {
+                        let edge = format!("{:?}", target.edge).to_lowercase();
+                        page.status = format!("drop {edge} pane {}", target.pane).into();
+                        cx.notify();
+                    }
+                })
+            })
+            .children(fractions.iter().enumerate().map(|(n, fraction)| {
+                v_flex()
+                    .size_full()
+                    .p_4()
+                    .gap_2()
+                    .child(Label::new(format!("Pane {n}")).size(TextSize::Body))
+                    .child(
+                        Label::new(format!("{:.0}%", fraction * 100.))
+                            .size(TextSize::Sm)
+                            .color(Color::Muted),
+                    )
+            }));
+        v_flex()
+            .id("split-page")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .bg(cx.theme().colors.background)
+            .when(keystone_ui::automation::enabled(), |d| {
+                d.child(keystone_ui::automation::frame_writer())
+            })
+            .child(toolbar)
+            .child(div().flex_1().hairline_t(cx).child(split))
+    }
 }
 
 fn row(items: impl IntoIterator<Item = AnyElement>) -> impl IntoElement {
@@ -308,6 +417,17 @@ impl Render for Gallery {
             .p_6()
             .child(Label::new("keystone-ui").size(TextSize::Title))
             .children(pages)
+            .child(
+                Button::new("split-open", "Split")
+                    .style(ButtonStyle::Subtle)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.split = Some(SplitPage {
+                            state: cx.new(|_| SplitState::new(gpui::Axis::Horizontal, 3)),
+                            status: "No drop yet".into(),
+                        });
+                        cx.notify();
+                    })),
+            )
             .child(div().flex_1())
             .children([Appearance::Dark, Appearance::Light].map(|appearance| {
                 Button::new(
@@ -379,6 +499,9 @@ impl Render for Gallery {
                 Page::Components => d.child(components),
                 Page::List => d.child(self.list_page(cx)),
             })
+            .when_some(self.split.as_ref(), |d, page| {
+                d.child(self.split_page(page, cx))
+            })
             .when_some(self.dialog.as_ref(), |d, focus| {
                 let (cancel, confirm) = (close.clone(), close);
                 d.child(
@@ -416,6 +539,7 @@ fn main() {
                         markdown: std::sync::Arc::new(keystone_ui::markdown::Document::parse(
                             MARKDOWN,
                         )),
+                        split: None,
                         tabs: cx.new(|_| tabs::TabsPage::new()),
                         list: cx.new(|cx| VirtualListState::new(50_000, cx)),
                         confirmed: None,
