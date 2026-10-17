@@ -164,15 +164,30 @@ class Group:
     def stop(self):
         if self.proc is None:
             return
-        try:
-            os.killpg(self.proc.pid, signal.SIGTERM)
-            self.proc.wait(STOP_TIMEOUT_S)
-        except ProcessLookupError:
-            pass
-        except subprocess.TimeoutExpired:
-            os.killpg(self.proc.pid, signal.SIGKILL)
-            self.proc.wait()
+        group = self.proc.pid
+        signal_group(group, signal.SIGTERM)
+        deadline = time.monotonic() + STOP_TIMEOUT_S
+        while group_alive(group) and time.monotonic() < deadline:
+            self.proc.poll()
+            time.sleep(0.05)
+        signal_group(group, signal.SIGKILL)
+        self.proc.wait()
         self.proc = None
+
+
+def signal_group(group, signum):
+    try:
+        os.killpg(group, signum)
+    except ProcessLookupError:
+        pass
+
+
+def group_alive(group):
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def start_build(build, path):
@@ -213,6 +228,8 @@ def run(args, app, build):
     HOME.mkdir(parents=True, exist_ok=True)
     followed, state = None, None
     while True:
+        if app_closed(app):
+            return 0
         snap = locate(REPO, args.target)
         if snap is None:
             say(f'no worktree of {REPO} matches {args.target}' if args.target else f'no worktree in {REPO}')
@@ -228,7 +245,9 @@ def run(args, app, build):
         elif isinstance(state, Building):
             code = build.poll()
             if code is not None:
-                build.proc = None
+                build.stop()
+                if app_closed(app):
+                    return 0
                 state = finish(state, code, app)
                 if args.once:
                     return app.proc.wait() if code == 0 else 1
@@ -237,16 +256,19 @@ def run(args, app, build):
         if isinstance(state, Building) and build.proc is None:
             say(f'building {snap.branch or "detached"} at {snap.head[:7]}{" with edits" if snap.status else ""}')
             start_build(build, snap.path)
-
-        code = app.poll()
-        if code == 0:
-            say('app closed, exiting')
-            return 0
-        if code is not None:
-            app.proc = None
-            how = f'exit {code}' if code > 0 else f'signal {-code}'
-            say(f'app crashed ({how}), relaunching on the next change; log in {HOME / "app.log"}')
         time.sleep(args.poll)
+
+
+def app_closed(app):
+    code = app.poll()
+    if code == 0:
+        say('app closed, exiting')
+        return True
+    if code is not None:
+        app.stop()
+        how = f'exit {code}' if code > 0 else f'signal {-code}'
+        say(f'app crashed ({how}), relaunching on the next change; log in {HOME / "app.log"}')
+    return False
 
 
 def interrupt(signum, _frame):

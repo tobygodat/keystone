@@ -69,6 +69,26 @@ class Repo:
         return path
 
 
+class GroupTest(unittest.TestCase):
+    def test_stop_kills_a_child_that_ignores_sigterm_after_the_leader_exits(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        pidfile = tmp / 'child'
+        group = preview.Group()
+        group.spawn(['sh', '-c', f'sh -c \'trap "" TERM; echo $$ > {pidfile}; sleep 60\' & sleep 60'],
+                    tmp, os.environ, tmp / 'log')
+        while not pidfile.exists() or not pidfile.read_text().strip():
+            time.sleep(0.01)
+        child = int(pidfile.read_text())
+        preview.STOP_TIMEOUT_S, saved = 0.5, preview.STOP_TIMEOUT_S
+        try:
+            group.stop()
+        finally:
+            preview.STOP_TIMEOUT_S = saved
+        time.sleep(0.1)
+        self.assertFalse(alive(child), 'a SIGTERM-ignoring descendant survived stop()')
+
+
 class PickWorktreeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
