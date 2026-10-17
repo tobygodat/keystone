@@ -196,10 +196,13 @@ def start_build(build, path):
     build.spawn(['nice', '-n', '19', *(['sh', '-c', custom] if custom else CARGO)], path, env, HOME / 'build.log')
 
 
-def restart(app):
+def stage():
     staged = BINARY.with_suffix('.new')
     shutil.copy2(TARGET_DIR / 'debug/keystone-desktop', staged)
     os.replace(staged, BINARY)
+
+
+def restart(app):
     app.stop()
     STATE.parent.mkdir(parents=True, exist_ok=True)
     # Sessions run in the main checkout, never in the agent's worktree being previewed.
@@ -246,6 +249,9 @@ def run(args, app, build):
             code = build.poll()
             if code is not None:
                 build.stop()
+                if code == 0:
+                    stage()
+                # Checked after staging so a Ctrl+Q during the copy still ends the preview.
                 if app_closed(app):
                     return 0
                 state = finish(state, code, app)
