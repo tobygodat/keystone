@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use crate::{ActiveTheme, Color, TextSize};
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
@@ -8,7 +9,6 @@ use gpui::{
     TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill,
     point, prelude::*, px, relative, size,
 };
-use keystone_ui::{ActiveTheme, Color, TextSize};
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -1122,7 +1122,7 @@ mod tests {
     #[gpui::test]
     fn multiline_editing_uses_visual_rows_and_unicode(cx: &mut gpui::TestAppContext) {
         cx.update(TextInput::bind_keys);
-        cx.update(keystone_ui::init);
+        cx.update(crate::init);
         let (input, cx) = cx.add_window_view(|window, cx| {
             let input = TextInput::new("Draft", InputMode::Multiline, cx);
             window.focus(&input.focus_handle, cx);
@@ -1221,7 +1221,7 @@ mod tests {
     #[gpui::test]
     fn search_rejects_multiline_without_losing_selection(cx: &mut gpui::TestAppContext) {
         cx.update(TextInput::bind_keys);
-        cx.update(keystone_ui::init);
+        cx.update(crate::init);
         let (input, cx) = cx.add_window_view(|window, cx| {
             let input = TextInput::new("Search", InputMode::SingleLine, cx);
             window.focus(&input.focus_handle, cx);

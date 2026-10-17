@@ -259,3 +259,101 @@ fn a_confirm_dialog_blocks_presses_behind_it(cx: &mut TestAppContext) {
     click(cx, "behind");
     view.read_with(cx, |c, _| assert_eq!(c.answers, vec!["cancel"]));
 }
+
+fn focused_input(
+    mode: InputMode,
+    cx: &mut TestAppContext,
+) -> (gpui::Entity<TextInput>, &mut gpui::VisualTestContext) {
+    cx.update(TextInput::bind_keys);
+    cx.update(keystone_ui::init);
+    let (input, cx) = cx.add_window_view(|_, cx| TextInput::new("Search", mode, cx));
+    input.update_in(cx, |input, window, cx| {
+        window.focus(&gpui::Focusable::focus_handle(input, cx), cx)
+    });
+    (input, cx)
+}
+
+fn count<E: 'static>(
+    input: &gpui::Entity<TextInput>,
+    cx: &mut gpui::VisualTestContext,
+) -> std::rc::Rc<std::cell::Cell<usize>>
+where
+    TextInput: gpui::EventEmitter<E>,
+{
+    let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = seen.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(input, move |_, _: &E, _| counter.set(counter.get() + 1))
+            .detach()
+    });
+    seen
+}
+
+#[gpui::test]
+fn single_line_input_rejects_newline(cx: &mut TestAppContext) {
+    let (input, cx) = focused_input(InputMode::SingleLine, cx);
+    let rejected = count::<keystone_ui::text_input::RejectedMultiline>(&input, cx);
+    cx.simulate_input("query");
+    cx.simulate_keystrokes("enter");
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("one\ntwo".into())));
+    cx.simulate_keystrokes("ctrl-v");
+    input.read_with(cx, |input, _| assert_eq!(input.value(), "query"));
+    assert!(rejected.get() > 0, "newline rejection is reported");
+}
+
+#[gpui::test]
+fn single_line_input_reports_changed(cx: &mut TestAppContext) {
+    let (input, cx) = focused_input(InputMode::SingleLine, cx);
+    let changed = count::<keystone_ui::text_input::Changed>(&input, cx);
+    cx.simulate_input("ab");
+    let after_typing = changed.get();
+    assert!(after_typing > 0, "typing reports a change");
+    cx.simulate_keystrokes("backspace");
+    input.read_with(cx, |input, _| assert_eq!(input.value(), "a"));
+    assert!(changed.get() > after_typing, "deleting reports a change");
+}
+
+struct CapturingHost {
+    input: gpui::Entity<TextInput>,
+    captured: Vec<&'static str>,
+}
+
+impl Render for CapturingHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use keystone_ui::text_input::{Down, Newline, Up};
+        div()
+            .capture_action(cx.listener(|this, _: &Up, _, cx| {
+                this.captured.push("up");
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|this, _: &Down, _, cx| {
+                this.captured.push("down");
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|this, _: &Newline, _, cx| {
+                this.captured.push("enter");
+                cx.stop_propagation();
+            }))
+            .child(self.input.clone())
+    }
+}
+
+#[gpui::test]
+fn a_host_takes_navigation_keys_before_the_input(cx: &mut TestAppContext) {
+    cx.update(TextInput::bind_keys);
+    cx.update(keystone_ui::init);
+    let (host, cx) = cx.add_window_view(|_, cx| CapturingHost {
+        input: cx.new(|cx| TextInput::new("Filter", InputMode::Multiline, cx)),
+        captured: Vec::new(),
+    });
+    let input = host.read_with(cx, |host, _| host.input.clone());
+    input.update_in(cx, |input, window, cx| {
+        window.focus(&gpui::Focusable::focus_handle(input, cx), cx)
+    });
+    cx.simulate_input("ab");
+    cx.simulate_keystrokes("up down enter");
+    host.read_with(cx, |host, _| {
+        assert_eq!(host.captured, vec!["up", "down", "enter"])
+    });
+    input.read_with(cx, |input, _| assert_eq!(input.value(), "ab"));
+}

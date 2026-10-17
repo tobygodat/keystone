@@ -27,6 +27,7 @@
 | `ListItem` | A selectable row for lists such as the session sidebar. `on_hover` reports the pointer entering and leaving, so a list can build a row action only for the row under the pointer. |
 | `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group, and `MenuItem::detail` adds a muted line that explains it. |
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
+| `TextInput`, `InputMode` | An editable text field. `InputMode::SingleLine` refuses newlines and emits `text_input::RejectedMultiline`, so search typing and paste stay on one line. `InputMode::Multiline` wraps, and arrows, Home, and End move by visual row. Every edit emits `text_input::Changed`. Call `TextInput::bind_keys` once at startup. Bound keys reach the input as actions before any key listener runs, so a host that needs Up, Down, or Enter first, such as a list or palette, wraps it in a div with `capture_action` for `text_input::Up`, `Down`, or `Newline` and stops propagation. |
 | `Tooltip` | A hover card with an optional shortcut. |
 
 Run `cargo run -p keystone-ui --example gallery` to see every component in every state. Its header switches between themes and densities.

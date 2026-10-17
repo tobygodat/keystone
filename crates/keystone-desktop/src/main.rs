@@ -1,7 +1,6 @@
 mod conversation;
 mod relative_time;
 mod settings;
-mod text_input;
 mod transcript;
 
 use conversation::{Conversation, Row};
@@ -21,13 +20,13 @@ use keystone_core::{
     ApprovalMode, Attention, Density, Durability, Preferences, Provider, Store, ThemeMode,
 };
 use keystone_ui::markdown::Document;
+use keystone_ui::text_input::Changed;
 use keystone_ui::{automation, prelude::*};
 use relative_time::{LocalTime, relative};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use text_input::{Changed, InputMode, TextInput};
 
 gpui::actions!(
     keystone,

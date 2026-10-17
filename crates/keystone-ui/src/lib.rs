@@ -13,6 +13,7 @@ mod list_item;
 pub mod markdown;
 mod popover;
 mod styled_ext;
+pub mod text_input;
 mod theme;
 mod tokens;
 mod tooltip;
@@ -27,6 +28,7 @@ pub use list_item::ListItem;
 pub use markdown::Markdown;
 pub use popover::{MenuHeader, MenuItem, MenuSeparator, PopoverMenu};
 pub use styled_ext::{StyledExt, h_flex, v_flex};
+pub use text_input::{InputMode, TextInput};
 pub use theme::{ActiveTheme, Appearance, Colors, Density, Fonts, Theme};
 pub use tokens::{Elevation, TextSize, radius, spacing};
 pub use tooltip::Tooltip;
@@ -44,6 +46,7 @@ pub fn set_theme(theme: Theme, cx: &mut gpui::App) {
 
 pub mod prelude {
     pub use crate::automation::AutomationExt;
+    pub use crate::text_input::{InputMode, TextInput};
     pub use crate::{
         ActiveTheme, Button, ButtonSize, ButtonStyle, Color, ConfirmDialog, DialogFocus, Elevation,
         Icon, IconButton, IconName, Kbd, Label, ListItem, Markdown, MenuHeader, MenuItem,

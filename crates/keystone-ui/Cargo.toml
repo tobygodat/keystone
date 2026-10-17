@@ -9,6 +9,7 @@ gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev =
 anyhow = "1"
 smallvec = "1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
+unicode-segmentation = "1.13.3"
 
 [features]
 ui-tests = ["gpui/test-support"]

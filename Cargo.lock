@@ -2816,6 +2816,7 @@ dependencies = [
  "gpui-pre-platform",
  "pulldown-cmark",
  "smallvec",
+ "unicode-segmentation",
 ]
 
 [[package]]
