@@ -121,6 +121,27 @@ fn markdown_code_blocks_copy_their_code(cx: &mut TestAppContext) {
     assert_eq!(copied.as_deref(), Some("second"));
 }
 
+struct Streamed(std::sync::Arc<keystone_ui::markdown::Document>);
+
+impl Render for Streamed {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(Markdown::new("streamed", self.0.clone()))
+    }
+}
+
+#[gpui::test]
+fn a_streaming_code_block_in_a_list_copies_only_its_code(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    let mut parser = keystone_ui::markdown::IncrementalParser::new();
+    parser.set_text("Steps:\n\n- Run it\n\n  ```sh\n  echo `hello");
+    let (_view, cx) = cx.add_window_view(|_, _| Streamed(parser.display()));
+    click(cx, "streamed-copy-1");
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(copied.as_deref(), Some("echo `hello"));
+}
+
 /// Agent replies are untrusted, so nesting far past any real reply must still render.
 struct Adversarial(&'static str);
 

@@ -14,12 +14,12 @@ use gpui::{
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{
     ApprovalState, ClaudeConnection, CodexConnection, Command, Connection, Event, ItemKind,
-    TurnStatus, Wake,
+    ItemStatus, TurnStatus, Wake,
 };
 use keystone_core::{
     ApprovalMode, Attention, Density, Durability, Preferences, Provider, Store, ThemeMode,
 };
-use keystone_ui::markdown::Document;
+use keystone_ui::markdown::{Document, IncrementalParser};
 use keystone_ui::text_input::Changed;
 use keystone_ui::{automation, prelude::*};
 use relative_time::{LocalTime, relative};
@@ -148,9 +148,9 @@ struct Keystone {
     wake: Wake,
     /// Scrolls the sample transcript, which is not a list.
     transcript_scroll: ScrollHandle,
-    /// Each reply row's parsed Markdown and the hash of the text it was parsed from, so
-    /// a row is parsed again only when its text changes, such as while it streams.
-    markdown: RefCell<HashMap<(u64, usize), (u64, Arc<Document>)>>,
+    /// Each reply row's Markdown. A streaming reply appends each delta to its parser,
+    /// which parses only the reply's last blocks again.
+    markdown: RefCell<HashMap<(u64, usize), IncrementalParser>>,
     /// The sample transcript, parsed once.
     fixture_document: Arc<Document>,
 }
@@ -409,20 +409,16 @@ impl Keystone {
             .child(Markdown::new("fixture", self.fixture_document.clone()))
     }
 
-    /// The parsed Markdown of reply row `index`, reused while its text is unchanged.
-    fn parsed(&self, session: u64, index: usize, text: &str) -> Arc<Document> {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        let hash = hasher.finish();
+    /// The parsed Markdown of reply row `index`. While the reply streams, its unclosed
+    /// inline markers show as closed, so styling does not jump when the closer arrives.
+    fn parsed(&self, session: u64, index: usize, text: &str, streaming: bool) -> Arc<Document> {
         let mut cache = self.markdown.borrow_mut();
-        match cache.get(&(session, index)) {
-            Some((cached, document)) if *cached == hash => document.clone(),
-            _ => {
-                let document = Arc::new(Document::parse(text));
-                cache.insert((session, index), (hash, document.clone()));
-                document
-            }
+        let parser = cache.entry((session, index)).or_default();
+        if streaming {
+            parser.set_text(text);
+            parser.display()
+        } else {
+            parser.finish(text)
         }
     }
 
@@ -1450,7 +1446,8 @@ impl Keystone {
             Some(row) if conversation::visible(row) => {
                 let reply = match row {
                     Row::Item(item) if item.kind == ItemKind::AgentMessage => {
-                        Some(self.parsed(session, index, &item.text))
+                        let streaming = item.status == ItemStatus::InProgress;
+                        Some(self.parsed(session, index, &item.text, streaming))
                     }
                     _ => None,
                 };
@@ -3683,8 +3680,7 @@ mod tests {
         });
         view.read_with(cx, |view, _| {
             let cache = view.markdown.borrow();
-            let (_, document) = &cache[&(1, reply)];
-            assert!(!document.is_empty());
+            assert!(!cache[&(1, reply)].document().is_empty());
         });
         click(cx, format!("copy-reply-{reply}").leak());
         let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));

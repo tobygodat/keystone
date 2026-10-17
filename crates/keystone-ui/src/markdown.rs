@@ -1,5 +1,7 @@
 //! Markdown for agent replies. [`Document::parse`] turns CommonMark with GitHub tables
 //! and strikethrough into plain data, and [`Markdown`] renders it from theme tokens.
+//! A streamed reply goes through an [`IncrementalParser`] instead, which parses only
+//! the reply's last blocks again on each delta.
 //!
 //! Parsing never fails, so a reply can be rendered at every streamed delta. An open
 //! code fence runs to the end of the text, which keeps a streaming code block stable.
@@ -26,14 +28,27 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod incremental;
+mod mend;
+
+pub use incremental::IncrementalParser;
+
 /// How deeply quotes and lists nest. Real replies rarely pass four levels, and each level
 /// costs several GPUI elements and render stack frames.
 pub const MAX_NESTING: usize = 8;
 
-/// A parsed reply: a list of blocks.
+/// A parsed reply: its top-level blocks, in order. Each is shared, so a streamed reply's
+/// next document reuses the blocks that did not change.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Document {
-    pub blocks: Vec<Block>,
+    pub blocks: Vec<Arc<TopBlock>>,
+}
+
+/// A top-level block and the byte range of the source it was parsed from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TopBlock {
+    pub range: Range<usize>,
+    pub block: Block,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,17 +95,35 @@ pub struct Style {
 
 impl Document {
     pub fn parse(source: &str) -> Self {
-        let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
-        let mut builder = Builder::default();
-        for event in Parser::new_ext(source, options) {
-            builder.event(event);
+        Self {
+            blocks: parse_at(source, 0),
         }
-        builder.finish()
     }
 
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
+}
+
+const OPTIONS: Options = Options::ENABLE_TABLES.union(Options::ENABLE_STRIKETHROUGH);
+
+/// Parses `source`, which starts at byte `offset` of a longer text, into top-level
+/// blocks whose ranges are offsets into that text.
+fn parse_at(source: &str, offset: usize) -> Vec<Arc<TopBlock>> {
+    let mut builder = Builder::default();
+    let mut depth = 0usize;
+    for (event, range) in Parser::new_ext(source, OPTIONS).into_offset_iter() {
+        if depth == 0 {
+            builder.top = range.start + offset..range.end + offset;
+        }
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+        builder.event(event);
+    }
+    builder.finish()
 }
 
 /// An open container while parsing.
@@ -119,7 +152,9 @@ enum Target {
 
 #[derive(Default)]
 struct Builder {
-    root: Vec<Block>,
+    root: Vec<Arc<TopBlock>>,
+    /// The source range of the top-level block being parsed.
+    top: Range<usize>,
     stack: Vec<Frame>,
     inline: Option<(Target, InlineBuilder)>,
     code: Option<(Option<SharedString>, String)>,
@@ -167,20 +202,24 @@ impl InlineBuilder {
 }
 
 impl Builder {
-    fn blocks(&mut self) -> &mut Vec<Block> {
+    /// Adds a finished block to the innermost open quote or item, or to the document.
+    fn emit(&mut self, block: Block) {
         for frame in self.stack.iter_mut().rev() {
             match frame {
-                Frame::Quote(blocks) | Frame::Item(blocks) => return blocks,
+                Frame::Quote(blocks) | Frame::Item(blocks) => return blocks.push(block),
                 // A list holds items, and a table holds cells; neither takes blocks directly.
                 Frame::List { .. } | Frame::Table { .. } => {}
             }
         }
-        &mut self.root
+        self.root.push(Arc::new(TopBlock {
+            range: self.top.clone(),
+            block,
+        }));
     }
 
     fn push_block(&mut self, block: Block) {
         self.flush_inline();
-        self.blocks().push(block);
+        self.emit(block);
     }
 
     /// Ends implicit paragraph text, such as a tight list item's, before another block.
@@ -189,8 +228,8 @@ impl Builder {
             let inline = inline.finish();
             match target {
                 Target::Paragraph if inline.text.trim().is_empty() => {}
-                Target::Paragraph => self.blocks().push(Block::Paragraph(inline)),
-                Target::Heading(level) => self.blocks().push(Block::Heading {
+                Target::Paragraph => self.emit(Block::Paragraph(inline)),
+                Target::Heading(level) => self.emit(Block::Heading {
                     level,
                     text: inline,
                 }),
@@ -376,13 +415,13 @@ impl Builder {
             TagEnd::BlockQuote(_) => {
                 self.flush_inline();
                 if let Some(Frame::Quote(blocks)) = self.stack.pop() {
-                    self.blocks().push(Block::Quote(blocks));
+                    self.emit(Block::Quote(blocks));
                 }
             }
             TagEnd::List(_) => {
                 self.flush_inline();
                 if let Some(Frame::List { start, items }) = self.stack.pop() {
-                    self.blocks().push(Block::List { start, items });
+                    self.emit(Block::List { start, items });
                 }
             }
             TagEnd::Item => {
@@ -408,13 +447,15 @@ impl Builder {
                     ..
                 }) = self.stack.pop()
                 {
-                    self.blocks().push(Block::Table {
+                    self.emit(Block::Table {
                         alignments,
                         header,
                         rows,
                     });
                 }
             }
+            // An HTML block's text ends with the block, so it gets the block's range.
+            TagEnd::HtmlBlock => self.flush_inline(),
             TagEnd::Strong => self.set_style(0, false),
             TagEnd::Emphasis => self.set_style(1, false),
             TagEnd::Strikethrough => self.set_style(2, false),
@@ -432,7 +473,7 @@ impl Builder {
         }
     }
 
-    fn finish(mut self) -> Document {
+    fn finish(mut self) -> Vec<Arc<TopBlock>> {
         // A stream can stop anywhere, so close whatever is still open.
         if let Some((language, code)) = self.code.take() {
             self.push_block(Block::Code {
@@ -462,9 +503,9 @@ impl Builder {
                     rows,
                 },
             };
-            self.blocks().push(block);
+            self.emit(block);
         }
-        Document { blocks: self.root }
+        self.root
     }
 }
 
@@ -524,7 +565,12 @@ impl RenderOnce for Markdown {
             texts: 0,
             code_blocks: 0,
         };
-        let blocks = render_blocks(&self.document.blocks, &mut ctx, window, cx);
+        let blocks: Vec<_> = self
+            .document
+            .blocks
+            .iter()
+            .map(|top| render_block(&top.block, &mut ctx, window, cx))
+            .collect();
         v_flex()
             .id(ElementId::Name(self.id))
             .w_full()
@@ -831,7 +877,11 @@ fn inline_text(inline: &Inline, base: &TextStyle, ctx: &mut Ctx, cx: &App) -> An
         })
         .tooltip(move |at, _, cx| {
             let index = tip_ranges.iter().position(|r| r.contains(&at))?;
-            Some(cx.new(|_| Tooltip::text(tips[index].clone())).into())
+            let tip = match tips[index].as_ref() {
+                mend::PENDING_LINK_URL => "Link loading".into(),
+                _ => tips[index].clone(),
+            };
+            Some(cx.new(|_| Tooltip::text(tip)).into())
         })
         .into_any_element()
 }
@@ -840,8 +890,12 @@ fn inline_text(inline: &Inline, base: &TextStyle, ctx: &mut Ctx, cx: &App) -> An
 mod tests {
     use super::*;
 
+    fn top(doc: &Document) -> Vec<Block> {
+        doc.blocks.iter().map(|top| top.block.clone()).collect()
+    }
+
     fn paragraph(doc: &Document) -> &Inline {
-        match &doc.blocks[0] {
+        match &doc.blocks[0].block {
             Block::Paragraph(inline) => inline,
             other => panic!("expected a paragraph, got {other:?}"),
         }
@@ -892,20 +946,20 @@ mod tests {
             "# Title\n\n- one\n- two\n  1. inner\n\n> quoted\n\n---\n\n```rust\nfn main() {}\n```\n",
         );
         assert!(
-            matches!(&doc.blocks[0], Block::Heading { level: 1, text } if text.text == "Title")
+            matches!(&doc.blocks[0].block, Block::Heading { level: 1, text } if text.text == "Title")
         );
-        let Block::List { start: None, items } = &doc.blocks[1] else {
-            panic!("{:?}", doc.blocks[1]);
+        let Block::List { start: None, items } = &doc.blocks[1].block else {
+            panic!("{:?}", doc.blocks[1].block);
         };
         assert_eq!(items.len(), 2);
         assert!(matches!(&items[0][0], Block::Paragraph(i) if i.text == "one"));
         assert!(matches!(&items[1][1], Block::List { start: Some(1), items } if items.len() == 1));
         assert!(
-            matches!(&doc.blocks[2], Block::Quote(b) if matches!(&b[0], Block::Paragraph(i) if i.text == "quoted"))
+            matches!(&doc.blocks[2].block, Block::Quote(b) if matches!(&b[0], Block::Paragraph(i) if i.text == "quoted"))
         );
-        assert_eq!(doc.blocks[3], Block::Rule);
+        assert_eq!(doc.blocks[3].block, Block::Rule);
         assert_eq!(
-            doc.blocks[4],
+            doc.blocks[4].block,
             Block::Code {
                 language: Some("rust".into()),
                 code: "fn main() {}".into()
@@ -920,7 +974,7 @@ mod tests {
             alignments,
             header,
             rows,
-        } = &doc.blocks[0]
+        } = &doc.blocks[0].block
         else {
             panic!("{:?}", doc.blocks);
         };
@@ -942,11 +996,11 @@ mod tests {
         let reply = "## Plan\n\n1. **Read** the `docs`\n2. Run:\n\n```bash\ncargo test\n```\n\n| a | b |\n|---|---|\n| é | 😀 |\n\n> [link](https://e.x) ~~gone~~\n";
         for end in (0..=reply.len()).filter(|&i| reply.is_char_boundary(i)) {
             let doc = Document::parse(&reply[..end]);
-            check_ranges(&doc.blocks);
+            check_ranges(&top(&doc));
         }
         let open = Document::parse("Text\n\n```bash\ncargo te");
         assert_eq!(
-            open.blocks[1],
+            open.blocks[1].block,
             Block::Code {
                 language: Some("bash".into()),
                 code: "cargo te".into()
@@ -1023,19 +1077,19 @@ mod tests {
         ];
         for source in &cases {
             let doc = Document::parse(source);
-            assert_eq!(nesting(&doc.blocks), MAX_NESTING, "{}", &source[..40]);
+            assert_eq!(nesting(&top(&doc)), MAX_NESTING, "{}", &source[..40]);
             let mut out = Vec::new();
-            texts(&doc.blocks, &mut out);
+            texts(&top(&doc), &mut out);
             assert!(
                 out.iter()
                     .any(|t| t.contains("hello") || t.contains("item 2999"))
             );
-            check_ranges(&doc.blocks);
+            check_ranges(&top(&doc));
         }
         // Lists past the limit keep their items, in order, as flat blocks.
         let doc = Document::parse(&cases[1]);
         let mut out = Vec::new();
-        texts(&doc.blocks, &mut out);
+        texts(&top(&doc), &mut out);
         let expected: Vec<String> = (0..3_000).map(|i| format!("item {i}")).collect();
         assert_eq!(out, expected);
     }
@@ -1043,8 +1097,8 @@ mod tests {
     #[test]
     fn nesting_up_to_the_limit_is_kept() {
         let doc = Document::parse(&("> ".repeat(MAX_NESTING) + "deep"));
-        assert_eq!(nesting(&doc.blocks), MAX_NESTING);
-        let mut block = &doc.blocks[0];
+        assert_eq!(nesting(&top(&doc)), MAX_NESTING);
+        let mut block = &doc.blocks[0].block;
         for _ in 1..MAX_NESTING {
             let Block::Quote(inner) = block else {
                 panic!("{block:?}")
@@ -1057,9 +1111,9 @@ mod tests {
         );
         // One more level is flattened into the innermost kept quote.
         let doc = Document::parse(&("> ".repeat(MAX_NESTING + 1) + "deep\n\nafter"));
-        assert_eq!(nesting(&doc.blocks), MAX_NESTING);
+        assert_eq!(nesting(&top(&doc)), MAX_NESTING);
         let mut out = Vec::new();
-        texts(&doc.blocks, &mut out);
+        texts(&top(&doc), &mut out);
         assert_eq!(out, ["deep", "after"]);
     }
 
@@ -1079,7 +1133,7 @@ mod tests {
             + &"](https://e.x)".repeat(10_000);
         let doc = Document::parse(&source);
         assert!(paragraph(&doc).text.contains("hi"));
-        check_ranges(&doc.blocks);
+        check_ranges(&top(&doc));
     }
 
     /// Every prefix of an adversarial reply parses within the limit, as it streams in.
@@ -1088,15 +1142,15 @@ mod tests {
         let reply = "> - 1. **a *b ".repeat(60) + "[x](https://e.x)\n\n```\ncode";
         for end in (0..=reply.len()).filter(|&i| reply.is_char_boundary(i)) {
             let doc = Document::parse(&reply[..end]);
-            assert!(nesting(&doc.blocks) <= MAX_NESTING);
-            check_ranges(&doc.blocks);
+            assert!(nesting(&top(&doc)) <= MAX_NESTING);
+            check_ranges(&top(&doc));
         }
     }
 
     #[test]
     fn raw_html_is_text_and_only_web_links_open() {
         let doc = Document::parse("<script>alert(1)</script>\n\nhi <b>there</b>");
-        assert!(matches!(&doc.blocks[0], Block::Paragraph(i) if i.text.contains("<script>")));
+        assert!(matches!(&doc.blocks[0].block, Block::Paragraph(i) if i.text.contains("<script>")));
         assert!(is_openable("https://example.com"));
         assert!(is_openable("mailto:a@b.c"));
         assert!(!is_openable("file:///etc/passwd"));

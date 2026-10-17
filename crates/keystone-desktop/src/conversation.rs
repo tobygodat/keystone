@@ -274,26 +274,7 @@ impl Conversation {
             Event::TurnCompleted { status, error, .. } => {
                 self.running = false;
                 self.approvals.clear();
-                // A stopped turn leaves items the provider never completes. Keep what
-                // streamed, so the partial reply survives a restart.
-                // Restored rows finished in an earlier run.
-                let start = self.run_start;
-                let unfinished: Vec<(usize, Item)> = self.rows[start..]
-                    .iter_mut()
-                    .enumerate()
-                    .map(|(index, row)| (start + index, row))
-                    .filter_map(|(index, row)| match row {
-                        Row::Item(item) if item.status == ItemStatus::InProgress => {
-                            item.status = ItemStatus::Failed;
-                            Some((index, item.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                for (index, item) in unfinished {
-                    self.mark(index);
-                    self.log_item(index, item);
-                }
+                self.settle_unfinished();
                 let shown = status != TurnStatus::Completed;
                 let entry = Entry::TurnEnded {
                     status,
@@ -309,12 +290,35 @@ impl Conversation {
             }
             Event::Failed { message } => {
                 self.running = false;
+                self.settle_unfinished();
                 self.error = Some(message);
                 self.turn_start = self.rows.len();
             }
             Event::Warning { message } => self.error = Some(message),
         }
         None
+    }
+
+    /// A turn that ends leaves items the provider never completes. Keep what streamed,
+    /// so the partial reply survives a restart. Restored rows finished in an earlier run.
+    fn settle_unfinished(&mut self) {
+        let start = self.run_start;
+        let unfinished: Vec<(usize, Item)> = self.rows[start..]
+            .iter_mut()
+            .enumerate()
+            .map(|(index, row)| (start + index, row))
+            .filter_map(|(index, row)| match row {
+                Row::Item(item) if item.status == ItemStatus::InProgress => {
+                    item.status = ItemStatus::Failed;
+                    Some((index, item.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (index, item) in unfinished {
+            self.mark(index);
+            self.log_item(index, item);
+        }
     }
 
     /// Records the user's answer to the oldest pending approval.
@@ -566,6 +570,24 @@ mod tests {
             message: "Could not start Codex".into(),
         });
         assert!(!live.running);
+    }
+
+    #[test]
+    fn a_failure_settles_the_reply_it_cut_off() {
+        let mut live = Conversation::default();
+        live.push_local("hello");
+        live.apply(Event::ItemStarted(message(
+            "m",
+            "Half a",
+            ItemStatus::InProgress,
+        )));
+        live.apply(Event::Failed {
+            message: "Codex exited".into(),
+        });
+        assert_eq!(
+            live.rows[1],
+            Row::Item(message("m", "Half a", ItemStatus::Failed))
+        );
     }
 
     #[test]
