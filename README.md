@@ -14,6 +14,18 @@ Codex and Claude Code run with your own `codex` and `claude` logins and, under P
 
 The preview saves to `$XDG_DATA_HOME/keystone/workspace.json`, or `$HOME/.local/share/keystone/workspace.json`. Set `KEYSTONE_STATE_PATH` to use an isolated state file. A file lock prevents concurrent desktop processes from writing the same workspace. Draft writes wait 250 ms after typing stops. Session changes and normal window close flush the visible draft immediately; failed saves keep the session open.
 
+## View on your laptop
+
+You can watch the app on another Wayland machine while it builds and runs on this one. Install waypipe on the laptop once with `sudo pacman -S waypipe`. Then run this from the laptop:
+
+```sh
+waypipe ssh tobygodat@desk ~/keystone/scripts/preview.py
+```
+
+The window opens on the laptop. `scripts/preview.py` follows the worktree that changed most recently, uncommitted edits included, so it shows whichever agent is working right now. It prints a line when it switches. After a change has been quiet for about 3 seconds, it rebuilds at low priority in `~/.cache/keystone-preview/target`, so it never waits on an agent's cargo lock, and restarts the app. A failed build leaves the last good app running and prints the errors. Pass a branch name or worktree path to pin one worktree, for example `~/keystone/scripts/preview.py my-branch`. `--once` builds and runs without following changes.
+
+The preview keeps its own workspace in `~/.local/share/keystone-preview/workspace.json`, so it doesn't conflict with a copy running on the desktop. Its Claude Code and Codex sessions run in the checkout the script lives in, not in the worktree being previewed. Set `KEYSTONE_PROJECT_DIR` to choose another directory. Pressing Ctrl+Q or dropping the connection stops the app and the script.
+
 ## Native verification driver
 
 Use the [desktop verification skill](crates/keystone-desktop/.agents/skills/verify/SKILL.md) for a separate Sway desktop with screenshots, mouse clicks, keyboard input, and disposable state. It includes a four-feature verification map and exact launch, doctor, drive, and cleanup instructions. Run it from the desktop crate context to discover the package-local Codex skill, or read the linked file directly from the workspace root.
