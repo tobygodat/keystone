@@ -260,6 +260,295 @@ fn a_confirm_dialog_blocks_presses_behind_it(cx: &mut TestAppContext) {
     view.read_with(cx, |c, _| assert_eq!(c.answers, vec!["cancel"]));
 }
 
+struct Tabs {
+    order: Vec<usize>,
+    selected: usize,
+    selects: usize,
+}
+
+impl Tabs {
+    fn new(count: usize) -> Self {
+        Self {
+            order: (0..count).collect(),
+            selected: 0,
+            selects: 0,
+        }
+    }
+}
+
+impl Render for Tabs {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = self
+            .order
+            .iter()
+            .map(|&n| Tab::new(("tab", n), format!("Tab {}", n + 1)));
+        div()
+            .size_full()
+            .child(
+                TabBar::new("bar")
+                    .children(tabs)
+                    .selected(self.selected)
+                    .on_select(cx.listener(|this, &ix: &usize, _, cx| {
+                        this.selected = ix;
+                        this.selects += 1;
+                        cx.notify();
+                    }))
+                    .on_close(cx.listener(|this, &ix: &usize, _, cx| {
+                        this.order.remove(ix);
+                        cx.notify();
+                    }))
+                    .on_move(cx.listener(|this, &(from, to): &(usize, usize), _, cx| {
+                        let tab = this.order.remove(from);
+                        this.order.insert(to, tab);
+                        cx.notify();
+                    })),
+            )
+            .child(div().h_8().debug_selector(|| "below".into()))
+    }
+}
+
+fn tabs(
+    cx: &mut TestAppContext,
+    count: usize,
+) -> (gpui::Entity<Tabs>, &mut gpui::VisualTestContext) {
+    cx.update(keystone_ui::init);
+    cx.add_window_view(|_, _| Tabs::new(count))
+}
+
+fn order(view: &gpui::Entity<Tabs>, cx: &mut gpui::VisualTestContext) -> Vec<usize> {
+    view.read_with(cx, |t, _| t.order.clone())
+}
+
+/// Presses on `from`, moves past the drag threshold in steps, and releases on `to`.
+fn drag(
+    cx: &mut gpui::VisualTestContext,
+    from: gpui::Point<gpui::Pixels>,
+    to: gpui::Point<gpui::Pixels>,
+) {
+    use gpui::MouseButton::Left;
+    cx.simulate_mouse_down(from, Left, Modifiers::none());
+    for step in 1..=4 {
+        let t = step as f32 / 4.;
+        cx.simulate_mouse_move(from + (to - from) * t, Left, Modifiers::none());
+    }
+    cx.simulate_mouse_up(to, Left, Modifiers::none());
+    cx.run_until_parked();
+}
+
+fn center(cx: &mut gpui::VisualTestContext, selector: &'static str) -> gpui::Point<gpui::Pixels> {
+    cx.debug_bounds(selector).expect(selector).center()
+}
+
+#[gpui::test]
+fn tab_click_selects(cx: &mut TestAppContext) {
+    let (view, cx) = tabs(cx, 8);
+    click(cx, "bar-tab-2");
+    view.read_with(cx, |t, _| assert_eq!(t.selected, 2));
+    assert_eq!(order(&view, cx), (0..8).collect::<Vec<_>>());
+}
+
+#[gpui::test]
+fn tab_close_button_closes(cx: &mut TestAppContext) {
+    let (view, cx) = tabs(cx, 8);
+    // Tab 2 is not selected, so its close button shows on hover.
+    let tab = center(cx, "bar-tab-1");
+    cx.simulate_mouse_move(tab, None, Modifiers::none());
+    click(cx, "bar-tab-1-close");
+    assert_eq!(order(&view, cx), vec![0, 2, 3, 4, 5, 6, 7]);
+    view.read_with(cx, |t, _| {
+        assert_eq!(t.selected, 0, "closing did not select")
+    });
+}
+
+#[gpui::test]
+fn tab_middle_click_closes(cx: &mut TestAppContext) {
+    let (view, cx) = tabs(cx, 8);
+    let tab = center(cx, "bar-tab-4");
+    cx.simulate_mouse_down(tab, gpui::MouseButton::Middle, Modifiers::none());
+    cx.simulate_mouse_up(tab, gpui::MouseButton::Middle, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(order(&view, cx), vec![0, 1, 2, 3, 5, 6, 7]);
+    view.read_with(cx, |t, _| {
+        assert_eq!(t.selected, 0, "middle click did not select")
+    });
+}
+
+#[gpui::test]
+fn tab_drag_reorders(cx: &mut TestAppContext) {
+    let (view, cx) = tabs(cx, 8);
+    let selects = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |t, _| t.selects);
+    let (first, fourth) = (center(cx, "bar-tab-0"), center(cx, "bar-tab-3"));
+    drag(cx, first, fourth);
+    assert_eq!(
+        order(&view, cx),
+        vec![1, 2, 3, 0, 4, 5, 6, 7],
+        "tab 1 after tab 4"
+    );
+    assert_eq!(selects(cx), 0, "a drag is not a click");
+
+    let (last, first) = (center(cx, "bar-tab-7"), center(cx, "bar-tab-0"));
+    drag(cx, last, first);
+    assert_eq!(
+        order(&view, cx),
+        vec![7, 1, 2, 3, 0, 4, 5, 6],
+        "last tab to the front"
+    );
+
+    let bar = cx.debug_bounds("bar").expect("bar");
+    let end = gpui::point(bar.right() - gpui::px(12.), bar.center().y);
+    let first = center(cx, "bar-tab-0");
+    drag(cx, first, end);
+    assert_eq!(
+        order(&view, cx),
+        vec![1, 2, 3, 0, 4, 5, 6, 7],
+        "empty end moves it last"
+    );
+
+    let (first, below) = (center(cx, "bar-tab-0"), center(cx, "below"));
+    drag(cx, first, below);
+    assert_eq!(
+        order(&view, cx),
+        vec![1, 2, 3, 0, 4, 5, 6, 7],
+        "a drop outside changes nothing"
+    );
+    assert_eq!(selects(cx), 0, "no drag selected a tab");
+}
+
+/// The draw time of a 50-tab bar while a tab is dragged across it. Run with
+/// `cargo test -p keystone-ui --features ui-tests --release perf_tab_bar_drag_50 -- --ignored --nocapture`.
+#[gpui::test]
+#[ignore]
+fn perf_tab_bar_drag_50(cx: &mut TestAppContext) {
+    use gpui::MouseButton::Left;
+    cx.executor().allow_parking();
+    let (view, cx) = tabs(cx, 50);
+    // Release builds drop debug selectors, so this presses by position: the bar
+    // runs along the window's top edge, and its first tab starts near the left.
+    let width = cx.update(|window, _| window.viewport_size().width);
+    let start = gpui::point(gpui::px(30.), gpui::px(17.));
+    cx.simulate_mouse_down(start, Left, Modifiers::none());
+    let mut frames = Vec::new();
+    for step in 0..200 {
+        let x = (width - gpui::px(1.)) * ((step % 100) as f32 / 100.);
+        cx.simulate_mouse_move(gpui::point(x, start.y), Left, Modifiers::none());
+        cx.update(|window, cx| {
+            let started = std::time::Instant::now();
+            window.draw(cx).clear(cx);
+            frames.push(started.elapsed());
+        });
+    }
+    cx.update(|_, cx| assert!(cx.has_active_drag(), "the drag stayed active"));
+    cx.simulate_mouse_up(start, Left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(order(&view, cx), (0..50).collect::<Vec<_>>());
+    frames.sort();
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.;
+    let p95 = ms(frames[frames.len() * 95 / 100]);
+    eprintln!(
+        "PERF tab_bar_drag_50_ms p50={:.3} p95={p95:.3} max={:.3}",
+        ms(frames[frames.len() / 2]),
+        ms(frames[frames.len() - 1]),
+    );
+    assert!(p95 < 4., "drag frame p95 {p95:.3} ms is over 4 ms");
+}
+
+#[gpui::test]
+fn tab_selected_on_open_is_scrolled_into_view(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    let (_view, cx) = cx.add_window_view(|_, _| Tabs {
+        selected: 49,
+        ..Tabs::new(50)
+    });
+    cx.run_until_parked();
+    let requested = cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert!(
+        requested > 0,
+        "the first frame asks for a second to reveal the tab"
+    );
+    cx.run_until_parked();
+    let bar = cx.debug_bounds("bar").expect("bar");
+    let last = cx.debug_bounds("bar-tab-49").expect("last tab");
+    assert!(
+        last.left() >= bar.left() && last.right() <= bar.right(),
+        "the selected last tab {last:?} shows inside the bar {bar:?}"
+    );
+}
+
+/// Two bars. Only `right` accepts tabs from another bar.
+struct TwoBars {
+    left: Vec<&'static str>,
+    right: Vec<&'static str>,
+}
+
+impl Render for TwoBars {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = |names: &[&'static str]| {
+            names
+                .iter()
+                .map(|&name| Tab::new(name, name))
+                .collect::<Vec<_>>()
+        };
+        div()
+            .size_full()
+            .child(
+                TabBar::new("left")
+                    .children(tabs(&self.left))
+                    .on_move(|_, _, _| {}),
+            )
+            .child(
+                TabBar::new("right")
+                    .children(tabs(&self.right))
+                    .on_move(|_, _, _| {})
+                    .on_insert(
+                        cx.listener(|this, (drag, to): &(DraggedTab, usize), _, cx| {
+                            assert_eq!(drag.bar_id, "left".into());
+                            let tab = this.left.remove(drag.index);
+                            this.right.insert(*to, tab);
+                            cx.notify();
+                        }),
+                    ),
+            )
+    }
+}
+
+#[gpui::test]
+fn tab_drop_on_another_bar_inserts(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    let (view, cx) = cx.add_window_view(|_, _| TwoBars {
+        left: vec!["a", "b", "c"],
+        right: vec!["x", "y"],
+    });
+    let (b, y) = (center(cx, "left-tab-1"), center(cx, "right-tab-1"));
+    drag(cx, b, y);
+    view.read_with(cx, |t, _| {
+        assert_eq!(t.left, vec!["a", "c"]);
+        assert_eq!(
+            t.right,
+            vec!["x", "b", "y"],
+            "inserted before the tab it was dropped on"
+        );
+    });
+
+    let right = cx.debug_bounds("right").expect("right bar");
+    let end = gpui::point(right.right() - gpui::px(12.), right.center().y);
+    let a = center(cx, "left-tab-0");
+    drag(cx, a, end);
+    view.read_with(cx, |t, _| {
+        assert_eq!(t.right, vec!["x", "b", "y", "a"], "the end appends")
+    });
+
+    let (x, c) = (center(cx, "right-tab-0"), center(cx, "left-tab-0"));
+    drag(cx, x, c);
+    view.read_with(cx, |t, _| {
+        assert_eq!(
+            t.left,
+            vec!["c"],
+            "a bar without on_insert ignores foreign tabs"
+        );
+        assert_eq!(t.right, vec!["x", "b", "y", "a"]);
+    });
+}
+
 struct List {
     state: gpui::Entity<VirtualListState>,
     confirmed: Option<usize>,

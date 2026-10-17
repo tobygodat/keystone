@@ -14,12 +14,16 @@ enum Page {
     List,
 }
 
+#[path = "gallery/tabs.rs"]
+mod tabs;
+
 struct Gallery {
     page: Page,
     menu_open: bool,
     dialog: Option<DialogFocus>,
     selected_row: usize,
     markdown: std::sync::Arc<keystone_ui::markdown::Document>,
+    tabs: gpui::Entity<tabs::TabsPage>,
     list: Entity<VirtualListState>,
     confirmed: Option<usize>,
 }
@@ -339,6 +343,7 @@ impl Render for Gallery {
                     .px_6()
                     .pb_6()
                     .gap_8()
+                    .child(section("TAB BAR", self.tabs.clone()))
                     .child(section("BUTTONS", buttons))
                     .child(section("CONFIRM DIALOG", dialog))
                     .child(section("ICON BUTTONS", icon_buttons))
@@ -411,6 +416,7 @@ fn main() {
                         markdown: std::sync::Arc::new(keystone_ui::markdown::Document::parse(
                             MARKDOWN,
                         )),
+                        tabs: cx.new(|_| tabs::TabsPage::new()),
                         list: cx.new(|cx| VirtualListState::new(50_000, cx)),
                         confirmed: None,
                     })

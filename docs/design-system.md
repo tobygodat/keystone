@@ -30,6 +30,7 @@
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
 | `TextInput`, `InputMode` | An editable text field. `InputMode::SingleLine` refuses newlines and emits `text_input::RejectedMultiline`, so search typing and paste stay on one line. `InputMode::Multiline` wraps, and arrows, Home, and End move by visual row. Every edit emits `text_input::Changed`. Call `TextInput::bind_keys` once at startup. Bound keys reach the input as actions before any key listener runs, so a host that needs Up, Down, or Enter first, such as a list or palette, wraps it in a div with `capture_action` for `text_input::Up`, `Down`, or `Newline` and stops propagation. |
 | `Tooltip` | A hover card with an optional shortcut. |
+| `TabBar`, `Tab`, `TabDot`, `DraggedTab` | A row of tabs that scrolls sideways, with close, a status dot, and drag reorder. See below. |
 
 Run `cargo run -p keystone-ui --example gallery` to see every component in every state. Its header switches between themes and densities.
 
@@ -50,6 +51,21 @@ Run `cargo run -p keystone-ui --example gallery` to see every component in every
 - Debug selectors are `{id}` for the card, and `{id}-cancel` and `{id}-confirm` for the buttons.
 
 The gallery's "Open confirm dialog" button shows it.
+
+## Tab bar
+
+`TabBar::new(id)` takes `Tab::new(id, label)` children and `selected(index)`. The caller owns the order and the selection and changes them in the handlers. A tab's id keeps its hover state with it when the bar reorders.
+
+- `on_select` gets the pressed tab's index. `on_close` gets the index from the close button or a middle click, and a bar without it shows no close buttons. The selected tab shows its close button at rest. Other tabs, and a selected tab with a dot, show it on hover.
+- `Tab::dot(TabDot::Working)` draws an accent dot in the close button's slot, and `TabDot::Dirty` a muted one. When the bar has `on_close`, hovering the tab swaps the dot for the close button.
+- The bar scrolls sideways when the tabs overflow, and scrolls the selected tab into view whenever the selection changes.
+- `on_move` makes tabs draggable. A drop on another tab of the same bar calls it with `(from, to)`: removing the tab at `from` and inserting it at `to` gives the new order. A drop on the empty end moves the tab last. While a tab hovers over a slot, an accent marker shows on the side it will land. A release anywhere else changes nothing.
+- `on_insert` takes tabs dragged from another bar, as `(DraggedTab, to)`. A drop on a tab inserts before it, and a drop on the empty end appends. A bar with `on_move` or `on_insert` ends every `DraggedTab` drag released over it, because GPUI hands a drop to the first target under the pointer, so a target around the bar never sees it.
+- The drag payload is `DraggedTab { bar_id, index }`. Other drop targets, such as split pane edges, accept it with `on_drop::<DraggedTab>`.
+- Ctrl+Tab and Ctrl+Shift+Tab belong to the host, which binds them to change `selected`.
+- Debug selectors are `{id}` for the bar, and `{id}-tab-{n}` and `{id}-tab-{n}-close`, counting from 0.
+
+The gallery's tab bar section has eight tabs and an "Add tab" button that makes the bar overflow.
 
 ## Virtual list
 
@@ -74,6 +90,8 @@ Write a `RenderOnce` struct with builder methods, read colors from `cx.theme()`,
 ## Sources
 
 The component shapes follow Zed's `ui` crate, and the visual values follow Zeron. Zed's UI crates are licensed GPL-3.0-or-later, so no Zed code was copied. Zeron is MIT-licensed, and only design values were adapted from it.
+
+The tab bar's structure, a tracked horizontal scroll strip with a trailing empty slot, follows `tab/tab_bar.rs` and `tab/tab.rs` in [gpui-component](https://github.com/longbridge/gpui-kit) 0.7.3, Copyright 2024 - 2026 Longbridge, licensed Apache-2.0. `crates/keystone-ui/src/tabs.rs` is a modified, rewritten adaptation and says so in its header.
 
 ## Known limits
 

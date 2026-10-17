@@ -13,6 +13,7 @@ mod list_item;
 pub mod markdown;
 mod popover;
 mod styled_ext;
+mod tabs;
 pub mod text_input;
 mod theme;
 mod tokens;
@@ -29,6 +30,7 @@ pub use list_item::ListItem;
 pub use markdown::Markdown;
 pub use popover::{MenuHeader, MenuItem, MenuSeparator, PopoverMenu};
 pub use styled_ext::{StyledExt, h_flex, v_flex};
+pub use tabs::{DraggedTab, Tab, TabBar, TabDot};
 pub use text_input::{InputMode, TextInput};
 pub use theme::{ActiveTheme, Appearance, Colors, Density, Fonts, Theme};
 pub use tokens::{Elevation, TextSize, radius, spacing};
@@ -55,5 +57,6 @@ pub mod prelude {
         Icon, IconButton, IconName, Kbd, Label, ListItem, Markdown, MenuHeader, MenuItem,
         MenuSeparator, PopoverMenu, StyledExt, TextSize, Tooltip, h_flex, radius, spacing, v_flex,
     };
+    pub use crate::{DraggedTab, Tab, TabBar, TabDot};
     pub use crate::{VirtualList, VirtualListState};
 }
