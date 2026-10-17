@@ -19,4 +19,6 @@ for _ in $(seq 100); do
   sleep 0.1
 done
 [ -S "$sock" ] || { echo "waypipe client did not create $sock" >&2; exit 1; }
-ssh -t -o ExitOnForwardFailure=yes -R "127.0.0.1:$port:$sock" "$host" "$remote $port $(printf '%q ' "$@")"
+args=""
+[ $# -gt 0 ] && args=$(printf ' %q' "$@")
+ssh -t -o ExitOnForwardFailure=yes -R "127.0.0.1:$port:$sock" "$host" "$remote $port$args"
