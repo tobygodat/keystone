@@ -28,6 +28,8 @@ BINARY = HOME / 'keystone-desktop'
 STATE = Path.home() / '.local/share/keystone-preview/workspace.json'
 CARGO = ['cargo', 'build', '-p', 'keystone-desktop', '--locked']
 STOP_TIMEOUT_S = 5
+# Non-interactive ssh gets a bare PATH, without the cargo and mise-managed claude and codex installs.
+TOOL_PATH = f'{Path.home() / ".cargo/bin"}:{Path.home() / ".local/share/mise/shims"}:{os.environ.get("PATH", "")}'
 LIBC = ctypes.CDLL(None, use_errno=True)
 PR_SET_PDEATHSIG = 1
 
@@ -175,18 +177,19 @@ class Group:
 
 def start_build(build, path):
     custom = os.environ.get('KEYSTONE_PREVIEW_BUILD_CMD')
-    env = {**os.environ, 'CARGO_TARGET_DIR': str(TARGET_DIR),
-           'PATH': f'{Path.home() / ".cargo/bin"}:{os.environ.get("PATH", "")}'}
+    env = {**os.environ, 'CARGO_TARGET_DIR': str(TARGET_DIR), 'PATH': TOOL_PATH}
     build.spawn(['nice', '-n', '19', *(['sh', '-c', custom] if custom else CARGO)], path, env, HOME / 'build.log')
 
 
-def restart(app, path):
+def restart(app):
     staged = BINARY.with_suffix('.new')
     shutil.copy2(TARGET_DIR / 'debug/keystone-desktop', staged)
     os.replace(staged, BINARY)
     app.stop()
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    app.spawn([str(BINARY)], path, {**os.environ, 'KEYSTONE_STATE_PATH': str(STATE)}, HOME / 'app.log')
+    # Sessions run in the main checkout, never in the agent's worktree being previewed.
+    app.spawn([str(BINARY)], REPO, {**os.environ, 'KEYSTONE_STATE_PATH': str(STATE), 'PATH': TOOL_PATH},
+              HOME / 'app.log')
     return app.proc.pid
 
 
@@ -195,10 +198,9 @@ def label(snap):
 
 
 def finish(state, code, app):
-    path = state.fp[0]
     if code == 0:
         say(f'built in {time.monotonic() - state.started:.0f}s')
-        say(f'{"started" if app.proc is None else "restarted"} app (pid {restart(app, path)})')
+        say(f'{"started" if app.proc is None else "restarted"} app (pid {restart(app)})')
     else:
         log = (HOME / 'build.log').read_text(errors='replace')
         for line in error_tail(log):
