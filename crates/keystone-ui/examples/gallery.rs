@@ -2,17 +2,26 @@
 //! Run with `cargo run -p keystone-ui --example gallery`.
 
 use gpui::{
-    Anchor, AnyElement, App, Bounds, Context, IntoElement, Render, SharedString, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, size,
+    Anchor, AnyElement, App, Bounds, Context, Entity, Focusable, IntoElement, Render, SharedString,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use keystone_ui::prelude::*;
-use keystone_ui::{Appearance, Density, Fonts, Theme, set_theme};
+use keystone_ui::{Appearance, Density, Fonts, Theme, automation, set_theme};
+
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Components,
+    List,
+}
 
 struct Gallery {
+    page: Page,
     menu_open: bool,
     dialog: Option<DialogFocus>,
     selected_row: usize,
     markdown: std::sync::Arc<keystone_ui::markdown::Document>,
+    list: Entity<VirtualListState>,
+    confirmed: Option<usize>,
 }
 
 const MARKDOWN: &str = "## Heading\n\nA paragraph with **strong**, *emphasis*, `inline code`, ~~struck~~, and a [link](https://example.com).\n\n- A bullet\n  1. A nested number\n- Another bullet\n\n> A quoted line.\n\n| Left | Center | Right |\n| :-- | :-: | --: |\n| `a` | b | 1 |\n| c | d | 22 |\n\n```rust\nfn main() {\n    println!(\"A long line that scrolls sideways instead of wrapping, as in an editor, so code keeps its shape.\");\n}\n```\n\n---\n";
@@ -31,6 +40,45 @@ fn section(title: &'static str, body: impl IntoElement) -> impl IntoElement {
 
 fn row(items: impl IntoIterator<Item = AnyElement>) -> impl IntoElement {
     h_flex().gap_3().flex_wrap().children(items)
+}
+
+impl Gallery {
+    fn list_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.list.read(cx);
+        let highlighted = state
+            .highlighted()
+            .map_or("none".into(), |ix| ix.to_string());
+        let confirmed = self.confirmed.map_or("none".into(), |ix| ix.to_string());
+        let status = format!(
+            "{} rows · highlighted {highlighted} · confirmed {confirmed}",
+            state.count()
+        );
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .px_6()
+            .pb_6()
+            .gap_3()
+            .child(
+                div()
+                    .automation_id("gallery-list-status")
+                    .child(Label::new(status).color(Color::Muted)),
+            )
+            .child(
+                VirtualList::new("gallery-list", &self.list, |ix, highlighted, _, _| {
+                    MenuItem::new(("row", ix), format!("Row {ix}"))
+                        .highlighted(highlighted)
+                        .into_any_element()
+                })
+                .on_confirm(cx.listener(|this, ix: &usize, _, cx| {
+                    this.confirmed = Some(*ix);
+                    cx.notify();
+                }))
+                .flex_1()
+                .min_h_0()
+                .max_w(px(480.)),
+            )
+    }
 }
 
 impl Render for Gallery {
@@ -233,48 +281,64 @@ impl Render for Gallery {
             cx.notify();
         });
         let close = std::rc::Rc::new(close);
-        div()
-            .id("gallery")
-            .size_full()
+        let page = self.page;
+        let pages = [
+            (Page::Components, "Components", "gallery-page-components"),
+            (Page::List, "List", "gallery-page-list"),
+        ]
+        .map(|(target, name, id)| {
+            Button::new(id, name)
+                .style(ButtonStyle::Subtle)
+                .selected(page == target)
+                .debug_selector(|| id.into())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.page = target;
+                    if target == Page::List {
+                        window.focus(&this.list.focus_handle(cx), cx);
+                    }
+                    cx.notify();
+                }))
+        });
+        let header = h_flex()
+            .gap_3()
+            .p_6()
+            .child(Label::new("keystone-ui").size(TextSize::Title))
+            .children(pages)
+            .child(div().flex_1())
+            .children([Appearance::Dark, Appearance::Light].map(|appearance| {
+                Button::new(
+                    SharedString::from(format!("{appearance:?}")),
+                    format!("{appearance:?}"),
+                )
+                .style(ButtonStyle::Subtle)
+                .selected(theme_appearance == appearance)
+                .on_click(move |_, _, cx| {
+                    let density = cx.theme().density;
+                    set_theme(Theme::new(appearance, density, Fonts::default()), cx)
+                })
+            }))
+            .children(Density::ALL.map(|density| {
+                Button::new(
+                    SharedString::from(format!("{density:?}")),
+                    format!("{density:?}"),
+                )
+                .style(ButtonStyle::Subtle)
+                .selected(theme_density == density)
+                .on_click(move |_, _, cx| {
+                    let appearance = cx.theme().appearance;
+                    set_theme(Theme::new(appearance, density, Fonts::default()), cx)
+                })
+            }));
+        let components = div()
+            .id("gallery-components")
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
-            .bg(background)
-            .font_family(ui_font)
-            .text_color(text)
-            .text_size(TextSize::Base.px())
             .child(
                 v_flex()
-                    .p_6()
+                    .px_6()
+                    .pb_6()
                     .gap_8()
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(Label::new("keystone-ui").size(TextSize::Title))
-                            .child(div().flex_1())
-                            .children([Appearance::Dark, Appearance::Light].map(|appearance| {
-                                Button::new(
-                                    SharedString::from(format!("{appearance:?}")),
-                                    format!("{appearance:?}"),
-                                )
-                                .style(ButtonStyle::Subtle)
-                                .selected(theme_appearance == appearance)
-                                .on_click(move |_, _, cx| {
-                                    let density = cx.theme().density;
-                                    set_theme(Theme::new(appearance, density, Fonts::default()), cx)
-                                })
-                            }))
-                            .children(Density::ALL.map(|density| {
-                                Button::new(
-                                    SharedString::from(format!("{density:?}")),
-                                    format!("{density:?}"),
-                                )
-                                .style(ButtonStyle::Subtle)
-                                .selected(theme_density == density)
-                                .on_click(move |_, _, cx| {
-                                    let appearance = cx.theme().appearance;
-                                    set_theme(Theme::new(appearance, density, Fonts::default()), cx)
-                                })
-                            })),
-                    )
                     .child(section("BUTTONS", buttons))
                     .child(section("CONFIRM DIALOG", dialog))
                     .child(section("ICON BUTTONS", icon_buttons))
@@ -294,7 +358,22 @@ impl Render for Gallery {
                     .child(section("LABELS", labels))
                     .child(section("ICONS", icons))
                     .child(section("SURFACES", surfaces)),
-            )
+            );
+        v_flex()
+            .id("gallery")
+            .size_full()
+            .bg(background)
+            .font_family(ui_font)
+            .text_color(text)
+            .text_size(TextSize::Base.px())
+            .when(automation::enabled(), |d| {
+                d.child(automation::frame_writer())
+            })
+            .child(header)
+            .map(|d| match page {
+                Page::Components => d.child(components),
+                Page::List => d.child(self.list_page(cx)),
+            })
             .when_some(self.dialog.as_ref(), |d, focus| {
                 let (cancel, confirm) = (close.clone(), close);
                 d.child(
@@ -324,13 +403,16 @@ fn main() {
                     ..Default::default()
                 },
                 |_, cx| {
-                    cx.new(|_| Gallery {
+                    cx.new(|cx| Gallery {
+                        page: Page::Components,
                         menu_open: true,
                         dialog: None,
                         selected_row: 0,
                         markdown: std::sync::Arc::new(keystone_ui::markdown::Document::parse(
                             MARKDOWN,
                         )),
+                        list: cx.new(|cx| VirtualListState::new(50_000, cx)),
+                        confirmed: None,
                     })
                 },
             )

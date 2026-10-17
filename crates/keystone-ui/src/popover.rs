@@ -130,6 +130,7 @@ pub struct MenuItem {
     icon: Option<IconName>,
     checked: Option<bool>,
     kbd: Option<SharedString>,
+    highlighted: bool,
     on_click: Option<ClickHandler>,
     debug_selector: Option<String>,
 }
@@ -143,6 +144,7 @@ impl MenuItem {
             icon: None,
             checked: None,
             kbd: None,
+            highlighted: false,
             on_click: None,
             debug_selector: None,
         }
@@ -168,6 +170,12 @@ impl MenuItem {
 
     pub fn kbd(mut self, keys: impl Into<SharedString>) -> Self {
         self.kbd = Some(keys.into());
+        self
+    }
+
+    /// Paints the hover wash, for the row a keyboard-driven list points at.
+    pub fn highlighted(mut self, highlighted: bool) -> Self {
+        self.highlighted = highlighted;
         self
     }
 
@@ -204,6 +212,7 @@ impl RenderOnce for MenuItem {
             .gap_2()
             .rounded(radius::MENU_ROW)
             .cursor_pointer()
+            .when(self.highlighted, |d| d.bg(hover))
             .hover(move |s| s.bg(hover))
             .when_some(self.icon, |d, icon| d.child(Icon::new(icon).size(px(14.))))
             .when_some(self.checked, |d, checked| {

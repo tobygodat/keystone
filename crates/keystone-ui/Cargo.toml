@@ -24,3 +24,7 @@ gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobyg
 [[test]]
 name = "layout_timing"
 required-features = ["ui-tests"]
+
+[[test]]
+name = "perf_lists"
+required-features = ["ui-tests"]

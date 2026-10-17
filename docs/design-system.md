@@ -26,6 +26,7 @@
 | `ConfirmDialog`, `DialogFocus` | A modal question with Cancel and Confirm. See below. |
 | `ListItem` | A selectable row for lists such as the session sidebar. `on_hover` reports the pointer entering and leaving, so a list can build a row action only for the row under the pointer. |
 | `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group, and `MenuItem::detail` adds a muted line that explains it. |
+| `VirtualList`, `VirtualListState` | A keyboard-driven list that renders only its visible rows, for pickers, palettes, and trees. See below. |
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
 | `TextInput`, `InputMode` | An editable text field. `InputMode::SingleLine` refuses newlines and emits `text_input::RejectedMultiline`, so search typing and paste stay on one line. `InputMode::Multiline` wraps, and arrows, Home, and End move by visual row. Every edit emits `text_input::Changed`. Call `TextInput::bind_keys` once at startup. Bound keys reach the input as actions before any key listener runs, so a host that needs Up, Down, or Enter first, such as a list or palette, wraps it in a div with `capture_action` for `text_input::Up`, `Down`, or `Newline` and stops propagation. |
 | `Tooltip` | A hover card with an optional shortcut. |
@@ -49,6 +50,22 @@ Run `cargo run -p keystone-ui --example gallery` to see every component in every
 - Debug selectors are `{id}` for the card, and `{id}-cancel` and `{id}-confirm` for the buttons.
 
 The gallery's "Open confirm dialog" button shows it.
+
+## Virtual list
+
+`VirtualList::new(id, &state, render_row)` draws a list of any length over GPUI's `uniform_list`. It renders only the rows on screen, so frame cost follows the viewport, not the row count. `render_row(index, highlighted, window, cx)` builds one row. `MenuItem::highlighted` paints the same wash as hover, so a `MenuItem` is the usual row.
+
+- The caller holds an `Entity<VirtualListState>` made with `VirtualListState::new(count, cx)`. Its highlight is `None` only when the list is empty, and otherwise always names a row in range. A new list highlights row 0.
+- Up and Down move one row, PageUp and PageDown move one viewport, and Home and End jump to the ends. Moves clamp at the ends and scroll the highlight into view. The keys work while the list has focus, in key context `VirtualList`.
+- Enter and a click call `on_confirm` with the row. Hover moves the highlight without scrolling.
+- `set_count` keeps the highlight in range when the rows change, such as when a filter narrows them.
+- Every row must have the same fixed height. The list measures row 0 and places the rest from it.
+- Row debug selectors are `{id}-row-{index}`.
+- `move_by`, `move_to`, `page`, and `set_count` take no `cx`. A palette or select that owns its own input can forward its keys to them, then call `cx.notify()`. The actions live in `keystone_ui::virtual_list` for hosts that bind their own keys.
+- A list takes focus when clicked. `VirtualList::focusable(false)` leaves focus with the host, so a palette's input keeps it.
+- The list redraws the view that drew it on every move, so it works inside a cached view.
+
+The gallery's List page shows 50,000 rows.
 
 ## Adding a component
 

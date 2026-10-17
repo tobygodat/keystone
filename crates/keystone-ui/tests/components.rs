@@ -260,6 +260,227 @@ fn a_confirm_dialog_blocks_presses_behind_it(cx: &mut TestAppContext) {
     view.read_with(cx, |c, _| assert_eq!(c.answers, vec!["cancel"]));
 }
 
+struct List {
+    state: gpui::Entity<VirtualListState>,
+    confirmed: Option<usize>,
+}
+
+impl Render for List {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(
+            VirtualList::new("list", &self.state, |ix, _, _, _| {
+                div()
+                    .h(gpui::px(20.))
+                    .child(format!("Row {ix}"))
+                    .into_any_element()
+            })
+            .on_confirm(cx.listener(|this, ix: &usize, _, cx| {
+                this.confirmed = Some(*ix);
+                cx.notify();
+            }))
+            .h(gpui::px(200.)),
+        )
+    }
+}
+
+/// A focused 200 px list of 20 px rows, so a page is 10 rows.
+fn open_list(
+    cx: &mut TestAppContext,
+    count: usize,
+) -> (gpui::Entity<List>, &mut gpui::VisualTestContext) {
+    cx.update(keystone_ui::init);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let state = cx.new(|cx| VirtualListState::new(count, cx));
+        window.focus(&gpui::Focusable::focus_handle(state.read(cx), cx), cx);
+        List {
+            state,
+            confirmed: None,
+        }
+    });
+    cx.run_until_parked();
+    (view, cx)
+}
+
+fn highlighted(view: &gpui::Entity<List>, cx: &mut gpui::VisualTestContext) -> Option<usize> {
+    view.read_with(cx, |list, cx| list.state.read(cx).highlighted())
+}
+
+#[gpui::test]
+fn virtual_list_keys_move_highlight(cx: &mut TestAppContext) {
+    let (view, cx) = open_list(cx, 50_000);
+    assert_eq!(highlighted(&view, cx), Some(0));
+    for (keys, expected) in [
+        ("down down down", 3),
+        ("up", 2),
+        ("pagedown", 12),
+        ("pagedown pagedown", 32),
+        ("pageup", 22),
+        ("end", 49_999),
+        ("up", 49_998),
+        ("home", 0),
+    ] {
+        cx.simulate_keystrokes(keys);
+        assert_eq!(highlighted(&view, cx), Some(expected), "{keys}");
+        assert!(
+            row_bounds(cx, expected).is_some(),
+            "{keys}: row {expected} on screen"
+        );
+    }
+}
+
+#[gpui::test]
+fn virtual_list_clamps_at_ends(cx: &mut TestAppContext) {
+    let (view, cx) = open_list(cx, 5);
+    for (keys, expected) in [
+        ("up", 0),
+        ("pageup", 0),
+        ("pagedown", 4),
+        ("down", 4),
+        ("end down", 4),
+        ("home up", 0),
+    ] {
+        cx.simulate_keystrokes(keys);
+        assert_eq!(highlighted(&view, cx), Some(expected), "{keys}");
+    }
+}
+
+#[gpui::test]
+fn virtual_list_enter_confirms(cx: &mut TestAppContext) {
+    let (view, cx) = open_list(cx, 100);
+    cx.simulate_keystrokes("down down enter");
+    view.read_with(cx, |list, _| assert_eq!(list.confirmed, Some(2)));
+    click_row(cx, 4);
+    view.read_with(cx, |list, _| assert_eq!(list.confirmed, Some(4)));
+    assert_eq!(highlighted(&view, cx), Some(4));
+}
+
+fn row_bounds(cx: &mut gpui::VisualTestContext, ix: usize) -> Option<gpui::Bounds<gpui::Pixels>> {
+    cx.debug_bounds(format!("list-row-{ix}").leak())
+}
+
+fn click_row(cx: &mut gpui::VisualTestContext, ix: usize) {
+    let bounds = row_bounds(cx, ix).expect("row");
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn virtual_list_set_count_keeps_highlight_in_range(cx: &mut TestAppContext) {
+    let (view, cx) = open_list(cx, 50);
+    let set_count = |count, cx: &mut gpui::VisualTestContext| {
+        view.update(cx, |list, cx| {
+            list.state.update(cx, |state, cx| {
+                state.set_count(count);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+    };
+    cx.simulate_keystrokes("end");
+    set_count(10, cx);
+    assert_eq!(highlighted(&view, cx), Some(9));
+    assert!(row_bounds(cx, 9).is_some());
+    set_count(0, cx);
+    assert_eq!(highlighted(&view, cx), None);
+    cx.simulate_keystrokes("down end enter");
+    assert_eq!(highlighted(&view, cx), None);
+    view.read_with(cx, |list, _| assert_eq!(list.confirmed, None));
+    set_count(30, cx);
+    assert_eq!(highlighted(&view, cx), Some(0));
+    cx.simulate_keystrokes("end");
+    assert_eq!(highlighted(&view, cx), Some(29));
+    assert!(row_bounds(cx, 29).is_some());
+}
+
+#[gpui::test]
+fn virtual_list_hover_moves_highlight(cx: &mut TestAppContext) {
+    let (view, cx) = open_list(cx, 100);
+    let row = row_bounds(cx, 3).expect("row 3");
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(highlighted(&view, cx), Some(3));
+    cx.simulate_keystrokes("down");
+    assert_eq!(highlighted(&view, cx), Some(4));
+}
+
+struct CachedHost {
+    list: gpui::Entity<List>,
+}
+
+impl Render for CachedHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(
+            gpui::AnyView::from(self.list.clone())
+                .cached(gpui::StyleRefinement::default().size_full()),
+        )
+    }
+}
+
+#[gpui::test]
+fn virtual_list_redraws_inside_a_cached_view(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        let state = cx.new(|cx| VirtualListState::new(50_000, cx));
+        window.focus(&gpui::Focusable::focus_handle(state.read(cx), cx), cx);
+        CachedHost {
+            list: cx.new(|_| List {
+                state,
+                confirmed: None,
+            }),
+        }
+    });
+    cx.run_until_parked();
+    // The first key switches the window to keyboard modality, which redraws everything.
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("end");
+    let view = host.read_with(cx, |host, _| host.list.clone());
+    assert_eq!(highlighted(&view, cx), Some(49_999));
+    assert!(row_bounds(cx, 49_999).is_some(), "row 49999 on screen");
+}
+
+struct Palette {
+    input: gpui::FocusHandle,
+    state: gpui::Entity<VirtualListState>,
+}
+
+impl Render for Palette {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(div().h_8().track_focus(&self.input))
+            .child(
+                VirtualList::new("list", &self.state, |ix, _, _, _| {
+                    div()
+                        .h(gpui::px(20.))
+                        .child(format!("Row {ix}"))
+                        .into_any_element()
+                })
+                .focusable(false)
+                .h(gpui::px(200.)),
+            )
+    }
+}
+
+#[gpui::test]
+fn virtual_list_can_leave_focus_with_its_host(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let input = cx.focus_handle();
+        window.focus(&input, cx);
+        Palette {
+            input,
+            state: cx.new(|cx| VirtualListState::new(3, cx)),
+        }
+    });
+    cx.run_until_parked();
+    let below_rows =
+        row_bounds(cx, 2).expect("row 2").bottom_left() + gpui::point(gpui::px(5.), gpui::px(40.));
+    cx.simulate_click(below_rows, Modifiers::none());
+    cx.run_until_parked();
+    let input = view.read_with(cx, |palette, _| palette.input.clone());
+    cx.update(|window, _| assert!(input.is_focused(window), "the host keeps focus"));
+}
+
 fn focused_input(
     mode: InputMode,
     cx: &mut TestAppContext,
