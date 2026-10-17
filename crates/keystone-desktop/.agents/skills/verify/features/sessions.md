@@ -9,6 +9,9 @@ Create a local Claude or Codex session and select it from the sidebar. These rec
 - `session-keyboard` creates a session with a shortcut.
 - `session-select` switches between existing sessions.
 - `session-attention` lists sessions that need the user in a **Needs action (n)** section above **Working**. A session needs action while it waits for approval, after its last turn failed (including a turn cut off when Keystone closed, but not one the user stopped or that ended because they denied an approval), or when a reply landed after the user last viewed it. The second line names the reason.
+- `session-title` titles a session from its first sent message: one line, cut near 48 characters with an ellipsis. Later messages leave it alone.
+- `session-rename` renames the selected session from the top bar title or F2. A rename is never replaced by a message.
+- `window-drag` moves the window by the top bar or the sidebar app bar, for window managers that draw no title bar. Pressing a control in either bar still clicks it.
 - `session-time` shows how long ago each session last changed: `now`, `5m`, `3h`, a weekday within a week, then a date such as `Oct 3`. Sessions saved before times were recorded show none.
 
 ## How to get to it (user POV)
@@ -17,6 +20,7 @@ Create a local Claude or Codex session and select it from the sidebar. These rec
 - Click the pencil at the right of the sidebar app bar, then **New Claude session** or **New Codex session**.
 - Press Ctrl+N for Claude or Ctrl+Shift+N for Codex.
 - Click a session row in the sidebar to select it.
+- Click the session title in the top bar, or press F2, to rename it. Enter saves, Escape cancels.
 
 ## Driving it with keystone-verify
 
@@ -31,6 +35,8 @@ Preconditions:
 - For the keyboard entry, call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","shift","n"]}]}`. Require a second record with `provider:"Codex"` selected. Type a short draft without a focus click and require it in the composer and state file.
 - For the menu entry, `click` `{"id":"new-session"}` and `wait_for` `{"id":"new-claude"}` or `{"id":"new-codex"}`. Capture the open menu, then `click` that id. Require exactly one additional record of that provider. Type a short draft without a focus click and require it in the composer and state file.
 - `click` the first row by its `session-<id>` from `workspace`. Require its title in the top bar breadcrumb, its provider in the composer toolbar, its restored draft, and its ID in `workspace.selected`.
+- Titles: in a Codex session, send `Fix the login bug` and require it as the row title, the top bar title, and `title` in `workspace`, with `title_source:"FirstMessage"`. `click` `{"id":"rename-session"}`, `wait_for` `{"id":"rename-dialog"}`, select all, type `Release notes`, and press Enter. Require the new title in the row, the top bar, and `workspace` with `title_source:"Renamed"`. Send another message and quit and `launch` again; require the title unchanged. F2 then Escape changes nothing.
+- Window drag: under a floating window manager, press on empty top bar space and drag; require the window to move. Press `minimize`, `maximize`, or `sidebar-toggle` and drift a few pixels before release; require the click to act and the window not to move.
 - Preserve before/after screenshots and a state snapshot. Repeat the welcome journey in a fresh run for Codex before marking both provider buttons verified.
 
 Needs action, with the scripted Codex from [conversations](conversations.md) and `KEYSTONE_FAKE_CODEX_DELAY_MS` of `250`:
@@ -45,6 +51,6 @@ Needs action, with the scripted Codex from [conversations](conversations.md) and
 
 - Duplicate titles are allowed. Use state IDs and the screenshot row position to distinguish sessions.
 - The welcome chooser appears only when no session is selected. It is absent after creation.
-- Named ids are `welcome-claude`, `welcome-codex`, `welcome-heading`, `new-session`, `new-claude`, `new-codex`, `composer-field`, `sidebar-toggle`, `session-<id>`, `settle-<id>`, `attention-section`, `working-section`, and `settled-section`. The same ids serve GPUI simulated tests.
+- Named ids are `welcome-claude`, `welcome-codex`, `welcome-heading`, `new-session`, `new-claude`, `new-codex`, `composer-field`, `sidebar-toggle`, `rename-session`, `rename-dialog`, `rename-field`, `rename-dialog-cancel`, `rename-dialog-confirm`, `minimize`, `maximize`, `close`, `session-<id>`, `settle-<id>`, `attention-section`, `working-section`, and `settled-section`. The same ids serve GPUI simulated tests.
 - Every creation path focuses the composer: the welcome buttons, the sidebar menu, Ctrl+N, and Ctrl+Shift+N.
 - Use `wait_for` on a menu item before clicking it. With `headless:false`, the nested window must stay visible. A hidden window draws no frames, so a click on a newly opened menu lands on the previous frame and misses.

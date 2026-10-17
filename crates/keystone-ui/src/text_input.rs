@@ -440,9 +440,13 @@ impl TextInput {
         self.move_to(self.content.len(), cx);
     }
 
+    /// A single line has no use for Enter, so it goes on to the input's container,
+    /// such as a dialog that submits on it.
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode == InputMode::Multiline {
             self.replace_text_in_range(None, "\n", window, cx);
+        } else {
+            cx.propagate();
         }
     }
 
@@ -484,7 +488,7 @@ impl TextInput {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         self.reveal_cursor = true;

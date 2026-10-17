@@ -99,6 +99,12 @@ fn save_failure_keeps_visible_state_unchanged() {
     fs::create_dir(&path).unwrap();
     assert!(store.set_draft(1, "unwritten".into()).is_err());
     assert_eq!(store.workspace().sessions()[0].draft(), "");
+    assert!(store.rename(1, "Unwritten").is_err());
+    assert!(store.record_message(1, "Unwritten", 2).is_err());
+    assert_eq!(
+        store.workspace().sessions()[0].title(),
+        "New Claude session"
+    );
     assert!(path.is_dir());
 }
 

@@ -1,31 +1,35 @@
 mod conversation;
 mod relative_time;
+mod reveal;
 mod settings;
 mod transcript;
 
 use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
-    Anchor, AnyElement, AnyView, App, AvailableSpace, Bounds, BoxShadow, Context, Entity,
-    FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset, ListState, Pixels,
-    Render, ScrollHandle, StyleRefinement, Subscription, WeakEntity, Window, WindowBounds,
-    WindowOptions, canvas, div, list, point, prelude::*, px, size,
+    Anchor, AnyElement, AnyView, App, AvailableSpace, BackgroundExecutor, Bounds, BoxShadow,
+    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle,
+    StyleRefinement, Subscription, WeakEntity, Window, WindowBounds, WindowOptions, canvas, div,
+    list, point, prelude::*, px, size,
 };
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{
     ApprovalState, ClaudeConnection, CodexConnection, Command, Connection, Event, ItemKind,
-    ItemStatus, TurnStatus, Wake,
+    TurnStatus, Wake,
 };
 use keystone_core::{
     ApprovalMode, Attention, Density, Durability, Preferences, Provider, Store, ThemeMode,
 };
-use keystone_ui::markdown::{Document, IncrementalParser};
-use keystone_ui::text_input::Changed;
+use keystone_ui::markdown::Document;
+use keystone_ui::text_input::{Changed, SelectAll};
 use keystone_ui::{automation, prelude::*};
 use relative_time::{LocalTime, relative};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 gpui::actions!(
@@ -37,7 +41,8 @@ gpui::actions!(
         ToggleSettle,
         FocusComposer,
         FocusSearch,
-        SendMessage
+        SendMessage,
+        RenameSession
     ]
 );
 
@@ -73,6 +78,18 @@ fn arch_mark(size: Pixels) -> impl IntoElement {
                     .color(Color::Accent),
             ),
         )
+}
+
+fn ranges(mut rows: Vec<usize>) -> Vec<Range<usize>> {
+    rows.sort_unstable();
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for index in rows {
+        match ranges.last_mut() {
+            Some(range) if range.end == index => range.end += 1,
+            _ => ranges.push(index..index + 1),
+        }
+    }
+    ranges
 }
 
 /// The wall clock in unix milliseconds. The store takes it as an argument, so its
@@ -111,6 +128,13 @@ fn durability_warning(durability: Durability) -> Option<String> {
     }
 }
 
+/// The open rename dialog. A failed save keeps it open with `error`.
+struct Renaming {
+    id: u64,
+    focus: DialogFocus,
+    error: Option<String>,
+}
+
 struct Keystone {
     store: Store,
     error: Option<String>,
@@ -126,6 +150,11 @@ struct Keystone {
     /// Full access chosen from the menu for this session, waiting in the confirmation
     /// dialog. Nothing is saved or sent until Confirm.
     confirm_full_access: Option<(u64, DialogFocus)>,
+    renaming: Option<Renaming>,
+    rename_input: Entity<TextInput>,
+    /// Set by a press on the top bar. The first move then hands the window to the
+    /// compositor, so a plain click never starts a move.
+    window_drag: bool,
     /// Whether the sidebar's Settled section is expanded. It starts collapsed.
     settled_open: bool,
     sidebar: bool,
@@ -148,9 +177,11 @@ struct Keystone {
     wake: Wake,
     /// Scrolls the sample transcript, which is not a list.
     transcript_scroll: ScrollHandle,
-    /// Each reply row's Markdown. A streaming reply appends each delta to its parser,
-    /// which parses only the reply's last blocks again.
-    markdown: RefCell<HashMap<(u64, usize), IncrementalParser>>,
+    /// Each reply row's Markdown and how much of it is shown. The open session's
+    /// streaming replies catch up with each burst over a few frames.
+    replies: RefCell<reveal::Replies>,
+    reveal_task: Option<gpui::Task<()>>,
+    clock: BackgroundExecutor,
     /// The sample transcript, parsed once.
     fixture_document: Arc<Document>,
 }
@@ -162,6 +193,7 @@ impl Keystone {
                 .text_style(TextSize::Body, Color::Strong)
         });
         let search = cx.new(|cx| TextInput::new("Search", InputMode::SingleLine, cx));
+        let rename_input = cx.new(|cx| TextInput::new("Session title", InputMode::SingleLine, cx));
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
                 this.draft_save_task = Some(cx.spawn(async move |this, cx| {
@@ -239,6 +271,9 @@ impl Keystone {
             settings_menu: false,
             approval_menu: false,
             confirm_full_access: None,
+            renaming: None,
+            rename_input,
+            window_drag: false,
             settled_open: false,
             sidebar: true,
             fixture,
@@ -251,7 +286,9 @@ impl Keystone {
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
-            markdown: RefCell::default(),
+            replies: RefCell::default(),
+            reveal_task: None,
+            clock: cx.background_executor().clone(),
             fixture_document: Arc::new(Document::parse(if fixture {
                 include_str!("fixture.md")
             } else {
@@ -362,6 +399,10 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
+        if let Some(left) = self.store.workspace().selected() {
+            let rows = self.replies.get_mut().settle(left);
+            self.invalidate(left, ranges(rows), false);
+        }
         self.error = match self.store.create(provider, now_ms()) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
@@ -409,23 +450,15 @@ impl Keystone {
             .child(Markdown::new("fixture", self.fixture_document.clone()))
     }
 
-    /// The parsed Markdown of reply row `index`. While the reply streams, its unclosed
-    /// inline markers show as closed, so styling does not jump when the closer arrives.
-    fn parsed(&self, session: u64, index: usize, text: &str, streaming: bool) -> Arc<Document> {
-        let mut cache = self.markdown.borrow_mut();
-        let parser = cache.entry((session, index)).or_default();
-        if streaming {
-            parser.set_text(text);
-            parser.display()
-        } else {
-            parser.finish(text)
-        }
-    }
-
     fn select(&mut self, id: u64, cx: &mut Context<Self>) {
         if !self.save_draft(cx) {
             return;
         }
+        if let Some(left) = self.store.workspace().selected() {
+            let rows = self.replies.get_mut().settle(left);
+            self.invalidate(left, ranges(rows), false);
+        }
+        self.replies.get_mut().forget(id);
         self.error = match self.store.select(id, now_ms()) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
@@ -442,34 +475,81 @@ impl Keystone {
         }
     }
 
+    /// Lets a press on `bar` move the window, for window managers that draw no title
+    /// bar. The press arms the move before any control sees it, and a control wrapped in
+    /// [`Keystone::own_press`] disarms it, so a press that drifts on a control still clicks.
+    fn drag_window(&self, bar: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        bar.capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
+            this.window_drag = event.button == MouseButton::Left;
+        }))
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, _| {
+            if std::mem::take(&mut this.window_drag) && event.dragging() {
+                window.start_window_move();
+            }
+        }))
+    }
+
+    /// Keeps a press on `control` from moving the window around it.
+    fn own_press(&self, control: impl IntoElement, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.window_drag = false),
+            )
+            .child(control)
+    }
+
     /// The main column's bar: the sidebar toggle, the breadcrumb, and the window controls.
     fn top_bar(&self, session: Option<(String, bool)>, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
+        let hover = cx.theme().colors.element_hover;
+        let bar = h_flex()
             .flex_shrink_0()
             .h(cx.theme().density.control(px(44.)))
             .px(px(6.))
             .gap(px(10.))
             .child(
-                IconButton::new("sidebar-toggle", IconName::Panel)
-                    .debug_selector(|| "sidebar-toggle".into())
-                    .tooltip(Tooltip::text(if self.sidebar {
-                        "Hide sidebar"
-                    } else {
-                        "Show sidebar"
-                    }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar = !this.sidebar;
-                        this.refresh(cx);
-                    })),
+                self.own_press(
+                    IconButton::new("sidebar-toggle", IconName::Panel)
+                        .debug_selector(|| "sidebar-toggle".into())
+                        .tooltip(Tooltip::text(if self.sidebar {
+                            "Hide sidebar"
+                        } else {
+                            "Show sidebar"
+                        }))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sidebar = !this.sidebar;
+                            this.refresh(cx);
+                        })),
+                    cx,
+                ),
             )
             .child(Label::new("keystone").color(Color::Muted))
             .when_some(session, |d, (title, settled)| {
                 d.child(Label::new("/").color(Color::Faint))
                     .child(
-                        Label::new(title)
-                            .weight(FontWeight::MEDIUM)
-                            .color(Color::Strong)
-                            .truncate(),
+                        div()
+                            .id("rename-session")
+                            .automation_id("rename-session")
+                            .min_w_0()
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(hover))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, _| this.window_drag = false),
+                            )
+                            .child(
+                                Label::new(title)
+                                    .weight(FontWeight::MEDIUM)
+                                    .color(Color::Strong)
+                                    .truncate(),
+                            )
+                            .tooltip(Tooltip::with_key("Rename session", "F2").builder())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_rename(window, cx)),
+                            ),
                     )
                     .when(settled, |d| {
                         d.child(Label::new("Settled").color(Color::Muted))
@@ -477,30 +557,134 @@ impl Keystone {
             })
             .child(div().flex_1())
             .child(
-                IconButton::new("minimize", IconName::Minus)
-                    .tooltip(Tooltip::text("Minimize"))
-                    .on_click(|_, window, _| window.minimize_window()),
+                self.own_press(
+                    h_flex()
+                        .gap(px(10.))
+                        .child(
+                            IconButton::new("minimize", IconName::Minus)
+                                .debug_selector(|| "minimize".into())
+                                .tooltip(Tooltip::text("Minimize"))
+                                .on_click(|_, window, _| window.minimize_window()),
+                        )
+                        .child(
+                            IconButton::new("maximize", IconName::Square)
+                                .debug_selector(|| "maximize".into())
+                                .tooltip(Tooltip::text("Maximize"))
+                                .on_click(|_, window, _| window.zoom_window()),
+                        )
+                        .child(
+                            IconButton::new("close", IconName::Close)
+                                .debug_selector(|| "close".into())
+                                .tooltip(Tooltip::with_key("Close window", "Ctrl+Q"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if this.save_before_exit(cx) {
+                                        window.remove_window();
+                                    }
+                                })),
+                        ),
+                    cx,
+                ),
+            );
+        self.drag_window(bar, cx)
+    }
+
+    /// Opens the rename dialog for the selected session, filled with its title.
+    fn open_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let (id, title) = (session.id(), session.title().to_owned());
+        let field = self.rename_input.focus_handle(cx);
+        self.renaming = Some(Renaming {
+            id,
+            focus: DialogFocus::with_body(field, window, cx),
+            error: None,
+        });
+        self.rename_input.update(cx, |input, cx| {
+            input.set_value(title, cx);
+            input.select_all(&SelectAll, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Saves the typed title. A blank one keeps the dialog open; a failed save keeps
+    /// it open with the typed title and the error, so the user can retry.
+    fn confirm_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.renaming.as_ref().map(|renaming| renaming.id) else {
+            return;
+        };
+        let title = self.rename_input.read(cx).value().to_owned();
+        match self.store.rename(id, &title) {
+            Ok(applied) => {
+                self.error = durability_warning(applied.durability);
+                self.close_rename(window, cx);
+            }
+            Err(error) => {
+                if let Some(renaming) = &mut self.renaming {
+                    renaming.error = Some(format!("Title not saved. {error}"));
+                }
+                self.rename_input.focus_handle(cx).focus(window, cx);
+            }
+        }
+        self.refresh(cx);
+    }
+
+    fn rename_dialog(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let renaming = self.renaming.as_ref()?;
+        let colors = cx.theme().colors;
+        let cancel = cx.listener(|this, _: &(), window, cx| this.close_rename(window, cx));
+        let confirm =
+            Rc::new(cx.listener(|this, _: &(), window, cx| this.confirm_rename(window, cx)));
+        let submit = confirm.clone();
+        let field = div()
+            .px(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(colors.border_focused)
+            .bg(colors.background)
+            .automation_id("rename-field")
+            .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "enter" {
+                    submit(&(), window, cx);
+                    cx.stop_propagation();
+                }
+            })
+            .child(self.rename_input.clone());
+        let body = v_flex()
+            .gap(spacing::SM)
+            .child(field)
+            .children(renaming.error.clone().map(|error| {
+                div()
+                    .automation_id("rename-error")
+                    .child(Label::new(error).size(TextSize::Sm).color(Color::Danger))
+            }));
+        Some(
+            ConfirmDialog::new(
+                "rename-dialog",
+                &renaming.focus,
+                "Rename session",
+                "Shown in the sidebar and above the conversation.",
             )
-            .child(
-                IconButton::new("maximize", IconName::Square)
-                    .tooltip(Tooltip::text("Maximize"))
-                    .on_click(|_, window, _| window.zoom_window()),
-            )
-            .child(
-                IconButton::new("close", IconName::Close)
-                    .tooltip(Tooltip::with_key("Close window", "Ctrl+Q"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.save_before_exit(cx) {
-                            window.remove_window();
-                        }
-                    })),
-            )
+            .icon(IconName::Pencil)
+            .tone(Color::Accent)
+            .confirm_label("Rename")
+            .body(body)
+            .on_cancel(move |window, cx| cancel(&(), window, cx))
+            .on_confirm(move |window, cx| confirm(&(), window, cx)),
+        )
     }
 
     /// The left column: app bar, search, the cached session list, and the settings footer.
     fn sidebar_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (colors, density) = (cx.theme().colors, cx.theme().density);
         let list = AnyView::from(self.session_sidebar.clone());
+        let new_session = self.new_session_menu(cx).into_any_element();
         v_flex()
             .w(px(302.))
             .flex_shrink_0()
@@ -508,36 +692,46 @@ impl Keystone {
             .bg(colors.sidebar)
             .hairline_r(cx)
             .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .h(density.control(px(44.)))
-                    .pl(px(13.))
-                    .pr_2()
-                    .gap(px(10.))
-                    .child(arch_mark(px(20.)))
-                    .child(
-                        Label::new("keystone")
-                            .size(TextSize::Body)
-                            .weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(
-                        h_flex()
-                            .h(px(18.))
-                            .px(px(6.))
-                            .rounded(px(5.))
-                            .bg(colors.element_hover)
-                            .child(Label::new("preview").size(TextSize::Xs).color(Color::Muted)),
-                    )
-                    .child(div().flex_1())
-                    .child(self.new_session_menu(cx)),
+                self.drag_window(
+                    h_flex()
+                        .flex_shrink_0()
+                        .h(density.control(px(44.)))
+                        .pl(px(13.))
+                        .pr_2()
+                        .gap(px(10.))
+                        .child(arch_mark(px(20.)))
+                        .child(
+                            Label::new("keystone")
+                                .size(TextSize::Body)
+                                .weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(
+                            h_flex()
+                                .h(px(18.))
+                                .px(px(6.))
+                                .rounded(px(5.))
+                                .bg(colors.element_hover)
+                                .child(
+                                    Label::new("preview").size(TextSize::Xs).color(Color::Muted),
+                                ),
+                        )
+                        .child(div().flex_1())
+                        .child(self.own_press(new_session, cx)),
+                    cx,
+                ),
             )
             .child(
                 h_flex()
+                    .id("search")
                     .flex_shrink_0()
                     .h(density.control(px(36.)))
                     .pl(px(14.))
                     .pr_2()
                     .gap_2()
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.search.focus_handle(cx).focus(window, cx)
+                    }))
                     .child(Icon::new(IconName::Search).size(px(15.)))
                     .child(
                         div()
@@ -722,7 +916,7 @@ impl Keystone {
                 let status = if waiting {
                     "Waiting for your approval"
                 } else if running {
-                    "Working · Ctrl+Enter steers this turn"
+                    "Ctrl+Enter steers this turn"
                 } else {
                     "Ctrl+Enter to send · Enter for a new line"
                 };
@@ -730,6 +924,15 @@ impl Keystone {
                     || self.project_dir.display().to_string(),
                     |n| n.to_string_lossy().into_owned(),
                 );
+                let project = Button::new("project", project)
+                    .size(ButtonSize::Compact)
+                    .icon(IconName::Folder)
+                    .debug_selector(|| "project".into())
+                    .tooltip(Tooltip::text(format!(
+                        "Open project folder · {}",
+                        self.project_dir.display()
+                    )))
+                    .on_click(cx.listener(|this, _, _, cx| cx.open_with_system(&this.project_dir)));
                 let toolbar = h_flex()
                     .gap(px(14.))
                     .child(
@@ -755,24 +958,7 @@ impl Keystone {
                             ),
                     )
                     .child(div().flex_shrink_0().w_px().h(px(14.)).bg(colors.border))
-                    .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .gap(px(6.))
-                            .child(Icon::new(IconName::Folder).size(px(13.)))
-                            .child(
-                                div()
-                                    .id("project")
-                                    .automation_id("project")
-                                    .child(
-                                        Label::new(project).size(TextSize::Ui).color(Color::Muted),
-                                    )
-                                    .tooltip(
-                                        Tooltip::text(self.project_dir.display().to_string())
-                                            .builder(),
-                                    ),
-                            ),
-                    )
+                    .child(project)
                     .when_some(mode, |d, mode| {
                         d.child(self.approval_menu(mode, running, cx))
                     })
@@ -874,9 +1060,9 @@ impl Keystone {
             .px(px(11.))
             .gap(px(7.))
             .rounded(px(15.))
-            .bg(colors.element_selected)
+            .bg(colors.element_filled)
             .cursor_pointer()
-            .hover(move |s| s.bg(colors.element_active))
+            .hover(move |s| s.bg(colors.element_filled_hover))
             .child(
                 Icon::new(IconName::Diamond)
                     .size(px(12.))
@@ -1051,30 +1237,52 @@ impl Keystone {
         };
         self.logs.append(session, conversation.take_writes());
         let changed = conversation.take_changes();
+        if self.store.workspace().selected() == Some(session) {
+            let now = self.clock.now();
+            let replies = self.replies.get_mut();
+            for index in changed.iter().cloned().flatten() {
+                if let Some(Row::Item(item)) = conversation.rows.get(index)
+                    && item.kind == ItemKind::AgentMessage
+                {
+                    replies.observe((session, index), item, now);
+                }
+            }
+        }
+        self.invalidate(session, changed, true);
+    }
+
+    /// Remeasures the changed rows of the session's list, and its status entry when
+    /// `status` is set, keeping the reader's place.
+    fn invalidate(&mut self, session: u64, changed: Vec<Range<usize>>, status: bool) {
+        let Some(conversation) = self.conversations.get(&session) else {
+            return;
+        };
         let count = conversation.rows.len() + 1;
         if let Some(list) = self.transcripts.get(&session) {
             // Rows are only appended or replaced in place, so every row the list
             // already shows keeps its index; the status entry is always last.
             let old = list.item_count();
-            let status = old.saturating_sub(1).min(count - 1);
+            let status_ix = old.saturating_sub(1).min(count - 1);
             // A splice moves the view to the start of a remeasured entry. Unless it
             // is following the bottom, which reads as the end of the list, keep it on
             // the same entry at the same offset.
             let top = list.logical_scroll_top();
             let scrolled = top.item_ix < old;
-            let mut remeasured = top.item_ix >= status;
+            let mut remeasured = status && top.item_ix >= status_ix;
             for range in changed {
                 remeasured |= range.contains(&top.item_ix);
-                let range = range.start..range.end.min(status);
+                let range = range.start..range.end.min(status_ix);
                 if !range.is_empty() {
                     list.splice(range.clone(), range.len());
                 }
             }
             // The status entry changes with almost anything, so it is always remeasured.
-            list.splice(status..old, count - status);
+            if status {
+                list.splice(status_ix..old, count - status_ix);
+            }
             if scrolled {
                 // Rows added before the status entry move it down; follow it.
-                let item_ix = if top.item_ix == status {
+                let item_ix = if top.item_ix == status_ix {
                     count - 1
                 } else {
                     top.item_ix
@@ -1085,6 +1293,37 @@ impl Keystone {
                 }
             }
         }
+    }
+
+    fn reveal(&mut self, cx: &mut Context<Self>) {
+        if self.reveal_task.is_some() || !self.replies.get_mut().pacing() {
+            return;
+        }
+        self.reveal_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(reveal::TICK).await;
+            let _ = this.update(cx, |this, cx| {
+                this.reveal_task = None;
+                let conversations = &this.conversations;
+                let changed = this
+                    .replies
+                    .get_mut()
+                    .tick(this.clock.now(), |(session, index)| {
+                        match conversations.get(&session)?.rows.get(index)? {
+                            Row::Item(item) if item.kind == ItemKind::AgentMessage => Some(item),
+                            _ => None,
+                        }
+                    });
+                let mut sessions: HashMap<u64, Vec<usize>> = HashMap::new();
+                for (session, index) in changed {
+                    sessions.entry(session).or_default().push(index);
+                }
+                for (session, rows) in sessions {
+                    this.invalidate(session, ranges(rows), false);
+                    cx.notify();
+                }
+                this.reveal(cx);
+            });
+        }));
     }
 
     /// Runs before the transcript list lays out. When the row the user is scrolled
@@ -1228,6 +1467,7 @@ impl Keystone {
                 }
             }
         }
+        self.reveal(cx);
         // Streamed text redraws only this view. The sidebar refreshes when a row changes.
         if sidebar_changed {
             self.refresh(cx);
@@ -1373,7 +1613,7 @@ impl Keystone {
         self.error = None;
         self.conversation(id).push_local(&text);
         self.commit(id);
-        if let Err(error) = self.store.record_message(id, now_ms()) {
+        if let Err(error) = self.store.record_message(id, &text, now_ms()) {
             self.error = Some(format!("Could not save the session. {error}"));
         }
         self.composer
@@ -1436,6 +1676,28 @@ impl Keystone {
         .py_6()
     }
 
+    fn jump_to_latest(&self, session: u64, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let list = self.transcripts.get(&session)?;
+        (list.logical_scroll_top().item_ix < list.item_count()).then(|| {
+            h_flex()
+                .absolute()
+                .bottom_3()
+                .left_0()
+                .w_full()
+                .justify_center()
+                .child(
+                    Button::new("jump-to-latest", "Jump to latest")
+                        .style(ButtonStyle::Filled)
+                        .icon(IconName::Chevron)
+                        .debug_selector(|| "jump-to-latest".into())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.scroll_to_end(session);
+                            cx.notify();
+                        })),
+                )
+        })
+    }
+
     /// One list entry: a row, or after the last row, the turn's status. Each entry is
     /// laid out on its own, so it carries the transcript's width and text style.
     fn transcript_entry(&self, session: u64, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -1446,8 +1708,7 @@ impl Keystone {
             Some(row) if conversation::visible(row) => {
                 let reply = match row {
                     Row::Item(item) if item.kind == ItemKind::AgentMessage => {
-                        let streaming = item.status == ItemStatus::InProgress;
-                        Some(self.parsed(session, index, &item.text, streaming))
+                        Some(self.replies.borrow_mut().document((session, index), item))
                     }
                     _ => None,
                 };
@@ -1500,7 +1761,7 @@ impl Keystone {
                     .id("approval")
                     .automation_id("approval")
                     .surface(Elevation::Raised, cx)
-                    .border_color(colors.border_focused)
+                    .border_color(colors.border_strong)
                     .p_3()
                     .gap_2()
                     .child(
@@ -1525,7 +1786,7 @@ impl Keystone {
                             .gap_2()
                             .child(
                                 Button::new("approve", "Allow")
-                                    .style(ButtonStyle::Filled)
+                                    .style(ButtonStyle::Primary)
                                     .icon(IconName::Check)
                                     .debug_selector(|| "approve".into())
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1546,11 +1807,16 @@ impl Keystone {
         } else if conversation.running {
             empty = false;
             view = view.child(
-                div().id("turn-status").automation_id("turn-status").child(
-                    Label::new("Working…")
-                        .size(TextSize::Ui)
-                        .color(Color::Muted),
-                ),
+                h_flex()
+                    .id("turn-status")
+                    .automation_id("turn-status")
+                    .gap_2()
+                    .child(div().size(px(6.)).rounded_full().bg(colors.accent))
+                    .child(
+                        Label::new("Working…")
+                            .size(TextSize::Ui)
+                            .color(Color::Muted),
+                    ),
             );
         }
         for error in conversation
@@ -2033,6 +2299,7 @@ impl Render for Keystone {
                     .w_full()
                     .child(self.transcript_top_check(id, cx))
                     .child(self.transcript_list(id, cx))
+                    .children(self.jump_to_latest(id, cx))
                     .into_any_element(),
                 None if self.fixture => div()
                     .flex_1()
@@ -2146,6 +2413,9 @@ impl Render for Keystone {
             .on_action(
                 cx.listener(|this, _: &SendMessage, window, cx| this.send_message(window, cx)),
             )
+            .on_action(
+                cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.sidebar = true;
                 this.search.focus_handle(cx).focus(window, cx);
@@ -2161,6 +2431,7 @@ impl Render for Keystone {
                     .child(main),
             )
             .children(self.full_access_dialog(cx))
+            .children(self.rename_dialog(cx))
     }
 }
 
@@ -2525,6 +2796,168 @@ mod tests {
             read.top()
         );
         assert!(cx.debug_bounds("transcript-row-600").is_none());
+    }
+
+    #[gpui::test]
+    fn a_streamed_burst_reveals_over_frames_while_its_turn_state_shows_at_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx, _dir) = long_session(cx);
+        cx.run_until_parked();
+        let receive = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, events| {
+            view.update(cx, |this, cx| this.receive(Vec::new(), events, cx));
+            cx.run_until_parked();
+        };
+        let height = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("transcript-row-600").unwrap().size.height
+        };
+        let tick = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(reveal::TICK);
+            cx.run_until_parked();
+        };
+        let reply = "Streamed words. ".repeat(100);
+        receive(
+            &view,
+            cx,
+            vec![
+                (1, Event::TurnStarted),
+                (
+                    1,
+                    Event::ItemStarted(Item {
+                        id: "reply".into(),
+                        kind: ItemKind::AgentMessage,
+                        text: String::new(),
+                        status: ItemStatus::InProgress,
+                    }),
+                ),
+                (
+                    1,
+                    Event::ItemDelta {
+                        item_id: "reply".into(),
+                        text: reply.clone(),
+                    },
+                ),
+                (
+                    1,
+                    Event::ApprovalRequested(keystone_agent::Approval {
+                        request: keystone_agent::RequestId("1".into()),
+                        item_id: None,
+                        action: "cargo test".into(),
+                        detail: None,
+                    }),
+                ),
+            ],
+        );
+        assert!(cx.debug_bounds("approve").is_some());
+        view.read_with(cx, |this, _| {
+            assert!(
+                matches!(&this.conversations[&1].rows[600], Row::Item(item) if item.text == reply)
+            );
+        });
+        let first = height(cx);
+        tick(cx);
+        let second = height(cx);
+        assert!(second > first, "the reply grows on the next frame");
+        for _ in 0..10 {
+            tick(cx);
+        }
+        let full = height(cx);
+        assert!(full > second);
+        view.read_with(cx, |this, _| {
+            assert!(this.reveal_task.is_none(), "no timer once caught up")
+        });
+
+        let over = cx.debug_bounds("conversation").unwrap().center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(120.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let read = cx.debug_bounds("transcript-row-600").unwrap().top();
+        receive(
+            &view,
+            cx,
+            vec![(
+                1,
+                Event::ItemDelta {
+                    item_id: "reply".into(),
+                    text: "More words. ".repeat(100),
+                },
+            )],
+        );
+        for _ in 0..3 {
+            tick(cx);
+            assert_eq!(cx.debug_bounds("transcript-row-600").unwrap().top(), read);
+        }
+
+        receive(
+            &view,
+            cx,
+            vec![(
+                1,
+                Event::TurnCompleted {
+                    status: TurnStatus::Completed,
+                    error: None,
+                    stopped: false,
+                },
+            )],
+        );
+        let done = height(cx);
+        tick(cx);
+        assert_eq!(height(cx), done, "nothing left to reveal");
+
+        click(cx, "jump-to-latest");
+        assert!(cx.debug_bounds("jump-to-latest").is_none());
+        let composer = cx.debug_bounds("composer-field").unwrap();
+        let row = cx.debug_bounds("transcript-row-600").unwrap();
+        assert!(row.bottom() <= composer.top());
+        assert!(cx.debug_bounds("copy-reply-600").is_some());
+    }
+
+    #[gpui::test]
+    fn a_session_selected_again_shows_its_backlog_at_once(cx: &mut gpui::TestAppContext) {
+        let (view, cx, _dir) = long_session(cx);
+        let delta = |text: &str| {
+            (
+                1,
+                Event::ItemDelta {
+                    item_id: "reply".into(),
+                    text: text.into(),
+                },
+            )
+        };
+        view.update(cx, |this, cx| {
+            let reply = Item {
+                id: "reply".into(),
+                kind: ItemKind::AgentMessage,
+                text: "Shown. ".into(),
+                status: ItemStatus::InProgress,
+            };
+            let events = vec![(1, Event::TurnStarted), (1, Event::ItemStarted(reply))];
+            this.receive(Vec::new(), events, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |this, cx| {
+            this.receive(Vec::new(), vec![delta(&"Visible burst. ".repeat(100))], cx);
+            assert!(this.replies.get_mut().pacing());
+            this.create(Provider::Codex, cx);
+            assert!(
+                !this.replies.get_mut().pacing(),
+                "new sessions settle the reply being left"
+            );
+        });
+        cx.run_until_parked();
+
+        view.update(cx, |this, cx| {
+            this.receive(Vec::new(), vec![delta(&"Backlog. ".repeat(100))], cx);
+            this.select(1, cx);
+            this.receive(Vec::new(), vec![delta("More. ")], cx);
+            assert!(
+                !this.replies.get_mut().pacing(),
+                "the backlog is not replayed"
+            );
+        });
     }
 
     /// Opens a long session and returns its view once the history is shown.
@@ -3679,12 +4112,24 @@ mod tests {
                 .unwrap()
         });
         view.read_with(cx, |view, _| {
-            let cache = view.markdown.borrow();
-            assert!(!cache[&(1, reply)].document().is_empty());
+            let Row::Item(item) = &view.conversations[&1].rows[reply] else {
+                panic!("a reply row");
+            };
+            assert!(
+                !view
+                    .replies
+                    .borrow_mut()
+                    .document((1, reply), item)
+                    .is_empty()
+            );
         });
         click(cx, format!("copy-reply-{reply}").leak());
         let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert!(copied.unwrap().contains("**Approvals:**"));
+        hover(cx, "transcript-row-0");
+        click(cx, "copy-message-0");
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(copied.as_deref(), Some("hello"));
         view.update_in(cx, |view, window, cx| {
             view.composer.focus_handle(cx).focus(window, cx)
         });
@@ -4885,6 +5330,96 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_rename_saves_on_enter_and_escape_keeps_the_title(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let (view, cx) = open_window(&path, cx);
+        click(cx, "new-session");
+        click(cx, "new-codex");
+        let saved_title = || {
+            Store::open(&path).unwrap().workspace().sessions()[0]
+                .title()
+                .to_owned()
+        };
+
+        click(cx, "rename-session");
+        view.update(cx, |view, cx| {
+            assert!(view.renaming.is_some(), "the title opens the rename dialog");
+            view.rename_input.update(cx, |input, cx| {
+                input.set_value(" Release  notes ".into(), cx)
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        assert!(view.read_with(cx, |view, _| view.renaming.is_none()));
+        assert_eq!(saved_title(), "Release notes");
+
+        cx.simulate_keystrokes("f2");
+        view.update(cx, |view, cx| {
+            assert!(view.renaming.is_some(), "F2 opens the rename dialog");
+            view.rename_input
+                .update(cx, |input, cx| input.set_value("Discarded".into(), cx));
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(cx, |view, _| view.renaming.is_none()));
+        assert_eq!(saved_title(), "Release notes");
+    }
+
+    #[gpui::test]
+    fn a_rename_tabs_through_its_field_and_retries_a_failed_save(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        let path = state_dir.join("workspace.json");
+        let (view, cx) = open_window(&path, cx);
+        click(cx, "new-session");
+        click(cx, "new-codex");
+        let value = |cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, cx| view.rename_input.read(cx).value().to_owned())
+        };
+
+        cx.simulate_keystrokes("f2");
+        cx.simulate_input("New");
+        assert_eq!(
+            value(cx),
+            "New",
+            "the field opens focused with its title selected"
+        );
+        cx.simulate_keystrokes("tab tab tab");
+        cx.simulate_input("er");
+        assert_eq!(
+            value(cx),
+            "Newer",
+            "Tab cycles Cancel, Rename, and back to the field"
+        );
+
+        std::fs::rename(&state_dir, dir.path().join("backup")).unwrap();
+        cx.simulate_keystrokes("shift-tab enter");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.renaming.is_some()));
+        assert!(
+            cx.debug_bounds("rename-error").is_some(),
+            "the dialog shows the error"
+        );
+        cx.simulate_input("!");
+        assert_eq!(
+            value(cx),
+            "Newer!",
+            "the typed title stays, with the field focused"
+        );
+
+        std::fs::rename(dir.path().join("backup"), &state_dir).unwrap();
+        cx.simulate_keystrokes("enter");
+        assert!(view.read_with(cx, |view, _| view.renaming.is_none()));
+        let saved = Store::open(&path).unwrap().workspace().sessions()[0]
+            .title()
+            .to_owned();
+        assert_eq!(saved, "Newer!");
+    }
+
+    #[gpui::test]
     fn unsaved_draft_survives_failed_navigation_and_retries(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state");
@@ -4948,6 +5483,7 @@ fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new("ctrl-l", FocusComposer, Some("!Dialog")),
         gpui::KeyBinding::new("ctrl-f", FocusSearch, Some("!Dialog")),
         gpui::KeyBinding::new("ctrl-enter", SendMessage, Some("!Dialog")),
+        gpui::KeyBinding::new("f2", RenameSession, Some("!Dialog")),
     ]);
 }
 

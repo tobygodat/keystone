@@ -249,6 +249,7 @@ fn a_confirm_dialog_answers_once_and_returns_focus(cx: &mut TestAppContext) {
         ("confirm", "confirm"),
         ("tab enter", "confirm"),
         ("tab tab enter", "cancel"),
+        ("shift-tab enter", "confirm"),
     ] {
         let (view, cx) = open_confirm(cx);
         assert!(cx.debug_bounds("ask").is_some(), "{how}: dialog shows");

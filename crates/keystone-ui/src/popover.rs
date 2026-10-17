@@ -217,7 +217,11 @@ impl RenderOnce for MenuItem {
             .when_some(self.icon, |d, icon| d.child(Icon::new(icon).size(px(14.))))
             .when_some(self.checked, |d, checked| {
                 d.child(div().size(px(14.)).flex_shrink_0().when(checked, |d| {
-                    d.child(Icon::new(IconName::Check).size(px(14.)))
+                    d.child(
+                        Icon::new(IconName::Check)
+                            .size(px(14.))
+                            .color(Color::Accent),
+                    )
                 }))
             })
             .child(

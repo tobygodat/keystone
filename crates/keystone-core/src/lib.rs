@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
+use unicode_segmentation::UnicodeSegmentation;
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
@@ -57,10 +58,46 @@ pub enum Attention {
     Replied,
 }
 
+/// Where a session's title came from. Only a placeholder gives way to the first message,
+/// so a rename is never overwritten. Files saved before titles changed load as a placeholder.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+enum TitleSource {
+    #[default]
+    Placeholder,
+    FirstMessage,
+    Renamed,
+}
+
+/// The longest title taken from a message, in user-perceived characters.
+const TITLE_LENGTH: usize = 48;
+
+/// `text` on one line with its whitespace collapsed, or `None` when it is blank.
+fn one_line(text: &str) -> Option<String> {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then_some(line)
+}
+
+/// A title for a session from its first message. Past [`TITLE_LENGTH`] it is cut, at a
+/// word end when one falls in the second half, and ends in an ellipsis.
+fn message_title(text: &str) -> Option<String> {
+    let line = one_line(text)?;
+    let Some((cut, _)) = line.grapheme_indices(true).nth(TITLE_LENGTH) else {
+        return Some(line);
+    };
+    let head = &line[..cut];
+    let head = match head.rfind(' ') {
+        Some(space) if space >= cut / 2 => &head[..space],
+        _ => head,
+    };
+    Some(format!("{}…", head.trim_end()))
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Session {
     id: u64,
     title: String,
+    #[serde(default, skip_serializing_if = "is_default")]
+    title_source: TitleSource,
     provider: Provider,
     settled: bool,
     draft: String,
@@ -354,6 +391,7 @@ impl Store {
         next.sessions.push(Session {
             id,
             title: format!("New {provider} session"),
+            title_source: TitleSource::Placeholder,
             provider,
             settled: false,
             draft: String::new(),
@@ -404,9 +442,16 @@ impl Store {
     }
 
     /// Records a message sent from the selected session. It starts a turn, which also
-    /// clears a failure shown for the last one.
-    pub fn record_message(&mut self, id: u64, now: u64) -> StoreResult<Applied<()>> {
+    /// clears a failure shown for the last one. The first message titles a session that
+    /// still has its placeholder title.
+    pub fn record_message(&mut self, id: u64, text: &str, now: u64) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| {
+            if session.title_source == TitleSource::Placeholder
+                && let Some(title) = message_title(text)
+            {
+                session.title = title;
+                session.title_source = TitleSource::FirstMessage;
+            }
             session.updated_at = Some(now);
             session.mark_viewed(now);
             session.last_turn = Some(LastTurn::Running);
@@ -431,6 +476,18 @@ impl Store {
             });
             if selected {
                 session.mark_viewed(now);
+            }
+        })
+    }
+
+    /// Gives the session the user's own title, on one line. A message never replaces it.
+    /// A blank title is refused and changes nothing.
+    pub fn rename(&mut self, id: u64, title: &str) -> StoreResult<Applied<()>> {
+        let title = one_line(title).ok_or_else(|| invalid("a title cannot be blank"))?;
+        self.update_session(id, |session| {
+            if session.title != title {
+                session.title = title;
+                session.title_source = TitleSource::Renamed;
             }
         })
     }
@@ -631,7 +688,7 @@ mod tests {
         assert_eq!(times(&store, 1), (Some(1_000), Some(1_000), Some(1_000)));
         store.set_draft(1, "typing".into()).unwrap();
         assert_eq!(times(&store, 1), (Some(1_000), Some(1_000), Some(1_000)));
-        store.record_message(1, 2_000).unwrap();
+        store.record_message(1, "hi", 2_000).unwrap();
         assert_eq!(times(&store, 1), (Some(1_000), Some(2_000), Some(2_000)));
         // A turn that ends while its session is selected is seen as it ends.
         store.record_turn_end(1, false, 3_000).unwrap();
@@ -702,7 +759,7 @@ mod tests {
         store.select(2, 6_000).unwrap();
         assert_eq!(attention(&store, false, false), Some(Attention::Failed));
         store.select(1, 7_000).unwrap();
-        store.record_message(1, 8_000).unwrap();
+        store.record_message(1, "hi", 8_000).unwrap();
         assert_eq!(attention(&store, false, true), None);
         // A turn saved as running with nothing running was cut off by a restart.
         assert_eq!(attention(&store, false, false), Some(Attention::Failed));
@@ -752,12 +809,110 @@ mod tests {
     }
 
     #[test]
+    fn the_first_message_titles_a_session_and_later_ones_do_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        let title = |store: &Store| store.workspace().sessions()[0].title().to_owned();
+        assert_eq!(title(&store), "New Codex session");
+        let writes = store.writes();
+        store.rename(1, " New Codex session ").unwrap();
+        assert_eq!(store.writes(), writes, "an unchanged title is not a rename");
+
+        store
+            .record_message(1, "\n  Fix the   login\tbug\nwith details below", 2_000)
+            .unwrap();
+        assert_eq!(title(&store), "Fix the login bug with details below");
+        store.record_message(1, "Something else", 3_000).unwrap();
+        assert_eq!(title(&Store::open(&path).unwrap()), title(&store));
+    }
+
+    #[test]
+    fn a_long_first_message_is_cut_between_characters_and_at_a_word() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        let mut title_of = |text: &str| {
+            let id = store.create(Provider::Claude, 1_000).unwrap().value;
+            store.record_message(id, text, 2_000).unwrap();
+            store.workspace().sessions()[id as usize - 1]
+                .title()
+                .to_owned()
+        };
+
+        let family = "👨\u{200d}👩\u{200d}👧";
+        let text = format!("{}{family}{family}", "a".repeat(47));
+        assert_eq!(title_of(&text), format!("{}{family}…", "a".repeat(47)));
+        let text = format!("{}e\u{301}xyz", "b".repeat(47));
+        assert_eq!(title_of(&text), format!("{}e\u{301}…", "b".repeat(47)));
+        let words = "Refactor the session sidebar so rows keep their place while typing";
+        assert_eq!(
+            title_of(words),
+            "Refactor the session sidebar so rows keep their…"
+        );
+    }
+
+    #[test]
+    fn a_rename_is_kept_through_messages_and_restarts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        store.create(Provider::Codex, 1_000).unwrap();
+        let title = |store: &Store, id: u64| {
+            store.workspace().sessions()[id as usize - 1]
+                .title()
+                .to_owned()
+        };
+
+        store.rename(1, "  Release  notes\n").unwrap();
+        store.record_message(1, "Draft the notes", 2_000).unwrap();
+        assert_eq!(title(&store, 1), "Release notes");
+        store.record_message(2, "Draft the notes", 2_000).unwrap();
+        store.rename(2, "Notes, take two").unwrap();
+        store.record_message(2, "And again", 3_000).unwrap();
+        assert_eq!(title(&store, 2), "Notes, take two");
+
+        let writes = store.writes();
+        assert!(store.rename(1, " \n\t").is_err());
+        assert!(store.rename(9, "Missing").is_err());
+        assert_eq!(store.writes(), writes);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(title(&reopened, 1), "Release notes");
+        assert_eq!(title(&reopened, 2), "Notes, take two");
+    }
+
+    #[test]
+    fn a_session_saved_before_titles_changed_takes_its_first_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":2,"workspace":{"sessions":[{"id":1,"title":"New Codex session","provider":"Codex","settled":false,"draft":""}],"selected":1}}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store.set_draft(1, "typing".into()).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("title_source")
+        );
+
+        store.record_message(1, "Port the parser", 1_000).unwrap();
+        assert_eq!(
+            Store::open(&path).unwrap().workspace().sessions()[0].title(),
+            "Port the parser"
+        );
+    }
+
+    #[test]
     fn a_turn_the_provider_starts_on_its_own_fails_if_cut_off() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         let mut store = Store::open(&path).unwrap();
         store.create(Provider::Codex, 1_000).unwrap();
-        store.record_message(1, 2_000).unwrap();
+        store.record_message(1, "hi", 2_000).unwrap();
         store.record_turn_end(1, false, 3_000).unwrap();
         // A late steer opens another turn without a new message.
         store.record_turn_start(1).unwrap();

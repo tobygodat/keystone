@@ -20,6 +20,7 @@ pub enum ButtonStyle {
     Subtle,
     /// The strongest fill, for the primary action in a group.
     Filled,
+    Primary,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,12 +73,20 @@ impl Common {
     fn base(self, cx: &App) -> Stateful<gpui::Div> {
         let colors = &cx.theme().colors;
         let (rest, hover) = match (self.style, self.selected) {
+            (ButtonStyle::Primary, _) => (
+                Some(colors.element_inverse),
+                colors.element_inverse.opacity(0.94),
+            ),
             (ButtonStyle::Filled, _) => (Some(colors.element_filled), colors.element_filled_hover),
             (_, true) => (Some(colors.element_selected), colors.element_active),
             (ButtonStyle::Subtle, false) => (Some(colors.element_hover), colors.element_active),
             (ButtonStyle::Ghost, false) => (None, colors.element_hover),
         };
-        let active = colors.element_active;
+        let active = if self.style == ButtonStyle::Primary {
+            colors.element_inverse.opacity(0.88)
+        } else {
+            colors.element_active
+        };
         let mut el = div()
             .id(self.id)
             .flex()
@@ -200,6 +209,8 @@ impl RenderOnce for Button {
         let size = self.common.size;
         let color = if let Some(color) = self.color {
             color
+        } else if self.common.style == ButtonStyle::Primary {
+            Color::Custom(cx.theme().colors.text_inverse)
         } else if self.common.selected || self.common.style == ButtonStyle::Filled {
             Color::Default
         } else {
@@ -245,7 +256,9 @@ impl IconButton {
 impl RenderOnce for IconButton {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let side = self.common.size.height(cx);
-        let color = if self.common.selected {
+        let color = if self.common.style == ButtonStyle::Primary {
+            Color::Custom(cx.theme().colors.text_inverse)
+        } else if self.common.selected {
             Color::Default
         } else {
             Color::Muted

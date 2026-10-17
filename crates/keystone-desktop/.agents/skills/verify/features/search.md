@@ -26,7 +26,7 @@ Preconditions:
 - Send Ctrl+A while search has focus, then type `no-such-session`. Require **No sessions match this search.** under **Working**.
 - Send Ctrl+A then BackSpace through `keypress`. Capture and require the full list to return.
 - `click` `{"id":"sidebar-toggle"}`. Call `wait_for` with `{"id":"search-field","present":false}`. Capture and require the whole left column to disappear, the main column to fill the window, and the composer to remain usable. Press Ctrl+F and require the sidebar and focused search to return.
-- `click` `{"id":"search-field"}`. Type `Claude` and require the Claude result. Clear it afterward.
+- `click` `{"id":"search-field"}`. Type `Claude` and require the Claude result. Clear it afterward. A click on the search icon or the `Ctrl F` hint focuses the field too.
 
 ## Gotchas
 

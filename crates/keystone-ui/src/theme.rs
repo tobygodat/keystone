@@ -152,61 +152,60 @@ impl Theme {
 }
 
 impl Colors {
-    /// The charcoal MonoCode palette. Interaction states are translucent white
-    /// washes so they read the same over the sidebar, the main column, and popovers.
+    /// Neutral gray surfaces and text, with blue reserved for actions, selection, and focus.
     pub fn dark() -> Self {
         Self {
-            background: rgb(0x131313).into(),
-            sidebar: rgb(0x171717).into(),
-            surface: rgb(0x1e1e1e).into(),
-            surface_raised: rgb(0x232323).into(),
-            overlay: rgb(0x252525).into(),
-            composer: rgb(0x232324).into(),
-            composer_border: white(0.07),
-            composer_shadow: black(0.35),
+            background: rgb(0x141414).into(),
+            sidebar: rgb(0x0d0d0d).into(),
+            surface: rgb(0x181818).into(),
+            surface_raised: rgb(0x1e1e1e).into(),
+            overlay: rgb(0x232323).into(),
+            composer: rgb(0x1c1c1c).into(),
+            composer_border: white(0.08),
+            composer_shadow: black(0.22),
 
-            element_hover: white(0.06),
-            element_active: white(0.12),
-            element_selected: white(0.09),
-            element_filled: white(0.12),
-            element_filled_hover: white(0.18),
+            element_hover: white(0.05),
+            element_active: white(0.10),
+            element_selected: rgba(0x82a5e621).into(),
+            element_filled: white(0.09),
+            element_filled_hover: white(0.15),
             element_disabled: white(0.10),
-            element_inverse: rgb(0xe6e6e6).into(),
+            element_inverse: rgb(0x4470c0).into(),
 
             border: white(0.08),
             border_strong: white(0.14),
-            border_focused: rgb(0x467bb0).into(),
+            border_focused: rgb(0x5b87d6).into(),
             shadow: black(0.45),
             scrim: black(0.5),
 
             text: rgb(0xe6e6e6).into(),
             text_strong: rgb(0xf2f2f2).into(),
-            text_muted: rgb(0x9c9c9c).into(),
-            text_faint: rgb(0x6e6e6e).into(),
-            text_placeholder: rgb(0x8f8f8f).into(),
-            text_inverse: rgb(0x131313).into(),
+            text_muted: rgb(0xa3a3a3).into(),
+            text_faint: rgb(0x858585).into(),
+            text_placeholder: rgb(0xa3a3a3).into(),
+            text_inverse: rgb(0xffffff).into(),
 
-            accent: rgb(0x6b9bd2).into(),
-            danger: rgb(0xea9990).into(),
+            accent: rgb(0x6f98de).into(),
+            danger: rgb(0xec9a8f).into(),
             success: rgb(0x8fc79a).into(),
-            warning: rgb(0xe0b86a).into(),
+            warning: rgb(0xe2ba6e).into(),
             provider_claude: rgb(0xd9805f).into(),
             provider_codex: rgb(0x93a6e0).into(),
 
-            code_text: rgb(0x82a9ce).into(),
-            selection: rgba(0x467bb070).into(),
+            code_text: rgb(0xb8b8b8).into(),
+            selection: rgba(0x5b87d670).into(),
             caret: rgb(0xe6e6e6).into(),
         }
     }
 
-    /// A warm paper palette with the same structure as the dark one. Interaction
+    /// A neutral light palette with the same structure as the dark one. Interaction
     /// states are translucent black washes.
     pub fn light() -> Self {
         Self {
-            background: rgb(0xfafaf9).into(),
-            sidebar: rgb(0xf2f2f0).into(),
+            background: rgb(0xfafafa).into(),
+            sidebar: rgb(0xf2f2f2).into(),
             surface: rgb(0xffffff).into(),
-            surface_raised: rgb(0xf6f6f4).into(),
+            surface_raised: rgb(0xf6f6f6).into(),
             overlay: rgb(0xffffff).into(),
             composer: rgb(0xffffff).into(),
             composer_border: black(0.08),
@@ -214,11 +213,11 @@ impl Colors {
 
             element_hover: black(0.045),
             element_active: black(0.09),
-            element_selected: black(0.065),
+            element_selected: rgba(0x3a6ea518).into(),
             element_filled: black(0.08),
             element_filled_hover: black(0.12),
             element_disabled: black(0.10),
-            element_inverse: rgb(0x262626).into(),
+            element_inverse: rgb(0x345fa8).into(),
 
             border: black(0.09),
             border_strong: black(0.16),
@@ -240,7 +239,7 @@ impl Colors {
             provider_claude: rgb(0xb4593a).into(),
             provider_codex: rgb(0x4a5fb5).into(),
 
-            code_text: rgb(0x2f5f8f).into(),
+            code_text: rgb(0x555555).into(),
             selection: rgba(0x3a6ea540).into(),
             caret: rgb(0x262626).into(),
         }

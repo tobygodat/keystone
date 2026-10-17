@@ -208,6 +208,7 @@ impl Render for Gallery {
             (ButtonStyle::Ghost, "Ghost"),
             (ButtonStyle::Subtle, "Subtle"),
             (ButtonStyle::Filled, "Filled"),
+            (ButtonStyle::Primary, "Primary"),
         ];
         let sizes = [
             (ButtonSize::Compact, "Compact"),

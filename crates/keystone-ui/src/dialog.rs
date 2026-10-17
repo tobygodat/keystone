@@ -6,30 +6,62 @@ use crate::styled_ext::{StyledExt, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, TextSize, spacing};
 use gpui::{
-    AnchoredPositionMode, App, FocusHandle, FontWeight, IntoElement, KeyDownEvent, RenderOnce,
-    SharedString, Window, anchored, deferred, div, point, prelude::*, px,
+    AnchoredPositionMode, AnyElement, App, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
+    RenderOnce, SharedString, Window, anchored, deferred, div, point, prelude::*, px,
 };
 use std::rc::Rc;
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 
-/// Keyboard focus for a [`ConfirmDialog`]'s two buttons. Create it when the dialog
-/// opens and keep it while the dialog shows. It focuses Cancel, so Enter alone
-/// never confirms.
+/// Keyboard focus for a [`ConfirmDialog`]: its buttons and, for a dialog with a
+/// field, that field. Create it when the dialog opens and keep it while the dialog
+/// shows.
 #[derive(Clone)]
 pub struct DialogFocus {
+    body: Option<FocusHandle>,
     cancel: FocusHandle,
     confirm: FocusHandle,
 }
 
 impl DialogFocus {
+    /// Focuses Cancel, so Enter alone never confirms.
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
-        let focus = Self {
-            cancel: cx.focus_handle(),
-            confirm: cx.focus_handle(),
-        };
+        let focus = Self::with_stops(None, cx);
         window.focus(&focus.cancel, cx);
         focus
+    }
+
+    /// For a dialog whose body holds a field: focuses `body`, and Tab cycles the
+    /// field, Cancel, and Confirm.
+    pub fn with_body(body: FocusHandle, window: &mut Window, cx: &mut App) -> Self {
+        window.focus(&body, cx);
+        Self::with_stops(Some(body), cx)
+    }
+
+    fn with_stops(body: Option<FocusHandle>, cx: &mut App) -> Self {
+        Self {
+            body,
+            cancel: cx.focus_handle(),
+            confirm: cx.focus_handle(),
+        }
+    }
+
+    fn cycle(&self, backward: bool, window: &mut Window, cx: &mut App) {
+        let stops: Vec<&FocusHandle> = self
+            .body
+            .iter()
+            .chain([&self.cancel, &self.confirm])
+            .collect();
+        let next = match stops
+            .iter()
+            .position(|stop| stop.contains_focused(window, cx))
+        {
+            Some(at) if backward => (at + stops.len() - 1) % stops.len(),
+            Some(at) => (at + 1) % stops.len(),
+            None if backward => stops.len() - 1,
+            None => 0,
+        };
+        window.focus(stops[next], cx);
     }
 }
 
@@ -37,9 +69,10 @@ impl DialogFocus {
 /// everything else, menus included, and a scrim takes every press outside the card.
 ///
 /// Cancel, Escape, and a press on the scrim call `on_cancel`; only Confirm calls
-/// `on_confirm`. Tab moves between the buttons, and Enter or Space presses the
-/// focused one. The card's key context is [`ConfirmDialog::KEY_CONTEXT`], so app
-/// shortcuts bound with `!Dialog` stay off while it is open.
+/// `on_confirm`. Tab and Shift+Tab cycle the stops of [`DialogFocus`], and Enter or
+/// Space presses the focused button. The card's key context is
+/// [`ConfirmDialog::KEY_CONTEXT`], so app shortcuts bound with `!Dialog` stay off
+/// while it is open.
 ///
 /// The dialog is `id`, its buttons `{id}-cancel` and `{id}-confirm`, for tests and
 /// native verification.
@@ -49,6 +82,9 @@ pub struct ConfirmDialog {
     focus: DialogFocus,
     title: SharedString,
     message: SharedString,
+    body: Option<AnyElement>,
+    icon: IconName,
+    confirm_label: SharedString,
     tone: Color,
     on_cancel: Option<Handler>,
     on_confirm: Option<Handler>,
@@ -68,6 +104,9 @@ impl ConfirmDialog {
             focus: focus.clone(),
             title: title.into(),
             message: message.into(),
+            body: None,
+            icon: IconName::Shield,
+            confirm_label: "Confirm".into(),
             tone: Color::Danger,
             on_cancel: None,
             on_confirm: None,
@@ -78,6 +117,24 @@ impl ConfirmDialog {
     /// choice that is risky but reversible.
     pub fn tone(mut self, tone: Color) -> Self {
         self.tone = tone;
+        self
+    }
+
+    /// Drawn after the message, such as the field a dialog asks the user to fill in.
+    pub fn body(mut self, body: impl IntoElement) -> Self {
+        self.body = Some(body.into_any_element());
+        self
+    }
+
+    /// The icon before the title. A shield by default.
+    pub fn icon(mut self, icon: IconName) -> Self {
+        self.icon = icon;
+        self
+    }
+
+    /// The confirm button's text. "Confirm" by default.
+    pub fn confirm_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.confirm_label = label.into();
         self
     }
 
@@ -105,19 +162,14 @@ impl RenderOnce for ConfirmDialog {
         let on_cancel = call(&self.on_cancel);
         let on_confirm = call(&self.on_confirm);
         let id = self.id;
-        let DialogFocus {
-            cancel: cancel_focus,
-            confirm: confirm_focus,
-        } = self.focus;
+        let focus = self.focus;
         let keys = {
             let on_cancel = on_cancel.clone();
-            let (cancel_focus, confirm_focus) = (cancel_focus.clone(), confirm_focus.clone());
+            let focus = focus.clone();
             move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
                 match event.keystroke.key.as_str() {
                     "escape" => on_cancel(window, cx),
-                    // Two buttons, so Tab and Shift+Tab both move to the other one.
-                    "tab" if confirm_focus.is_focused(window) => window.focus(&cancel_focus, cx),
-                    "tab" => window.focus(&confirm_focus, cx),
+                    "tab" => focus.cycle(event.keystroke.modifiers.shift, window, cx),
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -136,7 +188,7 @@ impl RenderOnce for ConfirmDialog {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(Icon::new(IconName::Shield).size(px(16.)).color(self.tone))
+                    .child(Icon::new(self.icon).size(px(16.)).color(self.tone))
                     .child(
                         Label::new(self.title)
                             .size(TextSize::Body)
@@ -144,6 +196,7 @@ impl RenderOnce for ConfirmDialog {
                     ),
             )
             .child(Label::new(self.message).color(Color::Muted))
+            .children(self.body)
             .child(
                 h_flex()
                     .pt(spacing::XS)
@@ -152,7 +205,7 @@ impl RenderOnce for ConfirmDialog {
                     .child(
                         Button::new(SharedString::from(format!("{id}-cancel")), "Cancel")
                             .style(ButtonStyle::Subtle)
-                            .track_focus(&cancel_focus)
+                            .track_focus(&focus.cancel)
                             .debug_selector(|| format!("{id}-cancel"))
                             .on_click({
                                 let on_cancel = on_cancel.clone();
@@ -160,12 +213,15 @@ impl RenderOnce for ConfirmDialog {
                             }),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("{id}-confirm")), "Confirm")
-                            .style(ButtonStyle::Filled)
-                            .color(self.tone)
-                            .track_focus(&confirm_focus)
-                            .debug_selector(|| format!("{id}-confirm"))
-                            .on_click(move |_, window, cx| on_confirm(window, cx)),
+                        Button::new(
+                            SharedString::from(format!("{id}-confirm")),
+                            self.confirm_label,
+                        )
+                        .style(ButtonStyle::Filled)
+                        .color(self.tone)
+                        .track_focus(&focus.confirm)
+                        .debug_selector(|| format!("{id}-confirm"))
+                        .on_click(move |_, window, cx| on_confirm(window, cx)),
                     ),
             );
         let card = crate::automation::tag(card, id.to_string());

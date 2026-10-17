@@ -2,11 +2,12 @@
 //! virtualizes them; this module only decides a row's content.
 
 use crate::conversation::Row;
-use gpui::{AnyElement, App, ClipboardItem, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, App, ClipboardItem, ElementId, SharedString, Window, div, prelude::*, px};
 use keystone_agent::{ItemKind, ItemStatus, TurnStatus};
 use keystone_ui::markdown::Document;
 use keystone_ui::prelude::*;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The content of a row that [`crate::conversation::visible`] accepts. `index` is the
 /// row's place in the conversation, and `reply` the parsed Markdown of a reply row.
@@ -15,20 +16,33 @@ pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> A
     let mono = cx.theme().fonts.mono.clone();
     match row {
         Row::Item(item) => match &item.kind {
-            ItemKind::UserMessage => v_flex()
-                .items_end()
+            ItemKind::UserMessage => h_flex()
+                .group("user-message")
+                .justify_end()
+                .items_start()
+                .gap_1()
+                .child(
+                    div()
+                        .invisible()
+                        .group_hover("user-message", |s| s.visible())
+                        .child(CopyButton::new(
+                            ("copy-message", index),
+                            "Copy message",
+                            item.text.clone(),
+                        )),
+                )
                 .child(
                     div()
                         .max_w(px(620.))
                         .px_3()
                         .py_2()
                         .rounded(radius::ROW)
-                        .bg(colors.element_selected)
+                        .bg(colors.element_filled)
+                        .text_color(colors.text_strong)
                         .child(item.text.clone()),
                 )
                 .into_any_element(),
             ItemKind::AgentMessage => {
-                let text = item.text.clone();
                 let document = reply.unwrap_or_else(|| Arc::new(Document::parse(&item.text)));
                 v_flex()
                     .gap_1()
@@ -36,17 +50,15 @@ pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> A
                         SharedString::from(format!("reply-{index}")),
                         document,
                     ))
-                    .when(item.status == ItemStatus::Completed, |d| {
-                        d.child(
-                            IconButton::new(("copy-reply", index), IconName::Copy)
-                                .size(ButtonSize::Compact)
-                                .debug_selector(move || format!("copy-reply-{index}"))
-                                .tooltip(Tooltip::text("Copy reply"))
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
-                                }),
-                        )
-                    })
+                    .child(
+                        div()
+                            .when(item.status == ItemStatus::InProgress, |d| d.invisible())
+                            .child(CopyButton::new(
+                                ("copy-reply", index),
+                                "Copy reply",
+                                item.text.clone(),
+                            )),
+                    )
                     .into_any_element()
             }
             ItemKind::Reasoning => div()
@@ -55,27 +67,36 @@ pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> A
                 .child(item.text.clone())
                 .into_any_element(),
             ItemKind::Command { command, exit_code } => {
-                let status = match (item.status, exit_code) {
-                    (ItemStatus::InProgress, _) => "Running".to_owned(),
-                    (ItemStatus::Declined, _) => "Not run".to_owned(),
-                    (ItemStatus::Failed, None) => "Stopped".to_owned(),
-                    (_, Some(code)) => format!("Exit {code}"),
-                    (_, None) => String::new(),
+                let (status, color) = match (item.status, exit_code) {
+                    (ItemStatus::InProgress, _) => ("Running".to_owned(), Color::Muted),
+                    (ItemStatus::Declined, _) => ("Not run".to_owned(), Color::Muted),
+                    (ItemStatus::Failed, None) => ("Stopped".to_owned(), Color::Muted),
+                    (_, Some(0)) => ("Exit 0".to_owned(), Color::Success),
+                    (_, Some(code)) => (format!("Exit {code}"), Color::Danger),
+                    (_, None) => (String::new(), Color::Muted),
                 };
                 let output = item.text.trim_end();
+                let copy = if output.is_empty() {
+                    CopyButton::new(("copy-command", index), "Copy command", command.clone())
+                } else {
+                    CopyButton::new(("copy-command", index), "Copy output", output.to_owned())
+                };
                 v_flex()
                     .surface(Elevation::Raised, cx)
                     .overflow_hidden()
                     .child(
                         h_flex()
-                            .px_3()
-                            .py_2()
+                            .min_h(px(38.))
+                            .pl_3()
+                            .pr_1()
+                            .py_1()
                             .gap_2()
                             .hairline_b(cx)
                             .font_family(mono.clone())
                             .text_size(TextSize::Ui.px())
                             .child(div().flex_1().min_w_0().child(format!("$ {command}")))
-                            .child(Label::new(status).size(TextSize::Sm).color(Color::Muted)),
+                            .child(Label::new(status).size(TextSize::Sm).color(color))
+                            .child(copy),
                     )
                     .when(!output.is_empty(), |d| {
                         d.child(
@@ -122,5 +143,63 @@ pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> A
         .size(TextSize::Ui)
         .color(Color::Muted)
         .into_any_element(),
+    }
+}
+
+/// Copies `text`, then shows a check for a moment.
+#[derive(IntoElement)]
+struct CopyButton {
+    id: ElementId,
+    label: &'static str,
+    text: String,
+}
+
+impl CopyButton {
+    fn new(id: impl Into<ElementId>, label: &'static str, text: String) -> Self {
+        Self {
+            id: id.into(),
+            label,
+            text,
+        }
+    }
+}
+
+impl RenderOnce for CopyButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let copied = window.use_keyed_state((self.id.clone(), "copied"), cx, |_, _| false);
+        let is_copied = *copied.read(cx);
+        let selector = match &self.id {
+            ElementId::NamedInteger(name, index) => format!("{name}-{index}"),
+            id => id.to_string(),
+        };
+        let text = self.text;
+        IconButton::new(
+            self.id,
+            if is_copied {
+                IconName::Check
+            } else {
+                IconName::Copy
+            },
+        )
+        .size(ButtonSize::Compact)
+        .debug_selector(move || selector)
+        .tooltip(Tooltip::text(if is_copied { "Copied" } else { self.label }))
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            copied.update(cx, |copied, cx| {
+                *copied = true;
+                cx.notify();
+                cx.spawn(async move |copied, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1500))
+                        .await;
+                    let _ = copied.update(cx, |copied, cx| {
+                        *copied = false;
+                        cx.notify();
+                    });
+                })
+                .detach();
+            });
+        })
     }
 }
