@@ -16,15 +16,17 @@ The preview saves to `$XDG_DATA_HOME/keystone/workspace.json`, or `$HOME/.local/
 
 ## View on your laptop
 
-You can watch the app on another Wayland machine while it builds and runs on this one. Install waypipe on the laptop once with `sudo pacman -S waypipe`. Then run this from the laptop:
+You can watch the app on another Wayland machine while it builds and runs on this one. Install waypipe on the laptop once with `sudo pacman -S waypipe`. Then run this from a Keystone checkout on the laptop:
 
 ```sh
-waypipe ssh tobygodat@desk ~/keystone/scripts/preview.py
+scripts/laptop-preview
 ```
 
-The window opens on the laptop. `scripts/preview.py` follows the worktree that changed most recently, uncommitted edits included, so it shows whichever agent is working right now. It prints a line when it switches. After a change has been quiet for about 3 seconds, it rebuilds at low priority in `~/.cache/keystone-preview/target`, so it never waits on an agent's cargo lock, and restarts the app. A failed build leaves the last good app running and prints the errors. Pass a branch name or worktree path to pin one worktree, for example `~/keystone/scripts/preview.py my-branch`. `--once` builds and runs without following changes.
+It connects to `tobygodat@desk` over SSH and runs `~/keystone/scripts/preview.py` there under waypipe. Set `KEYSTONE_PREVIEW_HOST` for another host. Plain `waypipe ssh` fails over Tailscale SSH, which creates forwarded sockets as root, so the script forwards a localhost TCP port and bridges it with socat on both ends.
 
-The preview keeps its own workspace in `~/.local/share/keystone-preview/workspace.json`, so it doesn't conflict with a copy running on the desktop. Its Claude Code and Codex sessions run in the checkout the script lives in, not in the worktree being previewed. Set `KEYSTONE_PROJECT_DIR` to choose another directory. Pressing Ctrl+Q or dropping the connection stops the app and the script.
+The window opens on the laptop. `scripts/preview.py` follows the worktree that changed most recently, uncommitted edits included, so it shows whichever agent is working right now. It prints a line when it switches. After a change has been quiet for about 3 seconds, it rebuilds at low priority in `~/.cache/keystone-preview/target`, so it never waits on an agent's cargo lock, and restarts the app. A failed build leaves the last good app running and prints the errors. Pass a branch name or worktree path to pin one worktree, for example `scripts/laptop-preview my-branch`. `--once` builds and runs without following changes.
+
+The preview keeps its own workspace in `~/.local/share/keystone-preview/workspace.json`, so it doesn't conflict with a copy running on the desktop. Its Claude Code and Codex sessions run in the checkout the script lives in, not in the worktree being previewed. Set `KEYSTONE_PROJECT_DIR` to choose another directory. Pressing Ctrl+Q in the app or Ctrl+C in the terminal, closing the terminal, or dropping the connection stops everything on both machines.
 
 ## Native verification driver
 
