@@ -9,11 +9,19 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 use unicode_segmentation::UnicodeSegmentation;
 
+mod composition;
 mod layout;
+mod project;
 
+pub use composition::{
+    Axis, Child, Component, Composition, Edit, Node, NodePath, Place, Problem, SavedComposition,
+    Size, ViewId,
+};
 pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
 };
+pub use project::ProjectId;
+use project::ProjectLayouts;
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
@@ -305,6 +313,8 @@ pub struct Preferences {
     #[serde(flatten)]
     appearance: Appearance,
     sidebar_layout: SavedLayout,
+    #[serde(skip_serializing_if = "ProjectLayouts::is_empty")]
+    project_layouts: ProjectLayouts,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -316,6 +326,23 @@ impl Preferences {
 
     pub fn sidebar_layout(&self) -> &SavedLayout {
         &self.sidebar_layout
+    }
+
+    pub fn project_layout(&self, project: &ProjectId) -> Option<&SavedComposition> {
+        self.project_layouts.get(project)
+    }
+
+    pub fn project_layouts(&self) -> impl Iterator<Item = (ProjectId, &SavedComposition)> {
+        self.project_layouts.iter()
+    }
+
+    /// The composition to draw for `project`. Until it saves its own, a project shows
+    /// the sidebar layout every project shared before compositions existed.
+    pub fn composition(&self, project: &ProjectId) -> Composition {
+        match self.project_layouts.get(project) {
+            Some(saved) => saved.shown(),
+            None => Composition::from_sidebar(self.sidebar_layout.shown()),
+        }
     }
 }
 
@@ -544,6 +571,19 @@ impl Store {
     /// every other preference as it is.
     pub fn set_sidebar_layout(&mut self, layout: SavedLayout) -> StoreResult<Applied<()>> {
         self.update_preferences(|preferences| preferences.sidebar_layout = layout)
+    }
+
+    /// Saves exactly `layout` for `project` alone, or removes its entry for `None`, so
+    /// Undo can restore a project that had none. Fails without writing when the saved
+    /// project layouts are not a map.
+    pub fn set_project_layout(
+        &mut self,
+        project: &ProjectId,
+        layout: Option<SavedComposition>,
+    ) -> StoreResult<Applied<()>> {
+        let mut layouts = self.workspace.preferences.project_layouts.clone();
+        layouts.set(project, layout)?;
+        self.update_preferences(|preferences| preferences.project_layouts = layouts)
     }
 
     pub fn set_provider_thread(&mut self, id: u64, thread: String) -> StoreResult<Applied<()>> {
@@ -1190,5 +1230,265 @@ mod tests {
             saved.contains(r#""sidebar_layout":{"side":"right","width_px":360}"#),
             "{saved}"
         );
+    }
+
+    fn tabbed() -> Composition {
+        Composition::default()
+            .edit(Edit::Open {
+                view: ViewId(5),
+                component: Component::Conversation,
+                at: Place::TabWith(ViewId::MAIN),
+                size: Size::Px(std::num::NonZeroU16::new(400).unwrap()),
+            })
+            .unwrap()
+    }
+
+    fn project_layouts(path: &Path) -> Option<Value> {
+        json(path)["workspace"]["preferences"]
+            .get("project_layouts")
+            .cloned()
+    }
+
+    #[test]
+    fn a_project_shows_the_legacy_sidebar_until_applied_and_undo_restores_absence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let (a_dir, b_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let a = ProjectId::new(a_dir.path()).unwrap();
+        let b = ProjectId::new(b_dir.path()).unwrap();
+        seeded(
+            &path,
+            r#","sidebar_layout":{"side":"right","width_px":360}"#,
+        );
+        let legacy = Composition::from_sidebar(SidebarLayout {
+            side: SidebarSide::Right,
+            width: SidebarWidth::new(360).unwrap(),
+        });
+        let mut store = Store::open(&path).unwrap();
+        let preferences = store.workspace().preferences();
+        assert_eq!(preferences.project_layout(&a), None);
+        assert_eq!(preferences.composition(&a), legacy);
+        assert_eq!(preferences.project_layouts().count(), 0);
+
+        store.set_draft(1, "edited".into()).unwrap();
+        store
+            .set_appearance(Appearance {
+                theme: ThemeMode::Light,
+                ..Appearance::default()
+            })
+            .unwrap();
+        assert_eq!(project_layouts(&path), None);
+
+        let mine = tabbed();
+        let applied = store
+            .set_project_layout(&a, Some(mine.clone().into()))
+            .unwrap();
+        assert_eq!(applied.durability, Durability::Synced);
+        assert_eq!(
+            project_layouts(&path),
+            Some(serde_json::json!({ a.path().to_str().unwrap(): mine }))
+        );
+        assert_eq!(
+            saved_sidebar(&json(&path)),
+            &serde_json::json!({"side": "right", "width_px": 360})
+        );
+        assert_eq!(store.workspace().preferences().composition(&b), legacy);
+
+        store
+            .set_project_layout(&b, Some(Composition::default().into()))
+            .unwrap();
+        store.set_draft(1, "newer".into()).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        let preferences = reopened.workspace().preferences();
+        assert_eq!(preferences.composition(&a), mine);
+        assert_eq!(preferences.composition(&b), Composition::default());
+        let mut both = vec![a.clone(), b.clone()];
+        both.sort();
+        assert_eq!(
+            preferences
+                .project_layouts()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            both
+        );
+
+        let mut store = reopened;
+        store.set_project_layout(&a, None).unwrap();
+        let writes = store.writes();
+        store.set_project_layout(&a, None).unwrap();
+        assert_eq!(store.writes(), writes);
+        let reopened = Store::open(&path).unwrap();
+        let preferences = reopened.workspace().preferences();
+        assert_eq!(preferences.project_layout(&a), None);
+        assert_eq!(preferences.composition(&a), legacy);
+        assert_eq!(preferences.composition(&b), Composition::default());
+        assert_eq!(preferences.appearance().theme, ThemeMode::Light);
+        assert_eq!(reopened.workspace().sessions()[0].draft(), "newer");
+        let saved = json(&path);
+        assert_eq!(
+            saved_sidebar(&saved),
+            &serde_json::json!({"side": "right", "width_px": 360})
+        );
+        assert_eq!(saved["future"], serde_json::json!({"a": [1, 2]}));
+        assert_eq!(saved["workspace"]["panes"], serde_json::json!(["chat"]));
+        assert_eq!(saved["workspace"]["preferences"]["accent"], "teal");
+        assert_eq!(saved["workspace"]["sessions"][0]["model"], "m-1");
+
+        let mut store = reopened;
+        store.set_project_layout(&b, None).unwrap();
+        assert_eq!(project_layouts(&path), None);
+    }
+
+    #[test]
+    fn unreadable_project_entries_and_an_unexpected_map_are_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        let foreign = serde_json::json!({
+            "/gone/project": {"version": 2, "views": []},
+            "/also/gone": "junk",
+        });
+        seeded(&path, &format!(r#","project_layouts":{foreign}"#));
+        let mut store = Store::open(&path).unwrap();
+        let listed: Vec<_> = store
+            .workspace()
+            .preferences()
+            .project_layouts()
+            .map(|(id, saved)| (id, saved.clone()))
+            .collect();
+        assert_eq!(listed.len(), 2);
+        let (gone, raw) = &listed[1];
+        assert_eq!(gone.path(), Path::new("/gone/project"));
+        assert_eq!(raw.supported(), None);
+        assert_eq!(
+            store.workspace().preferences().composition(gone),
+            Composition::default()
+        );
+
+        store.set_project_layout(&a, Some(tabbed().into())).unwrap();
+        store
+            .set_project_layout(gone, Some(Composition::default().into()))
+            .unwrap();
+        store.set_project_layout(gone, Some(raw.clone())).unwrap();
+        store.set_draft(1, "edited".into()).unwrap();
+        let mut expected = foreign.clone();
+        expected[a.path().to_str().unwrap()] = serde_json::to_value(tabbed()).unwrap();
+        assert_eq!(project_layouts(&path), Some(expected));
+
+        seeded(&path, r#","project_layouts":"wide""#);
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.workspace().preferences().project_layouts().count(), 0);
+        assert_eq!(
+            store.workspace().preferences().composition(&a),
+            Composition::default()
+        );
+        store.set_draft(1, "edited".into()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let writes = store.writes();
+        assert!(store.set_project_layout(&a, Some(tabbed().into())).is_err());
+        assert!(store.set_project_layout(&a, None).is_err());
+        assert_eq!(store.writes(), writes);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(project_layouts(&path), Some(serde_json::json!("wide")));
+    }
+
+    #[test]
+    fn a_project_layout_fails_before_rename_or_warns_after_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let path = state.join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+
+        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        let applied = store.set_project_layout(&a, Some(tabbed().into())).unwrap();
+        assert!(matches!(
+            applied.durability,
+            Durability::DirectorySyncPending(_)
+        ));
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .workspace()
+                .preferences()
+                .composition(&a),
+            tabbed()
+        );
+        store.sync_directory = File::sync_all;
+
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = store.set_project_layout(&a, None);
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err());
+        assert_eq!(store.workspace().preferences().composition(&a), tabbed());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn the_deepest_composition_reopens_from_the_state_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        let mut deepest = Composition::default();
+        for id in 10.. {
+            let axis = if id % 2 == 0 { Axis::Row } else { Axis::Column };
+            match deepest.edit(Edit::Open {
+                view: ViewId(id),
+                component: Component::Conversation,
+                at: Place::Beside {
+                    target: ViewId::MAIN,
+                    axis,
+                    after: true,
+                },
+                size: Size::Px(std::num::NonZeroU16::MAX),
+            }) {
+                Ok(deeper) => deepest = deeper,
+                Err(problem) => {
+                    assert_eq!(problem, Problem::TooDeep);
+                    break;
+                }
+            }
+        }
+        let mut store = Store::open(&path).unwrap();
+        store
+            .set_project_layout(&a, Some(deepest.clone().into()))
+            .unwrap();
+        let reopened = Store::open(&path).unwrap();
+        let saved = reopened
+            .workspace()
+            .preferences()
+            .project_layout(&a)
+            .unwrap();
+        assert_eq!(saved.supported(), Some(&deepest));
+    }
+
+    #[test]
+    fn project_ids_are_canonical_utf8_directories() {
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let id = ProjectId::new(&project).unwrap();
+        assert!(id.path().is_absolute());
+        assert_eq!(ProjectId::new(&project.join("../project/.")).unwrap(), id);
+        std::os::unix::fs::symlink(&project, directory.path().join("link")).unwrap();
+        assert_eq!(ProjectId::new(&directory.path().join("link")).unwrap(), id);
+
+        let missing = ProjectId::new(&directory.path().join("missing")).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert!(missing.to_string().contains("missing"), "{missing}");
+        std::fs::write(directory.path().join("file"), "").unwrap();
+        let file = ProjectId::new(&directory.path().join("file")).unwrap_err();
+        assert_eq!(file.kind(), io::ErrorKind::NotADirectory);
+        let lossy = directory
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"not-utf8-\xff"));
+        std::fs::create_dir(&lossy).unwrap();
+        let lossy = ProjectId::new(&lossy).unwrap_err();
+        assert_eq!(lossy.kind(), io::ErrorKind::InvalidData);
     }
 }

@@ -24,7 +24,7 @@ use keystone_agent::{
 };
 use keystone_core::{
     Appearance, ApprovalMode, Attention, Density, Durability, Provider, SidebarSide, Store,
-    ThemeMode,
+    ThemeMode, ViewId,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
@@ -36,7 +36,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use view_state::{ViewId, ViewKey, ViewStates};
+use view_state::{ViewKey, ViewStates};
 
 gpui::actions!(
     keystone,

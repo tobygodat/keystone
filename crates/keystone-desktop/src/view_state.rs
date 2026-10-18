@@ -1,13 +1,7 @@
 use gpui::{ListAlignment, ListOffset, ListState, px};
+use keystone_core::ViewId;
 use std::collections::HashMap;
 use std::ops::Range;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ViewId(pub u32);
-
-impl ViewId {
-    pub const MAIN: ViewId = ViewId(0);
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ViewKey {
