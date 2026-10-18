@@ -1,11 +1,6 @@
-//! Asks Claude Code or Codex to interpret a sidebar request. Each request runs in a
-//! fresh provider session, read only, in an empty temporary directory, with every
-//! approval it asks for denied. One worker thread owns the connection, so starting
-//! and ending provider processes never blocks the UI.
-
 use keystone_agent::{
-    ApprovalState, ClaudeConnection, CodexConnection, Command, Connection, Event, ItemKind,
-    ItemStatus, TurnStatus, Wake,
+    ApprovalState, ClaudeConnection, Command, Connection, Event, ItemKind, ItemStatus, TurnStatus,
+    Wake,
 };
 use keystone_core::{ApprovalMode, Provider, SidebarLayout, SidebarSide, SidebarWidth};
 use serde::Deserialize;
@@ -20,6 +15,8 @@ pub const REASON_LIMIT: usize = 256;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 const SESSION: u64 = 1;
+
+const CODEX_UNSUPPORTED: &str = "Codex prompt customization is unavailable because Keystone cannot disable all of its tools. Choose Claude Code or arrange the layout manually.";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Proposal {
@@ -54,11 +51,10 @@ enum Next {
     Stop,
 }
 
-/// Where to find each provider. `None` looks it up on the `PATH`, as sessions do.
+/// Where to find Claude Code. `None` looks it up on the `PATH`, as sessions do.
 #[derive(Clone, Default)]
 pub struct Programs {
     pub claude: Option<PathBuf>,
-    pub codex: Option<PathBuf>,
 }
 
 pub struct Agent {
@@ -149,6 +145,14 @@ impl Worker {
     }
 
     fn serve(&self, ask: Ask) -> Next {
+        match ask.provider {
+            Provider::Claude => {}
+            Provider::Codex => {
+                let unsupported = Proposal::Unsupported(CODEX_UNSUPPORTED.into());
+                self.report(ask.request, Outcome::Proposal(unsupported));
+                return Next::Wait;
+            }
+        }
         let deadline = Instant::now() + self.timeout;
         let directory = match tempfile::Builder::new()
             .prefix("keystone-customize-")
@@ -167,16 +171,10 @@ impl Worker {
         let wake: Wake = Arc::new(move || {
             let _ = events.lock().unwrap().send(Message::Events);
         });
-        let connection: Box<dyn Connection> = match ask.provider {
-            Provider::Claude => Box::new(ClaudeConnection::new(self.programs.claude.clone(), wake)),
-            Provider::Codex => Box::new(CodexConnection::new(
-                self.programs.codex.clone(),
-                env!("CARGO_PKG_VERSION"),
-                wake,
-            )),
-        };
+        // Declared after the directory, so its processes end before the directory goes.
+        let connection = ClaudeConnection::for_layout_helper(self.programs.claude.clone(), wake);
         let cwd = directory.path().to_string_lossy().into_owned();
-        self.exchange(ask, connection.as_ref(), &cwd, deadline)
+        self.exchange(ask, &connection, &cwd, deadline)
     }
 
     fn exchange(
@@ -701,17 +699,18 @@ mod provider_tests {
     const CHANGE: &str = r#"{"kind":"change","version":1,"side":"right","width_px":360}"#;
 
     #[test]
-    fn both_providers_answer_with_a_validated_proposal() {
+    fn claude_answers_with_a_validated_proposal_and_codex_is_refused_unstarted() {
         let dir = tempfile::tempdir().unwrap();
-        let reply =
-            format!("KEYSTONE_FAKE_CLAUDE_REPLY='{CHANGE}' KEYSTONE_FAKE_CLAUDE_DELAY_MS=1");
+        let argv = dir.path().join("argv");
+        std::fs::write(&argv, "").unwrap();
+        let reply = format!(
+            "KEYSTONE_FAKE_CLAUDE_REPLY='{CHANGE}' KEYSTONE_FAKE_CLAUDE_DELAY_MS=1 KEYSTONE_FAKE_CLAUDE_ARGV_LOG='{}'",
+            argv.display()
+        );
         let claude = wrapper(dir.path(), "keystone-fake-claude", &reply);
-        let reply = format!("KEYSTONE_FAKE_CODEX_REPLY='{CHANGE}' KEYSTONE_FAKE_CODEX_DELAY_MS=1");
-        let codex = wrapper(dir.path(), "keystone-fake-codex", &reply);
         let (agent, woken) = agent(
             Programs {
                 claude: Some(claude),
-                codex: Some(codex),
             },
             REQUEST_TIMEOUT,
         );
@@ -720,56 +719,69 @@ mod provider_tests {
             width: SidebarWidth::new(360).unwrap(),
         }));
         agent.ask(ask(1, Provider::Claude));
-        assert_eq!(next(&agent, &woken), vec![(1, expected.clone())]);
+        assert_eq!(next(&agent, &woken), vec![(1, expected)]);
+        let launched = std::fs::read_to_string(&argv).unwrap();
+        let tools = r#""--tools","","#;
+        assert!(launched.contains(tools), "{launched}");
+        assert!(
+            launched.contains(r#""--include-hook-events""#),
+            "{launched}"
+        );
+
         agent.ask(ask(2, Provider::Codex));
-        assert_eq!(next(&agent, &woken), vec![(2, expected)]);
+        assert_eq!(
+            next(&agent, &woken),
+            vec![(
+                2,
+                Outcome::Proposal(Proposal::Unsupported(CODEX_UNSUPPORTED.into()))
+            )]
+        );
+        assert_eq!(std::fs::read_to_string(&argv).unwrap(), launched);
     }
 
     #[test]
-    fn prose_and_a_missing_provider_fail_without_a_proposal() {
+    fn prose_and_a_missing_claude_fail_without_a_proposal() {
         let dir = tempfile::tempdir().unwrap();
         let claude = wrapper(
             dir.path(),
             "keystone-fake-claude",
             "KEYSTONE_FAKE_CLAUDE_REPLY='Sure, moved it.' KEYSTONE_FAKE_CLAUDE_DELAY_MS=1",
         );
-        let (agent, woken) = agent(
-            Programs {
+        for (claude, expected) in [
+            (claude, "could not be used"),
+            (
+                dir.path().join("no-such-claude"),
+                "Could not start Claude Code",
+            ),
+        ] {
+            let programs = Programs {
                 claude: Some(claude),
-                codex: Some(dir.path().join("no-such-codex")),
-            },
-            REQUEST_TIMEOUT,
-        );
-        agent.ask(ask(1, Provider::Claude));
-        let results = next(&agent, &woken);
-        assert!(
-            matches!(results.as_slice(), [(1, Outcome::Failed(problem))] if problem.contains("could not be used")),
-            "{results:?}"
-        );
-        agent.ask(ask(2, Provider::Codex));
-        let results = next(&agent, &woken);
-        assert!(
-            matches!(results.as_slice(), [(2, Outcome::Failed(problem))] if problem.contains("Could not start Codex")),
-            "{results:?}"
-        );
+            };
+            let (agent, woken) = agent(programs, REQUEST_TIMEOUT);
+            agent.ask(ask(1, Provider::Claude));
+            let results = next(&agent, &woken);
+            assert!(
+                matches!(results.as_slice(), [(1, Outcome::Failed(problem))] if problem.contains(expected)),
+                "{results:?}"
+            );
+        }
     }
 
     #[test]
     fn a_replaced_or_cancelled_request_reports_nothing_and_a_slow_one_times_out() {
         let dir = tempfile::tempdir().unwrap();
         let reply =
-            format!("KEYSTONE_FAKE_CODEX_REPLY='{CHANGE}' KEYSTONE_FAKE_CODEX_DELAY_MS=1500");
-        let codex = wrapper(dir.path(), "keystone-fake-codex", &reply);
+            format!("KEYSTONE_FAKE_CLAUDE_REPLY='{CHANGE}' KEYSTONE_FAKE_CLAUDE_DELAY_MS=1500");
+        let claude = wrapper(dir.path(), "keystone-fake-claude", &reply);
         let programs = Programs {
-            claude: None,
-            codex: Some(codex),
+            claude: Some(claude),
         };
         let (agent, woken) = agent(programs.clone(), REQUEST_TIMEOUT);
-        agent.ask(ask(1, Provider::Codex));
-        agent.ask(ask(2, Provider::Codex));
-        agent.ask(ask(3, Provider::Codex));
+        agent.ask(ask(1, Provider::Claude));
+        agent.ask(ask(2, Provider::Claude));
+        agent.ask(ask(3, Provider::Claude));
         agent.cancel(3);
-        agent.ask(ask(4, Provider::Codex));
+        agent.ask(ask(4, Provider::Claude));
         let results = next(&agent, &woken);
         assert!(
             matches!(results.as_slice(), [(4, Outcome::Proposal(_))]),
@@ -777,7 +789,7 @@ mod provider_tests {
         );
 
         let (agent, woken) = agent_with_timeout(programs);
-        agent.ask(ask(5, Provider::Codex));
+        agent.ask(ask(5, Provider::Claude));
         let results = next(&agent, &woken);
         assert!(
             matches!(results.as_slice(), [(5, Outcome::Failed(problem))] if problem.contains("No answer")),

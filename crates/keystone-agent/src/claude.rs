@@ -63,6 +63,64 @@ pub fn args(mode: ApprovalMode) -> Vec<&'static str> {
     args
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Launch {
+    #[default]
+    Chat,
+    LayoutHelper,
+}
+
+const LAYOUT_HELPER_ARGS: [&str; 11] = [
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--mcp-config",
+    r#"{"mcpServers":{}}"#,
+    "--disable-slash-commands",
+    "--safe-mode",
+    "--settings",
+    r#"{"disableAllHooks":true}"#,
+    "--no-session-persistence",
+    "--include-hook-events",
+];
+
+impl Launch {
+    pub(crate) fn approval(self, asked: ApprovalState) -> ApprovalState {
+        match self {
+            Launch::Chat => asked,
+            Launch::LayoutHelper => ApprovalState {
+                mode: ApprovalMode::ReadOnly,
+                overridden: true,
+            },
+        }
+    }
+
+    pub(crate) fn args<'a>(
+        self,
+        mode: ApprovalMode,
+        baseline: Option<&'a str>,
+        resume: Option<&'a str>,
+    ) -> Vec<&'a str> {
+        match self {
+            Launch::Chat => {
+                let mut args = args(mode);
+                if let Some(baseline) = baseline {
+                    args.extend(["--permission-mode", baseline]);
+                }
+                if let Some(resume) = resume {
+                    args.extend(["--resume", resume]);
+                }
+                args
+            }
+            Launch::LayoutHelper => {
+                let mut args = args(ApprovalMode::ReadOnly);
+                args.extend(LAYOUT_HELPER_ARGS);
+                args
+            }
+        }
+    }
+}
+
 /// What Claude is told when the user denies a tool call.
 const DENIED: &str = "The user denied this in Keystone.";
 
@@ -160,6 +218,10 @@ pub struct ClaudeDriver {
     /// `initialize` and `set_permission_mode` requests sent since the connection last
     /// asked, so it can time them ([`ClaudeDriver::take_timed_requests`]).
     timed: Vec<String>,
+    launch: Launch,
+    provider_version: Option<String>,
+    helper_init_confirmed: bool,
+    refused: bool,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -173,6 +235,17 @@ impl ClaudeDriver {
         resume: bool,
         seed: u64,
         mode: ApprovalMode,
+        out: &mut Outputs,
+    ) -> Self {
+        Self::launched(session, resume, seed, mode, Launch::Chat, out)
+    }
+
+    pub(crate) fn launched(
+        session: u64,
+        resume: bool,
+        seed: u64,
+        mode: ApprovalMode,
+        launch: Launch,
         out: &mut Outputs,
     ) -> Self {
         let mut driver = Self {
@@ -200,6 +273,10 @@ impl ClaudeDriver {
             leaving_plan: false,
             untrusted: false,
             timed: Vec::new(),
+            launch,
+            provider_version: None,
+            helper_init_confirmed: false,
+            refused: false,
             unknown: 0,
         };
         let line = driver.request(json!({"subtype": "initialize"}), Request::Initialize);
@@ -301,10 +378,8 @@ impl ClaudeDriver {
             // The process is started with the directory and `--resume`.
             Command::Open { .. } => {}
             // Checked again before every message is written, including those waiting.
-            Command::Configure {
-                approval: ApprovalState { mode, .. },
-                ..
-            } => {
+            Command::Configure { approval, .. } => {
+                let mode = self.launch.approval(approval).mode;
                 if mode != self.mode {
                     self.mode = mode;
                     self.version += 1;
@@ -336,7 +411,7 @@ impl ClaudeDriver {
                 let Some(pending) = self.approvals.remove(&request) else {
                     return;
                 };
-                let response = if allow {
+                let response = if allow && self.launch == Launch::Chat {
                     // Claude leaves plan mode when the tool runs, at a time no later line
                     // is ordered against, so nothing more is written in this turn.
                     if pending.exits_plan {
@@ -360,6 +435,9 @@ impl ClaudeDriver {
 
     /// Handles one line of Claude's output.
     pub fn on_line(&mut self, line: &[u8], out: &mut Outputs) {
+        if self.refused {
+            return;
+        }
         let Ok(envelope) = serde_json::from_slice::<Envelope>(line) else {
             self.unknown += 1;
             return;
@@ -370,12 +448,23 @@ impl ClaudeDriver {
         }
         match (&*envelope.kind, envelope.subtype.as_deref()) {
             ("system", Some("init")) => self.on_init(line, out),
+            ("system", Some("hook_started")) if self.launch == Launch::LayoutHelper => {
+                self.refuse("ran a hook although Keystone turned hooks off", out)
+            }
             // Claude reports a mode change, such as after an approved `ExitPlanMode`.
             ("system", Some("status")) => {
                 if let Ok(Status {
                     permission_mode: Some(mode),
                 }) = serde_json::from_slice(line)
                 {
+                    if self.launch == Launch::LayoutHelper && mode != "plan" {
+                        return self.refuse(
+                            &format!(
+                                "reported permission mode {mode} although Keystone required plan"
+                            ),
+                            out,
+                        );
+                    }
                     self.confirmed = Some(mode);
                     self.pump(out);
                 }
@@ -566,8 +655,7 @@ impl ClaudeDriver {
         if self.turn.is_none() {
             self.turn = Some(Turn {
                 started: true,
-                // Claude is already working, so a message steers it.
-                written: true,
+                written: self.launch == Launch::Chat,
                 ..Turn::default()
             });
             out.event(self.session, Event::TurnStarted);
@@ -651,7 +739,46 @@ impl ClaudeDriver {
         }
     }
 
+    fn refuse(&mut self, observed: &str, out: &mut Outputs) {
+        self.refused = true;
+        self.untrusted = true;
+        let claude = match &self.provider_version {
+            Some(version) => format!("Claude Code {version}"),
+            None => "Claude Code".to_owned(),
+        };
+        let written = self.turn.as_ref().is_some_and(|turn| turn.written);
+        let message = format!(
+            "{claude} {observed}. The request was {}.",
+            if written {
+                "stopped and its reply not used"
+            } else {
+                "not sent"
+            }
+        );
+        if written {
+            let line = self.request(
+                json!({"subtype": "interrupt", "cancel_queued": true}),
+                Request::Interrupt,
+            );
+            out.writes.push(line);
+        }
+        match self.turn {
+            Some(_) => self.finish(TurnStatus::Failed, Some(message), out),
+            None => out.event(self.session, Event::Failed { message }),
+        }
+    }
+
     fn on_init(&mut self, line: &[u8], out: &mut Outputs) {
+        if self.launch == Launch::LayoutHelper {
+            let init = serde_json::from_slice::<Value>(line).unwrap_or_default();
+            if self.provider_version.is_none() {
+                self.provider_version = init["claude_code_version"].as_str().map(str::to_owned);
+            }
+            if let Some(observed) = helper_init_problem(&init) {
+                return self.refuse(&observed, out);
+            }
+            self.helper_init_confirmed = true;
+        }
         let Ok(init) = serde_json::from_slice::<Init>(line) else {
             return self.unknown += 1;
         };
@@ -1027,6 +1154,30 @@ impl ClaudeDriver {
                 return self.on_mode_set(response, version, target, out);
             }
             Request::Initialize if response.subtype != "error" => {
+                if self.launch == Launch::LayoutHelper {
+                    let answer = response.response.as_ref();
+                    self.provider_version = answer
+                        .and_then(|a| a.claude_code_version.as_ref()?.as_str())
+                        .map(str::to_owned);
+                    match answer.and_then(|a| a.commands.as_ref()?.as_array()) {
+                        Some(commands) if commands.is_empty() => {}
+                        Some(commands) => {
+                            return self.refuse(
+                                &format!(
+                                    "listed {} slash commands or skills at startup although Keystone turned them off",
+                                    commands.len()
+                                ),
+                                out,
+                            );
+                        }
+                        None => {
+                            return self.refuse(
+                                "did not list its slash commands at startup, so Keystone could not confirm they were off",
+                                out,
+                            );
+                        }
+                    }
+                }
                 self.initialized = true;
                 self.confirmed = response
                     .response
@@ -1091,6 +1242,23 @@ impl ClaudeDriver {
             return self.unknown += 1;
         };
         let failed = result.is_error || result.subtype != "success";
+        if !failed && self.launch == Launch::LayoutHelper {
+            if !self.initialized
+                || !self.turn.as_ref().is_some_and(|turn| turn.written)
+                || self.confirmed.as_deref() != Some("plan")
+            {
+                return self.refuse(
+                    "did not complete initialization and a written helper request in plan mode, so Keystone could not confirm the helper restrictions",
+                    out,
+                );
+            }
+            if !self.helper_init_confirmed {
+                return self.refuse(
+                    "did not report system/init tools and MCP servers, so Keystone could not confirm the helper restrictions",
+                    out,
+                );
+            }
+        }
         let reason = || {
             if result.errors.is_empty() {
                 result
@@ -1331,12 +1499,46 @@ struct ControlResult {
     response: Option<ModeSet>,
 }
 
-/// The parts of a control answer Keystone reads: `set_permission_mode`'s `mode`, and
-/// `initialize`'s `current_permission_mode`.
 #[derive(Deserialize)]
 struct ModeSet {
     mode: Option<String>,
     current_permission_mode: Option<String>,
+    commands: Option<Value>,
+    claude_code_version: Option<Value>,
+}
+
+fn helper_init_problem(init: &Value) -> Option<String> {
+    if let Some(mode) = init["permissionMode"].as_str()
+        && mode != "plan"
+    {
+        return Some(format!(
+            "reported permission mode {mode} although Keystone required plan"
+        ));
+    }
+    let mut listed = Vec::new();
+    for (key, label, required) in [
+        ("tools", "tools", true),
+        ("mcp_servers", "MCP servers", true),
+        ("slash_commands", "slash commands", false),
+        ("skills", "skills", false),
+    ] {
+        match init.get(key).map(Value::as_array) {
+            Some(Some(list)) if list.is_empty() => {}
+            Some(Some(list)) => listed.push(format!("{} {label}", list.len())),
+            None if !required => {}
+            _ => {
+                return Some(format!(
+                    "did not list its {label}, so Keystone could not confirm they were off"
+                ));
+            }
+        }
+    }
+    (!listed.is_empty()).then(|| {
+        format!(
+            "listed {} although Keystone turned them off",
+            listed.join(", ")
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -1358,6 +1560,104 @@ mod tests {
         let a = message_uuid(0x6b65_7973_746f_6e65, 1);
         assert_eq!(a, "6b657973-746f-46e6-8005-000000000001");
         assert_ne!(a, message_uuid(0x6b65_7973_746f_6e65, 2));
+    }
+
+    #[test]
+    fn the_layout_helper_driver_stays_in_plan_mode_and_denies_every_request() {
+        use ApprovalMode::*;
+        let mut out = Outputs::default();
+        let mut driver =
+            ClaudeDriver::launched(1, false, 7, ReadOnly, Launch::LayoutHelper, &mut out);
+        driver.on_line(
+            br#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-1","response":{"commands":[],"current_permission_mode":"plan"}}}"#,
+            &mut out,
+        );
+        for mode in [Ask, Auto, FullAccess, Provider] {
+            let approval = ApprovalState {
+                mode,
+                overridden: true,
+            };
+            driver.command(
+                Command::Configure {
+                    session: 1,
+                    approval,
+                },
+                &mut out,
+            );
+        }
+        let mut out = Outputs::default();
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "a layout".into(),
+            },
+            &mut out,
+        );
+        assert!(
+            matches!(out.writes.as_slice(), [line] if line.contains(r#""type":"user""#)),
+            "only the message is written, in plan mode: {:?}",
+            out.writes
+        );
+        driver.on_line(
+            br#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"t1"}}"#,
+            &mut out,
+        );
+        let request = out
+            .events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::ApprovalRequested(approval) => Some(approval.request.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let mut out = Outputs::default();
+        driver.command(
+            Command::Answer {
+                session: 1,
+                request,
+                allow: true,
+            },
+            &mut out,
+        );
+        assert!(
+            matches!(out.writes.as_slice(), [line] if line.contains(r#""behavior":"deny""#)),
+            "{:?}",
+            out.writes
+        );
+    }
+
+    #[test]
+    fn initialized_process_cannot_succeed_without_a_written_helper_turn() {
+        for launch in [Launch::LayoutHelper, Launch::Chat] {
+            let mut out = Outputs::default();
+            let mut driver =
+                ClaudeDriver::launched(1, false, 7, ApprovalMode::ReadOnly, launch, &mut out);
+            for line in [
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-1","response":{"commands":[],"current_permission_mode":"plan"}}}"#,
+                r#"{"type":"system","subtype":"init","session_id":"s1","tools":[],"mcp_servers":[],"permissionMode":"plan"}"#,
+                r#"{"type":"assistant","message":{"id":"layout-reply","content":[{"type":"text","text":"a layout"}]}}"#,
+                r#"{"type":"result","subtype":"success"}"#,
+            ] {
+                driver.on_line(line.as_bytes(), &mut out);
+            }
+            let expected = if launch == Launch::LayoutHelper {
+                TurnStatus::Failed
+            } else {
+                TurnStatus::Completed
+            };
+            assert!(
+                out.events.iter().any(|(_, event)| matches!(
+                    event, Event::TurnCompleted { status, .. } if *status == expected
+                )),
+                "{:?}",
+                out.events
+            );
+            assert!(
+                !out.writes
+                    .iter()
+                    .any(|line| line.contains(r#""type":"user""#))
+            );
+        }
     }
 
     #[test]

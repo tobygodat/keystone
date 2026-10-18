@@ -38,7 +38,17 @@
 //! earlier process would find them. With `KEYSTONE_FAKE_CLAUDE_LOG_DIR` set, each
 //! answer received is logged to `<dir>/<pid>.answers` as `applied <id>` or
 //! `ignored <id>`. When its directory holds a `.fake-claude-pids` file, each process
-//! appends its ID to it, so a test can find a process it never saw start.
+//! appends its ID to it, so a test can find a process it never saw start. A
+//! `.fake-claude-argv` file, or the file `KEYSTONE_FAKE_CLAUDE_ARGV_LOG` names, gets
+//! each process's arguments as a JSON array per line, and a `.fake-claude-messages`
+//! file each user message it reads.
+//!
+//! `init` lists tools unless launched with `--tools ""`, and no MCP servers, slash
+//! commands or skills. `init-tools` and `init-commands` settings replace the JSON of
+//! `init`'s `tools` and the `initialize` answer's `commands`; `missing` leaves the
+//! field out. A `hook` setting of `1` reports a `SessionStart` hook before reading
+//! anything, and a `reject-flag` setting names a flag to exit on at launch, as an
+//! older Claude would.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -53,6 +63,8 @@ type Out = Arc<Mutex<io::Stdout>>;
 
 /// The longest a reply waits for its release file.
 const RELEASE_LIMIT: Duration = Duration::from_secs(10);
+
+const VERSION: &str = "2.1.300";
 
 fn emit(out: &Out, message: Value) {
     let mut out = out.lock().unwrap();
@@ -136,6 +148,12 @@ fn main() {
     {
         let _ = writeln!(pids, "{}", std::process::id());
     }
+    let argv_log = std::env::var_os("KEYSTONE_FAKE_CLAUDE_ARGV_LOG")
+        .map_or_else(|| PathBuf::from(".fake-claude-argv"), PathBuf::from);
+    let open = std::fs::OpenOptions::new().append(true).open(&argv_log);
+    if let Ok(mut argv) = open {
+        let _ = writeln!(argv, "{}", json!(args[1..]));
+    }
     let launch_mode = args
         .iter()
         .position(|a| a == "--permission-mode")
@@ -170,6 +188,37 @@ fn main() {
             .unwrap_or(0),
     );
     let ignore_initialize = setting("ignore-initialize");
+    if let Some(flag) = setting("reject-flag")
+        && args.contains(&flag)
+    {
+        eprintln!("error: unknown option '{flag}'");
+        std::process::exit(1);
+    }
+    let field = |name: &str, default: Value| match setting(name).as_deref() {
+        Some("missing") => None,
+        Some(json) => Some(serde_json::from_str(json).expect("valid JSON setting")),
+        None => Some(default),
+    };
+    let no_tools = args
+        .windows(2)
+        .any(|w| w[0] == "--tools" && w[1].is_empty());
+    let tools = field(
+        "init-tools",
+        if no_tools {
+            json!([])
+        } else {
+            json!(["Bash", "Read", "Edit"])
+        },
+    );
+    let commands = field("init-commands", json!([]));
+    if setting("hook").as_deref() == Some("1") {
+        emit(
+            &out,
+            json!({"type": "system", "subtype": "hook_started", "hook_id": "fake-hook",
+                   "hook_name": "SessionStart:startup", "hook_event": "SessionStart",
+                   "session_id": session}),
+        );
+    }
     let shared = Arc::new(Shared {
         state: Mutex::default(),
         bypass: launch_mode.as_deref() == Some("bypassPermissions"),
@@ -189,9 +238,10 @@ fn main() {
         },
     });
     set_mode(&shared, &mode);
+    let skip_init = setting("skip-init").as_deref() == Some("1");
     let worker = {
         let (out, shared, session) = (out.clone(), shared.clone(), session.clone());
-        thread::spawn(move || work(&out, &shared, &session, delay, signed_out))
+        thread::spawn(move || work(&out, &shared, &session, delay, signed_out, tools, skip_init))
     };
 
     for line in io::stdin().lock().lines() {
@@ -214,8 +264,20 @@ fn main() {
                         if ignore_initialize.as_deref() == Some("all")
                             || (ignore_initialize.as_deref() == Some("probe")
                                 && id == "keystone-probe") => {}
-                    Some("initialize") => reply(json!({"commands": [],
-                        "current_permission_mode": *shared.mode.lock().unwrap()})),
+                    Some("initialize") => {
+                        if let Some(frames) = setting("initialize-frames") {
+                            for frame in serde_json::from_str::<Vec<Value>>(&frames).unwrap() {
+                                emit(&out, frame);
+                            }
+                            continue;
+                        }
+                        let mut answer = json!({"claude_code_version": VERSION,
+                            "current_permission_mode": *shared.mode.lock().unwrap()});
+                        if let Some(commands) = &commands {
+                            answer["commands"] = commands.clone();
+                        }
+                        reply(answer)
+                    }
                     Some("set_permission_mode") => {
                         thread::sleep(hold_mode);
                         let mode = message["request"]["mode"].as_str().unwrap_or_default();
@@ -286,6 +348,18 @@ fn main() {
                     .as_str()
                     .unwrap_or_default()
                     .to_owned();
+                if let Ok(mut messages) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(".fake-claude-messages")
+                {
+                    let _ = writeln!(messages, "{}", json!(text));
+                }
+                if let Some(frames) = setting("turn-frames") {
+                    for frame in serde_json::from_str::<Vec<Value>>(&frames).unwrap() {
+                        emit(&out, frame);
+                    }
+                    continue;
+                }
                 lifecycle(&out, &shared, &session, &uuid, "queued");
                 let mut state = shared.state.lock().unwrap();
                 if state.busy && message["priority"] == "now" {
@@ -333,7 +407,15 @@ fn stream(out: &Out, event: Value) {
     );
 }
 
-fn work(out: &Out, shared: &Shared, session: &str, delay: Duration, signed_out: bool) {
+fn work(
+    out: &Out,
+    shared: &Shared,
+    session: &str,
+    delay: Duration,
+    signed_out: bool,
+    tools: Option<Value>,
+    skip_init: bool,
+) {
     let mut turn = 0;
     loop {
         let next = {
@@ -358,11 +440,15 @@ fn work(out: &Out, shared: &Shared, session: &str, delay: Duration, signed_out: 
             &[]
         };
         let mode = shared.mode.lock().unwrap().clone();
-        emit(
-            out,
-            json!({"type": "system", "subtype": "init", "session_id": session,
-                   "capabilities": capabilities, "permissionMode": mode}),
-        );
+        let mut init = json!({"type": "system", "subtype": "init", "session_id": session,
+               "capabilities": capabilities, "permissionMode": mode, "mcp_servers": [],
+               "slash_commands": [], "skills": [], "claude_code_version": VERSION});
+        if let Some(tools) = &tools {
+            init["tools"] = tools.clone();
+        }
+        if !skip_init {
+            emit(out, init);
+        }
         emit(
             out,
             json!({"type": "user", "message": {"role": "user", "content": next.text},

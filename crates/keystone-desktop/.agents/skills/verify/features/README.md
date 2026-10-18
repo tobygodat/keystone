@@ -16,7 +16,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools only obser
 - [Drafts and restart](drafts.md) covers focus, typing, autosave, and restoration.
 - [Settlement](settlement.md) covers row and shortcut settling, un-settling, and the collapsible Settled section.
 - [Search and navigation](search.md) covers search entry points, matching, clearing, and sidebar visibility.
-- [Customize](customize.md) covers sidebar side and width through direct controls and Claude or Codex requests, plus preview, Apply, Discard, Undo, Reset, and restart.
+- [Customize](customize.md) covers sidebar side and width through direct controls and Claude Code requests, plus preview, Apply, Discard, Undo, Reset, and restart.
 - [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, and restoring a conversation.
 
 ## Coverage rules

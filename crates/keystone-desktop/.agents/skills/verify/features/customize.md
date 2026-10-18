@@ -1,12 +1,12 @@
 # Customize the sidebar
 
-Preview, apply, and undo the session sidebar's side and width, by direct edits or by a Claude Code or Codex request.
+Preview, apply, and undo the session sidebar's side and width, by direct edits or by a Claude Code request.
 
 ## Sub-features
 
 - `customize-entry` opens the panel from the top bar, including while the sidebar is hidden, and closing restores that visibility.
 - `customize-direct` previews side and width from buttons, Alt+Left/Right/[/], and the inner-edge drag.
-- `customize-ask` sends the prompt to the chosen provider and previews only a valid answer.
+- `customize-ask` sends the prompt to Claude Code's layout helper and previews only a valid answer. Codex is refused as not supported before anything starts.
 - `customize-commit` covers Apply, Discard, Reset, and Undo, and their saved state.
 - `customize-fit` draws a narrower sidebar in a small window without changing the saved width.
 
@@ -26,8 +26,10 @@ Names: `customize-toggle`, `customize-panel`, `customize-close`, `customize-side
 - Drag the handle with `input` `{"actions":[{"action":"drag","path":[{"x":X,"y":Y},{"x":X-60,"y":Y}]}]}` from the handle's center. On the right, moving left widens it. Read `customize-width` in a fresh screenshot.
 - `click` `customize-apply`. Require `workspace` to show `sidebar_layout` with the new side and `width_px`. `click` `customize-undo` and require the earlier layout saved.
 - Quit with Ctrl+Q, `launch`, and require the saved layout drawn before opening the panel.
-- For a scripted answer, start with `env` setting `KEYSTONE_CLAUDE_PATH` to a script that runs `target/debug/keystone-fake-claude` with `KEYSTONE_FAKE_CLAUDE_REPLY='{"kind":"change","version":1,"side":"right","width_px":360}'`. `KEYSTONE_FAKE_CODEX_REPLY` does the same for `keystone-fake-codex`. Prose, fences, or unknown fields in the reply must show an error in `customize-status` and leave the preview unchanged.
-- For an unavailable provider, set `KEYSTONE_CODEX_PATH` to a missing file, choose Codex, and press Preview. Require an error and **Retry** in the panel, with the prompt kept.
+- For a scripted answer, start with `env` setting `KEYSTONE_CLAUDE_PATH` to a script that runs `target/debug/keystone-fake-claude` with `KEYSTONE_FAKE_CLAUDE_REPLY='{"kind":"change","version":1,"side":"right","width_px":360}'`. Prose, fences, or unknown fields in the reply must show an error in `customize-status` and leave the preview unchanged.
+- Choose Codex and press Preview. Require `customize-status` to say it is not supported, with no Codex process started.
+- For an unavailable provider, set `KEYSTONE_CLAUDE_PATH` to a missing file and press Preview. Require an error and **Retry** in the panel, with the prompt kept.
+- The helper launches `claude` with `--tools ""`, empty MCP, no slash commands or hooks, and plan mode, and fails the request when Claude reports any of them on. A wrapper script on `KEYSTONE_CLAUDE_PATH` can log its arguments.
 
 ## Gotchas
 

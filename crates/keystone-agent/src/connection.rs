@@ -1,7 +1,7 @@
 //! Running provider connections: drivers, their processes, and an inbox of events
 //! for the UI.
 
-use crate::claude::{self, ClaudeDriver};
+use crate::claude::{self, ClaudeDriver, Launch};
 use crate::codex::CodexDriver;
 use crate::driver::{ApprovalState, Command, Outputs};
 use crate::host::{Exit, Process};
@@ -541,6 +541,7 @@ struct ClaudeShared {
     before_start: Option<StartHook>,
     /// [`MODE_TIMEOUT`], shorter in tests.
     mode_timeout: Option<Duration>,
+    launch: Launch,
 }
 
 /// A session's process, from when it begins starting until it exits.
@@ -596,6 +597,7 @@ impl ClaudeShared {
 /// Records the session's approval state and gives it to its driver, which may now
 /// write what waited for it, or need a new process. Returns what the driver wrote.
 fn configure(shared: &mut ClaudeShared, session: u64, approval: ApprovalState) -> Outputs {
+    let approval = shared.launch.approval(approval);
     shared.approvals.insert(session, approval);
     let mut out = Outputs::default();
     if let Some(live) = shared.live.get_mut(&session) {
@@ -618,11 +620,27 @@ enum Job {
 impl ClaudeConnection {
     /// `program` is the `claude` binary to run, or `None` to look for it on first use.
     pub fn new(program: Option<PathBuf>, wake: Wake) -> Self {
+        Self::launching(program, wake, Launch::Chat)
+    }
+
+    /// A connection for the sidebar layout helper, whose reply is text Keystone parses.
+    /// Every process starts in plan mode with flags to disable tools, MCP servers,
+    /// slash commands, skills, hooks, and conversation persistence. It never resumes.
+    /// Caller approval modes are ignored and approval answers cannot grant access.
+    /// The caller still handles approval requests and must answer them to continue.
+    /// The turn fails if reported capabilities contradict these restrictions or cannot
+    /// be confirmed. These checks cannot undo startup actions; managed settings may apply.
+    pub fn for_layout_helper(program: Option<PathBuf>, wake: Wake) -> Self {
+        Self::launching(program, wake, Launch::LayoutHelper)
+    }
+
+    fn launching(program: Option<PathBuf>, wake: Wake, launch: Launch) -> Self {
         Self {
             starter: ClaudeStarter {
                 wake,
                 shared: Arc::new(Mutex::new(ClaudeShared {
                     program,
+                    launch,
                     ..ClaudeShared::default()
                 })),
                 started: Arc::default(),
@@ -854,7 +872,11 @@ impl ClaudeStarter {
         message: bool,
         act: impl FnOnce(&mut ClaudeDriver, &mut Outputs),
     ) {
-        let resume = shared.threads.get(&session).cloned().or(resume);
+        let launch = shared.launch;
+        let resume = match launch {
+            Launch::Chat => shared.threads.get(&session).cloned().or(resume),
+            Launch::LayoutHelper => None,
+        };
         shared.generation += 1;
         let generation = shared.generation;
         let approval = shared.approvals.get(&session).copied().unwrap_or_default();
@@ -863,8 +885,14 @@ impl ClaudeStarter {
         // so the user's own settings are read from a fresh process and passed.
         let probe = mode == ApprovalMode::Provider && resume.is_some() && approval.overridden;
         let mut pending = Outputs::default();
-        let mut driver =
-            ClaudeDriver::new(session, resume.is_some(), random_seed(), mode, &mut pending);
+        let mut driver = ClaudeDriver::launched(
+            session,
+            resume.is_some(),
+            random_seed(),
+            mode,
+            launch,
+            &mut pending,
+        );
         act(&mut driver, &mut pending);
         // Counted only now that the driver has the turn, so a message sent during the
         // start is refused like any steer too early to send.
@@ -889,7 +917,9 @@ impl ClaudeStarter {
         let program = shared.program.clone();
         let hook = shared.before_start.clone();
         drop(shared);
-        let spawned = self.spawn(session, generation, program, hook, cwd, resume, mode, probe);
+        let spawned = self.spawn(
+            session, generation, program, hook, cwd, resume, mode, probe, launch,
+        );
 
         let mut shared = self.shared.lock().unwrap();
         let current = shared
@@ -955,6 +985,7 @@ impl ClaudeStarter {
         resume: Option<String>,
         mode: ApprovalMode,
         probe: bool,
+        launch: Launch,
     ) -> Result<Process, String> {
         if let Some(hook) = hook {
             hook(session);
@@ -970,17 +1001,11 @@ impl ClaudeStarter {
             }
         };
         let baseline = if probe {
-            Some(self.probe_permission_mode(session, generation, &program, cwd)?)
+            Some(self.probe_permission_mode(session, generation, &program, cwd, launch)?)
         } else {
             None
         };
-        let mut args = claude::args(mode);
-        if let Some(baseline) = &baseline {
-            args.extend(["--permission-mode", baseline]);
-        }
-        if let Some(resume) = &resume {
-            args.extend(["--resume", resume]);
-        }
+        let args = launch.args(mode, baseline.as_deref(), resume.as_deref());
         let on_line = {
             let starter = self.clone();
             move |line: &[u8]| {
@@ -1037,6 +1062,7 @@ impl ClaudeStarter {
         generation: u64,
         program: &Path,
         cwd: &Path,
+        launch: Launch,
     ) -> Result<String, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let on_line = move |line: &[u8]| {
@@ -1057,6 +1083,9 @@ impl ClaudeStarter {
                 "Could not read your Claude Code approval settings to restore them ({reason}). Choose an approval mode to continue."
             )
         };
+        if launch == Launch::LayoutHelper {
+            return Err(failed("the layout helper never reads them"));
+        }
         let process = Process::spawn(program, &claude::ARGS, cwd, on_line, |_| {})
             .map_err(|e| failed(&e.to_string()))?;
         process.send(

@@ -380,7 +380,6 @@ impl Keystone {
         self.customize_agent.get_or_insert_with(|| {
             let programs = Programs {
                 claude: std::env::var_os("KEYSTONE_CLAUDE_PATH").map(PathBuf::from),
-                codex: std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
             };
             Agent::new(programs, REQUEST_TIMEOUT, wake)
         })
@@ -1357,7 +1356,6 @@ mod ui_tests {
             view.customize_agent = Some(Agent::new(
                 Programs {
                     claude: Some(claude),
-                    codex: None,
                 },
                 Duration::from_secs(20),
                 wake,
