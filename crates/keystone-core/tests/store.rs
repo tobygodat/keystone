@@ -13,7 +13,7 @@ fn sessions_and_drafts_survive_restart() {
     let claude = store.create(Provider::Claude, 1).unwrap().value;
     let codex = store.create(Provider::Codex, 1).unwrap().value;
     assert_eq!((claude, codex), (1, 2));
-    store.select(claude, 1).unwrap();
+    store.select(claude).unwrap();
     store.set_settled(codex, true).unwrap();
     store
         .set_draft(claude, "First paragraph 🥔\n\n第二段\n".into())
@@ -52,7 +52,7 @@ fn invalid_commands_leave_memory_and_file_unchanged() {
     store.create(Provider::Claude, 1).unwrap();
     let before = fs::read(&path).unwrap();
 
-    assert!(store.select(99, 1).is_err());
+    assert!(store.select(99).is_err());
     assert!(store.set_settled(99, true).is_err());
     assert!(store.set_draft(99, "lost".into()).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);

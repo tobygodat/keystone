@@ -1,0 +1,494 @@
+use super::*;
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
+use keystone_agent::{
+    Item, ItemKind, ItemStatus,
+    log::{Entry, SessionLog},
+};
+use keystone_core::{Provider, Store};
+
+fn click(cx: &mut VisualTestContext, id: &'static str) {
+    let bounds = cx
+        .debug_bounds(id)
+        .unwrap_or_else(|| panic!("missing {id}"));
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+}
+fn drag(cx: &mut VisualTestContext, id: &'static str, x: f32, y: f32) {
+    let from = cx.debug_bounds(id).unwrap().center();
+    let to = point(from.x + px(x), from.y + px(y));
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(from.x + px(x / 2.), from.y + px(y / 2.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+}
+fn open(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+    store.create(Provider::Codex, 1).unwrap();
+    store.create(Provider::Claude, 2).unwrap();
+    store.select(1).unwrap();
+    let mut log = SessionLog::open(&dir.path().join("sessions"), 1).unwrap();
+    for i in 0..50 {
+        log.append(&Entry::Item {
+            item: Item {
+                id: format!("reply-{i}"),
+                kind: ItemKind::AgentMessage,
+                text: format!(
+                    "Reply {i}. {}",
+                    "A saved transcript with enough text to scroll. ".repeat(12)
+                ),
+                status: ItemStatus::Completed,
+            },
+            seq: None,
+            run: None,
+        })
+        .unwrap();
+    }
+    cx.update(|cx| {
+        keystone_ui::init(cx);
+        crate::bind_keys(cx);
+    });
+    cx.executor().allow_parking();
+    let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+    cx.simulate_resize(gpui::size(px(1200.), px(900.)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !view.read_with(cx, |this, _| {
+        this.conversations
+            .get(&1)
+            .is_some_and(|c| c.rows.len() == 50)
+    }) {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        cx.run_until_parked();
+    }
+    click(cx, "customize-toggle");
+    click(cx, "component-duplicate");
+    (dir, view, cx)
+}
+
+#[gpui::test]
+fn two_visible_occurrences_keep_scroll_and_focus_across_session_selection(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    let first = ViewKey {
+        view: ViewId::MAIN,
+        session: 1,
+    };
+    let second = ViewKey {
+        view: ViewId(3),
+        session: 1,
+    };
+    let over = cx.debug_bounds("conversation").unwrap().center();
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: over,
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(300.))),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    let top = view.read_with(cx, |this, _| {
+        assert!(this.views.scrolled_up(first));
+        assert!(!this.views.scrolled_up(second));
+        assert!(
+            this.views
+                .get(second)
+                .unwrap()
+                .viewport_bounds()
+                .size
+                .height
+                > px(0.)
+        );
+        this.views.get(first).unwrap().logical_scroll_top()
+    });
+    click(cx, "conversation");
+    view.read_with(cx, |this, _| {
+        assert_eq!(
+            this.views.send_target(&this.arrangement.visible, 1),
+            Some(first)
+        )
+    });
+    click(cx, "conversation-view-3");
+    view.read_with(cx, |this, _| {
+        assert_eq!(
+            this.views.send_target(&this.arrangement.visible, 1),
+            Some(second)
+        )
+    });
+    click(cx, "session-2");
+    click(cx, "session-1");
+    view.read_with(cx, |this, _| {
+        let restored = this.views.get(first).unwrap().logical_scroll_top();
+        assert_eq!(restored.item_ix, top.item_ix);
+        assert_eq!(restored.offset_in_item, top.offset_in_item);
+        assert!(!this.views.scrolled_up(second));
+    });
+}
+
+#[gpui::test]
+fn resize_changes_visible_geometry_without_retyping_auto_or_unrelated_fill(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, view, cx) = open(cx);
+    drag(cx, "split-grip-[]-0", 40., 0.);
+    view.read_with(cx, |this, _| {
+        let saved = this.saved_composition();
+        let c = this.customization.shown(&saved);
+        let Node::Split { children, .. } = c.root() else {
+            panic!()
+        };
+        assert_eq!(children[0].size, Size::Px(NonZeroU16::new(342).unwrap()));
+        assert_eq!(children[1].size, Size::Fill(NonZeroU16::MIN));
+        let Node::Split { children, .. } = &children[1].node else {
+            panic!()
+        };
+        assert_eq!(children.last().unwrap().size, Size::Auto);
+        assert!(this.saved_layout().is_none());
+    });
+    let first = cx.debug_bounds("conversation").unwrap().size.height;
+    let second = cx.debug_bounds("conversation-view-3").unwrap().size.height;
+    drag(cx, "split-grip-[1]-0", 0., 50.);
+    assert!(cx.debug_bounds("conversation").unwrap().size.height > first);
+    assert!(cx.debug_bounds("conversation-view-3").unwrap().size.height < second);
+}
+
+#[gpui::test]
+fn a_narrow_composer_keeps_streaming_controls_inside_the_window(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    let preferred: Composition = serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "views": [
+            {"id": 0, "component": "conversation"},
+            {"id": 1, "component": "session_list"},
+            {"id": 2, "component": "composer"}
+        ],
+        "root": {"kind": "split", "axis": "row", "children": [
+            {"node": {"kind": "view", "id": 1}, "size": {"px": 302}},
+            {"node": {"kind": "view", "id": 0}, "size": {"fill": 1}},
+            {"node": {"kind": "view", "id": 2}, "size": {"px": 440}}
+        ]}
+    }))
+    .unwrap();
+    view.update_in(cx, |this, window, cx| {
+        this.store
+            .set_project_layout(
+                this.project.as_ref().unwrap(),
+                Some(preferred.clone().into()),
+            )
+            .unwrap();
+        this.customize(crate::arrangement_editor::Action::Discard, window, cx);
+        this.conversations.get_mut(&1).unwrap().running = true;
+        cx.notify();
+    });
+    cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+    cx.run_until_parked();
+    let mut right = px(0.);
+    for id in ["project", "approval-mode", "stop", "send"] {
+        let bounds = cx.debug_bounds(id).unwrap();
+        assert!(bounds.left() >= right, "{id} overlaps another control");
+        assert!(bounds.right() <= px(1280.), "{id} clips at the window edge");
+        right = bounds.right();
+    }
+    view.read_with(cx, |this, _| {
+        assert_eq!(this.saved_composition(), preferred)
+    });
+}
+
+fn unread(view: &Entity<Keystone>, cx: &mut VisualTestContext) {
+    view.update_in(cx, |this, window, cx| {
+        window.activate_window();
+        this.store.record_turn_end(1, false, 10).unwrap();
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+fn viewed(view: &Entity<Keystone>, cx: &VisualTestContext) -> u64 {
+    view.read_with(cx, |this, _| {
+        this.selected_session().unwrap().viewed_at().unwrap()
+    })
+}
+
+#[gpui::test]
+fn header_only_conversation_does_not_observe_until_transcript_is_visible(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    cx.simulate_resize(gpui::size(px(1280.), px(236.)));
+    cx.run_until_parked();
+    unread(&view, cx);
+    let transcript = cx.debug_bounds("conversation").unwrap();
+    assert_eq!(transcript.size.height, px(0.));
+    cx.simulate_click(
+        point(transcript.center().x, transcript.top() - px(10.)),
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(viewed(&view, cx) < 10);
+    cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+    cx.run_until_parked();
+    assert!(viewed(&view, cx) >= 10);
+}
+
+#[gpui::test]
+fn failed_observation_waits_for_deliberate_activation_before_retry(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx);
+    unread(&view, cx);
+    let path = dir.path().join("workspace.json");
+    let backup = dir.path().join("backup.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    click(cx, "conversation");
+    view.read_with(cx, |this, _| {
+        assert!(
+            this.error
+                .as_ref()
+                .unwrap()
+                .starts_with("Could not save read status.")
+        );
+    });
+    assert!(viewed(&view, cx) < 10);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    for _ in 0..3 {
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+    }
+    assert!(viewed(&view, cx) < 10);
+    let writes = view.read_with(cx, |this, _| this.store.writes());
+    click(cx, "composer-field");
+    click(cx, "conversation");
+    assert!(viewed(&view, cx) >= 10);
+    view.read_with(cx, |this, _| assert_eq!(this.store.writes(), writes + 1));
+    click(cx, "conversation");
+    view.read_with(cx, |this, _| assert_eq!(this.store.writes(), writes + 1));
+}
+
+fn tabbed(selected: usize) -> Composition {
+    serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "views": [
+            {"id": 0, "component": "conversation"},
+            {"id": 2, "component": "composer"},
+            {"id": 3, "component": "conversation"}
+        ],
+        "root": {"kind": "split", "axis": "column", "children": [
+            {"node": {"kind": "tabs", "selected": selected, "views": [0, 3]}, "size": {"fill": 1}},
+            {"node": {"kind": "view", "id": 2}, "size": "auto"}
+        ]}
+    }))
+    .unwrap()
+}
+
+#[gpui::test]
+fn checked_tab_preview_and_restored_documents_replace_runtime_selection(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    view.update_in(cx, |this, window, cx| {
+        this.store
+            .set_project_layout(this.project.as_ref().unwrap(), Some(tabbed(0).into()))
+            .unwrap();
+        this.customize(Action::Close, window, cx);
+    });
+    cx.run_until_parked();
+    let writes = view.read_with(cx, |this, _| this.store.writes());
+    click(cx, "conversation-tab-3");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    view.read_with(cx, |this, _| assert_eq!(this.store.writes(), writes));
+    click(cx, "customize-toggle");
+    assert!(cx.debug_bounds("conversation").is_some());
+    click(cx, "conversation-tab-3");
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    click(cx, "conversation-tab-0");
+    click(cx, "customize-toggle");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    click(cx, "customize-undo");
+    assert!(cx.debug_bounds("conversation").is_some());
+    click(cx, "customize-close");
+    assert!(cx.debug_bounds("conversation").is_some());
+    click(cx, "conversation-tab-3");
+    click(cx, "customize-toggle");
+    click(cx, "conversation-tab-3");
+    click(cx, "customize-discard");
+    click(cx, "customize-close");
+    assert!(cx.debug_bounds("conversation").is_some());
+}
+
+#[gpui::test]
+fn fitted_sidebar_entry_points_without_session_list_do_not_block_observation(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, view, cx) = open(cx);
+    view.update_in(cx, |this, window, cx| {
+        this.store
+            .set_project_layout(this.project.as_ref().unwrap(), Some(tabbed(0).into()))
+            .unwrap();
+        this.customize(Action::Close, window, cx);
+    });
+    cx.simulate_resize(gpui::size(px(400.), px(420.)));
+    cx.run_until_parked();
+    unread(&view, cx);
+    click(cx, "sidebar-toggle");
+    click(cx, "conversation");
+    assert!(viewed(&view, cx) >= 10);
+    view.read_with(cx, |this, _| assert!(!this.arrangement.sidebar_overlay));
+    click(cx, "composer-field");
+    view.update(cx, |this, cx| {
+        this.store
+            .record_turn_end(1, false, crate::now_ms() + 1)
+            .unwrap();
+        cx.notify();
+    });
+    cx.dispatch_action(crate::FocusSearch);
+    cx.run_until_parked();
+    view.read_with(cx, |this, _| assert!(!this.arrangement.sidebar_overlay));
+    click(cx, "conversation");
+    view.read_with(cx, |this, _| {
+        let session = this.selected_session().unwrap();
+        assert!(session.viewed_at() >= session.updated_at());
+    });
+}
+
+#[gpui::test]
+fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
+    cx: &mut TestAppContext,
+) {
+    let (dir, view, cx) = open(cx);
+    view.update_in(cx, |this, window, cx| {
+        this.store
+            .set_project_layout(this.project.as_ref().unwrap(), Some(tabbed(0).into()))
+            .unwrap();
+        this.customize(Action::Close, window, cx);
+    });
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    let path = dir.path().join("workspace.json");
+    let original = std::fs::read(&path).unwrap();
+    click(cx, "fitted-tab-3");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    click(cx, "customize-toggle");
+    view.update(cx, |this, cx| {
+        let saved = this.saved_composition();
+        let raw = this.saved_layout().cloned();
+        this.customization.dispatch(
+            Action::Ask {
+                provider: Provider::Codex,
+                prompt: "Select conversation 3".into(),
+            },
+            raw.as_ref(),
+            &saved,
+        );
+        this.customization.receive(
+            this.customization.running().unwrap(),
+            crate::customization_agent::Outcome::Proposal(
+                crate::customization_agent::Proposal::Change(tabbed(1)),
+            ),
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    click(cx, "customize-apply");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    view.read_with(cx, |this, _| {
+        assert_eq!(this.saved_composition(), tabbed(1))
+    });
+    click(cx, "customize-close");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    cx.simulate_resize(gpui::size(px(1200.), px(900.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    click(cx, "customize-toggle");
+    click(cx, "fitted-tab-3");
+    view.update(cx, |this, cx| {
+        let saved = this.saved_composition();
+        let raw = this.saved_layout().cloned();
+        this.customization.dispatch(
+            Action::Ask {
+                provider: Provider::Codex,
+                prompt: "Select conversation 0".into(),
+            },
+            raw.as_ref(),
+            &saved,
+        );
+        this.customization.receive(
+            this.customization.running().unwrap(),
+            crate::customization_agent::Outcome::Proposal(
+                crate::customization_agent::Proposal::Change(tabbed(0)),
+            ),
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("conversation").is_some());
+    assert!(cx.debug_bounds("conversation-view-3").is_none());
+    let applied = std::fs::read(&path).unwrap();
+    click(cx, "fitted-tab-3");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    assert_eq!(std::fs::read(&path).unwrap(), applied);
+    click(cx, "customize-discard");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    click(cx, "fitted-tab-0");
+    click(cx, "customize-close");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    click(cx, "customize-toggle");
+    click(cx, "customize-undo");
+    assert!(cx.debug_bounds("conversation").is_some());
+    view.read_with(cx, |this, _| {
+        assert_eq!(this.saved_composition(), tabbed(0))
+    });
+}
+
+#[gpui::test]
+fn fitting_uses_the_first_displayed_preferred_pane_and_retains_temporary_clicks(
+    cx: &mut TestAppContext,
+) {
+    let (dir, view, cx) = open(cx);
+    let preferred: Composition = serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "views": [
+            {"id": 0, "component": "conversation"},
+            {"id": 2, "component": "composer"},
+            {"id": 3, "component": "conversation"},
+            {"id": 4, "component": "conversation"}
+        ],
+        "root": {"kind": "split", "axis": "column", "children": [
+            {"node": {"kind": "view", "id": 2}, "size": "auto"},
+            {"node": {"kind": "split", "axis": "row", "children": [
+                {"node": {"kind": "tabs", "selected": 1, "views": [0, 3]}, "size": {"fill": 1}},
+                {"node": {"kind": "view", "id": 4}, "size": {"fill": 1}}
+            ]}, "size": {"fill": 1}}
+        ]}
+    }))
+    .unwrap();
+    view.update_in(cx, |this, window, cx| {
+        this.store
+            .set_project_layout(this.project.as_ref().unwrap(), Some(preferred.into()))
+            .unwrap();
+        this.customize(Action::Close, window, cx);
+    });
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    assert!(cx.debug_bounds("conversation").is_none());
+    assert!(cx.debug_bounds("conversation-view-4").is_none());
+    let saved = std::fs::read(dir.path().join("workspace.json")).unwrap();
+    click(cx, "fitted-tab-4");
+    assert!(cx.debug_bounds("conversation-view-4").is_some());
+    cx.simulate_resize(gpui::size(px(1200.), px(900.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    assert!(cx.debug_bounds("conversation-view-4").is_some());
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("conversation-view-4").is_some());
+    assert_eq!(
+        std::fs::read(dir.path().join("workspace.json")).unwrap(),
+        saved
+    );
+}

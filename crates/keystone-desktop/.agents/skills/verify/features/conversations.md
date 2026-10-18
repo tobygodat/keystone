@@ -49,3 +49,9 @@ Named elements: `send`, `stop`, `approval`, `approve`, `deny`, `turn-status`, `c
 
 - Wheel scrolling. Driver scroll actions reach no GPUI view (KS-012).
 - A copy click before any key press in the run copies nothing (KS-013).
+
+## Repeated conversations and unread
+
+All conversation occurrences follow the active session, with independent retained scroll and focus. The default occurrence keeps the selectors above. Other occurrences append `-view-{ViewId}` to transcript, status, approval, and jump selectors. Read the actual element list after a helper or Borrow replacement. See [Customize](customize.md) for the complete selector map and fitting behavior.
+
+Only a visible, focused conversation showing the latest reply in an active native window acknowledges that reply. Composer focus and unfocused visibility do not count. Selection, navigation, Send, Stop, and completion do not implicitly observe replies. Send scrolls only the most recently focused visible occurrence, then focuses the composer.

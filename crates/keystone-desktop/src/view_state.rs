@@ -1,4 +1,4 @@
-use gpui::{ListAlignment, ListOffset, ListState, px};
+use gpui::{App, FocusHandle, ListAlignment, ListOffset, ListState, px};
 use keystone_core::ViewId;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -12,11 +12,16 @@ pub struct ViewKey {
 struct Transcript {
     list: ListState,
     remeasured_top: bool,
+    focus: Option<FocusHandle>,
+    focused_at: u64,
+    revision: u64,
+    observation_attempt: Option<u64>,
 }
 
 #[derive(Default)]
 pub struct ViewStates {
     transcripts: HashMap<ViewKey, Transcript>,
+    focus_serial: u64,
 }
 
 impl ViewStates {
@@ -26,9 +31,63 @@ impl ViewStates {
             .or_insert_with(|| Transcript {
                 list: ListState::new(rows + 1, ListAlignment::Bottom, px(600.)),
                 remeasured_top: false,
+                focus: None,
+                focused_at: 0,
+                revision: 0,
+                observation_attempt: None,
             })
             .list
             .clone()
+    }
+
+    pub fn focus(&mut self, key: ViewKey, cx: &mut App) -> FocusHandle {
+        self.list(key, 0);
+        self.transcripts
+            .get_mut(&key)
+            .unwrap()
+            .focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
+
+    pub fn revision(&self, key: ViewKey) -> u64 {
+        self.transcripts.get(&key).map_or(0, |t| t.revision)
+    }
+
+    pub fn activate(&mut self, key: ViewKey) {
+        self.transcripts.get_mut(&key).unwrap().observation_attempt = None;
+        self.note_focus(key);
+    }
+
+    pub fn note_focus(&mut self, key: ViewKey) {
+        self.focus_serial += 1;
+        self.transcripts.get_mut(&key).unwrap().focused_at = self.focus_serial;
+    }
+
+    pub fn send_target(&self, visible: &[ViewId], session: u64) -> Option<ViewKey> {
+        visible
+            .iter()
+            .map(|view| ViewKey {
+                view: *view,
+                session,
+            })
+            .max_by_key(|key| self.transcripts.get(key).map_or(0, |t| t.focused_at))
+            .filter(|key| self.transcripts.get(key).is_some_and(|t| t.focused_at > 0))
+            .or_else(|| {
+                visible.first().map(|view| ViewKey {
+                    view: *view,
+                    session,
+                })
+            })
+    }
+
+    pub fn attempt_observation(&mut self, key: ViewKey, updated: u64) -> bool {
+        let t = self.transcripts.get_mut(&key).unwrap();
+        if t.observation_attempt == Some(updated) {
+            return false;
+        }
+        t.observation_attempt = Some(updated);
+        true
     }
 
     pub fn get(&self, key: ViewKey) -> Option<&ListState> {
@@ -48,6 +107,7 @@ impl ViewStates {
             .iter_mut()
             .filter(|(key, _)| key.session == session)
         {
+            transcript.revision += 1;
             let list = &transcript.list;
             // Rows are only appended or replaced in place, so every row the list
             // already shows keeps its index; the status entry is always last.

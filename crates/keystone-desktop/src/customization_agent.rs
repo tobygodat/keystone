@@ -2,7 +2,7 @@ use keystone_agent::{
     ApprovalState, ClaudeConnection, Command, Connection, Event, ItemKind, ItemStatus, TurnStatus,
     Wake,
 };
-use keystone_core::{ApprovalMode, Provider, SidebarLayout, SidebarSide, SidebarWidth};
+use keystone_core::{ApprovalMode, Composition, Provider};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ const CODEX_UNSUPPORTED: &str = "Codex prompt customization is unavailable becau
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Proposal {
-    Change(SidebarLayout),
+    Change(Composition),
     Unsupported(String),
 }
 
@@ -35,7 +35,7 @@ pub struct Ask {
     pub request: u64,
     pub provider: Provider,
     pub prompt: String,
-    pub current: SidebarLayout,
+    pub current: Composition,
 }
 
 enum Message {
@@ -311,21 +311,22 @@ impl Reply {
 }
 
 fn instruction(ask: &Ask) -> String {
-    let (min, max) = (SidebarWidth::MIN, SidebarWidth::MAX);
     format!(
-        "You are setting the layout of the Keystone desktop app's session sidebar. \
-         Only two things can change: which side of the window it is on (left or right) \
-         and its width, a whole number of logical pixels from {min} to {max}. \
-         It is now on the {side} at {width} px.\n\n\
-         Do not use any tools or read any files. Reply with exactly one JSON object on \
-         one line and nothing else: no prose and no code fences.\n\
-         If the request can be met by side and width alone, give the complete resulting \
-         layout: {{\"kind\":\"change\",\"version\":1,\"side\":\"left\",\"width_px\":302}}\n\
-         Otherwise, explain in one short sentence (at most 200 characters): \
-         {{\"kind\":\"unsupported\",\"version\":1,\"reason\":\"Only sidebar side and width are supported.\"}}\n\n\
-         The request:\n{prompt}",
-        side = ask.current.side.label(),
-        width = ask.current.width.px(),
+        "Arrange the Keystone desktop's presentation. All occurrences bind to the active session. \
+         There is exactly one composer, at least one conversation, and zero or one session_list. \
+         Each declared occurrence ID is placed exactly once. Keep an existing ID only for its existing component. \
+         Splits have axis row or column and at least two children. A child has node and size. \
+         Sizes are \"auto\", {{\"px\":320}}, or {{\"fill\":1}}, with positive integer values up to 65535. \
+         Views are {{\"kind\":\"view\",\"id\":0}}. Tabs contain conversations only, \
+         {{\"kind\":\"tabs\",\"selected\":0,\"views\":[0,3]}}. \
+         Splits are {{\"kind\":\"split\",\"axis\":\"row\",\"children\":[...]}}. \
+         Maximum depth is 32 and node budget is 256. Do not add semantic fields. \
+         Never use tools, files, commands, permissions, model choices, messages or drafts. \
+         Return exactly one JSON object without prose or fences. \
+         For a supported request return {{\"kind\":\"change\",\"version\":1,\"composition\":<full document>}}. \
+         Otherwise return {{\"kind\":\"unsupported\",\"version\":1,\"reason\":\"Short explanation\"}}.\n\n\
+         Current complete document (also the composition schema example):\n{current}\n\nRequest:\n{prompt}",
+        current = serde_json::to_string(&ask.current).unwrap(),
         prompt = ask.prompt,
     )
 }
@@ -335,8 +336,7 @@ fn instruction(ask: &Ask) -> String {
 enum Wire {
     Change {
         version: u32,
-        side: SidebarSide,
-        width_px: u16,
+        composition: Composition,
     },
     Unsupported {
         version: u32,
@@ -347,6 +347,9 @@ enum Wire {
 /// Reads a reply: exactly one JSON object of a known kind, nothing around it but
 /// whitespace, with no unknown fields and every value in range.
 pub fn parse(text: &str) -> Result<Proposal, String> {
+    if text.len() > OUTPUT_LIMIT {
+        return Err("reply exceeds the output limit".into());
+    }
     let wire =
         serde_json::from_str::<Wire>(text.trim()).map_err(|error| match error.classify() {
             serde_json::error::Category::Data => error.to_string(),
@@ -359,16 +362,7 @@ pub fn parse(text: &str) -> Result<Proposal, String> {
         return Err(format!("version {version} is not supported"));
     }
     match wire {
-        Wire::Change { side, width_px, .. } => {
-            let width = SidebarWidth::new(width_px).ok_or_else(|| {
-                format!(
-                    "width {width_px} px is outside {}–{} px",
-                    SidebarWidth::MIN,
-                    SidebarWidth::MAX
-                )
-            })?;
-            Ok(Proposal::Change(SidebarLayout { side, width }))
-        }
+        Wire::Change { composition, .. } => Ok(Proposal::Change(composition)),
         Wire::Unsupported { reason, .. } => {
             let reason = reason.trim();
             if reason.is_empty() || reason.chars().count() > REASON_LIMIT {
@@ -384,48 +378,57 @@ mod tests {
     use super::*;
     use keystone_agent::Item;
 
-    fn layout(side: SidebarSide, width: u16) -> SidebarLayout {
-        SidebarLayout {
-            side,
-            width: SidebarWidth::new(width).unwrap(),
-        }
+    fn layout() -> Composition {
+        Composition::default()
     }
 
     #[test]
-    fn parse_accepts_only_the_exact_contract() {
+    fn parse_accepts_only_a_full_checked_presentation() {
+        let change = serde_json::json!({"kind":"change", "version":1, "composition": Composition::default()});
+        assert_eq!(parse(&change.to_string()), Ok(Proposal::Change(layout())));
+        let mut invalid = change.clone();
+        invalid["composition"]["root"]["binding"] = "foreign-session".into();
+        assert!(parse(&invalid.to_string()).is_err());
+        invalid = change.clone();
+        invalid["composition"]["views"][0]["component"] = "activity".into();
+        assert!(parse(&invalid.to_string()).is_err());
+        for (path, value) in [
+            ("/version", serde_json::json!(2)),
+            ("/composition/version", serde_json::json!(2)),
+            ("/kind", serde_json::json!("resize")),
+            ("/composition/root/children/0/size/px", serde_json::json!(0)),
+            (
+                "/composition/views/2/component",
+                serde_json::json!("conversation"),
+            ),
+        ] {
+            let mut invalid = change.clone();
+            *invalid.pointer_mut(path).unwrap() = value;
+            assert!(parse(&invalid.to_string()).is_err(), "accepted {invalid}");
+        }
+        invalid = change.clone();
+        invalid["permissions"] = "full-access".into();
+        assert!(parse(&invalid.to_string()).is_err());
+        for bad in [
+            format!("```json\n{change}\n```"),
+            format!("{change} trailing"),
+            format!("{change}{change}"),
+            format!("{} ", " ".repeat(OUTPUT_LIMIT)),
+            r#"{"kind":"change","version":1,"side":"right","width_px":360}"#.into(),
+            r#"{"kind":"unsupported","version":1,"reason":"  "}"#.into(),
+            r#"{"kind":"unsupported","version":1,"reason":"No.","side":"left"}"#.into(),
+            r#"{"version":1,"composition":{}}"#.into(),
+            r#"{"kind":"change","version":1}"#.into(),
+            "[]".into(),
+            "".into(),
+            serde_json::json!({"kind":"unsupported", "version":1, "reason":"x".repeat(REASON_LIMIT+1)}).to_string(),
+        ] {
+            assert!(parse(&bad).is_err(), "accepted {bad}");
+        }
         assert_eq!(
-            parse(r#"{"kind":"change","version":1,"side":"right","width_px":360}"#),
-            Ok(Proposal::Change(layout(SidebarSide::Right, 360)))
-        );
-        assert_eq!(
-            parse(" {\"kind\":\"unsupported\",\"version\":1,\"reason\":\"No colors.\"}\n"),
+            parse(r#"{"kind":"unsupported","version":1,"reason":"No colors."}"#),
             Ok(Proposal::Unsupported("No colors.".into()))
         );
-        let long_reason = format!(
-            r#"{{"kind":"unsupported","version":1,"reason":"{}"}}"#,
-            "x".repeat(REASON_LIMIT + 1)
-        );
-        for bad in [
-            "Sure! Moving it right.",
-            "```json\n{\"kind\":\"change\",\"version\":1,\"side\":\"right\",\"width_px\":360}\n```",
-            r#"{"kind":"change","version":1,"side":"right","width_px":360} done"#,
-            r#"{"kind":"change","version":1,"side":"right","width_px":360}{"kind":"change"}"#,
-            r#"{"kind":"change","version":1,"side":"right","width_px":360,"color":"red"}"#,
-            r#"{"kind":"change","version":2,"side":"right","width_px":360}"#,
-            r#"{"kind":"change","version":1,"side":"top","width_px":360}"#,
-            r#"{"kind":"change","version":1,"side":"right","width_px":900}"#,
-            r#"{"kind":"change","version":1,"side":"right","width_px":360.5}"#,
-            r#"{"kind":"change","version":1,"side":"right"}"#,
-            r#"{"kind":"resize","version":1,"width_px":360}"#,
-            r#"{"version":1,"side":"right","width_px":360}"#,
-            r#"{"kind":"unsupported","version":1,"reason":"No.","side":"left"}"#,
-            r#"{"kind":"unsupported","version":1,"reason":"  "}"#,
-            long_reason.as_str(),
-            "[]",
-            "",
-        ] {
-            assert!(parse(bad).is_err(), "accepted {bad:?}");
-        }
     }
 
     fn message(id: &str, text: &str, status: ItemStatus) -> Item {
@@ -457,7 +460,7 @@ mod tests {
             ))),
             None
         );
-        let json = r#"{"kind":"change","version":1,"side":"right","width_px":360}"#;
+        let json = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":302}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
         reply.apply(Event::ItemStarted(message("b", "", ItemStatus::InProgress)));
         assert_eq!(
             reply.apply(Event::ItemDelta {
@@ -473,10 +476,7 @@ mod tests {
         )));
         assert_eq!(
             reply.apply(end(TurnStatus::Completed)),
-            Some(Outcome::Proposal(Proposal::Change(layout(
-                SidebarSide::Right,
-                360
-            ))))
+            Some(Outcome::Proposal(Proposal::Change(layout())))
         );
 
         let mut interrupted = Reply::default();
@@ -607,7 +607,7 @@ mod tests {
             results: Arc::default(),
             wake: Arc::new(|| {}),
         };
-        let json = r#"{"kind":"change","version":1,"side":"right","width_px":360}"#;
+        let json = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":302}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
         let connection = Late {
             events: Mutex::new(vec![
                 (
@@ -624,7 +624,7 @@ mod tests {
             request: 7,
             provider: Provider::Claude,
             prompt: "right".into(),
-            current: SidebarLayout::default(),
+            current: Composition::default(),
         };
         let deadline = Instant::now() + worker.timeout;
         assert!(matches!(
@@ -685,7 +685,7 @@ mod provider_tests {
             request,
             provider,
             prompt: "Put it on the right".into(),
-            current: SidebarLayout::default(),
+            current: Composition::default(),
         }
     }
 
@@ -696,7 +696,7 @@ mod provider_tests {
         agent.drain()
     }
 
-    const CHANGE: &str = r#"{"kind":"change","version":1,"side":"right","width_px":360}"#;
+    const CHANGE: &str = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":302}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
 
     #[test]
     fn claude_answers_with_a_validated_proposal_and_codex_is_refused_unstarted() {
@@ -714,10 +714,7 @@ mod provider_tests {
             },
             REQUEST_TIMEOUT,
         );
-        let expected = Outcome::Proposal(Proposal::Change(SidebarLayout {
-            side: SidebarSide::Right,
-            width: SidebarWidth::new(360).unwrap(),
-        }));
+        let expected = Outcome::Proposal(Proposal::Change(Composition::default()));
         agent.ask(ask(1, Provider::Claude));
         assert_eq!(next(&agent, &woken), vec![(1, expected)]);
         let launched = std::fs::read_to_string(&argv).unwrap();

@@ -1,3 +1,5 @@
+mod arrangement;
+mod arrangement_editor;
 mod conversation;
 mod customization;
 mod customization_agent;
@@ -7,8 +9,8 @@ mod settings;
 mod transcript;
 mod view_state;
 
+use arrangement_editor::Customization;
 use conversation::{Conversation, Row};
-use customization::Customization;
 use futures::StreamExt;
 use gpui::{
     Anchor, AnyElement, AnyView, App, AvailableSpace, BackgroundExecutor, Bounds, BoxShadow,
@@ -22,9 +24,11 @@ use keystone_agent::{
     ApprovalState, ClaudeConnection, CodexConnection, Command, Connection, Event, ItemKind,
     RequestId, TurnStatus, Wake,
 };
+#[cfg(test)]
+use keystone_core::ViewId;
 use keystone_core::{
     Appearance, ApprovalMode, Attention, Density, Durability, Provider, SidebarSide, Store,
-    ThemeMode, ViewId,
+    ThemeMode,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
@@ -48,7 +52,9 @@ gpui::actions!(
         FocusComposer,
         FocusSearch,
         SendMessage,
-        RenameSession
+        RenameSession,
+        NextFocus,
+        PreviousFocus
     ]
 );
 
@@ -180,6 +186,9 @@ struct Keystone {
     views: ViewStates,
     /// The directory agents work in.
     project_dir: PathBuf,
+    project: Result<keystone_core::ProjectId, String>,
+    arrangement: arrangement::Arrangement,
+    borrow_focus: Option<FocusHandle>,
     wake: Wake,
     /// Scrolls the sample transcript, which is not a list.
     transcript_scroll: ScrollHandle,
@@ -195,7 +204,6 @@ struct Keystone {
     customize_provider: Provider,
     customize_agent: Option<customization_agent::Agent>,
     sidebar_before_customize: Option<bool>,
-    sidebar_drag: Option<customization::SidebarDrag>,
 }
 
 impl Keystone {
@@ -206,13 +214,8 @@ impl Keystone {
         });
         let search = cx.new(|cx| TextInput::new("Search", InputMode::SingleLine, cx));
         let rename_input = cx.new(|cx| TextInput::new("Session title", InputMode::SingleLine, cx));
-        let customize_prompt = cx.new(|cx| {
-            TextInput::new(
-                "e.g. Put the sidebar on the right and make it a bit wider",
-                InputMode::SingleLine,
-                cx,
-            )
-        });
+        let customize_prompt =
+            cx.new(|cx| TextInput::new("Describe a layout change…", InputMode::SingleLine, cx));
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
                 this.draft_save_task = Some(cx.spawn(async move |this, cx| {
@@ -230,6 +233,7 @@ impl Keystone {
             }),
             cx.subscribe(&search, |this, _, _: &Changed, cx| this.refresh(cx)),
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
+            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
         ];
         let app = cx.weak_entity();
         let session_sidebar = cx.new(|_| SessionSidebar {
@@ -277,6 +281,16 @@ impl Keystone {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
+        let project = keystone_core::ProjectId::new(&project_dir).map_err(|e| e.to_string());
+        let initial = project.as_ref().map_or_else(
+            |_| {
+                keystone_core::Composition::from_sidebar(
+                    store.workspace().preferences().sidebar_layout().shown(),
+                )
+            },
+            |p| store.workspace().preferences().composition(p),
+        );
+        let customization = Customization::new(&initial);
         let mut result = Self {
             store,
             error: None,
@@ -302,6 +316,9 @@ impl Keystone {
             logs: Logs::new(sessions_dir, wake.clone()),
             views: ViewStates::default(),
             project_dir,
+            project,
+            arrangement: arrangement::Arrangement::default(),
+            borrow_focus: None,
             wake,
             transcript_scroll: ScrollHandle::new(),
             replies: RefCell::default(),
@@ -312,12 +329,11 @@ impl Keystone {
             } else {
                 ""
             })),
-            customization: Customization::default(),
+            customization,
             customize_prompt,
             customize_provider: Provider::Claude,
             customize_agent: None,
             sidebar_before_customize: None,
-            sidebar_drag: None,
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -400,27 +416,17 @@ impl Keystone {
         }
     }
 
-    /// Saves the draft, writes the session logs, and marks the open session viewed.
     /// Returns false, with the error shown, when the draft or the session cannot be
     /// saved, so the app stays open. The logs are written either way.
     fn save_before_exit(&mut self, cx: &mut Context<Self>) -> bool {
         let saved = self.save_draft(cx);
-        // Before `leave`: the last events may end a turn the user is watching.
         self.flush_logs(cx);
-        if !saved {
+        if let Err(error) = self.store.sync_pending() {
+            self.error = Some(format!("Could not save before closing. {error}"));
+            cx.notify();
             return false;
         }
-        match self.store.leave(now_ms()) {
-            Ok(applied) => {
-                self.error = durability_warning(applied.durability);
-                self.error.is_none()
-            }
-            Err(error) => {
-                self.error = Some(format!("Could not save before closing. {error}"));
-                cx.notify();
-                false
-            }
-        }
+        saved
     }
 
     fn create(&mut self, provider: Provider, cx: &mut Context<Self>) {
@@ -487,15 +493,13 @@ impl Keystone {
             self.invalidate(left, ranges(rows), false);
         }
         self.replies.get_mut().forget(id);
-        self.error = match self.store.select(id, now_ms()) {
+        self.arrangement.sidebar_overlay = false;
+        self.error = match self.store.select(id) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
         self.sync_draft(cx);
-        self.views.scroll_to_end(ViewKey {
-            view: ViewId::MAIN,
-            session: id,
-        });
+
         self.refresh(cx);
     }
 
@@ -547,8 +551,14 @@ impl Keystone {
                         } else {
                             "Show sidebar"
                         }))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar = !this.sidebar;
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus.focus(window, cx);
+                            if this.arrangement.fitted {
+                                this.arrangement.sidebar_overlay = this.arrangement_has_sidebar()
+                                    && !this.arrangement.sidebar_overlay;
+                            } else {
+                                this.sidebar = !this.sidebar;
+                            }
                             this.refresh(cx);
                         })),
                     cx,
@@ -723,6 +733,7 @@ impl Keystone {
             .h_full()
             .overflow_hidden()
             .bg(colors.sidebar)
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| this.focus.focus(window, cx)))
             .map(|d| match side {
                 SidebarSide::Left => d.hairline_r(cx),
                 SidebarSide::Right => d.hairline_l(cx),
@@ -1372,7 +1383,7 @@ impl Keystone {
         let start = top.item_ix;
         while top.item_ix < list.item_count() {
             let height = self
-                .transcript_entry(key.session, top.item_ix, cx)
+                .transcript_entry(key, top.item_ix, cx)
                 .layout_as_root(space, window, cx)
                 .height;
             if top.offset_in_item < height {
@@ -1617,10 +1628,9 @@ impl Keystone {
         self.composer
             .update(cx, |input, cx| input.set_value(String::new(), cx));
         self.save_draft(cx);
-        self.views.scroll_to_end(ViewKey {
-            view: ViewId::MAIN,
-            session: id,
-        });
+        if let Some(key) = self.views.send_target(&self.arrangement.visible, id) {
+            self.views.scroll_to_end(key);
+        }
         // Clicking Send moves focus off the composer; put it back for the next message.
         self.composer.focus_handle(cx).focus(window, cx);
         // The session moves to Working and shows its new time.
@@ -1670,7 +1680,7 @@ impl Keystone {
         let state = self.views.list(key, rows);
         let app = cx.weak_entity();
         list(state, move |index, _, cx| {
-            app.update(cx, |this, cx| this.transcript_entry(key.session, index, cx))
+            app.update(cx, |this, cx| this.transcript_entry(key, index, cx))
                 .unwrap_or_else(|_| div().into_any_element())
         })
         .size_full()
@@ -1686,21 +1696,28 @@ impl Keystone {
                 .w_full()
                 .justify_center()
                 .child(
-                    Button::new("jump-to-latest", "Jump to latest")
-                        .style(ButtonStyle::Filled)
-                        .icon(IconName::Chevron)
-                        .debug_selector(|| "jump-to-latest".into())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.views.scroll_to_end(key);
-                            cx.notify();
-                        })),
+                    Button::new(
+                        arrangement::selector("jump-to-latest", key.view),
+                        "Jump to latest",
+                    )
+                    .style(ButtonStyle::Filled)
+                    .icon(IconName::Chevron)
+                    .debug_selector(move || {
+                        arrangement::selector("jump-to-latest", key.view).to_string()
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.views.focus(key, cx).focus(window, cx);
+                        this.views.scroll_to_end(key);
+                        cx.notify();
+                    })),
                 )
         })
     }
 
     /// One list entry: a row, or after the last row, the turn's status. Each entry is
     /// laid out on its own, so it carries the transcript's width and text style.
-    fn transcript_entry(&self, session: u64, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn transcript_entry(&self, key: ViewKey, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let session = key.session;
         let Some(conversation) = self.conversations.get(&session) else {
             return div().into_any_element();
         };
@@ -1715,7 +1732,7 @@ impl Keystone {
                 Some(transcript::row(row, index, reply, cx))
             }
             Some(_) => None,
-            None => self.transcript_status(session, conversation, cx),
+            None => self.transcript_status(key, conversation, cx),
         };
         let Some(content) = content else {
             // Nothing to show takes no space, gap included.
@@ -1726,7 +1743,7 @@ impl Keystone {
             _ => "transcript-status".to_owned(),
         };
         h_flex()
-            .automation_id(name)
+            .automation_id(arrangement::selector(&name, key.view))
             .w_full()
             .justify_center()
             .child(
@@ -1745,10 +1762,11 @@ impl Keystone {
     /// errors. `None` when there is nothing to say.
     fn transcript_status(
         &self,
-        session: u64,
+        key: ViewKey,
         conversation: &Conversation,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let session = key.session;
         let colors = cx.theme().colors;
         let mono = cx.theme().fonts.mono.clone();
         let mut view = v_flex().gap_4();
@@ -1759,8 +1777,8 @@ impl Keystone {
             let name = self.provider(session).map_or("The provider", provider_name);
             view = view.child(
                 v_flex()
-                    .id("approval")
-                    .automation_id("approval")
+                    .id(arrangement::selector("approval", key.view))
+                    .automation_id(arrangement::selector("approval", key.view))
                     .surface(Elevation::Raised, cx)
                     .border_color(colors.border_strong)
                     .p_3()
@@ -1786,19 +1804,23 @@ impl Keystone {
                         h_flex()
                             .gap_2()
                             .child(
-                                Button::new("approve", "Allow")
+                                Button::new(arrangement::selector("approve", key.view), "Allow")
                                     .style(ButtonStyle::Primary)
                                     .icon(IconName::Check)
-                                    .debug_selector(|| "approve".into())
+                                    .debug_selector(move || {
+                                        arrangement::selector("approve", key.view).to_string()
+                                    })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.answer(session, allow.clone(), true, window, cx)
                                     })),
                             )
                             .child(
-                                Button::new("deny", "Deny")
+                                Button::new(arrangement::selector("deny", key.view), "Deny")
                                     .style(ButtonStyle::Subtle)
                                     .icon(IconName::Close)
-                                    .debug_selector(|| "deny".into())
+                                    .debug_selector(move || {
+                                        arrangement::selector("deny", key.view).to_string()
+                                    })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.answer(session, deny.clone(), false, window, cx)
                                     })),
@@ -1809,8 +1831,8 @@ impl Keystone {
             empty = false;
             view = view.child(
                 h_flex()
-                    .id("turn-status")
-                    .automation_id("turn-status")
+                    .id(arrangement::selector("turn-status", key.view))
+                    .automation_id(arrangement::selector("turn-status", key.view))
                     .gap_2()
                     .child(div().size(px(6.)).rounded_full().bg(colors.accent))
                     .child(
@@ -2236,170 +2258,25 @@ impl Render for Keystone {
             .find(|s| Some(s.id()) == self.store.workspace().selected());
         let session = current.map(|s| (s.title().to_owned(), s.settled()));
         let selected = current.map(|s| s.id());
-        // A session that has reached its provider has history, so while that history
-        // loads, the transcript layout is shown rather than the welcome screen.
-        let has_thread = current.is_some_and(|s| s.provider_thread().is_some());
-        let current = current.map(|s| (s.id(), s.provider()));
         if let Some(id) = selected {
             self.conversation(id);
         }
-        let has_conversation = selected
-            .and_then(|id| self.conversations.get(&id))
-            .is_some_and(|c| {
-                if c.is_loading() {
-                    has_thread || c.running
-                } else {
-                    !c.is_empty()
-                }
-            });
-        let composer = self.composer(current, cx);
-        let error = self.error_line().map(|error| {
-            div()
-                .w_full()
-                .max_w(px(CONTENT_WIDTH))
-                .px_1()
-                .pb_2()
-                .child(error)
-        });
-        let main = if let (None, false) = (selected, self.fixture) {
-            v_flex()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .items_center()
-                .justify_center()
-                .gap(px(22.))
-                .px(px(24.))
-                .pb(px(60.))
-                .child(
-                    v_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(arch_mark(px(40.)))
-                        .child(
-                            div()
-                                .id("welcome-heading")
-                                .automation_id("welcome-heading")
-                                .child(
-                                    Label::new("What should we work on?")
-                                        .size(TextSize::Title)
-                                        .weight(FontWeight::SEMIBOLD)
-                                        .color(Color::Strong),
-                                ),
-                        ),
-                )
-                .child(composer)
-                .children(error)
-        } else {
-            let body = match selected.filter(|_| !self.fixture) {
-                Some(id) if has_conversation => {
-                    let key = ViewKey {
-                        view: ViewId::MAIN,
-                        session: id,
-                    };
-                    div()
-                        .id("conversation")
-                        .automation_id("conversation")
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .child(self.transcript_top_check(key, cx))
-                        .child(self.transcript_list(key, cx))
-                        .children(self.jump_to_latest(key, cx))
-                        .into_any_element()
-                }
-                None if self.fixture => div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(
-                        v_flex()
-                            .id("conversation")
-                            .automation_id("conversation")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.transcript_scroll)
-                            .items_center()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(CONTENT_WIDTH))
-                                    .py_6()
-                                    .child(self.transcript()),
-                            ),
-                    )
-                    .into_any_element(),
-                _ => {
-                    let hint = format!(
-                        "Your draft is saved on this machine. Ctrl Enter sends it to {}.",
-                        current.map_or("the provider", |(_, provider)| provider_name(provider))
-                    );
-                    v_flex()
-                        .id("empty-conversation")
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(10.))
-                        .child(
-                            Icon::new(IconName::Wedge)
-                                .size(px(28.))
-                                .color(Color::Custom(cx.theme().colors.border_strong)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(15.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("No messages yet"),
-                        )
-                        .child(
-                            div()
-                                .w(px(320.))
-                                .text_center()
-                                .text_size(TextSize::Ui.px())
-                                .line_height(px(18.))
-                                .text_color(cx.theme().colors.text_muted)
-                                .child(hint),
-                        )
-                        .into_any_element()
-                }
-            };
-            v_flex()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .items_center()
-                .px(px(24.))
-                .pb(px(18.))
-                .child(body)
-                .children(error)
-                .child(composer)
-        };
-        let window_width = f32::from(window.viewport_size().width);
-        let layout = self.customization.shown(self.saved_layout());
+        let main = self.arrangement_body(window, cx);
         let customizing = self.customization.is_open();
-        let sidebar = self.sidebar.then(|| {
-            self.sidebar_column(layout.fit(window_width), layout.side, cx)
-                .when(customizing, |d| {
-                    d.child(self.resize_handle(layout.side, cx))
-                })
-        });
-        let (left, right) = match layout.side {
-            SidebarSide::Left => (sidebar, None),
-            SidebarSide::Right => (None, sidebar),
-        };
         let root =
-            h_flex()
+            v_flex()
                 .id("keystone-root")
                 .size_full()
-                .items_start()
                 .bg(background)
                 .font_family(ui_font)
                 .text_color(text)
                 .text_size(TextSize::Base.px())
                 .track_focus(&self.focus)
-                .key_context("Keystone")
+                .key_context(if customizing {
+                    "Keystone Customize"
+                } else {
+                    "Keystone"
+                })
                 .when(automation::enabled(), |d| {
                     d.child(automation::frame_writer())
                 })
@@ -2411,17 +2288,66 @@ impl Render for Keystone {
                     {
                         return;
                     }
-                    if this.new_menu || this.settings_menu || this.approval_menu {
+                    if this.customization.chooser().is_some() {
+                        this.customize(arrangement_editor::Action::CloseChooser, window, cx);
+                        cx.stop_propagation();
+                    } else if this.new_menu || this.settings_menu || this.approval_menu {
                         this.new_menu = false;
                         this.settings_menu = false;
                         this.approval_menu = false;
                         this.refresh(cx);
                         cx.stop_propagation();
                     } else if this.customization.is_open() {
-                        this.customize(customization::Action::Close, window, cx);
+                        this.customize(arrangement_editor::Action::Close, window, cx);
                         cx.stop_propagation();
                     }
                 }))
+                .on_action(
+                    cx.listener(|this, _: &customization::OpenCustomize, window, cx| {
+                        this.customize(
+                            if this.customization.is_open() {
+                                arrangement_editor::Action::Close
+                            } else {
+                                arrangement_editor::Action::Open
+                            },
+                            window,
+                            cx,
+                        )
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &customization::ApplyLayout, window, cx| {
+                        this.customize(arrangement_editor::Action::Apply, window, cx)
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &customization::MoveLeft, window, cx| {
+                        this.move_component(keystone_core::Axis::Row, false, window, cx)
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &customization::MoveRight, window, cx| {
+                        this.move_component(keystone_core::Axis::Row, true, window, cx)
+                    }),
+                )
+                .on_action(cx.listener(|this, _: &customization::MoveUp, window, cx| {
+                    this.move_component(keystone_core::Axis::Column, false, window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &customization::MoveDown, window, cx| {
+                        this.move_component(keystone_core::Axis::Column, true, window, cx)
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &customization::Narrower, window, cx| {
+                        this.size_component(-1, None, window, cx)
+                    }),
+                )
+                .on_action(cx.listener(|this, _: &customization::Wider, window, cx| {
+                    this.size_component(1, None, window, cx)
+                }))
+                .on_action(cx.listener(|_, _: &NextFocus, window, cx| window.focus_next(cx)))
+                .on_action(cx.listener(|_, _: &PreviousFocus, window, cx| window.focus_prev(cx)))
                 .on_action(cx.listener(|this, _: &Quit, _, cx| {
                     if this.save_before_exit(cx) {
                         cx.quit();
@@ -2446,27 +2372,26 @@ impl Render for Keystone {
                     cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)),
                 )
                 .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                    if !this.arrangement_has_sidebar() {
+                        this.arrangement.sidebar_overlay = false;
+                        return;
+                    }
                     this.sidebar = true;
+                    if this.arrangement.fitted {
+                        this.arrangement.sidebar_overlay = true;
+                    }
                     this.search.focus_handle(cx).focus(window, cx);
                     this.refresh(cx);
                 }))
-                .children(left)
-                .child(
-                    v_flex()
-                        .relative()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .child(self.top_bar(session, cx))
-                        .child(main)
-                        .when(customizing, |d| {
-                            d.child(self.customize_panel(window.viewport_size(), cx))
-                        }),
-                )
-                .children(right)
+                .child(self.top_bar(session, cx))
+                .when(customizing, |d| {
+                    d.child(self.customize_panel(window.viewport_size(), cx))
+                })
+                .child(main)
+                .children(self.borrow_dialog(cx))
                 .children(self.full_access_dialog(cx))
                 .children(self.rename_dialog(cx));
-        self.on_sidebar_drag(root, cx)
+        self.on_arrangement_drag(root, cx)
     }
 }
 
@@ -2754,7 +2679,6 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(cx.debug_bounds("transcript-row-0").unwrap(), first);
         assert!(cx.debug_bounds("transcript-row-601").is_none());
-        // Sending, or selecting the session, returns to the latest row.
         view.update(cx, |this, cx| {
             this.views.scroll_to_end(MAIN_1);
             cx.notify();
@@ -2849,7 +2773,7 @@ mod tests {
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         store.create(Provider::Codex, 1).unwrap();
         store.create(Provider::Codex, 2).unwrap();
-        store.select(1, 3).unwrap();
+        store.select(1).unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -3244,9 +3168,9 @@ mod tests {
     fn a_reader_scrolled_into_a_row_that_a_wider_window_shortens_sees_the_next_row(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (view, cx, _dir, content_top) = long_replies(cx, 700.);
+        let (view, cx, _dir, content_top) = long_replies(cx, 850.);
         let narrow = cx.debug_bounds("transcript-row-600").unwrap().size.height;
-        let offset = narrow * 0.8;
+        let offset = narrow * 0.95;
         scroll_to(&view, cx, at(600, offset.into()));
 
         // The reply wraps onto fewer lines, ending before the place being read.
@@ -3285,7 +3209,7 @@ mod tests {
         scroll_to(&view, cx, at(600, 1000.));
 
         // The reply wraps onto more lines; the place being read is still inside it.
-        cx.simulate_resize(size(px(700.), px(700.)));
+        cx.simulate_resize(size(px(850.), px(700.)));
         cx.run_until_parked();
         let row = cx.debug_bounds("transcript-row-600").unwrap();
         assert!(row.size.height > px(2000.));
@@ -3516,7 +3440,7 @@ mod tests {
             let id = store.create(provider, 1).unwrap().value;
             store.set_settled(id, true).unwrap();
         }
-        store.select(1, 1).unwrap();
+        store.select(1).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -4619,7 +4543,7 @@ mod tests {
         store.record_turn_end(2, false, 11).unwrap();
         store.set_settled(5, true).unwrap();
         store.record_turn_end(5, true, 12).unwrap();
-        store.select(4, 13).unwrap();
+        store.select(4).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -4659,7 +4583,7 @@ mod tests {
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         store.create(Provider::Codex, 1).unwrap();
         store.create(Provider::Codex, 2).unwrap();
-        store.select(1, 3).unwrap();
+        store.select(1).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -4740,7 +4664,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn an_unread_row_stays_in_needs_action_until_the_user_leaves_it(cx: &mut gpui::TestAppContext) {
+    fn selection_and_leaving_do_not_acknowledge_an_unread_reply(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let mut store = Store::open(&path).unwrap();
@@ -4756,10 +4680,10 @@ mod tests {
         assert!(y(cx, "session-1") < y(cx, "working-section"));
 
         click(cx, "session-2");
-        assert!(y(cx, "session-1") > y(cx, "working-section"));
+        assert!(y(cx, "session-1") < y(cx, "working-section"));
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].attention(false, false),
-            None
+            Some(Attention::Replied)
         );
     }
 
@@ -4891,13 +4815,15 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
         let toggle_x =
             |cx: &mut gpui::VisualTestContext| cx.debug_bounds("sidebar-toggle").unwrap().origin.x;
-        assert_eq!(toggle_x(cx), px(308.));
+        assert_eq!(toggle_x(cx), px(6.));
+        assert!(cx.debug_bounds("search-field").is_some());
 
         click(cx, "sidebar-toggle");
         assert_eq!(toggle_x(cx), px(6.));
 
         cx.simulate_keystrokes("ctrl-f");
-        assert_eq!(toggle_x(cx), px(308.));
+        assert_eq!(toggle_x(cx), px(6.));
+        assert!(cx.debug_bounds("search-field").is_some());
         view.update_in(cx, |this, window, cx| {
             assert!(this.search.focus_handle(cx).is_focused(window))
         });
@@ -5392,7 +5318,7 @@ mod tests {
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         store.create(Provider::Claude, 1).unwrap();
         store.create(Provider::Claude, 2).unwrap();
-        store.select(1, 3).unwrap();
+        store.select(1).unwrap();
         let script = claude_script(dir.path(), "");
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -5412,12 +5338,11 @@ mod tests {
         });
         view.update_in(cx, |this, window, cx| this.stop_turn(1, window, cx));
         wait_until(cx, &view, |view| !running(view));
-        // Stopped by the user, and seen as it ended: nothing to act on.
         assert_eq!(
             last_turn(&view, cx),
             Some(keystone_core::LastTurn::Finished)
         );
-        assert!(in_section(cx, "session-1", Section::Working));
+        assert!(in_section(cx, "session-1", Section::Attention));
 
         send_text(&view, cx, "please run it");
         wait_until(cx, &view, |view| {
@@ -5428,7 +5353,7 @@ mod tests {
         click(cx, "approve");
         wait_until(cx, &view, |view| !running(view));
         cx.run_until_parked();
-        assert!(in_section(cx, "session-1", Section::Working));
+        assert!(in_section(cx, "session-1", Section::Attention));
 
         // A reply that ends while the user is elsewhere is unread.
         send_text(&view, cx, "hello");
@@ -5448,7 +5373,7 @@ mod tests {
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         store.create(Provider::Claude, 1).unwrap();
         store.create(Provider::Claude, 2).unwrap();
-        store.select(1, 3).unwrap();
+        store.select(1).unwrap();
         let script = claude_script(dir.path(), "KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1");
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -5472,7 +5397,7 @@ mod tests {
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         store.create(Provider::Claude, 1).unwrap();
         store.create(Provider::Claude, 2).unwrap();
-        store.select(1, 3).unwrap();
+        store.select(1).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -5692,6 +5617,8 @@ fn bind_keys(cx: &mut App) {
     customization::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new("ctrl-q", Quit, None),
+        gpui::KeyBinding::new("tab", NextFocus, Some("Keystone && !Dialog")),
+        gpui::KeyBinding::new("shift-tab", PreviousFocus, Some("Keystone && !Dialog")),
         gpui::KeyBinding::new("ctrl-n", NewClaude, Some("!Dialog")),
         gpui::KeyBinding::new("ctrl-shift-n", NewCodex, Some("!Dialog")),
         gpui::KeyBinding::new("ctrl-shift-s", ToggleSettle, Some("!Dialog")),
