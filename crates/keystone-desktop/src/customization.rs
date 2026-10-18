@@ -7,7 +7,7 @@ use crate::{Keystone, SendMessage, durability_warning, provider_name};
 use gpui::{
     Context, Empty, Focusable, FontWeight, IntoElement, MouseButton, Window, div, prelude::*, px,
 };
-use keystone_core::{Provider, SidebarLayout, SidebarSide, SidebarWidth};
+use keystone_core::{Provider, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth};
 use keystone_ui::prelude::*;
 use std::path::PathBuf;
 
@@ -72,14 +72,13 @@ pub enum Commit {
 pub enum Effect {
     Ask(Ask),
     Cancel(u64),
-    /// Save `layout`, then report the outcome to [`Customization::saved`].
-    Save(SidebarLayout, Commit),
+    Save(SavedLayout, Commit),
 }
 
 #[derive(Debug, Default)]
 pub struct Customization {
     editing: Option<Editing>,
-    replaced_layout: Option<SidebarLayout>,
+    replaced_layout: Option<SavedLayout>,
     last_ask: Option<(Provider, String)>,
     next_request: u64,
 }
@@ -90,8 +89,10 @@ impl Customization {
     }
 
     /// The layout to draw: the preview while customizing, else the saved one.
-    pub fn shown(&self, saved: SidebarLayout) -> SidebarLayout {
-        self.editing.as_ref().map_or(saved, |e| e.candidate)
+    pub fn shown(&self, saved: &SavedLayout) -> SidebarLayout {
+        self.editing
+            .as_ref()
+            .map_or_else(|| saved.shown(), |e| e.candidate)
     }
 
     pub fn interpretation(&self) -> Option<&Interpretation> {
@@ -118,24 +119,46 @@ impl Customization {
             )
     }
 
-    /// Undo is offered only with nothing unapplied, so it never discards a preview.
-    pub fn can_undo(&self, saved: SidebarLayout) -> bool {
-        self.replaced_layout.is_some() && self.shown(saved) == saved
+    pub fn can_apply(&self, saved: &SavedLayout) -> bool {
+        self.editing
+            .as_ref()
+            .is_some_and(|e| SavedLayout::from(e.candidate) != *saved)
     }
 
-    pub fn dispatch(&mut self, action: Action, saved: SidebarLayout) -> Vec<Effect> {
+    pub fn can_discard(&self, saved: &SavedLayout) -> bool {
+        self.editing
+            .as_ref()
+            .is_some_and(|e| e.candidate != saved.shown())
+    }
+
+    pub fn can_reset(&self, saved: &SavedLayout) -> bool {
+        self.editing.as_ref().is_some_and(|e| {
+            e.candidate != SidebarLayout::default()
+                || *saved != SavedLayout::from(SidebarLayout::default())
+        })
+    }
+
+    /// Undo is offered only with nothing unapplied, so it never discards a preview.
+    pub fn can_undo(&self, saved: &SavedLayout) -> bool {
+        self.replaced_layout.is_some() && !self.can_discard(saved)
+    }
+
+    pub fn dispatch(&mut self, action: Action, saved: &SavedLayout) -> Vec<Effect> {
         let mut effects = Vec::new();
         if action == Action::Open {
             if self.editing.is_none() {
                 self.editing = Some(Editing {
-                    candidate: saved,
+                    candidate: saved.shown(),
                     revision: 0,
                     interpretation: Interpretation::Idle,
-                    note: None,
+                    note: (SavedLayout::from(saved.shown()) != *saved).then(|| {
+                        "The saved layout can't be read, so the default is shown. Apply replaces it.".into()
+                    }),
                 });
             }
             return effects;
         }
+        let (can_apply, can_undo) = (self.can_apply(saved), self.can_undo(saved));
         let Some(editing) = &mut self.editing else {
             return effects;
         };
@@ -184,20 +207,19 @@ impl Customization {
             }
             Action::Cancel => editing.note = Some("Request cancelled.".into()),
             Action::Apply => {
-                if editing.candidate == saved {
-                    editing.note = Some("Nothing to apply.".into());
+                if can_apply {
+                    effects.push(Effect::Save(editing.candidate.into(), Commit::Apply));
                 } else {
-                    effects.push(Effect::Save(editing.candidate, Commit::Apply));
+                    editing.note = Some("Nothing to apply.".into());
                 }
             }
             Action::Undo => {
-                if let Some(previous) = self.replaced_layout.filter(|_| editing.candidate == saved)
-                {
-                    effects.push(Effect::Save(previous, Commit::Undo));
+                if can_undo && let Some(previous) = &self.replaced_layout {
+                    effects.push(Effect::Save(previous.clone(), Commit::Undo));
                 }
             }
             Action::Discard => {
-                edit(editing, saved);
+                edit(editing, saved.shown());
                 editing.note = Some("Preview discarded.".into());
             }
             Action::Close => self.editing = None,
@@ -266,8 +288,8 @@ impl Customization {
     pub fn saved(
         &mut self,
         commit: Commit,
-        previous: SidebarLayout,
-        layout: SidebarLayout,
+        previous: SavedLayout,
+        layout: SavedLayout,
         result: Result<Option<String>, String>,
     ) {
         let Some(editing) = &mut self.editing else {
@@ -276,7 +298,7 @@ impl Customization {
         match result {
             Ok(warning) => {
                 self.replaced_layout = Some(previous);
-                editing.candidate = layout;
+                editing.candidate = layout.shown();
                 editing.revision += 1;
                 let done = match commit {
                     Commit::Apply => "Applied.",
@@ -300,8 +322,8 @@ pub struct SidebarDrag {
 }
 
 impl Keystone {
-    pub(crate) fn saved_layout(&self) -> SidebarLayout {
-        self.store.workspace().preferences().sidebar_layout
+    pub(crate) fn saved_layout(&self) -> &SavedLayout {
+        self.store.workspace().preferences().sidebar_layout()
     }
 
     /// Runs a customization action and its effects. Opening reveals a hidden sidebar
@@ -312,12 +334,12 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let saved = self.saved_layout();
+        let saved = self.saved_layout().clone();
         let (opening, closing) = (
             action == Action::Open && !self.customization.is_open(),
             action == Action::Close && self.customization.is_open(),
         );
-        for effect in self.customization.dispatch(action, saved) {
+        for effect in self.customization.dispatch(action, &saved) {
             match effect {
                 Effect::Ask(ask) => self.customize_agent().ask(ask),
                 Effect::Cancel(request) => {
@@ -326,7 +348,7 @@ impl Keystone {
                     }
                 }
                 Effect::Save(layout, commit) => {
-                    let result = match self.store.set_sidebar_layout(layout) {
+                    let result = match self.store.set_sidebar_layout(layout.clone()) {
                         Ok(applied) => {
                             let warning = durability_warning(applied.durability);
                             self.error = warning.clone();
@@ -334,7 +356,8 @@ impl Keystone {
                         }
                         Err(error) => Err(error.to_string()),
                     };
-                    self.customization.saved(commit, saved, layout, result);
+                    self.customization
+                        .saved(commit, saved.clone(), layout, result);
                 }
             }
         }
@@ -469,7 +492,6 @@ impl Keystone {
         let layout = self.customization.shown(saved);
         let drawn = layout.fit(f32::from(viewport.width)).round();
         let max_height = (f32::from(viewport.height) - PANEL_TOP - PANEL_MARGIN).max(0.);
-        let changed = layout != saved;
         let running = matches!(
             self.customization.interpretation(),
             Some(Interpretation::Running { .. })
@@ -703,7 +725,7 @@ impl Keystone {
                             .child(
                                 Button::new("customize-reset", "Reset")
                                     .size(ButtonSize::Compact)
-                                    .disabled(layout == SidebarLayout::default())
+                                    .disabled(!self.customization.can_reset(saved))
                                     .debug_selector(|| "customize-reset".into())
                                     .tooltip(Tooltip::text("Preview the default layout"))
                                     .on_click(action(Action::Reset)),
@@ -722,7 +744,7 @@ impl Keystone {
                             .child(
                                 Button::new("customize-discard", "Discard")
                                     .size(ButtonSize::Compact)
-                                    .disabled(!changed)
+                                    .disabled(!self.customization.can_discard(saved))
                                     .debug_selector(|| "customize-discard".into())
                                     .on_click(action(Action::Discard)),
                             )
@@ -730,7 +752,7 @@ impl Keystone {
                                 Button::new("customize-apply", "Apply")
                                     .size(ButtonSize::Compact)
                                     .style(ButtonStyle::Filled)
-                                    .disabled(!changed)
+                                    .disabled(!self.customization.can_apply(saved))
                                     .debug_selector(|| "customize-apply".into())
                                     .tooltip(Tooltip::with_key("Save this layout", "Ctrl+S"))
                                     .on_click(action(Action::Apply)),
@@ -751,7 +773,11 @@ mod tests {
         }
     }
 
-    fn ask(c: &mut Customization, saved: SidebarLayout) -> u64 {
+    fn unreadable() -> SavedLayout {
+        serde_json::from_str(r#"{"side":"top","width_px":360,"pinned":true}"#).unwrap()
+    }
+
+    fn ask(c: &mut Customization, saved: &SavedLayout) -> u64 {
         let effects = c.dispatch(
             Action::Ask {
                 provider: Provider::Claude,
@@ -771,73 +797,93 @@ mod tests {
 
     #[test]
     fn a_manual_edit_cancels_a_request_and_its_late_answer_is_ignored() {
-        let saved = SidebarLayout::default();
+        let saved = SavedLayout::default();
         let mut c = Customization::default();
-        c.dispatch(Action::Open, saved);
-        let request = ask(&mut c, saved);
-        let effects = c.dispatch(Action::Resize(SidebarWidth::new(400).unwrap()), saved);
+        c.dispatch(Action::Open, &saved);
+        let request = ask(&mut c, &saved);
+        let effects = c.dispatch(Action::Resize(SidebarWidth::new(400).unwrap()), &saved);
         assert_eq!(effects, vec![Effect::Cancel(request)]);
         c.receive(request, change(SidebarSide::Right, 360));
-        assert_eq!(c.shown(saved), layout(SidebarSide::Left, 400));
+        assert_eq!(c.shown(&saved), layout(SidebarSide::Left, 400));
         assert_eq!(c.interpretation(), Some(&Interpretation::Idle));
     }
 
     #[test]
     fn only_the_current_request_for_the_current_candidate_is_accepted() {
-        let saved = SidebarLayout::default();
+        let saved = SavedLayout::default();
         let mut c = Customization::default();
         c.receive(1, change(SidebarSide::Right, 360));
-        assert_eq!(c.shown(saved), saved);
+        assert_eq!(c.shown(&saved), saved.shown());
 
-        c.dispatch(Action::Open, saved);
-        let first = ask(&mut c, saved);
-        let second = ask(&mut c, saved);
+        c.dispatch(Action::Open, &saved);
+        let first = ask(&mut c, &saved);
+        let second = ask(&mut c, &saved);
         c.receive(first, change(SidebarSide::Right, 500));
-        assert_eq!(c.shown(saved), saved);
+        assert_eq!(c.shown(&saved), saved.shown());
         c.receive(second, change(SidebarSide::Right, 360));
-        assert_eq!(c.shown(saved), layout(SidebarSide::Right, 360));
+        assert_eq!(c.shown(&saved), layout(SidebarSide::Right, 360));
         c.receive(second, change(SidebarSide::Left, 220));
-        assert_eq!(c.shown(saved), layout(SidebarSide::Right, 360));
+        assert_eq!(c.shown(&saved), layout(SidebarSide::Right, 360));
     }
 
     #[test]
     fn cancel_keeps_the_candidate_and_close_discards_it() {
-        let saved = SidebarLayout::default();
+        let saved = SavedLayout::default();
         let mut c = Customization::default();
-        c.dispatch(Action::Open, saved);
-        c.dispatch(Action::SetSide(SidebarSide::Right), saved);
-        let request = ask(&mut c, saved);
+        c.dispatch(Action::Open, &saved);
+        c.dispatch(Action::SetSide(SidebarSide::Right), &saved);
+        let request = ask(&mut c, &saved);
         assert_eq!(
-            c.dispatch(Action::Cancel, saved),
+            c.dispatch(Action::Cancel, &saved),
             vec![Effect::Cancel(request)]
         );
-        assert_eq!(c.shown(saved), layout(SidebarSide::Right, 302));
+        assert_eq!(c.shown(&saved), layout(SidebarSide::Right, 302));
         c.receive(request, change(SidebarSide::Left, 500));
-        assert_eq!(c.shown(saved), layout(SidebarSide::Right, 302));
+        assert_eq!(c.shown(&saved), layout(SidebarSide::Right, 302));
 
-        let request = ask(&mut c, saved);
+        let request = ask(&mut c, &saved);
         assert_eq!(
-            c.dispatch(Action::Close, saved),
+            c.dispatch(Action::Close, &saved),
             vec![Effect::Cancel(request)]
         );
         assert!(!c.is_open());
-        assert_eq!(c.shown(saved), saved);
+        assert_eq!(c.shown(&saved), saved.shown());
+    }
+
+    #[test]
+    fn a_running_request_is_cancelled_even_with_nothing_to_apply_or_discard() {
+        let saved = SavedLayout::default();
+        let mut c = Customization::default();
+        c.dispatch(Action::Open, &saved);
+        let request = ask(&mut c, &saved);
+        assert!(!c.can_apply(&saved) && !c.can_discard(&saved));
+        assert_eq!(
+            c.dispatch(Action::Cancel, &saved),
+            vec![Effect::Cancel(request)]
+        );
+        assert_eq!(c.note(), Some("Request cancelled."));
+        let request = ask(&mut c, &saved);
+        assert_eq!(
+            c.dispatch(Action::Apply, &saved),
+            vec![Effect::Cancel(request)]
+        );
+        assert_eq!(c.note(), Some("Nothing to apply."));
     }
 
     #[test]
     fn failures_and_unsupported_answers_keep_the_candidate_and_allow_retry() {
-        let saved = SidebarLayout::default();
+        let saved = SavedLayout::default();
         let mut c = Customization::default();
-        c.dispatch(Action::Open, saved);
-        c.dispatch(Action::SetSide(SidebarSide::Right), saved);
-        let request = ask(&mut c, saved);
+        c.dispatch(Action::Open, &saved);
+        c.dispatch(Action::SetSide(SidebarSide::Right), &saved);
+        let request = ask(&mut c, &saved);
         c.receive(
             request,
             Outcome::Failed("Claude Code is not installed.".into()),
         );
         assert!(c.can_retry());
-        assert_eq!(c.shown(saved), layout(SidebarSide::Right, 302));
-        let effects = c.dispatch(Action::Retry, saved);
+        assert_eq!(c.shown(&saved), layout(SidebarSide::Right, 302));
+        let effects = c.dispatch(Action::Retry, &saved);
         let [Effect::Ask(retry)] = effects.as_slice() else {
             panic!("{effects:?}")
         };
@@ -851,95 +897,152 @@ mod tests {
             c.interpretation(),
             Some(&Interpretation::Unsupported("No colors.".into()))
         );
-        assert_eq!(c.shown(saved), layout(SidebarSide::Right, 302));
+        assert_eq!(c.shown(&saved), layout(SidebarSide::Right, 302));
     }
 
     #[test]
     fn apply_and_undo_change_history_only_after_a_successful_save() {
-        let original = SidebarLayout::default();
+        let original = SavedLayout::default();
         let right = layout(SidebarSide::Right, 360);
         let mut c = Customization::default();
-        c.dispatch(Action::Open, original);
-        c.dispatch(Action::SetSide(SidebarSide::Right), original);
-        c.dispatch(Action::Resize(right.width), original);
-        assert!(!c.can_undo(original));
+        c.dispatch(Action::Open, &original);
+        assert!(!c.can_apply(&original) && !c.can_reset(&original));
+        c.dispatch(Action::SetSide(SidebarSide::Right), &original);
+        c.dispatch(Action::Resize(right.width), &original);
+        assert!(!c.can_undo(&original));
+        assert!(c.can_apply(&original) && c.can_discard(&original));
 
-        let effects = c.dispatch(Action::Apply, original);
-        assert_eq!(effects, vec![Effect::Save(right, Commit::Apply)]);
-        c.saved(Commit::Apply, original, right, Err("disk full".into()));
-        assert_eq!(c.shown(original), right);
-        assert!(!c.can_undo(original));
+        let effects = c.dispatch(Action::Apply, &original);
+        assert_eq!(effects, vec![Effect::Save(right.into(), Commit::Apply)]);
+        c.saved(
+            Commit::Apply,
+            original.clone(),
+            right.into(),
+            Err("disk full".into()),
+        );
+        assert_eq!(c.shown(&original), right);
+        assert!(!c.can_undo(&original));
         assert_eq!(c.note(), Some("Not saved. disk full"));
 
-        c.saved(Commit::Apply, original, right, Ok(None));
-        let saved = right;
-        assert!(c.can_undo(saved));
-        assert_eq!(c.dispatch(Action::Apply, saved), vec![]);
-        assert!(c.can_undo(saved));
+        c.saved(Commit::Apply, original.clone(), right.into(), Ok(None));
+        let saved = SavedLayout::from(right);
+        assert!(c.can_undo(&saved));
+        assert!(!c.can_apply(&saved) && !c.can_discard(&saved));
+        assert_eq!(c.dispatch(Action::Apply, &saved), vec![]);
+        assert!(c.can_undo(&saved));
 
-        c.dispatch(Action::Resize(SidebarWidth::new(500).unwrap()), saved);
-        assert!(!c.can_undo(saved));
-        assert_eq!(c.dispatch(Action::Undo, saved), vec![]);
-        c.dispatch(Action::Discard, saved);
-        assert!(c.can_undo(saved));
+        c.dispatch(Action::Resize(SidebarWidth::new(500).unwrap()), &saved);
+        assert!(!c.can_undo(&saved));
+        assert_eq!(c.dispatch(Action::Undo, &saved), vec![]);
+        c.dispatch(Action::Discard, &saved);
+        assert!(c.can_undo(&saved));
 
         assert_eq!(
-            c.dispatch(Action::Undo, saved),
-            vec![Effect::Save(original, Commit::Undo)]
+            c.dispatch(Action::Undo, &saved),
+            vec![Effect::Save(original.clone(), Commit::Undo)]
         );
-        c.saved(Commit::Undo, saved, original, Ok(None));
-        assert_eq!(c.shown(original), original);
+        c.saved(Commit::Undo, saved.clone(), original.clone(), Ok(None));
+        assert_eq!(c.shown(&original), original.shown());
         assert_eq!(
-            c.dispatch(Action::Undo, original),
-            vec![Effect::Save(right, Commit::Undo)]
+            c.dispatch(Action::Undo, &original),
+            vec![Effect::Save(right.into(), Commit::Undo)]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_layout_can_be_replaced_by_the_default_and_undone_exactly() {
+        let unreadable = unreadable();
+        let default = SavedLayout::from(SidebarLayout::default());
+        let mut c = Customization::default();
+        c.dispatch(Action::Open, &unreadable);
+        assert_eq!(c.shown(&unreadable), SidebarLayout::default());
+        assert!(c.can_apply(&unreadable) && c.can_reset(&unreadable));
+        assert!(!c.can_discard(&unreadable) && !c.can_undo(&unreadable));
+        assert!(c.note().unwrap().contains("can't be read"));
+
+        assert_eq!(c.dispatch(Action::Reset, &unreadable), vec![]);
+        assert!(c.can_apply(&unreadable) && c.can_reset(&unreadable));
+        assert_eq!(
+            c.dispatch(Action::Apply, &unreadable),
+            vec![Effect::Save(default.clone(), Commit::Apply)]
+        );
+        c.saved(
+            Commit::Apply,
+            unreadable.clone(),
+            default.clone(),
+            Err("disk full".into()),
+        );
+        assert!(c.can_apply(&unreadable) && !c.can_undo(&unreadable));
+        assert_eq!(c.note(), Some("Not saved. disk full"));
+
+        c.saved(Commit::Apply, unreadable.clone(), default.clone(), Ok(None));
+        assert!(!c.can_apply(&default) && !c.can_reset(&default));
+        assert!(c.can_undo(&default));
+        assert_eq!(c.dispatch(Action::Apply, &default), vec![]);
+        assert_eq!(c.note(), Some("Nothing to apply."));
+
+        assert_eq!(
+            c.dispatch(Action::Undo, &default),
+            vec![Effect::Save(unreadable.clone(), Commit::Undo)]
+        );
+        c.saved(Commit::Undo, default.clone(), unreadable.clone(), Ok(None));
+        assert_eq!(c.note(), Some("Undone."));
+        assert_eq!(c.shown(&unreadable), SidebarLayout::default());
+        assert!(c.can_apply(&unreadable) && c.can_reset(&unreadable));
+        assert!(c.can_undo(&unreadable) && !c.can_discard(&unreadable));
+        assert_eq!(
+            c.dispatch(Action::Undo, &unreadable),
+            vec![Effect::Save(default, Commit::Undo)]
         );
     }
 
     #[test]
     fn a_pending_directory_sync_still_counts_as_applied() {
-        let original = SidebarLayout::default();
-        let right = layout(SidebarSide::Right, 302);
+        let original = SavedLayout::default();
+        let right = SavedLayout::from(layout(SidebarSide::Right, 302));
         let mut c = Customization::default();
-        c.dispatch(Action::Open, original);
-        c.dispatch(Action::SetSide(SidebarSide::Right), original);
+        c.dispatch(Action::Open, &original);
+        c.dispatch(Action::SetSide(SidebarSide::Right), &original);
         c.saved(
             Commit::Apply,
             original,
-            right,
+            right.clone(),
             Ok(Some(
                 "Change saved, but crash durability is unconfirmed.".into(),
             )),
         );
-        assert!(c.can_undo(right));
+        assert!(c.can_undo(&right));
         assert!(c.note().unwrap().starts_with("Applied. Change saved"));
     }
 
     #[test]
     fn reset_previews_the_default_until_applied() {
-        let saved = layout(SidebarSide::Right, 480);
+        let saved = SavedLayout::from(layout(SidebarSide::Right, 480));
         let mut c = Customization::default();
-        c.dispatch(Action::Open, saved);
-        assert_eq!(c.dispatch(Action::Reset, saved), vec![]);
-        assert_eq!(c.shown(saved), SidebarLayout::default());
+        c.dispatch(Action::Open, &saved);
+        assert!(c.can_reset(&saved));
+        assert_eq!(c.dispatch(Action::Reset, &saved), vec![]);
+        assert_eq!(c.shown(&saved), SidebarLayout::default());
+        assert!(c.can_reset(&saved) && c.can_apply(&saved));
         assert_eq!(
-            c.dispatch(Action::Apply, saved),
-            vec![Effect::Save(SidebarLayout::default(), Commit::Apply)]
+            c.dispatch(Action::Apply, &saved),
+            vec![Effect::Save(SidebarLayout::default().into(), Commit::Apply)]
         );
     }
 
     #[test]
     fn manual_edits_clear_a_provider_error_before_saving() {
-        let saved = SidebarLayout::default();
+        let saved = SavedLayout::default();
         let mut c = Customization::default();
-        c.dispatch(Action::Open, saved);
-        let request = ask(&mut c, saved);
+        c.dispatch(Action::Open, &saved);
+        let request = ask(&mut c, &saved);
         c.receive(request, Outcome::Failed("Provider unavailable".into()));
         assert!(c.can_retry());
-        c.dispatch(Action::SetSide(SidebarSide::Right), saved);
+        c.dispatch(Action::SetSide(SidebarSide::Right), &saved);
         assert_eq!(c.interpretation(), Some(&Interpretation::Idle));
         assert!(!c.can_retry());
-        let next = c.shown(saved);
-        c.saved(Commit::Apply, saved, next, Ok(None));
+        let next = c.shown(&saved);
+        c.saved(Commit::Apply, saved, next.into(), Ok(None));
         assert_eq!(c.note(), Some("Applied."));
     }
 }
@@ -992,7 +1095,14 @@ mod ui_tests {
             .unwrap()
             .workspace()
             .preferences()
-            .sidebar_layout
+            .sidebar_layout()
+            .shown()
+    }
+
+    fn saved_json(path: &Path) -> serde_json::Value {
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        state["workspace"]["preferences"].clone()
     }
 
     fn shown(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> SidebarLayout {
@@ -1071,6 +1181,84 @@ mod ui_tests {
 
         click(cx, "sidebar-toggle");
         assert!(search_x(cx) > 300.);
+    }
+
+    #[gpui::test]
+    fn an_unreadable_saved_layout_is_replaced_by_apply_and_restored_by_undo(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let raw = serde_json::json!({"side": "top", "width_px": 360, "pinned": true});
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version": 1,
+                "next_id": 2,
+                "future": {"a": [1, 2]},
+                "workspace": {
+                    "sessions": [{"id": 1, "title": "Old", "provider": "Codex", "settled": false, "draft": "keep", "model": "m-1"}],
+                    "selected": 1,
+                    "preferences": {"theme": "Dark", "accent": "teal", "sidebar_layout": raw},
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (view, cx) = open(&path, cx);
+        assert_eq!(shown(&view, cx), SidebarLayout::default());
+
+        click(cx, "customize-toggle");
+        view.read_with(cx, |view, _| {
+            assert!(view.customization.note().unwrap().contains("can't be read"))
+        });
+        click(cx, "customize-reset");
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.customization.note(),
+                Some("Default layout shown. Apply saves it.")
+            )
+        });
+        assert_eq!(saved_json(&path)["sidebar_layout"], raw);
+
+        click(cx, "customize-apply");
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.customization.note(), Some("Applied."))
+        });
+        let preferences = saved_json(&path);
+        assert_eq!(
+            preferences["sidebar_layout"],
+            serde_json::json!({"side": "left", "width_px": 302})
+        );
+        assert_eq!(preferences["accent"], "teal");
+
+        for selector in ["settings", "theme-light"] {
+            click(cx, selector);
+        }
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(saved_json(&path)["theme"], "Light");
+
+        click(cx, "customize-undo");
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.customization.note(), Some("Undone."))
+        });
+        let preferences = saved_json(&path);
+        assert_eq!(preferences["sidebar_layout"], raw);
+        assert_eq!(preferences["theme"], "Light");
+        assert_eq!(preferences["accent"], "teal");
+        assert_eq!(shown(&view, cx), SidebarLayout::default());
+
+        for selector in ["settings", "density-compact"] {
+            click(cx, selector);
+        }
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let preferences = saved_json(&path);
+        assert_eq!(preferences["sidebar_layout"], raw);
+        assert_eq!(preferences["density"], "Compact");
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.workspace().sessions()[0].draft(), "keep");
     }
 
     #[gpui::test]

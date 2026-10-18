@@ -1,4 +1,4 @@
-use keystone_core::{ApprovalMode, Density, Preferences, Provider, Store, ThemeMode};
+use keystone_core::{Appearance, ApprovalMode, Density, Preferences, Provider, Store, ThemeMode};
 use std::fs;
 use tempfile::tempdir;
 
@@ -120,17 +120,20 @@ fn preferences_survive_restart_and_default_for_older_files() {
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.workspace().preferences(), &Preferences::default());
 
-    let preferences = Preferences {
+    let appearance = Appearance {
         theme: ThemeMode::Light,
         density: Density::Compact,
         ui_font: Some("Noto Sans".into()),
-        ..Preferences::default()
     };
-    store.set_preferences(preferences.clone()).unwrap();
+    store.set_appearance(appearance.clone()).unwrap();
     drop(store);
     assert_eq!(
-        Store::open(&path).unwrap().workspace().preferences(),
-        &preferences
+        Store::open(&path)
+            .unwrap()
+            .workspace()
+            .preferences()
+            .appearance(),
+        &appearance
     );
 }
 

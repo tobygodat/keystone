@@ -89,13 +89,40 @@ impl SidebarLayout {
     }
 }
 
-/// Reads a saved layout. Anything missing or invalid, such as an unknown side, falls
-/// back to the whole default layout rather than failing to open the workspace.
-pub(crate) fn lenient<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<SidebarLayout, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).unwrap_or_default())
+/// What the state file holds for the sidebar layout, kept as is even when this
+/// version cannot read it. Only deserialization builds an unreadable one, so a value
+/// built from a [`SidebarLayout`] never equals it.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct SavedLayout(Saved);
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(untagged)]
+enum Saved {
+    Supported(SidebarLayout),
+    Unsupported(serde_json::Value),
+}
+
+impl SavedLayout {
+    /// The layout to draw: the saved one, or the default when it cannot be read.
+    pub fn shown(&self) -> SidebarLayout {
+        match &self.0 {
+            Saved::Supported(layout) => *layout,
+            Saved::Unsupported(_) => SidebarLayout::default(),
+        }
+    }
+}
+
+impl From<SidebarLayout> for SavedLayout {
+    fn from(layout: SidebarLayout) -> Self {
+        Self(Saved::Supported(layout))
+    }
+}
+
+impl Default for Saved {
+    fn default() -> Self {
+        Self::Supported(SidebarLayout::default())
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +172,17 @@ mod tests {
             r#"{"side":"left","width_px":-5}"#,
         ] {
             assert!(serde_json::from_str::<SidebarLayout>(bad).is_err(), "{bad}");
+            let saved: SavedLayout = serde_json::from_str(bad).unwrap();
+            assert_eq!(saved.shown(), SidebarLayout::default(), "{bad}");
+            assert_ne!(saved, SavedLayout::from(SidebarLayout::default()), "{bad}");
+            assert_eq!(
+                serde_json::to_value(&saved).unwrap(),
+                serde_json::from_str::<serde_json::Value>(bad).unwrap(),
+                "{bad}"
+            );
         }
+        let saved: SavedLayout = serde_json::from_str(&json).unwrap();
+        assert_eq!(saved, SavedLayout::from(layout));
+        assert_eq!(serde_json::to_string(&saved).unwrap(), json);
     }
 }

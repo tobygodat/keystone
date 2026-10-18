@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -10,7 +11,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 mod layout;
 
-pub use layout::{DIVIDER_WIDTH, MAIN_MIN_WIDTH, SidebarLayout, SidebarSide, SidebarWidth};
+pub use layout::{
+    DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
+};
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
@@ -128,6 +131,8 @@ pub struct Session {
     /// restore them explicitly, even after a restart.
     #[serde(default, skip_serializing_if = "is_default")]
     approval_overridden: bool,
+    #[serde(flatten)]
+    unknown: Map<String, Value>,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -283,16 +288,35 @@ pub enum Density {
     Spacious,
 }
 
-/// Appearance settings. Missing fields load as defaults, so older state files stay valid.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+/// Missing fields load as defaults, so older state files stay valid.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
-pub struct Preferences {
+pub struct Appearance {
     pub theme: ThemeMode,
     pub density: Density,
     /// The interface font family. `None` uses the built-in default.
     pub ui_font: Option<String>,
-    #[serde(deserialize_with = "layout::lenient")]
-    pub sidebar_layout: SidebarLayout,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct Preferences {
+    // Before `unknown`, so its keys are taken before the map collects the rest.
+    #[serde(flatten)]
+    appearance: Appearance,
+    sidebar_layout: SavedLayout,
+    #[serde(flatten)]
+    unknown: Map<String, Value>,
+}
+
+impl Preferences {
+    pub fn appearance(&self) -> &Appearance {
+        &self.appearance
+    }
+
+    pub fn sidebar_layout(&self) -> &SavedLayout {
+        &self.sidebar_layout
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -301,6 +325,8 @@ pub struct Workspace {
     selected: Option<u64>,
     #[serde(default)]
     preferences: Preferences,
+    #[serde(flatten)]
+    unknown: Map<String, Value>,
 }
 
 impl Workspace {
@@ -329,12 +355,15 @@ struct Snapshot {
     version: u32,
     next_id: u64,
     workspace: Workspace,
+    #[serde(flatten)]
+    unknown: Map<String, Value>,
 }
 
 pub struct Store {
     path: PathBuf,
     workspace: Workspace,
     next_id: u64,
+    unknown: Map<String, Value>,
     pending_directory: Option<File>,
     writes: u64,
     #[cfg(test)]
@@ -351,6 +380,7 @@ impl Store {
                     path,
                     workspace: Workspace::default(),
                     next_id: 1,
+                    unknown: Map::new(),
                     pending_directory: None,
                     writes: 0,
                     #[cfg(test)]
@@ -364,6 +394,7 @@ impl Store {
             path,
             workspace: snapshot.workspace,
             next_id: snapshot.next_id,
+            unknown: snapshot.unknown,
             pending_directory: None,
             writes: 0,
             #[cfg(test)]
@@ -408,6 +439,7 @@ impl Store {
             last_turn: None,
             approval_mode: ApprovalMode::default(),
             approval_overridden: false,
+            unknown: Map::new(),
         });
         next.selected = Some(id);
         let applied = self.commit(next, next_id)?;
@@ -502,21 +534,16 @@ impl Store {
         self.update_session(id, |session| session.settled = settled)
     }
 
-    pub fn set_preferences(&mut self, preferences: Preferences) -> StoreResult<Applied<()>> {
-        if self.workspace.preferences == preferences {
-            return Ok(self.finish_sync());
-        }
-        let mut next = self.workspace.clone();
-        next.preferences = preferences;
-        self.commit(next, self.next_id)
+    /// Saves the appearance over the latest preferences. The sidebar layout and any
+    /// preference this version does not know stay as they are.
+    pub fn set_appearance(&mut self, appearance: Appearance) -> StoreResult<Applied<()>> {
+        self.update_preferences(|preferences| preferences.appearance = appearance)
     }
 
-    /// Saves the sidebar layout over the latest preferences, leaving every other
-    /// preference as it is.
-    pub fn set_sidebar_layout(&mut self, layout: SidebarLayout) -> StoreResult<Applied<()>> {
-        let mut preferences = self.workspace.preferences.clone();
-        preferences.sidebar_layout = layout;
-        self.set_preferences(preferences)
+    /// Saves exactly `layout`, readable or not, over the latest preferences, leaving
+    /// every other preference as it is.
+    pub fn set_sidebar_layout(&mut self, layout: SavedLayout) -> StoreResult<Applied<()>> {
+        self.update_preferences(|preferences| preferences.sidebar_layout = layout)
     }
 
     pub fn set_provider_thread(&mut self, id: u64, thread: String) -> StoreResult<Applied<()>> {
@@ -541,6 +568,18 @@ impl Store {
 
     pub fn set_draft(&mut self, id: u64, text: String) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.draft = text)
+    }
+
+    fn update_preferences(
+        &mut self,
+        change: impl FnOnce(&mut Preferences),
+    ) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        change(&mut next.preferences);
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
     }
 
     fn update_session(
@@ -587,6 +626,7 @@ impl Store {
             version: FORMAT_VERSION,
             next_id,
             workspace,
+            unknown: self.unknown.clone(),
         };
         let parent = self
             .path
@@ -937,35 +977,180 @@ mod tests {
         );
     }
 
+    fn seeded(path: &Path, layout: &str) {
+        std::fs::write(
+            path,
+            format!(
+                r#"{{"version":1,"next_id":2,"future":{{"a":[1,2]}},"workspace":{{"sessions":[{{"id":1,"title":"Old","provider":"Codex","settled":false,"draft":"keep","model":"m-1"}}],"selected":1,"panes":["chat"],"preferences":{{"theme":"Dark","accent":"teal"{layout}}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn json(path: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn saved_sidebar(saved: &Value) -> &Value {
+        saved["workspace"]["preferences"]
+            .as_object()
+            .unwrap()
+            .get("sidebar_layout")
+            .expect("sidebar_layout saved")
+    }
+
+    fn appearance_keys_saved_once(path: &Path) {
+        let text = std::fs::read_to_string(path).unwrap();
+        for key in [r#""theme""#, r#""density""#, r#""ui_font""#] {
+            assert_eq!(text.matches(key).count(), 1, "{key} in {text}");
+        }
+    }
+
     #[test]
-    fn a_missing_or_invalid_sidebar_layout_loads_as_the_default_and_keeps_the_rest() {
+    fn unknown_fields_and_an_unreadable_layout_survive_every_other_save() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         for layout in [
-            "",
             r#","sidebar_layout":{"side":"top","width_px":360}"#,
             r#","sidebar_layout":{"side":"right","width_px":9000}"#,
+            r#","sidebar_layout":{"side":"right","width_px":360,"pinned":true}"#,
             r#","sidebar_layout":{"width_px":360}"#,
             r#","sidebar_layout":"wide""#,
             r#","sidebar_layout":null"#,
         ] {
-            std::fs::write(
-                &path,
-                format!(
-                    r#"{{"version":1,"next_id":2,"workspace":{{"sessions":[{{"id":1,"title":"Old","provider":"Codex","settled":false,"draft":"keep"}}],"selected":1,"preferences":{{"theme":"Dark"{layout}}}}}}}"#
-                ),
-            )
-            .unwrap();
-            let store = Store::open(&path).unwrap();
-            let workspace = store.workspace();
+            seeded(&path, layout);
+            let raw = saved_sidebar(&json(&path)).clone();
+            let mut store = Store::open(&path).unwrap();
+            let preferences = store.workspace().preferences();
             assert_eq!(
-                workspace.preferences().sidebar_layout,
+                preferences.sidebar_layout().shown(),
                 SidebarLayout::default(),
                 "{layout}"
             );
-            assert_eq!(workspace.preferences().theme, ThemeMode::Dark, "{layout}");
-            assert_eq!(workspace.sessions()[0].draft(), "keep", "{layout}");
+            assert_eq!(preferences.appearance().theme, ThemeMode::Dark, "{layout}");
+            let unreadable = preferences.sidebar_layout().clone();
+
+            store.set_draft(1, "edited".into()).unwrap();
+            store
+                .set_appearance(Appearance {
+                    theme: ThemeMode::Light,
+                    ..Appearance::default()
+                })
+                .unwrap();
+            store.create(Provider::Claude, 1_000).unwrap();
+            store.rename(1, "Renamed").unwrap();
+
+            appearance_keys_saved_once(&path);
+            let saved = json(&path);
+            let reopened = Store::open(&path).unwrap();
+            assert_eq!(reopened.workspace().sessions()[0].draft(), "edited");
+            assert_eq!(
+                reopened.workspace().preferences().appearance(),
+                &Appearance {
+                    theme: ThemeMode::Light,
+                    ..Appearance::default()
+                }
+            );
+            assert_eq!(
+                saved["future"],
+                serde_json::json!({"a": [1, 2]}),
+                "{layout}"
+            );
+            assert_eq!(saved["workspace"]["panes"], serde_json::json!(["chat"]));
+            let sessions = &saved["workspace"]["sessions"];
+            assert_eq!(sessions[0]["model"], "m-1");
+            assert!(sessions[1].get("model").is_none());
+            assert_eq!(saved["workspace"]["preferences"]["accent"], "teal");
+            assert_eq!(saved_sidebar(&saved), &raw, "{layout}");
+
+            let mut store = reopened;
+            store
+                .set_sidebar_layout(SidebarLayout::default().into())
+                .unwrap();
+            let saved = json(&path);
+            assert_eq!(
+                saved_sidebar(&saved),
+                &serde_json::json!({"side": "left", "width_px": 302}),
+                "{layout}"
+            );
+            assert_eq!(saved["future"], serde_json::json!({"a": [1, 2]}));
+            assert_eq!(saved["workspace"]["preferences"]["accent"], "teal");
+            assert_eq!(saved["workspace"]["sessions"][0]["model"], "m-1");
+
+            store
+                .set_appearance(Appearance {
+                    theme: ThemeMode::Dark,
+                    density: Density::Compact,
+                    ui_font: Some("Inter".into()),
+                })
+                .unwrap();
+            store.set_draft(1, "newer".into()).unwrap();
+            store.set_sidebar_layout(unreadable.clone()).unwrap();
+            let saved = json(&path);
+            assert_eq!(saved_sidebar(&saved), &raw, "{layout}");
+            let preferences = &saved["workspace"]["preferences"];
+            assert_eq!(preferences["theme"], "Dark", "{layout}");
+            assert_eq!(preferences["density"], "Compact", "{layout}");
+            assert_eq!(preferences["ui_font"], "Inter", "{layout}");
+            assert_eq!(preferences["accent"], "teal");
+            assert_eq!(saved["workspace"]["sessions"][0]["draft"], "newer");
+            assert_eq!(saved["future"], serde_json::json!({"a": [1, 2]}));
+
+            store.set_draft(1, "later".into()).unwrap();
+            let reopened = Store::open(&path).unwrap();
+            assert_eq!(saved_sidebar(&json(&path)), &raw, "{layout}");
+            assert_eq!(
+                reopened.workspace().preferences().sidebar_layout(),
+                &unreadable
+            );
+            assert_eq!(reopened.workspace().sessions()[0].draft(), "later");
+            assert_eq!(reopened.workspace().sessions().len(), 2);
+            appearance_keys_saved_once(&path);
         }
+    }
+
+    #[test]
+    fn a_supported_or_missing_layout_loads_and_saves_as_itself() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        seeded(
+            &path,
+            r#","sidebar_layout":{"side":"right","width_px":360}"#,
+        );
+        let mut store = Store::open(&path).unwrap();
+        let layout = store.workspace().preferences().sidebar_layout().shown();
+        assert_eq!((layout.side, layout.width.px()), (SidebarSide::Right, 360));
+        store.set_draft(1, "edited".into()).unwrap();
+        assert_eq!(
+            saved_sidebar(&json(&path)),
+            &serde_json::json!({"side": "right", "width_px": 360})
+        );
+
+        seeded(&path, "");
+        let mut store = Store::open(&path).unwrap();
+        let preferences = store.workspace().preferences();
+        assert_eq!(preferences.sidebar_layout(), &SavedLayout::default());
+        assert_eq!(
+            preferences.appearance(),
+            &Appearance {
+                theme: ThemeMode::Dark,
+                ..Appearance::default()
+            }
+        );
+        let writes = store.writes();
+        store
+            .set_sidebar_layout(SidebarLayout::default().into())
+            .unwrap();
+        assert_eq!(store.writes(), writes);
+        store.set_draft(1, "edited".into()).unwrap();
+        appearance_keys_saved_once(&path);
+        let saved = json(&path);
+        assert_eq!(saved["workspace"]["preferences"]["density"], "Default");
+        assert_eq!(saved["workspace"]["preferences"]["accent"], "teal");
+        assert_eq!(
+            Store::open(&path).unwrap().workspace().preferences(),
+            store.workspace().preferences()
+        );
     }
 
     #[test]
@@ -975,26 +1160,29 @@ mod tests {
         let mut store = Store::open(&path).unwrap();
         store.create(Provider::Claude, 1).unwrap();
         store.set_draft(1, "draft".into()).unwrap();
-        let mut preferences = store.workspace().preferences().clone();
-        preferences.theme = ThemeMode::Light;
-        preferences.ui_font = Some("Inter".into());
-        store.set_preferences(preferences).unwrap();
+        store
+            .set_appearance(Appearance {
+                theme: ThemeMode::Light,
+                ui_font: Some("Inter".into()),
+                ..Appearance::default()
+            })
+            .unwrap();
 
         let layout = SidebarLayout {
             side: SidebarSide::Right,
             width: SidebarWidth::new(360).unwrap(),
         };
-        let applied = store.set_sidebar_layout(layout).unwrap();
+        let applied = store.set_sidebar_layout(layout.into()).unwrap();
         assert_eq!(applied.durability, Durability::Synced);
         let writes = store.writes();
-        store.set_sidebar_layout(layout).unwrap();
+        store.set_sidebar_layout(layout.into()).unwrap();
         assert_eq!(store.writes(), writes);
 
         let reopened = Store::open(&path).unwrap();
         let preferences = reopened.workspace().preferences();
-        assert_eq!(preferences.sidebar_layout, layout);
-        assert_eq!(preferences.theme, ThemeMode::Light);
-        assert_eq!(preferences.ui_font.as_deref(), Some("Inter"));
+        assert_eq!(preferences.sidebar_layout(), &SavedLayout::from(layout));
+        assert_eq!(preferences.appearance().theme, ThemeMode::Light);
+        assert_eq!(preferences.appearance().ui_font.as_deref(), Some("Inter"));
         assert_eq!(reopened.workspace().sessions()[0].draft(), "draft");
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains(r#""version":1"#), "{saved}");

@@ -23,7 +23,7 @@ use keystone_agent::{
     RequestId, TurnStatus, Wake,
 };
 use keystone_core::{
-    ApprovalMode, Attention, Density, Durability, Preferences, Provider, SidebarSide, Store,
+    Appearance, ApprovalMode, Attention, Density, Durability, Provider, SidebarSide, Store,
     ThemeMode,
 };
 use keystone_ui::markdown::Document;
@@ -326,20 +326,24 @@ impl Keystone {
 
     fn apply_theme(&self, window: &Window, cx: &mut App) {
         keystone_ui::set_theme(
-            settings::theme_for(self.store.workspace().preferences(), window, cx),
+            settings::theme_for(
+                self.store.workspace().preferences().appearance(),
+                window,
+                cx,
+            ),
             cx,
         );
     }
 
-    fn update_preferences(
+    fn update_appearance(
         &mut self,
-        change: impl FnOnce(&mut Preferences),
+        change: impl FnOnce(&mut Appearance),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut preferences = self.store.workspace().preferences().clone();
-        change(&mut preferences);
-        self.error = match self.store.set_preferences(preferences) {
+        let mut appearance = self.store.workspace().preferences().appearance().clone();
+        change(&mut appearance);
+        self.error = match self.store.set_appearance(appearance) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(format!("Settings not saved. {error}")),
         };
@@ -842,9 +846,9 @@ impl Keystone {
     }
 
     fn settings_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let preferences = self.store.workspace().preferences().clone();
+        let appearance = self.store.workspace().preferences().appearance().clone();
         let fonts = if self.settings_menu {
-            settings::font_choices(&preferences, cx)
+            settings::font_choices(&appearance, cx)
         } else {
             Vec::new()
         };
@@ -862,13 +866,13 @@ impl Keystone {
             .chain(fonts.into_iter().map(Some))
             .enumerate()
             .map(|(index, font)| {
-                let checked = font == preferences.ui_font;
+                let checked = font == appearance.ui_font;
                 let label = font.clone().unwrap_or_else(|| "Default".into());
                 MenuItem::new(("font", index), label)
                     .checked(checked)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let font = font.clone();
-                        this.update_preferences(|p| p.ui_font = font, window, cx)
+                        this.update_appearance(|a| a.ui_font = font, window, cx)
                     }))
             })
             .collect::<Vec<_>>();
@@ -889,20 +893,20 @@ impl Keystone {
         .child(MenuHeader::new("Theme"))
         .children(themes.map(|(mode, label, selector)| {
             MenuItem::new(selector, label)
-                .checked(preferences.theme == mode)
+                .checked(appearance.theme == mode)
                 .debug_selector(|| selector.into())
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.update_preferences(|p| p.theme = mode, window, cx)
+                    this.update_appearance(|a| a.theme = mode, window, cx)
                 }))
         }))
         .child(MenuSeparator)
         .child(MenuHeader::new("Density"))
         .children(densities.map(|(density, label, selector)| {
             MenuItem::new(selector, label)
-                .checked(preferences.density == density)
+                .checked(appearance.density == density)
                 .debug_selector(|| selector.into())
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.update_preferences(|p| p.density = density, window, cx)
+                    this.update_appearance(|a| a.density = density, window, cx)
                 }))
         }))
         .child(MenuSeparator)
@@ -3569,6 +3573,7 @@ mod tests {
             .unwrap()
             .workspace()
             .preferences()
+            .appearance()
             .clone();
         assert_eq!(
             (saved.theme, saved.density),

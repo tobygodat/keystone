@@ -1,7 +1,7 @@
 //! Maps saved preferences onto the keystone-ui theme.
 
 use gpui::{App, Window, WindowAppearance};
-use keystone_core::{Density as SavedDensity, Preferences, ThemeMode};
+use keystone_core::{Appearance as SavedAppearance, Density as SavedDensity, ThemeMode};
 use keystone_ui::{Appearance, Density, Fonts, Theme};
 
 /// Interface fonts offered in the settings menu when they are installed. The default,
@@ -29,8 +29,8 @@ const MONO_CANDIDATES: [&str; 7] = [
     "Adwaita Mono",
 ];
 
-pub fn theme_for(preferences: &Preferences, window: &Window, cx: &App) -> Theme {
-    let appearance = match preferences.theme {
+pub fn theme_for(saved: &SavedAppearance, window: &Window, cx: &App) -> Theme {
+    let appearance = match saved.theme {
         ThemeMode::Light => Appearance::Light,
         ThemeMode::Dark => Appearance::Dark,
         ThemeMode::System => match window.appearance() {
@@ -38,13 +38,13 @@ pub fn theme_for(preferences: &Preferences, window: &Window, cx: &App) -> Theme 
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Appearance::Dark,
         },
     };
-    let density = match preferences.density {
+    let density = match saved.density {
         SavedDensity::Compact => Density::Compact,
         SavedDensity::Default => Density::Default,
         SavedDensity::Spacious => Density::Spacious,
     };
     let mut fonts = Fonts::default();
-    if let Some(font) = &preferences.ui_font {
+    if let Some(font) = &saved.ui_font {
         fonts.ui = font.clone().into();
     }
     let installed = cx.text_system().all_font_names();
@@ -59,17 +59,17 @@ pub fn theme_for(preferences: &Preferences, window: &Window, cx: &App) -> Theme 
 
 /// The candidate fonts that are installed, plus a saved choice that is no longer listed,
 /// so the menu always shows what is in use.
-pub fn font_choices(preferences: &Preferences, cx: &App) -> Vec<String> {
+pub fn font_choices(saved: &SavedAppearance, cx: &App) -> Vec<String> {
     let installed = cx.text_system().all_font_names();
     let mut choices: Vec<String> = FONT_CANDIDATES
         .iter()
         .filter(|font| installed.iter().any(|name| name == *font))
         .map(|font| font.to_string())
         .collect();
-    if let Some(saved) = &preferences.ui_font
-        && !choices.contains(saved)
+    if let Some(font) = &saved.ui_font
+        && !choices.contains(font)
     {
-        choices.push(saved.clone());
+        choices.push(font.clone());
     }
     choices
 }
