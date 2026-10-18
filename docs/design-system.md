@@ -28,6 +28,7 @@
 | `ListItem` | A selectable row for lists such as the session sidebar. `on_hover` reports the pointer entering and leaving, so a list can build a row action only for the row under the pointer. |
 | `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group, and `MenuItem::detail` adds a muted line that explains it. |
 | `VirtualList`, `VirtualListState` | A keyboard-driven list that renders only its visible rows, for pickers, palettes, and trees. See below. |
+| `Tree`, `TreeState`, `TreeModel` | A keyboard-driven tree of any size that loads children lazily and draws only its visible rows. See below. |
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
 | `TextInput`, `InputMode` | An editable text field. `InputMode::SingleLine` propagates the Enter action to its container (for submit), refuses inserted newlines and emits `text_input::RejectedMultiline`, so search typing and paste stay on one line. `InputMode::Multiline` wraps, and arrows, Home, and End move by visual row. Every edit emits `text_input::Changed`. Call `TextInput::bind_keys` once at startup. Bound keys reach the input as actions before any key listener runs, so a host that needs Up, Down, or Enter first, such as a list or palette, wraps it in a div with `capture_action` for `text_input::Up`, `Down`, or `Newline` and stops propagation. |
 | `Tooltip` | A hover card with an optional shortcut. |
@@ -85,6 +86,20 @@ The gallery's tab bar section has eight tabs and an "Add tab" button that makes 
 
 The gallery's List page shows 50,000 rows.
 
+## Tree
+
+`TreeModel` holds every node in one flat arena and the rows on screen in one flat `visible` vector. `TreeModel::new(roots)` takes `(name, NodeKind)` pairs, and `set_children(folder, children)` fills a folder and returns the new children's ids, which stay contiguous. The host keeps `Entity<TreeState>` made with `TreeState::new(model, cx)` and renders `Tree::new(id, &state, render_row)`, which draws the visible rows through `VirtualList`.
+
+- Expanding a folder splices its visible descendants into `visible` in one step, and collapsing drains them. Neither walks more of the tree than the rows it adds or removes, and nothing walks the whole tree per frame. Nested folders keep their expanded state while a parent is collapsed.
+- A folder whose children were never set shows a "Loading…" row when it expands and calls `on_expand(node_id)` once. The host loads the children and calls `TreeState::set_children`, which replaces the Loading row.
+- Up, Down, PageUp, PageDown, Home, and End work as in `VirtualList`. Left collapses an expanded folder, and otherwise moves to the parent. Right expands a collapsed folder, and otherwise moves to its first child. Enter and a row click open a file through `on_open(node_id)` and toggle a folder. A chevron click toggles without bubbling to the row. Left and Right are bound in key context `Tree`.
+- Each row is one flat element. The tree indents it by depth with padding, draws the chevron, and appends `render_row(&TreeEntry, highlighted, window, cx)`, which usually draws an icon and the name. Rows are one height, set by density, and the highlighted row uses `selection_fill`.
+- The highlight follows its row through every expand and collapse. A row that a collapse hides hands the highlight to the collapsed folder.
+- Every change, including a `set_children` that lands after a load, redraws the view that last drew the tree, so it works inside a cached view. Draw one `TreeState` in one view only, since its list's scroll position is shared.
+- Debug selectors are `{id}-row-{index}` and `{id}-chevron-{index}`.
+
+The gallery's Tree page shows a 50,000-node tree with a 10,000-file folder, nested folders, and a lazy folder that loads after a moment.
+
 ## Split
 
 `SplitState::new(axis, panes)` holds each pane's share of the container as fractions that sum to 1, and `min_px` sets the shortest a pane may get, 120 px by default. The host keeps it in an `Entity` and renders `Split::new(id, &state)` with one child per pane. `set_fractions` restores saved shares and rejects any that are not finite and positive.
@@ -108,6 +123,8 @@ The component shapes follow Zed's `ui` crate, and the visual values follow Zeron
 `split.rs` adapts the structure of gpui-component 0.7.3's `resizable.rs` and gpui-base 0.7.3's `resizable/` (Copyright 2024 - 2026 Longbridge, Apache-2.0), with modifications. No code was copied verbatim.
 
 The tab bar's structure, a tracked horizontal scroll strip with a trailing empty slot, follows `tab/tab_bar.rs` and `tab/tab.rs` in [gpui-component](https://github.com/longbridge/gpui-kit) 0.7.3, Copyright 2024 - 2026 Longbridge, licensed Apache-2.0. `crates/keystone-ui/src/tabs.rs` is a modified, rewritten adaptation and says so in its header.
+
+The tree's structure, a tree state that owns the rows beside a styled `Tree` element with Left, Right, and Enter in a `Tree` key context, follows `tree.rs` in gpui-base 0.7.3 and gpui-component 0.7.3 (Copyright 2024 - 2026 Longbridge, Apache-2.0). `crates/keystone-ui/src/tree.rs` is a modified, rewritten adaptation and says so in its header. Upstream rebuilds its entry list on every toggle, and this one splices.
 
 ## Known limits
 

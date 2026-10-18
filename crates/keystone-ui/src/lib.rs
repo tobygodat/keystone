@@ -19,6 +19,7 @@ pub mod text_input;
 mod theme;
 mod tokens;
 mod tooltip;
+pub mod tree;
 pub mod virtual_list;
 
 pub use button::{Button, ButtonSize, ButtonStyle, IconButton};
@@ -37,12 +38,14 @@ pub use text_input::{InputMode, TextInput};
 pub use theme::{ActiveTheme, Appearance, Colors, Density, Fonts, Theme};
 pub use tokens::{Elevation, TextSize, radius, spacing};
 pub use tooltip::Tooltip;
+pub use tree::{NodeId, NodeKind, Tree, TreeEntry, TreeModel, TreeState};
 pub use virtual_list::{VirtualList, VirtualListState};
 
 /// Installs the dark theme and component key bindings. Call once before opening a window.
 pub fn init(cx: &mut gpui::App) {
     cx.set_global(Theme::dark());
     virtual_list::bind_keys(cx);
+    tree::bind_keys(cx);
 }
 
 /// Replaces the active theme and redraws every window, including cached views.
@@ -60,6 +63,7 @@ pub mod prelude {
         MenuSeparator, PopoverMenu, StyledExt, TextSize, Tooltip, h_flex, radius, spacing, v_flex,
     };
     pub use crate::{DraggedTab, Tab, TabBar, TabDot};
+    pub use crate::{NodeId, NodeKind, Tree, TreeEntry, TreeModel, TreeState};
     pub use crate::{Split, SplitState};
     pub use crate::{VirtualList, VirtualListState};
 }

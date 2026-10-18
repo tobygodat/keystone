@@ -81,3 +81,125 @@ fn perf_virtual_list_50k(cx: &mut TestAppContext) {
     eprintln!("PERF perf_virtual_list_50k_max={max:.3}");
     assert!(p95 < 8.0, "p95 {p95:.3} ms exceeds half the frame budget");
 }
+
+struct Files {
+    state: Entity<TreeState>,
+}
+
+impl Render for Files {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().flex().flex_col().child(
+            Tree::new("perf-tree", &self.state, |entry, _, _, _| {
+                h_flex()
+                    .gap_2()
+                    .child(Icon::new(IconName::File).size(px(14.)))
+                    .child(Label::new(entry.name.clone()).truncate())
+                    .into_any_element()
+            })
+            .flex_1()
+            .w(px(400.)),
+        )
+    }
+}
+
+/// Five folders of 10,000 files each, 50,005 nodes, with the first `open` expanded.
+fn open_tree(
+    cx: &mut TestAppContext,
+    open: usize,
+) -> (Entity<TreeState>, &mut gpui::VisualTestContext) {
+    cx.update(keystone_ui::init);
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        let mut model = TreeModel::new((0..5).map(|n| (format!("folder-{n}"), NodeKind::Folder)));
+        for folder in 0..5 {
+            model.set_children(
+                folder,
+                (0..10_000).map(|n| (format!("file-{folder}-{n}.rs"), NodeKind::File)),
+            );
+        }
+        for folder in (0..open).rev() {
+            model.expand(folder);
+        }
+        Files {
+            state: cx.new(|cx| TreeState::new(model, cx)),
+        }
+    });
+    cx.simulate_resize(size(px(800.), px(600.)));
+    cx.simulate_mouse_move(point(px(700.), px(300.)), None, Modifiers::none());
+    cx.run_until_parked();
+    let state = view.read_with(cx, |files, _| files.state.clone());
+    (state, cx)
+}
+
+fn report(name: &str, mut frames: Vec<f64>) -> (f64, f64) {
+    frames.sort_by(f64::total_cmp);
+    let at = |q: f64| frames[((frames.len() - 1) as f64 * q).round() as usize];
+    let (p50, p95, max) = (at(0.5), at(0.95), frames[frames.len() - 1]);
+    eprintln!("PERF {name}_p50={p50:.3}");
+    eprintln!("PERF {name}_p95={p95:.3}");
+    eprintln!("PERF {name}_max={max:.3}");
+    (p95, max)
+}
+
+/// Sweeps the fully expanded 50,005-row tree the way `perf_virtual_list_50k` sweeps the list.
+#[gpui::test]
+#[ignore = "benchmark"]
+fn perf_tree_50k(cx: &mut TestAppContext) {
+    let (state, cx) = open_tree(cx, 5);
+    let (list, rows) = state.read_with(cx, |state, _| {
+        (state.list().clone(), state.model().visible().len())
+    });
+    assert_eq!(rows, 50_005);
+    let mut frames = Vec::with_capacity(FRAMES);
+    for frame in 0..FRAMES {
+        let target = if frame % 2 == 0 {
+            frame * 100
+        } else {
+            frame * 100 - 99
+        };
+        state.update(cx, |state, cx| state.highlight(target, cx));
+        cx.update(|window, cx| {
+            let start = std::time::Instant::now();
+            window.draw(cx).clear(cx);
+            frames.push(start.elapsed().as_secs_f64() * 1000.);
+        });
+        let top = list.read_with(cx, |list, _| {
+            let scroll = list.scroll_handle().0.borrow();
+            let size = scroll.last_item_size.expect("laid out");
+            let row = size.contents.height / rows as f32;
+            (-scroll.base_handle.offset().y / row).floor() as usize
+        });
+        assert!(
+            top <= target && target < top + 30,
+            "frame {frame}: row {target} on screen, top {top}"
+        );
+    }
+    let (p95, _) = report("perf_tree_50k", frames);
+    assert!(p95 < 8.0, "p95 {p95:.3} ms exceeds half the frame budget");
+}
+
+/// Expands a 10,000-child folder inside the 50,005-node tree and draws the next frame,
+/// then collapses it, fifty times. Each sample is the expand plus its frame.
+#[gpui::test]
+#[ignore = "benchmark"]
+fn perf_tree_expand_10k(cx: &mut TestAppContext) {
+    let (state, cx) = open_tree(cx, 0);
+    let mut samples = Vec::new();
+    for _ in 0..50 {
+        cx.update(|window, cx| {
+            let start = std::time::Instant::now();
+            state.update(cx, |state, cx| state.expand(2, cx));
+            window.draw(cx).clear(cx);
+            samples.push(start.elapsed().as_secs_f64() * 1000.);
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| s.model().visible().len()),
+            10_005
+        );
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| state.collapse(2, cx));
+            window.draw(cx).clear(cx);
+        });
+    }
+    let (_, max) = report("perf_tree_expand_10k", samples);
+    assert!(max < 16.7, "expand {max:.3} ms misses the frame");
+}

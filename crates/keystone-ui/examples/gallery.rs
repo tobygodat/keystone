@@ -12,10 +12,13 @@ use keystone_ui::{Appearance, Density, Fonts, Theme, automation, set_theme};
 enum Page {
     Components,
     List,
+    Tree,
 }
 
 #[path = "gallery/tabs.rs"]
 mod tabs;
+#[path = "gallery/tree.rs"]
+mod tree;
 
 struct Gallery {
     page: Page,
@@ -27,6 +30,7 @@ struct Gallery {
     tabs: gpui::Entity<tabs::TabsPage>,
     list: Entity<VirtualListState>,
     confirmed: Option<usize>,
+    tree: Entity<tree::TreePage>,
 }
 
 const MARKDOWN: &str = "## Heading\n\nA paragraph with **strong**, *emphasis*, `inline code`, ~~struck~~, and a [link](https://example.com).\n\n- A bullet\n  1. A nested number\n- Another bullet\n\n> A quoted line.\n\n| Left | Center | Right |\n| :-- | :-: | --: |\n| `a` | b | 1 |\n| c | d | 22 |\n\n```rust\nfn main() {\n    println!(\"A long line that scrolls sideways instead of wrapping, as in an editor, so code keeps its shape.\");\n}\n```\n\n---\n";
@@ -399,6 +403,7 @@ impl Render for Gallery {
         let pages = [
             (Page::Components, "Components", "gallery-page-components"),
             (Page::List, "List", "gallery-page-list"),
+            (Page::Tree, "Tree", "gallery-page-tree"),
         ]
         .map(|(target, name, id)| {
             Button::new(id, name)
@@ -409,6 +414,9 @@ impl Render for Gallery {
                     this.page = target;
                     if target == Page::List {
                         window.focus(&this.list.focus_handle(cx), cx);
+                    }
+                    if target == Page::Tree {
+                        window.focus(&this.tree.focus_handle(cx), cx);
                     }
                     cx.notify();
                 }))
@@ -499,6 +507,7 @@ impl Render for Gallery {
             .map(|d| match page {
                 Page::Components => d.child(components),
                 Page::List => d.child(self.list_page(cx)),
+                Page::Tree => d.child(self.tree.clone()),
             })
             .when_some(self.split.as_ref(), |d, page| {
                 d.child(self.split_page(page, cx))
@@ -544,6 +553,7 @@ fn main() {
                         tabs: cx.new(|_| tabs::TabsPage::new()),
                         list: cx.new(|cx| VirtualListState::new(50_000, cx)),
                         confirmed: None,
+                        tree: cx.new(tree::TreePage::new),
                     })
                 },
             )

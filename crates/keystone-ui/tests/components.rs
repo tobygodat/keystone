@@ -1107,3 +1107,247 @@ fn a_host_takes_navigation_keys_before_the_input(cx: &mut TestAppContext) {
     });
     input.read_with(cx, |input, _| assert_eq!(input.value(), "ab"));
 }
+
+struct Files {
+    state: gpui::Entity<TreeState>,
+    opened: Vec<NodeId>,
+    requested: Vec<NodeId>,
+}
+
+impl Render for Files {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(
+            Tree::new("tree", &self.state, |entry, _, _, _| {
+                div().child(entry.name.clone()).into_any_element()
+            })
+            .on_open(cx.listener(|this, id: &NodeId, _, cx| {
+                this.opened.push(*id);
+                cx.notify();
+            }))
+            .on_expand(cx.listener(|this, id: &NodeId, _, cx| {
+                this.requested.push(*id);
+                cx.notify();
+            }))
+            .h(gpui::px(400.)),
+        )
+    }
+}
+
+/// `src/` holding `lib/` (holding `mod.rs`) and `main.rs`, a lazy `remote/`, and `README`.
+fn open_tree(cx: &mut TestAppContext) -> (gpui::Entity<Files>, &mut gpui::VisualTestContext) {
+    cx.update(keystone_ui::init);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut model = TreeModel::new([
+            ("src", NodeKind::Folder),
+            ("remote", NodeKind::Folder),
+            ("README", NodeKind::File),
+        ]);
+        let src = model.set_children(0, [("lib", NodeKind::Folder), ("main.rs", NodeKind::File)]);
+        model.set_children(src.start, [("mod.rs", NodeKind::File)]);
+        let state = cx.new(|cx| TreeState::new(model, cx));
+        window.focus(&gpui::Focusable::focus_handle(state.read(cx), cx), cx);
+        Files {
+            state,
+            opened: Vec::new(),
+            requested: Vec::new(),
+        }
+    });
+    cx.run_until_parked();
+    (view, cx)
+}
+
+fn tree_rows(view: &gpui::Entity<Files>, cx: &mut gpui::VisualTestContext) -> Vec<String> {
+    view.read_with(cx, |files, cx| {
+        let model = files.state.read(cx).model();
+        model
+            .visible()
+            .iter()
+            .map(|row| match *row {
+                keystone_ui::tree::Row::Node(id) => model.node(id).name().to_string(),
+                keystone_ui::tree::Row::Loading(_) => "Loading".into(),
+            })
+            .collect()
+    })
+}
+
+fn tree_highlight(view: &gpui::Entity<Files>, cx: &mut gpui::VisualTestContext) -> Option<usize> {
+    view.read_with(cx, |files, cx| files.state.read(cx).highlighted_row(cx))
+}
+
+#[gpui::test]
+fn tree_left_right_navigate(cx: &mut TestAppContext) {
+    let (view, cx) = open_tree(cx);
+    assert_eq!(tree_rows(&view, cx), ["src", "remote", "README"]);
+    for (keys, rows, highlight) in [
+        (
+            "right",
+            &["src", "lib", "main.rs", "remote", "README"][..],
+            0,
+        ),
+        ("right", &["src", "lib", "main.rs", "remote", "README"], 1),
+        (
+            "right right",
+            &["src", "lib", "mod.rs", "main.rs", "remote", "README"],
+            2,
+        ),
+        (
+            "right",
+            &["src", "lib", "mod.rs", "main.rs", "remote", "README"],
+            2,
+        ),
+        (
+            "left",
+            &["src", "lib", "mod.rs", "main.rs", "remote", "README"],
+            1,
+        ),
+        ("left", &["src", "lib", "main.rs", "remote", "README"], 1),
+        ("left", &["src", "lib", "main.rs", "remote", "README"], 0),
+        ("left", &["src", "remote", "README"], 0),
+        ("left", &["src", "remote", "README"], 0),
+        (
+            "right down",
+            &["src", "lib", "main.rs", "remote", "README"],
+            1,
+        ),
+        (
+            "right down left",
+            &["src", "lib", "mod.rs", "main.rs", "remote", "README"],
+            1,
+        ),
+    ] {
+        cx.simulate_keystrokes(keys);
+        assert_eq!(tree_rows(&view, cx), rows, "{keys}");
+        assert_eq!(tree_highlight(&view, cx), Some(highlight), "{keys}");
+    }
+}
+
+#[gpui::test]
+fn tree_collapse_keeps_highlight_on_the_folder(cx: &mut TestAppContext) {
+    let (view, cx) = open_tree(cx);
+    cx.simulate_keystrokes("right down down down");
+    assert_eq!(tree_highlight(&view, cx), Some(3), "on remote");
+    view.update(cx, |files, cx| {
+        files.state.update(cx, |state, cx| state.collapse(0, cx))
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        tree_highlight(&view, cx),
+        Some(1),
+        "remote moved up with it"
+    );
+    cx.simulate_keystrokes("up right down down");
+    view.update(cx, |files, cx| {
+        files.state.update(cx, |state, cx| state.collapse(0, cx))
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        tree_highlight(&view, cx),
+        Some(0),
+        "a hidden row hands it to src"
+    );
+}
+
+#[gpui::test]
+fn tree_enter_opens_files_and_toggles_folders(cx: &mut TestAppContext) {
+    let (view, cx) = open_tree(cx);
+    cx.simulate_keystrokes("enter");
+    assert_eq!(tree_rows(&view, cx).len(), 5, "enter expands src");
+    cx.simulate_keystrokes("down down enter");
+    let opened = view.read_with(cx, |files, cx| {
+        let model = files.state.read(cx).model();
+        files
+            .opened
+            .iter()
+            .map(|id| model.node(*id).name().to_string())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(opened, ["main.rs"]);
+    cx.simulate_keystrokes("up up enter");
+    assert_eq!(tree_rows(&view, cx), ["src", "remote", "README"]);
+    view.read_with(cx, |files, _| assert_eq!(files.opened.len(), 1));
+}
+
+#[gpui::test]
+fn tree_lazy_folder_shows_loading_until_filled(cx: &mut TestAppContext) {
+    let (view, cx) = open_tree(cx);
+    cx.simulate_keystrokes("down right");
+    assert_eq!(tree_rows(&view, cx), ["src", "remote", "Loading", "README"]);
+    view.read_with(cx, |files, _| assert_eq!(files.requested, [1]));
+    assert!(cx.debug_bounds("tree-row-2").is_some(), "loading row drawn");
+    cx.simulate_keystrokes("left right");
+    view.read_with(cx, |files, _| {
+        assert_eq!(files.requested, [1], "asked only once")
+    });
+    view.update(cx, |files, cx| {
+        files.state.update(cx, |state, cx| {
+            state.set_children(1, [("a", NodeKind::File), ("b", NodeKind::File)], cx);
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(tree_rows(&view, cx), ["src", "remote", "a", "b", "README"]);
+    cx.simulate_keystrokes("right");
+    assert_eq!(tree_highlight(&view, cx), Some(2));
+}
+
+#[gpui::test]
+fn tree_chevron_click_toggles_without_opening(cx: &mut TestAppContext) {
+    let (view, cx) = open_tree(cx);
+    let chevron = cx.debug_bounds("tree-chevron-0").expect("src chevron");
+    cx.simulate_click(chevron.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(tree_rows(&view, cx).len(), 5);
+    let chevron = cx.debug_bounds("tree-chevron-1").expect("lib chevron");
+    cx.simulate_click(chevron.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(tree_rows(&view, cx).len(), 6);
+    assert_eq!(tree_highlight(&view, cx), Some(1));
+    let file = cx.debug_bounds("tree-row-3").expect("main.rs row");
+    cx.simulate_click(file.center(), Modifiers::none());
+    cx.run_until_parked();
+    view.read_with(cx, |files, _| assert_eq!(files.opened.len(), 1));
+}
+
+struct CachedFiles {
+    files: gpui::Entity<Files>,
+}
+
+impl Render for CachedFiles {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(
+            gpui::AnyView::from(self.files.clone())
+                .cached(gpui::StyleRefinement::default().size_full()),
+        )
+    }
+}
+
+#[gpui::test]
+fn tree_redraws_a_cached_host_when_children_arrive(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        let model = TreeModel::new([("remote", NodeKind::Folder), ("README", NodeKind::File)]);
+        let state = cx.new(|cx| TreeState::new(model, cx));
+        window.focus(&gpui::Focusable::focus_handle(state.read(cx), cx), cx);
+        CachedFiles {
+            files: cx.new(|_| Files {
+                state,
+                opened: Vec::new(),
+                requested: Vec::new(),
+            }),
+        }
+    });
+    cx.run_until_parked();
+    let state = host.read_with(cx, |host, cx| host.files.read(cx).state.clone());
+    cx.simulate_keystrokes("right");
+    assert!(
+        cx.debug_bounds("tree-row-2").is_some(),
+        "README below the loading row"
+    );
+    state.update(cx, |state, cx| {
+        state.set_children(0, [("a", NodeKind::File), ("b", NodeKind::File)], cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("tree-row-3").is_some(),
+        "README moved down a row"
+    );
+}
