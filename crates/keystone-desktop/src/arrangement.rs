@@ -432,8 +432,6 @@ impl Keystone {
                     split = split.child(
                         div()
                             .relative()
-                            .min_h_0()
-                            .min_w_0()
                             .map(|d| match child.size {
                                 Size::Auto => d
                                     .flex_shrink(1.)
@@ -457,8 +455,11 @@ impl Keystone {
                                     }
                                 }
                             })
-                            .when(axis == Axis::Row, |d| d.h_full())
-                            .when(axis == Axis::Column, |d| d.w_full())
+                            .map(|d| match axis {
+                                Axis::Column => d.min_w_0().w_full(),
+                                Axis::Row if !auto => d.min_h_0().h_full(),
+                                Axis::Row => d,
+                            })
                             .child(
                                 canvas(
                                     move |bounds, _, cx| {

@@ -532,6 +532,90 @@ fn fitting_uses_the_first_displayed_preferred_pane_and_retains_temporary_clicks(
     );
 }
 
+fn open_auto_row(
+    cx: &mut TestAppContext,
+) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
+    let (dir, view, cx) = open(cx);
+    click(cx, "select-component-3");
+    click(cx, "component-right");
+    click(cx, "select-component-2");
+    click(cx, "component-right");
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    (dir, view, cx)
+}
+
+#[gpui::test]
+fn an_auto_row_of_conversation_and_composer_keeps_both_visible(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open_auto_row(cx);
+    view.read_with(cx, |this, _| {
+        let Node::Split {
+            axis: Axis::Row,
+            children,
+        } = this.saved_composition().root().clone()
+        else {
+            panic!("root is not a row")
+        };
+        let Node::Split {
+            axis: Axis::Column,
+            children,
+        } = children[1].node.clone()
+        else {
+            panic!("body is not a column")
+        };
+        assert_eq!(children[0].node, Node::View { id: ViewId::MAIN });
+        assert_eq!(children[0].size, Size::Fill(NonZeroU16::MIN));
+        assert_eq!(children[1].size, Size::Auto);
+        let Node::Split {
+            axis: Axis::Row,
+            children,
+        } = children[1].node.clone()
+        else {
+            panic!("second slot is not a row")
+        };
+        assert_eq!(children[0].node, Node::View { id: ViewId(3) });
+        assert_eq!(children[0].size, Size::Fill(NonZeroU16::MIN));
+        assert_eq!(children[1].node, Node::View { id: ViewId(2) });
+        assert_eq!(children[1].size, Size::Fill(NonZeroU16::MIN));
+    });
+    let upper = cx.debug_bounds("conversation").unwrap();
+    let lower = cx.debug_bounds("conversation-view-3").unwrap();
+    let field = cx.debug_bounds("composer-field").unwrap();
+    assert!(
+        lower.size.height > px(0.),
+        "conversation 3 collapsed: {lower:?}"
+    );
+    assert!(
+        field.top() >= upper.bottom(),
+        "composer field {field:?} overlaps conversation {upper:?}"
+    );
+}
+
+#[gpui::test]
+fn a_multiline_draft_grows_the_auto_row_instead_of_overflowing_it(cx: &mut TestAppContext) {
+    let (_dir, _view, cx) = open_auto_row(cx);
+    let before = cx.debug_bounds("conversation-view-3").unwrap();
+    click(cx, "composer-field");
+    cx.simulate_input("one\ntwo\nthree\nfour\nfive\nsix");
+    cx.run_until_parked();
+    let upper = cx.debug_bounds("conversation").unwrap();
+    let lower = cx.debug_bounds("conversation-view-3").unwrap();
+    let field = cx.debug_bounds("composer-field").unwrap();
+    assert!(field.size.height > px(44.), "draft did not grow: {field:?}");
+    assert!(
+        lower.size.height > before.size.height,
+        "row did not grow with the draft: {before:?} then {lower:?}"
+    );
+    assert!(
+        field.top() >= upper.bottom(),
+        "composer field {field:?} overlaps conversation {upper:?}"
+    );
+    assert!(
+        field.bottom() <= px(900.),
+        "composer field leaves the window: {field:?}"
+    );
+}
+
 fn working_directory() -> WorkingDirectory {
     WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
