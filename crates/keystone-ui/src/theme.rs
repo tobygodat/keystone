@@ -79,6 +79,11 @@ pub struct Colors {
     pub element_disabled: Hsla,
     /// The strongest fill, for one primary action such as Send. Pairs with `text_inverse`.
     pub element_inverse: Hsla,
+    /// Neutral selector fill and foreground. Model rows also use the inset ring
+    /// and provider edge. Generic buttons retain their existing focus geometry.
+    pub selection_fill: Hsla,
+    pub selection_ring: Hsla,
+    pub selection_edge: Hsla,
 
     pub border: Hsla,
     pub border_strong: Hsla,
@@ -171,6 +176,9 @@ impl Colors {
             element_filled_hover: white(0.15),
             element_disabled: white(0.10),
             element_inverse: rgb(0x4470c0).into(),
+            selection_fill: white(0.16),
+            selection_ring: white(0.20),
+            selection_edge: rgb(0xffffff).into(),
 
             border: white(0.08),
             border_strong: white(0.14),
@@ -218,6 +226,9 @@ impl Colors {
             element_filled_hover: black(0.12),
             element_disabled: black(0.10),
             element_inverse: rgb(0x345fa8).into(),
+            selection_fill: black(0.16),
+            selection_ring: black(0.20),
+            selection_edge: rgb(0x141414).into(),
 
             border: black(0.09),
             border_strong: black(0.16),

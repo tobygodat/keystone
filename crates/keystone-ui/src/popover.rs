@@ -220,7 +220,7 @@ impl RenderOnce for MenuItem {
                     d.child(
                         Icon::new(IconName::Check)
                             .size(px(14.))
-                            .color(Color::Accent),
+                            .color(Color::Custom(theme.colors.selection_edge)),
                     )
                 }))
             })

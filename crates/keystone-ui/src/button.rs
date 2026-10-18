@@ -78,14 +78,14 @@ impl Common {
                 colors.element_inverse.opacity(0.94),
             ),
             (ButtonStyle::Filled, _) => (Some(colors.element_filled), colors.element_filled_hover),
-            (_, true) => (Some(colors.element_selected), colors.element_active),
+            (_, true) => (Some(colors.selection_fill), colors.selection_fill),
             (ButtonStyle::Subtle, false) => (Some(colors.element_hover), colors.element_active),
             (ButtonStyle::Ghost, false) => (None, colors.element_hover),
         };
-        let active = if self.style == ButtonStyle::Primary {
-            colors.element_inverse.opacity(0.88)
-        } else {
-            colors.element_active
+        let active = match (self.style, self.selected) {
+            (ButtonStyle::Primary, _) => colors.element_inverse.opacity(0.88),
+            (ButtonStyle::Ghost | ButtonStyle::Subtle, true) => colors.selection_fill,
+            _ => colors.element_active,
         };
         let mut el = div()
             .id(self.id)
@@ -211,7 +211,9 @@ impl RenderOnce for Button {
             color
         } else if self.common.style == ButtonStyle::Primary {
             Color::Custom(cx.theme().colors.text_inverse)
-        } else if self.common.selected || self.common.style == ButtonStyle::Filled {
+        } else if self.common.selected {
+            Color::Custom(cx.theme().colors.selection_edge)
+        } else if self.common.style == ButtonStyle::Filled {
             Color::Default
         } else {
             Color::Muted
@@ -259,7 +261,7 @@ impl RenderOnce for IconButton {
         let color = if self.common.style == ButtonStyle::Primary {
             Color::Custom(cx.theme().colors.text_inverse)
         } else if self.common.selected {
-            Color::Default
+            Color::Custom(cx.theme().colors.selection_edge)
         } else {
             Color::Muted
         };
