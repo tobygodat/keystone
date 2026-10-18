@@ -35,7 +35,8 @@ fn a_claude_without_lifecycle_frames_refuses_steers() {
             let _ = tx.send(());
         }),
     );
-    conn.send(1, "/tmp", None, NO_MODE, "long".into()).unwrap();
+    conn.send(1, "/tmp", None, None, NO_MODE, "long".into())
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut events = Vec::new();
     let mut steered = false;
@@ -44,7 +45,7 @@ fn a_claude_without_lifecycle_frames_refuses_steers() {
         for (i, event) in batch.iter().enumerate() {
             if !steered && matches!(event, Event::ItemDelta { .. }) {
                 let error = conn
-                    .send(1, "/tmp", None, NO_MODE, "change course".into())
+                    .send(1, "/tmp", None, None, NO_MODE, "change course".into())
                     .unwrap_err();
                 assert!(error.contains("msg_lifecycle_v1"), "{error}");
                 steered = true;
@@ -91,5 +92,6 @@ fn a_claude_without_lifecycle_frames_refuses_steers() {
     );
     assert!(!conn.is_running(1));
     // Idle again, so a message starts the next turn.
-    conn.send(1, "/tmp", None, NO_MODE, "hello".into()).unwrap();
+    conn.send(1, "/tmp", None, None, NO_MODE, "hello".into())
+        .unwrap();
 }

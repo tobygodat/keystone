@@ -16,11 +16,14 @@ pub struct ApprovalState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    /// Open the session's conversation in `cwd`, resuming `resume` when given.
+    /// Open the session's conversation in `cwd`, resuming `resume` when given. `model`
+    /// is the provider-native model the session asked for; `None` leaves the choice to
+    /// the provider.
     Open {
         session: u64,
         cwd: String,
         resume: Option<String>,
+        model: Option<String>,
     },
     /// Start a turn, or steer the running one.
     Send {

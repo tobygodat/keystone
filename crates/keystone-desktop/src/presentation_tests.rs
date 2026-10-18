@@ -2,6 +2,7 @@ use super::*;
 use crate::FOLDER_UNCONFIRMED;
 use crate::arrangement_editor::{Action, Commit};
 use crate::customization_agent::{Outcome, Proposal};
+use crate::model_selector::{CatalogKey, Choices};
 use crate::view_state::ViewKey;
 use gpui::{ListOffset, TestAppContext, VisualTestContext, px};
 use keystone_agent::Event;
@@ -621,4 +622,440 @@ fn send_with_unrelated_save_debt_refuses_without_blaming_a_folder(cx: &mut TestA
             )
         );
     });
+}
+
+#[gpui::test]
+fn first_send_lock_waits_for_the_send_barrier_when_its_sync_is_pending(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx, true);
+    view.update_in(cx, |this, window, cx| {
+        assert!(!this.store.workspace().sessions()[0].started());
+        refuse_directory_sync(this);
+        this.composer
+            .update(cx, |i, cx| i.set_value("First message".into(), cx));
+        this.send_message(
+            crate::ComposerDraft {
+                session: 1,
+                text: "First message".into(),
+            },
+            window,
+            cx,
+        );
+        assert!(this.codex.is_none());
+        assert_eq!(this.composer.read(cx).value(), "First message");
+        assert!(
+            this.conversation(1)
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Not sent. Could not finish saving changes.")),
+            "{:?}",
+            this.conversation(1).error
+        );
+        let saved = std::fs::read_to_string(this.store.path()).unwrap();
+        assert!(saved.contains(r#""model_locked":true"#), "{saved}");
+        assert!(this.store.workspace().sessions()[0].started());
+    });
+}
+
+fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let exe = std::env::current_exe().unwrap();
+    let fake = exe
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("keystone-fake-claude");
+    assert!(
+        fake.exists(),
+        "build it with `cargo build -p keystone-agent --bins`"
+    );
+    let log = dir.join("claude-cwd");
+    let script = dir.join("claude-cwd-wrapper");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\npwd >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            fake.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (script, log)
+}
+
+fn claude_from(this: &mut Keystone, program: std::path::PathBuf) {
+    this.claude = Some(keystone_agent::ClaudeConnection::new(
+        Some(program),
+        this.wake.clone(),
+    ));
+}
+
+/// The model names the menu would list for the session once its catalog arrives.
+fn listed(
+    view: &Entity<Keystone>,
+    cx: &mut VisualTestContext,
+    session: u64,
+    provider: Provider,
+) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        cx.run_until_parked();
+        let ready = view.read_with(cx, |this, _| {
+            match this.model_selection(session, provider).choices {
+                Choices::Ready(models) => Some(models.iter().map(|m| m.model.clone()).collect()),
+                _ => None,
+            }
+        });
+        if let Some(models) = ready {
+            return models;
+        }
+        assert!(std::time::Instant::now() < deadline, "no catalog arrived");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn started_in(log: &Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+fn canonical(path: std::path::PathBuf) -> std::path::PathBuf {
+    path.canonicalize().unwrap()
+}
+
+#[gpui::test]
+fn a_draft_catalog_starts_in_the_conversation_folder_not_the_layout_project(
+    cx: &mut TestAppContext,
+) {
+    let (dir, view, cx) = open(cx, true);
+    pick(&view, cx, &dir.path().join("b"));
+    let (claude, log) = logged_claude(dir.path());
+    view.update(cx, |this, cx| {
+        claude_from(this, claude);
+        this.request_catalog(2, Provider::Claude, cx);
+    });
+    assert_eq!(
+        listed(&view, cx, 2, Provider::Claude),
+        ["fake-opus", "fake-haiku"]
+    );
+    assert_eq!(started_in(&log), [canonical(dir.path().join("a"))]);
+}
+
+#[gpui::test]
+fn a_draft_without_a_usable_folder_asks_nothing_and_leaves_other_drafts_their_catalog(
+    cx: &mut TestAppContext,
+) {
+    let (dir, view, cx) = open(cx, false);
+    let (claude, log) = logged_claude(dir.path());
+    view.update(cx, |this, cx| {
+        let a = WorkingDirectory::new(&dir.path().join("a")).unwrap();
+        assert_eq!(this.store.create(Provider::Claude, &a, 3).unwrap().value, 3);
+        claude_from(this, claude);
+        for (session, provider) in [(1, Provider::Codex), (2, Provider::Claude)] {
+            this.request_catalog(session, provider, cx);
+            assert!(matches!(
+                this.model_selection(session, provider).choices,
+                Choices::Unavailable(_)
+            ));
+        }
+        assert!(this.codex.is_none());
+        this.request_catalog(3, Provider::Claude, cx);
+    });
+    assert_eq!(
+        listed(&view, cx, 3, Provider::Claude),
+        ["fake-opus", "fake-haiku"]
+    );
+    assert_eq!(started_in(&log), [canonical(dir.path().join("a"))]);
+    view.read_with(cx, |this, _| {
+        assert!(matches!(
+            this.model_selection(2, Provider::Claude).choices,
+            Choices::Unavailable(_)
+        ));
+    });
+}
+
+#[gpui::test]
+fn a_chosen_legacy_folder_loads_its_catalog_without_a_retry(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, false);
+    let (claude, log) = logged_claude(dir.path());
+    view.update(cx, |this, cx| {
+        this.store.set_provider(1, Provider::Claude).unwrap();
+        claude_from(this, claude);
+        this.request_catalog(1, Provider::Claude, cx);
+        assert!(matches!(
+            this.model_selection(1, Provider::Claude).choices,
+            Choices::Unavailable(_)
+        ));
+        let ticket = this.presentation.legacy_ticket(1).unwrap();
+        this.finish_legacy_folder(ticket, FolderPick::Selected(dir.path().join("b")), cx);
+        this.request_catalog(1, Provider::Claude, cx);
+    });
+    assert_eq!(
+        listed(&view, cx, 1, Provider::Claude),
+        ["fake-opus", "fake-haiku"]
+    );
+    assert_eq!(started_in(&log), [canonical(dir.path().join("b"))]);
+}
+
+#[gpui::test]
+fn drafts_in_two_folders_each_get_the_catalog_of_their_own_folder(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    let only_b = serde_json::json!([{"type": "control_response", "response": {
+    "subtype": "success", "request_id": "keystone-catalog", "response": {"models": [
+        {"value": "b-only", "displayName": "B only", "description": "", "resolvedModel": "b-only"}
+    ]}}}]);
+    std::fs::write(
+        dir.path().join("b/.fake-claude-initialize-frames"),
+        only_b.to_string(),
+    )
+    .unwrap();
+    let (claude, log) = logged_claude(dir.path());
+    view.update(cx, |this, cx| {
+        let b = WorkingDirectory::new(&dir.path().join("b")).unwrap();
+        assert_eq!(this.store.create(Provider::Claude, &b, 3).unwrap().value, 3);
+        claude_from(this, claude);
+        this.request_catalog(2, Provider::Claude, cx);
+        this.request_catalog(3, Provider::Claude, cx);
+    });
+    assert_eq!(listed(&view, cx, 3, Provider::Claude), ["b-only"]);
+    assert_eq!(
+        listed(&view, cx, 2, Provider::Claude),
+        ["fake-opus", "fake-haiku"]
+    );
+    let mut started = started_in(&log);
+    started.sort();
+    assert_eq!(
+        started,
+        [
+            canonical(dir.path().join("a")),
+            canonical(dir.path().join("b"))
+        ]
+    );
+}
+
+fn apply(view: &Entity<Keystone>, cx: &mut VisualTestContext, session: u64, event: Event) {
+    view.update(cx, |this, cx| {
+        this.receive(Vec::new(), vec![(session, event)], cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+fn inside(inner: gpui::Bounds<gpui::Pixels>, outer: gpui::Bounds<gpui::Pixels>) -> bool {
+    inner.left() >= outer.left()
+        && inner.right() <= outer.right()
+        && inner.top() >= outer.top()
+        && inner.bottom() <= outer.bottom()
+}
+
+#[gpui::test]
+fn a_400px_composer_keeps_a_model_target_and_every_action_through_a_turn(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx, true);
+    cx.simulate_resize(gpui::size(px(400.), px(800.)));
+    let window = gpui::Bounds::new(gpui::point(px(0.), px(0.)), gpui::size(px(400.), px(800.)));
+    for session in [1, 2] {
+        view.update(cx, |this, cx| this.select(session, cx));
+        cx.run_until_parked();
+        let check = |cx: &mut VisualTestContext, actions: &[&'static str]| {
+            let selector = cx.debug_bounds("model-selector").unwrap();
+            let folder = cx.debug_bounds("project").unwrap();
+            let approval = cx.debug_bounds("approval-mode").unwrap();
+            let send = cx.debug_bounds("send").unwrap();
+            let field = cx.debug_bounds("composer-field").unwrap();
+            assert!(
+                selector.size.width >= px(56.) && selector.size.height >= px(28.),
+                "{selector:?}"
+            );
+            assert!(selector.right() <= folder.left() && folder.right() <= approval.left());
+            assert_eq!(folder.size.width, px(28.));
+            assert!(send.right() <= field.right() + px(12.), "Send at {send:?}");
+            for &id in actions {
+                let action = cx
+                    .debug_bounds(id)
+                    .unwrap_or_else(|| panic!("{id} missing"));
+                assert!(
+                    approval.right() <= action.left() && action.right() <= send.left(),
+                    "{id} at {action:?}"
+                );
+                assert!(inside(action, window));
+            }
+            assert!(inside(send, window));
+        };
+        check(cx, &[]);
+        view.update(cx, |this, _| this.store.lock_model(session).unwrap());
+        apply(&view, cx, session, Event::TurnStarted);
+        check(cx, &["stop"]);
+        apply(
+            &view,
+            cx,
+            session,
+            Event::ApprovalRequested(keystone_agent::Approval {
+                request: keystone_agent::RequestId("1".into()),
+                item_id: None,
+                action: "cargo test".into(),
+                detail: None,
+            }),
+        );
+        check(cx, &["stop"]);
+        assert!(cx.debug_bounds("approve").is_some());
+    }
+}
+
+#[gpui::test]
+fn the_model_menu_fits_a_400px_window_and_keeps_its_columns_when_wide(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    let fail = |view: &Entity<Keystone>, cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            let key = CatalogKey {
+                provider: Provider::Codex,
+                directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+            };
+            this.catalogs.clear(&key);
+            this.catalogs.ask(key, 1);
+            this.catalogs.apply(
+                Provider::Codex,
+                1,
+                keystone_agent::Catalog::Failed(
+                    "Codex stopped before it listed its models, with a long reason.".into(),
+                ),
+            );
+            this.model_menu = Some(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    fail(&view, cx);
+    let provider = cx.debug_bounds("provider-codex").unwrap();
+    let column = cx.debug_bounds("model-column").unwrap();
+    assert_eq!(provider.size.width, px(152.));
+    assert_eq!(column.size.width, px(282.));
+
+    cx.simulate_resize(gpui::size(px(400.), px(800.)));
+    fail(&view, cx);
+    let window = gpui::Bounds::new(gpui::point(px(8.), px(8.)), gpui::size(px(384.), px(784.)));
+    assert_eq!(
+        cx.debug_bounds("provider-codex").unwrap().size.width,
+        px(152.)
+    );
+    let column = cx.debug_bounds("model-column").unwrap();
+    assert!(
+        column.size.width < px(282.) && inside(column, window),
+        "{column:?}"
+    );
+    for id in [
+        "provider-claude",
+        "provider-codex",
+        "model-default",
+        "model-failed",
+        "model-retry",
+        "model-footer",
+    ] {
+        let bounds = cx
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} missing"));
+        assert!(inside(bounds, window), "{id} at {bounds:?}");
+        assert!(
+            id.starts_with("provider") || inside(bounds, column),
+            "{id} at {bounds:?}"
+        );
+    }
+}
+
+/// The narrowest window width the default layout shows unfitted.
+fn fitted_boundary(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> f32 {
+    let fitted = |width: f32, cx: &mut VisualTestContext| {
+        cx.simulate_resize(gpui::size(px(width), px(800.)));
+        cx.run_until_parked();
+        view.read_with(cx, |this, _| this.presentation.current.arrangement.fitted)
+    };
+    let (mut fits, mut unfit) = (2400., 400.);
+    assert!(fitted(unfit, cx) && !fitted(fits, cx));
+    while fits - unfit > 1. {
+        let middle = ((fits + unfit) / 2_f32).floor();
+        if fitted(middle, cx) {
+            unfit = middle;
+        } else {
+            fits = middle;
+        }
+    }
+    fits
+}
+
+#[gpui::test]
+fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext) {
+    const LONG: &str =
+        "fake-opus-with-a-provider-reported-identifier-longer-than-any-label-20991231";
+    let (dir, view, cx) = open(cx, true);
+    let (claude, _log) = logged_claude(dir.path());
+    view.update(cx, |this, cx| {
+        claude_from(this, claude);
+        this.store.set_model(2, Some(LONG.into())).unwrap();
+        this.select(2, cx);
+    });
+    cx.run_until_parked();
+    let boundary = fitted_boundary(&view, cx);
+    let at_boundary = |cx: &mut VisualTestContext, step: &str| {
+        assert_eq!(fitted_boundary(&view, cx), boundary, "refit after {step}");
+        let selector = cx.debug_bounds("model-selector").unwrap();
+        let folder = cx.debug_bounds("project").unwrap();
+        assert!(selector.right() <= folder.left(), "{step}: {selector:?}");
+    };
+
+    view.update(cx, |this, cx| this.select(1, cx));
+    cx.run_until_parked();
+    at_boundary(cx, "selecting a Codex draft");
+    view.update(cx, |this, cx| this.select(2, cx));
+    cx.run_until_parked();
+    view.update(cx, |this, _| {
+        let key = CatalogKey {
+            provider: Provider::Claude,
+            directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+        };
+        this.catalogs.ask(key, 2);
+        this.catalogs.apply(
+            Provider::Claude,
+            2,
+            keystone_agent::Catalog::Ready {
+                models: vec![keystone_agent::ModelInfo {
+                    model: LONG.into(),
+                    label: "A catalog label far longer than the provider default label".into(),
+                    resolved: None,
+                }],
+                default_model: None,
+            },
+        );
+    });
+    at_boundary(cx, "a long catalog label");
+
+    cx.simulate_resize(gpui::size(px(boundary), px(800.)));
+    view.update_in(cx, |this, window, cx| {
+        this.composer
+            .update(cx, |input, cx| input.set_value("hello".into(), cx));
+        this.send_message(
+            crate::ComposerDraft {
+                session: 2,
+                text: "hello".into(),
+            },
+            window,
+            cx,
+        );
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while view.read_with(cx, |this, _| {
+        this.conversations[&2].reported_model.as_deref() != Some(LONG)
+    }) {
+        assert!(std::time::Instant::now() < deadline, "no model report");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+        assert!(
+            !view.read_with(cx, |this, _| this.presentation.current.arrangement.fitted),
+            "the Send or its report refit the layout"
+        );
+    }
+    at_boundary(cx, "the provider's report");
 }

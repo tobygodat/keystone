@@ -3,7 +3,7 @@
 
 use keystone_agent::codex::CodexDriver;
 use keystone_agent::{ApprovalState, Command, Outputs};
-use keystone_agent::{Event, ItemKind, ItemStatus, RequestId, TurnStatus};
+use keystone_agent::{Catalog, Event, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus};
 use keystone_core::ApprovalMode;
 use serde_json::Value;
 
@@ -37,6 +37,7 @@ fn opened() -> CodexDriver {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
+            model: None,
         },
         &mut out,
     );
@@ -345,6 +346,7 @@ fn messages_and_a_stop_sent_during_startup_are_kept_in_order() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
+            model: None,
         },
         &mut out,
     );
@@ -399,6 +401,7 @@ fn a_stop_while_opening_ends_the_turn_and_drops_the_message() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
+            model: None,
         },
         &mut out,
     );
@@ -455,14 +458,17 @@ fn unknown_server_requests_get_an_error_and_exit_fails_the_running_turn() {
     driver.on_exit("Codex stopped", &mut out);
     assert_eq!(
         out.events,
-        vec![(
-            SESSION,
-            Event::TurnCompleted {
-                status: TurnStatus::Failed,
-                error: Some("Codex stopped".into()),
-                stopped: false
-            }
-        )]
+        vec![
+            (
+                SESSION,
+                Event::TurnCompleted {
+                    status: TurnStatus::Failed,
+                    error: Some("Codex stopped".into()),
+                    stopped: false
+                }
+            ),
+            (SESSION, Event::ModelLost),
+        ]
     );
     assert!(!driver.is_open(SESSION));
 }
@@ -478,6 +484,7 @@ fn a_thread_that_cannot_resume_reports_it_instead_of_starting_fresh() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: Some("gone".into()),
+            model: None,
         },
         &mut out,
     );
@@ -495,8 +502,36 @@ fn a_thread_that_cannot_resume_reports_it_instead_of_starting_fresh() {
         &mut out,
     );
     assert!(out.writes.is_empty(), "no fresh thread and no turn");
-    assert!(matches!(&out.events[..], [(_, Event::Failed { message })]
-        if message.contains("Could not resume") && message.contains("thread not found")));
+    assert!(
+        matches!(&out.events[..], [(_, Event::Failed { message }), (_, Event::ModelLost)]
+        if message.contains("Could not resume") && message.contains("thread not found"))
+    );
+}
+
+/// The model a thread reported describes nothing once the app-server is gone, for
+/// every session it hosted, idle ones included.
+#[test]
+fn an_exit_loses_the_model_of_every_session_the_process_hosted() {
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Open {
+            session: 8,
+            cwd: "/tmp/repo".into(),
+            resume: None,
+            model: Some("gpt-6-astra".into()),
+        },
+        &mut out,
+    );
+    let mut out = Outputs::default();
+    driver.on_exit("Codex stopped", &mut out);
+    let mut lost: Vec<u64> = out
+        .events
+        .iter()
+        .filter_map(|(session, e)| (*e == Event::ModelLost).then_some(*session))
+        .collect();
+    lost.sort_unstable();
+    assert_eq!(lost, [SESSION, 8]);
 }
 
 fn send(driver: &mut CodexDriver, text: &str) -> Value {
@@ -582,6 +617,7 @@ fn returning_to_the_default_restores_the_settings_a_new_thread_reported() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
+            model: None,
         },
         &mut out,
     );
@@ -624,6 +660,7 @@ fn a_resumed_overridden_thread_waits_for_the_users_settings() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: Some(THREAD.into()),
+            model: None,
         },
         &mut out,
     );
@@ -667,6 +704,7 @@ fn unreadable_settings_fail_the_message_instead_of_keeping_the_override() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: Some(THREAD.into()),
+            model: None,
         },
         &mut out,
     );
@@ -749,6 +787,7 @@ fn a_rejected_restore_is_retried_with_the_users_settings() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
+            model: None,
         },
         &mut out,
     );
@@ -793,6 +832,7 @@ fn a_rejected_restore_after_reading_the_settings_is_retried_with_them() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: Some(THREAD.into()),
+            model: None,
         },
         &mut out,
     );
@@ -994,4 +1034,189 @@ fn only_a_denial_that_cancels_the_turn_ends_it_for_the_user() {
         stopped(&feed(&mut driver, &[interrupted("c")])),
         Some(false)
     );
+}
+
+#[test]
+fn a_chosen_model_opens_the_thread_with_it_and_the_reply_reports_the_model() {
+    let mut out = Outputs::default();
+    let mut driver = CodexDriver::new("0.0.0-test", &mut out);
+    driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
+    let open = |driver: &mut CodexDriver, session, resume: Option<&str>, model: Option<&str>| {
+        let mut out = Outputs::default();
+        driver.command(
+            Command::Open {
+                session,
+                cwd: "/tmp/repo".into(),
+                resume: resume.map(str::to_owned),
+                model: model.map(str::to_owned),
+            },
+            &mut out,
+        );
+        serde_json::from_str::<Value>(&out.writes[0]).unwrap()
+    };
+    let start = open(&mut driver, SESSION, None, Some("gpt-6-astra"));
+    assert_eq!(start["method"], "thread/start");
+    assert_eq!(start["params"]["model"], "gpt-6-astra");
+    let resume = open(&mut driver, 8, Some(THREAD), Some("gpt-6-sol"));
+    assert_eq!(resume["method"], "thread/resume");
+    assert_eq!(resume["params"]["model"], "gpt-6-sol");
+    let plain = open(&mut driver, 9, None, None);
+    assert!(plain["params"].get("model").is_none(), "{plain}");
+
+    let mut out = Outputs::default();
+    let id = start["id"].as_u64().unwrap();
+    let reply =
+        format!(r#"{{"id":{id},"result":{{"thread":{{"id":"{THREAD}"}},"model":"gpt-6-astra"}}}}"#);
+    driver.on_line(reply.as_bytes(), &mut out);
+    assert_eq!(
+        out.events,
+        vec![
+            (
+                SESSION,
+                Event::ThreadReady {
+                    thread_id: THREAD.into()
+                }
+            ),
+            (
+                SESSION,
+                Event::ModelReported {
+                    model: "gpt-6-astra".into()
+                }
+            ),
+        ]
+    );
+}
+
+/// The catalog is every page `model/list` offers, hidden entries left out, each named
+/// by its `model` (what a thread is started with), not its `id`; an error on any page
+/// fails it; and a cursor that never ends is followed only so far.
+#[test]
+fn the_model_list_becomes_a_catalog_across_its_pages_without_hidden_entries() {
+    let mut driver = opened();
+    let ask = |driver: &mut CodexDriver| {
+        let mut out = Outputs::default();
+        driver.request_catalog(SESSION, &mut out);
+        let request: Value = serde_json::from_str(&out.writes[0]).unwrap();
+        assert_eq!(request["method"], "model/list");
+        assert!(request["params"].get("cursor").is_none(), "{request}");
+        request["id"].as_u64().unwrap()
+    };
+    let page = |driver: &mut CodexDriver, id: u64, data: &str, cursor: &str| {
+        let mut out = Outputs::default();
+        let reply = format!(r#"{{"id":{id},"result":{{"data":[{data}],"nextCursor":{cursor}}}}}"#);
+        driver.on_line(reply.as_bytes(), &mut out);
+        out
+    };
+    /// The request a page's reply caused, when its cursor asked for another page.
+    fn next_request(out: &Outputs, cursor: &str) -> u64 {
+        let [line] = &out.writes[..] else {
+            panic!("one request, got {:?}", out.writes);
+        };
+        let request: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(request["method"], "model/list");
+        assert_eq!(request["params"]["cursor"], cursor);
+        request["id"].as_u64().unwrap()
+    }
+
+    let id = ask(&mut driver);
+    let out = page(
+        &mut driver,
+        id,
+        r#"{"id":"gpt-6.1-sol","model":"gpt-6.1-sol","displayName":"GPT-6.1 Sol","description":"Balanced","hidden":false,"isDefault":true},
+           {"id":"gpt-reserve","model":"gpt-reserve","displayName":"Reserve","description":"","hidden":true,"isDefault":false}"#,
+        r#""page-2""#,
+    );
+    assert!(out.events.is_empty(), "nothing until the last page");
+    let id = next_request(&out, "page-2");
+    let out = page(
+        &mut driver,
+        id,
+        r#"{"id":"entry-7","model":"gpt-x","displayName":"GPT X","description":"","hidden":false,"isDefault":false}"#,
+        "null",
+    );
+    assert!(out.writes.is_empty());
+    assert_eq!(
+        out.events,
+        vec![(
+            SESSION,
+            Event::Catalog(Catalog::Ready {
+                models: vec![
+                    ModelInfo {
+                        model: "gpt-6.1-sol".into(),
+                        label: "GPT-6.1 Sol".into(),
+                        resolved: None,
+                    },
+                    ModelInfo {
+                        model: "gpt-x".into(),
+                        label: "GPT X".into(),
+                        resolved: None,
+                    },
+                ],
+                // Codex's `isDefault` is not the user's configured default.
+                default_model: None,
+            })
+        )]
+    );
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Open {
+            session: 8,
+            cwd: "/tmp/repo".into(),
+            resume: None,
+            model: Some("gpt-x".into()),
+        },
+        &mut out,
+    );
+    let start: Value = serde_json::from_str(&out.writes[0]).unwrap();
+    assert_eq!(start["method"], "thread/start");
+    assert_eq!(start["params"]["model"], "gpt-x");
+
+    // An error on a later page fails the whole catalog.
+    let id = ask(&mut driver);
+    let out = page(&mut driver, id, "", r#""page-2""#);
+    let id = next_request(&out, "page-2");
+    let mut out = Outputs::default();
+    let reply = format!(r#"{{"id":{id},"error":{{"code":-32600,"message":"invalid cursor"}}}}"#);
+    driver.on_line(reply.as_bytes(), &mut out);
+    assert_eq!(
+        out.events,
+        vec![(
+            SESSION,
+            Event::Catalog(Catalog::Failed("invalid cursor".into()))
+        )]
+    );
+
+    let mut id = ask(&mut driver);
+    for n in 1..20 {
+        let entry = format!(
+            r#"{{"id":"m{n}","model":"m{n}","displayName":"M{n}","hidden":false,"isDefault":false}}"#
+        );
+        let out = page(&mut driver, id, &entry, r#""more""#);
+        assert!(out.events.is_empty(), "page {n}");
+        id = next_request(&out, "more");
+    }
+    let out = page(
+        &mut driver,
+        id,
+        r#"{"id":"m20","model":"m20","displayName":"M20","hidden":false,"isDefault":false}"#,
+        r#""more""#,
+    );
+    assert!(out.writes.is_empty(), "page 21 is not asked for");
+    assert_eq!(
+        out.events,
+        vec![(
+            SESSION,
+            Event::Catalog(Catalog::Failed(
+                "Codex returned more than 20 pages of models".into()
+            ))
+        )]
+    );
+
+    ask(&mut driver);
+    let mut out = Outputs::default();
+    driver.on_exit("Codex stopped", &mut out);
+    assert!(out.events.contains(&(
+        SESSION,
+        Event::Catalog(Catalog::Failed("Codex stopped".into()))
+    )));
 }

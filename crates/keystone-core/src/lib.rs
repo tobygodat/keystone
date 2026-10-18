@@ -54,7 +54,7 @@ pub enum Durability {
     DirectorySyncPending(String),
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum Provider {
     Claude,
     Codex,
@@ -156,6 +156,15 @@ pub struct Session {
     /// restore them explicitly, even after a restart.
     #[serde(default, skip_serializing_if = "is_default")]
     approval_overridden: bool,
+    /// The provider-native model the user asked for, such as Claude's `opus` or Codex's
+    /// `gpt-6-astra`. `None` leaves the choice to the provider. Fixed once the session
+    /// has started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// Set just before the first message goes to the provider, so the provider and
+    /// model stay fixed even if nothing else of that send was saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_locked: Option<bool>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -253,6 +262,20 @@ impl Session {
 
     pub fn approval_overridden(&self) -> bool {
         self.approval_overridden
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    pub fn model_locked(&self) -> Option<bool> {
+        self.model_locked
+    }
+
+    /// Whether the session has sent anything to its provider. The provider and model
+    /// are fixed from then on. A session saved before the lock existed counts as sent.
+    pub fn started(&self) -> bool {
+        self.model_locked.unwrap_or(true)
     }
 
     pub fn created_at(&self) -> Option<u64> {
@@ -488,6 +511,8 @@ impl Store {
             last_turn: None,
             approval_mode: ApprovalMode::default(),
             approval_overridden: false,
+            model: None,
+            model_locked: Some(false),
             unknown: Map::new(),
         });
         next.selected = Some(id);
@@ -624,6 +649,31 @@ impl Store {
         self.update_session(id, |session| session.provider_thread = Some(thread))
     }
 
+    /// Chooses the model the session's provider is asked for, or `None` for the
+    /// provider's default. Refused once the session has started.
+    pub fn set_model(&mut self, id: u64, model: Option<String>) -> StoreResult<Applied<()>> {
+        self.update_unstarted(id, |session| session.model = model)
+    }
+
+    /// Changes the session's provider. The model returns to the provider's default,
+    /// and a placeholder title names the new provider. Refused once the session has
+    /// started.
+    pub fn set_provider(&mut self, id: u64, provider: Provider) -> StoreResult<Applied<()>> {
+        self.update_unstarted(id, |session| {
+            session.provider = provider;
+            session.model = None;
+            if session.title_source == TitleSource::Placeholder {
+                session.title = format!("New {provider} session");
+            }
+        })
+    }
+
+    /// Fixes the session's provider and model, for just before its first message is
+    /// sent. A send whose later saves fail still leaves them fixed.
+    pub fn lock_model(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.model_locked = Some(true))
+    }
+
     /// Takes effect from the session's next turn. Any mode but the default also records,
     /// in the same write, that the provider may now hold an override, so the record is
     /// saved before an override can be sent. The record is never cleared: returning to
@@ -654,6 +704,25 @@ impl Store {
             return Ok(self.finish_sync());
         }
         self.commit(next, self.next_id)
+    }
+
+    /// A change allowed only before the session has sent anything.
+    fn update_unstarted(
+        &mut self,
+        id: u64,
+        change: impl FnOnce(&mut Session),
+    ) -> StoreResult<Applied<()>> {
+        let started = self
+            .workspace
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .ok_or_else(|| invalid(format!("unknown session ID {id}")))?
+            .started();
+        if started {
+            return Err(invalid("the provider and model are fixed once a session has sent").into());
+        }
+        self.update_session(id, change)
     }
 
     fn update_session(
@@ -1256,6 +1325,83 @@ mod tests {
         for key in [r#""theme""#, r#""density""#, r#""ui_font""#] {
             assert_eq!(text.matches(key).count(), 1, "{key} in {text}");
         }
+    }
+
+    #[test]
+    fn a_state_file_without_a_model_lock_loads_as_sent_and_keeps_no_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":2,"workspace":{"sessions":[{"id":1,"title":"Old","provider":"Codex","settled":false,"draft":"keep"}],"selected":1}}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+        let session = &store.workspace().sessions()[0];
+        assert_eq!((session.model(), session.model_locked()), (None, None));
+        // Nothing says this session never launched, so its provider and model stay.
+        assert!(session.started());
+        assert!(store.set_model(1, Some("fake-fast".into())).is_err());
+        assert!(store.set_provider(1, Provider::Claude).is_err());
+        store.set_draft(1, "edited".into()).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains(r#""version":1"#));
+        assert!(!saved.contains(r#""model":"#), "{saved}");
+        assert!(Store::open(&path).unwrap().workspace().sessions()[0].started());
+    }
+
+    #[test]
+    fn the_model_and_provider_are_fixed_once_the_session_is_locked() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
+        let session = &store.workspace().sessions()[0];
+        assert!(!session.started());
+        assert_eq!(session.model_locked(), Some(false));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains(r#""model_locked":false"#), "{saved}");
+        store.set_model(1, Some("fake-fast".into())).unwrap();
+
+        store.lock_model(1).unwrap();
+        let session = &store.workspace().sessions()[0];
+        assert!(session.started() && session.last_turn().is_none());
+        let writes = store.writes();
+        assert!(store.set_model(1, None).is_err());
+        assert!(store.set_provider(1, Provider::Claude).is_err());
+        assert!(store.set_model(9, None).is_err());
+        assert_eq!(store.writes(), writes);
+        let reopened = Store::open(&path).unwrap();
+        let session = &reopened.workspace().sessions()[0];
+        assert_eq!(session.model(), Some("fake-fast"));
+        assert_eq!(session.provider(), Provider::Codex);
+        assert!(session.started());
+    }
+
+    #[test]
+    fn changing_the_provider_resets_the_model_and_a_placeholder_title_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
+        store.set_model(1, Some("fake-fast".into())).unwrap();
+        store.set_provider(1, Provider::Claude).unwrap();
+        let session = &store.workspace().sessions()[0];
+        assert_eq!(session.provider(), Provider::Claude);
+        assert_eq!(session.model(), None);
+        assert_eq!(session.title(), "New Claude session");
+
+        store.rename(2, "Release notes").unwrap();
+        store.set_provider(2, Provider::Claude).unwrap();
+        let session = &store.workspace().sessions()[1];
+        assert_eq!(session.provider(), Provider::Claude);
+        assert_eq!(session.title(), "Release notes");
     }
 
     #[test]

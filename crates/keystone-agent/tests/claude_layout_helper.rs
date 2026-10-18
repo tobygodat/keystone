@@ -1,5 +1,6 @@
 use keystone_agent::{
-    ApprovalState, ClaudeConnection, Command, Event, ItemKind, ItemStatus, TurnStatus, Wake, claude,
+    ApprovalState, Catalog, ClaudeConnection, Command, Event, ItemKind, ItemStatus, TurnStatus,
+    Wake, claude,
 };
 use keystone_core::ApprovalMode;
 use std::path::{Path, PathBuf};
@@ -104,7 +105,7 @@ fn reply(events: &[Event]) -> Option<String> {
 }
 
 fn failure(events: &[Event]) -> String {
-    match events.last() {
+    match events.iter().rev().find(|e| !matches!(e, Event::ModelLost)) {
         Some(Event::TurnCompleted {
             status: TurnStatus::Failed,
             error: Some(error),
@@ -142,8 +143,15 @@ fn every_helper_process_is_restricted_in_plan_mode_and_never_resumes_or_probes()
     let (conn, wake) = connect(ClaudeConnection::for_layout_helper);
     conn.set_mode_timeout(Duration::from_millis(300));
     let provider = mode(ApprovalMode::Provider);
-    conn.send(1, cwd, Some("saved-conversation"), provider, "first".into())
-        .unwrap();
+    conn.send(
+        1,
+        cwd,
+        Some("saved-conversation"),
+        None,
+        provider,
+        "first".into(),
+    )
+    .unwrap();
     assert!(failure(&until(&conn, &wake, completed)).contains("did not start"));
 
     std::fs::remove_file(dir.path().join(".fake-claude-ignore-initialize")).unwrap();
@@ -157,6 +165,7 @@ fn every_helper_process_is_restricted_in_plan_mode_and_never_resumes_or_probes()
         1,
         cwd,
         Some("saved-conversation"),
+        None,
         full,
         "run second".into(),
     )
@@ -182,8 +191,15 @@ fn every_helper_process_is_restricted_in_plan_mode_and_never_resumes_or_probes()
     assert!(reply(&events).unwrap().contains("**Mode:** `plan`"));
 
     kill(&conn, &wake);
-    conn.send(1, cwd, Some("saved-conversation"), full, "third".into())
-        .unwrap();
+    conn.send(
+        1,
+        cwd,
+        Some("saved-conversation"),
+        None,
+        full,
+        "third".into(),
+    )
+    .unwrap();
     assert!(
         reply(&until(&conn, &wake, completed))
             .unwrap()
@@ -237,6 +253,7 @@ fn the_helper_fails_when_claude_reports_or_leaves_out_what_its_flags_turn_off() 
             1,
             cwd,
             None,
+            None,
             mode(ApprovalMode::ReadOnly),
             "a layout".into(),
         )
@@ -273,6 +290,7 @@ fn a_claude_that_rejects_a_helper_flag_fails_with_its_reason() {
         1,
         cwd,
         None,
+        None,
         mode(ApprovalMode::ReadOnly),
         "a layout".into(),
     )
@@ -288,8 +306,15 @@ fn chat_is_launched_and_answered_as_before() {
     let dir = project(&[("init-commands", "missing")]);
     let (conn, wake) = connect(ClaudeConnection::new);
     let cwd = dir.path().to_str().unwrap();
-    conn.send(1, cwd, None, mode(ApprovalMode::ReadOnly), "hello".into())
-        .unwrap();
+    conn.send(
+        1,
+        cwd,
+        None,
+        None,
+        mode(ApprovalMode::ReadOnly),
+        "hello".into(),
+    )
+    .unwrap();
     let events = until(&conn, &wake, completed);
     assert!(reply(&events).unwrap().contains("**Mode:** `plan`"));
     let expected: Vec<String> = claude::args(ApprovalMode::ReadOnly)
@@ -312,6 +337,7 @@ fn a_success_without_system_init_cannot_confirm_helper_capabilities() {
         conn.send(
             1,
             dir.path().to_str().unwrap(),
+            None,
             None,
             mode(ApprovalMode::ReadOnly),
             "a layout".into(),
@@ -370,6 +396,7 @@ fn scripted_turn(
     conn.send(
         1,
         dir.path().to_str().unwrap(),
+        None,
         None,
         mode(ApprovalMode::ReadOnly),
         "a layout".into(),
@@ -466,4 +493,31 @@ fn unanswered_initialize_preserves_provider_failure_diagnostics() {
         assert!(messages.is_empty());
         assert!(failure(&events).contains("provider diagnostic"));
     }
+}
+
+#[test]
+fn a_helper_connection_refuses_a_catalog_without_starting_claude() {
+    let catalog = |build| {
+        let dir = project(&[]);
+        let (conn, wake) = connect(build);
+        conn.request_catalog(1, dir.path().to_str().unwrap());
+        let events = until(&conn, &wake, |e| matches!(e, Event::Catalog(_)));
+        std::thread::sleep(Duration::from_millis(300));
+        (events, argv(dir.path()))
+    };
+    let (events, started) = catalog(ClaudeConnection::for_layout_helper);
+    assert_eq!(
+        events,
+        [Event::Catalog(Catalog::Failed(
+            "The layout helper does not list models.".into()
+        ))]
+    );
+    assert!(started.is_empty(), "the helper started {started:?}");
+
+    let (events, started) = catalog(ClaudeConnection::new);
+    assert!(
+        matches!(events.as_slice(), [Event::Catalog(Catalog::Ready { .. })]),
+        "{events:?}"
+    );
+    assert_eq!(started.len(), 1);
 }

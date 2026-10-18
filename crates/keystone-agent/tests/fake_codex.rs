@@ -4,7 +4,7 @@ mod gate;
 use gate::Gate;
 use keystone_agent::ApprovalState;
 use keystone_agent::Command;
-use keystone_agent::{CodexConnection, Event, ItemKind, TurnStatus};
+use keystone_agent::{Catalog, CodexConnection, Event, ItemKind, ModelInfo, TurnStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
@@ -53,6 +53,7 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
         session: 1,
         cwd: "/tmp".into(),
         resume: None,
+        model: None,
     });
     conn.command(Command::Send {
         session: 1,
@@ -128,6 +129,7 @@ fn two_sessions_share_one_process() {
             session,
             cwd: "/tmp".into(),
             resume: None,
+            model: None,
         });
         conn.command(Command::Send {
             session,
@@ -153,7 +155,7 @@ fn two_sessions_share_one_process() {
 #[test]
 fn dropping_the_connection_stops_codex() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, NO_MODE, "hello".into());
+    conn.send(1, "/tmp", None, None, NO_MODE, "hello".into());
     until(&conn, &wake, |e| matches!(e, Event::ThreadReady { .. }));
     let pid = conn.pid().expect("app-server running");
     drop(conn);
@@ -174,7 +176,7 @@ fn dropping_the_connection_stops_codex() {
 #[test]
 fn after_a_crash_the_latest_thread_is_resumed_even_if_the_caller_has_none() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, NO_MODE, "hello".into());
+    conn.send(1, "/tmp", None, None, NO_MODE, "hello".into());
     let events = until(&conn, &wake, completed);
     let Some(Event::ThreadReady { thread_id: first }) = events.first() else {
         panic!("expected a thread first, got {events:?}");
@@ -192,7 +194,7 @@ fn after_a_crash_the_latest_thread_is_resumed_even_if_the_caller_has_none() {
         conn.drain();
     }
     // The caller passes no saved thread, as if the ID never reached its storage.
-    conn.send(1, "/tmp", None, NO_MODE, "again".into());
+    conn.send(1, "/tmp", None, None, NO_MODE, "again".into());
     let events = until(&conn, &wake, completed);
     assert!(
         events.contains(&Event::ThreadReady {
@@ -212,7 +214,7 @@ fn a_codex_that_cannot_start_fails_the_session_that_needed_it() {
             let _ = tx.send(());
         }),
     );
-    conn.send(7, "/tmp", None, NO_MODE, "hello".into());
+    conn.send(7, "/tmp", None, None, NO_MODE, "hello".into());
     let deadline = Instant::now() + Duration::from_secs(5);
     let events = loop {
         let events = conn.drain();
@@ -235,7 +237,7 @@ fn dropping_gives_up_on_a_stuck_start() {
     let (conn, _wake) = connect();
     let gate = Gate::new(None);
     conn.hold_starts(gate.hook());
-    conn.send(1, "/tmp", None, NO_MODE, "hello".into());
+    conn.send(1, "/tmp", None, None, NO_MODE, "hello".into());
     gate.reached(1);
     let started = Instant::now();
     drop(conn);
@@ -274,17 +276,119 @@ fn approval(mode: keystone_core::ApprovalMode) -> ApprovalState {
     }
 }
 
-/// The policy the scripted Codex reports at the end of the turn's last reply.
-fn policy_of(events: &[Event]) -> String {
-    let reply = events
+/// The turn's last reply.
+fn reply(events: &[Event]) -> &str {
+    events
         .iter()
         .rev()
         .find_map(|e| match e {
             Event::ItemCompleted(item) if item.kind == ItemKind::AgentMessage => Some(&item.text),
             _ => None,
         })
-        .expect("a reply");
-    reply.rsplit('`').nth(1).unwrap().to_owned()
+        .expect("a reply")
+}
+
+/// The backticked value after `label` in the turn's last reply, such as the policy
+/// after `**Approvals:**`.
+fn reported(events: &[Event], label: &str) -> String {
+    let reply = reply(events);
+    let start = reply.find(label).expect(label) + label.len();
+    reply[start..].split('`').nth(1).unwrap().to_owned()
+}
+
+/// The policy the scripted Codex reports at the end of the turn's last reply.
+fn policy_of(events: &[Event]) -> String {
+    reported(events, "**Approvals:**")
+}
+
+fn model_of(events: &[Event]) -> String {
+    reported(events, "**Model:**")
+}
+
+fn catalog(event: &Event) -> bool {
+    matches!(event, Event::Catalog(_))
+}
+
+/// The chosen model opens the thread, and opens it again after a restart; the thread's
+/// model comes back from Codex with the thread; and the catalog lists what Codex
+/// offers, hidden entries left out.
+#[test]
+fn a_chosen_model_reaches_codex_on_start_and_resume_and_the_catalog_is_listed() {
+    let (conn, wake) = connect();
+    conn.request_catalog(1);
+    let events = until(&conn, &wake, catalog);
+    assert!(events.contains(&Event::Catalog(Catalog::Ready {
+        models: vec![
+            ModelInfo {
+                model: "fake-default".into(),
+                label: "Fake Default".into(),
+                resolved: None,
+            },
+            ModelInfo {
+                model: "fake-fast".into(),
+                label: "Fake Fast".into(),
+                resolved: None,
+            },
+        ],
+        default_model: None,
+    })));
+
+    conn.send(1, "/tmp", None, Some("fake-fast"), NO_MODE, "hello".into());
+    let events = until(&conn, &wake, completed);
+    assert!(events.contains(&Event::ModelReported {
+        model: "fake-fast".into()
+    }));
+    assert_eq!(model_of(&events), "fake-fast");
+    conn.send(2, "/tmp", None, None, NO_MODE, "plain".into());
+    let events = until(&conn, &wake, completed);
+    assert_eq!(model_of(&events), "fake-default");
+
+    // A new process resumes the thread with the same model.
+    kill_codex(&conn, &wake);
+    conn.send(1, "/tmp", None, Some("fake-fast"), NO_MODE, "again".into());
+    let events = until(&conn, &wake, completed);
+    assert_eq!(model_of(&events), "fake-fast");
+}
+
+/// A catalog Codex cannot list fails with Codex's own reason, so the user can see why
+/// and ask again.
+#[test]
+fn a_catalog_codex_cannot_list_fails_with_its_reason() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("codex");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nKEYSTONE_FAKE_CODEX_NO_CATALOG=1 exec {} \"$@\"\n",
+            env!("CARGO_BIN_EXE_keystone-fake-codex")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (tx, rx) = channel();
+    let wake = Arc::new(move || {
+        let _ = tx.send(());
+    });
+    let conn = CodexConnection::new(Some(script), "0.0.0-test", wake);
+    conn.request_catalog(1);
+    let events = until(&conn, &rx, catalog);
+    assert!(events.contains(&Event::Catalog(Catalog::Failed(
+        "scripted catalog failure".into()
+    ))));
+
+    let (tx, rx) = channel();
+    let wake = Arc::new(move || {
+        let _ = tx.send(());
+    });
+    let conn = CodexConnection::new(Some("/nonexistent/codex".into()), "0.0.0-test", wake);
+    conn.request_catalog(1);
+    let events = until(&conn, &rx, catalog);
+    assert!(
+        matches!(&events[..], [Event::Catalog(Catalog::Failed(message))]
+            if message.starts_with("Could not start Codex at /nonexistent/codex.")),
+        "got {events:?}"
+    );
 }
 
 fn kill_codex(conn: &CodexConnection, wake: &Receiver<()>) {
@@ -309,13 +413,13 @@ fn a_mode_chosen_before_codex_restarts_reaches_the_new_process() {
     use keystone_core::ApprovalMode::{FullAccess, ReadOnly};
     let dir = tempfile::tempdir().unwrap();
     let (conn, wake) = connect_keeping_overrides(dir.path());
-    conn.send(1, "/tmp", None, approval(FullAccess), "first".into());
+    conn.send(1, "/tmp", None, None, approval(FullAccess), "first".into());
     let events = until(&conn, &wake, completed);
     assert_eq!(policy_of(&events), "never / dangerFullAccess");
 
     conn.set_approval(1, approval(ReadOnly));
     kill_codex(&conn, &wake);
-    conn.send(1, "/tmp", None, approval(ReadOnly), "second".into());
+    conn.send(1, "/tmp", None, None, approval(ReadOnly), "second".into());
     let events = until(&conn, &wake, completed);
     assert_eq!(policy_of(&events), "on-request / readOnly");
 }
@@ -327,7 +431,7 @@ fn provider_settings_after_a_restart_restore_the_users_own() {
     use keystone_core::ApprovalMode::{FullAccess, Provider};
     let dir = tempfile::tempdir().unwrap();
     let (conn, wake) = connect_keeping_overrides(dir.path());
-    conn.send(1, "/tmp", None, approval(FullAccess), "first".into());
+    conn.send(1, "/tmp", None, None, approval(FullAccess), "first".into());
     let events = until(&conn, &wake, completed);
     let Some(Event::ThreadReady { thread_id }) = events.first().cloned() else {
         panic!("expected a thread first, got {events:?}");
@@ -339,6 +443,7 @@ fn provider_settings_after_a_restart_restore_the_users_own() {
         1,
         "/tmp",
         Some(&thread_id),
+        None,
         approval(Provider),
         "again".into(),
     );
@@ -352,9 +457,16 @@ fn provider_settings_after_a_restart_restore_the_users_own() {
 fn a_rejected_steer_retried_as_a_turn_uses_the_mode_chosen_since() {
     use keystone_core::ApprovalMode::{FullAccess, ReadOnly};
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, approval(FullAccess), "end on steer".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        None,
+        approval(FullAccess),
+        "end on steer".into(),
+    );
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
-    conn.send(1, "/tmp", None, approval(FullAccess), "late".into());
+    conn.send(1, "/tmp", None, None, approval(FullAccess), "late".into());
     // Codex holds the steer for 300 ms. Choose the mode once it has gone out, so the
     // change must reach the running driver, not only the queued send.
     std::thread::sleep(Duration::from_millis(100));

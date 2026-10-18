@@ -5,11 +5,12 @@ use crate::claude::{self, ClaudeDriver, Launch};
 use crate::codex::CodexDriver;
 use crate::driver::{ApprovalState, Command, Outputs};
 use crate::host::{Exit, Process};
-use crate::item::Event;
+use crate::item::{Catalog, Event};
 use crate::worker::Worker;
 use keystone_core::ApprovalMode;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -29,19 +30,24 @@ pub type StartHook = Arc<dyn Fn(u64) + Send + Sync>;
 /// for the session that needed it.
 pub trait Connection {
     /// Opens the session's conversation if needed, then sends `text`: a new turn, or a
-    /// steer for the running one. `resume` is the saved provider conversation ID.
-    /// `approval` is the session's approval state, which a turn this message starts
-    /// runs under unless [`Connection::set_approval`] changes it first. Returns the
-    /// reason, without sending, when the provider cannot take a steer now, so the
-    /// caller can keep the text.
+    /// steer for the running one. `resume` is the saved provider conversation ID, and
+    /// `model` the provider-native model the session asked for, applied when the
+    /// conversation opens. `approval` is the session's approval state, which a turn
+    /// this message starts runs under unless [`Connection::set_approval`] changes it
+    /// first. Returns the reason, without sending, when the provider cannot take a
+    /// steer now, so the caller can keep the text.
     fn send(
         &self,
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        model: Option<&str>,
         approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str>;
+    /// Asks the provider which models it offers, from `cwd`. The answer arrives as
+    /// [`Event::Catalog`] for `session`, a failure to ask included.
+    fn request_catalog(&self, session: u64, cwd: &str);
     /// Changes the session's approval state at once. It applies to the next turn the
     /// provider starts for the session, including one for a message already sent and
     /// still waiting, and survives a provider restart.
@@ -61,14 +67,24 @@ fn exit_reason(name: &str, exit: &Exit) -> String {
     }
 }
 
-/// Reports that `session`'s provider could not start, and wakes the UI.
-fn fail(inbox: &Inbox, wake: &Wake, session: u64, message: String) {
-    inbox
-        .lock()
-        .unwrap()
-        .push((session, Event::Failed { message }));
+/// Queues one event for the UI and wakes it.
+fn push(inbox: &Inbox, wake: &Wake, session: u64, event: Event) {
+    inbox.lock().unwrap().push((session, event));
     wake();
 }
+
+/// The event for a provider that could not start for a session's command.
+fn start_failed(message: String) -> Event {
+    Event::Failed { message }
+}
+
+/// The event for a provider that could not start to list its models.
+fn catalog_failed(message: String) -> Event {
+    Event::Catalog(Catalog::Failed(message))
+}
+
+const CLAUDE_NOT_INSTALLED: &str =
+    "Claude Code is not installed. Install the claude CLI and run `claude` once to sign in.";
 
 fn command_session(command: &Command) -> u64 {
     match command {
@@ -192,13 +208,15 @@ impl CodexConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        model: Option<&str>,
         approval: ApprovalState,
         text: String,
     ) {
         self.set_approval(session, approval);
         let cwd = cwd.to_owned();
         let resume = resume.map(str::to_owned);
-        self.with_driver(session, move |driver, shared, out| {
+        let model = model.map(str::to_owned);
+        self.with_driver(session, start_failed, move |driver, shared, out| {
             let approval = shared.approvals.get(&session).copied().unwrap_or_default();
             driver.command(Command::Configure { session, approval }, out);
             if !driver.is_open(session) {
@@ -208,6 +226,7 @@ impl CodexConnection {
                         session,
                         cwd,
                         resume,
+                        model,
                     },
                     out,
                 );
@@ -219,7 +238,17 @@ impl CodexConnection {
     /// Sends a command, starting the app-server first if it is not running.
     pub fn command(&self, command: Command) {
         let session = command_session(&command);
-        self.with_driver(session, move |driver, _, out| driver.command(command, out));
+        self.with_driver(session, start_failed, move |driver, _, out| {
+            driver.command(command, out)
+        });
+    }
+
+    /// Asks Codex for its models, starting the app-server first if it is not running;
+    /// see [`Connection::request_catalog`].
+    pub fn request_catalog(&self, session: u64) {
+        self.with_driver(session, catalog_failed, move |driver, _, out| {
+            driver.request_catalog(session, out)
+        });
     }
 
     /// Changes the session's approval state at once; see [`Connection::set_approval`].
@@ -233,14 +262,17 @@ impl CodexConnection {
         self.shared.lock().unwrap().approvals.get(&session).copied()
     }
 
+    /// Runs `act` on the driver on the worker. `on_fail` is the event `session` gets
+    /// when the app-server cannot start.
     fn with_driver(
         &self,
         session: u64,
+        on_fail: fn(String) -> Event,
         act: impl FnOnce(&mut CodexDriver, &Shared, &mut Outputs) + Send + 'static,
     ) {
         let starter = self.starter();
         let Some(worker) = &self.worker else { return };
-        worker.run(move || starter.run(session, act));
+        worker.run(move || starter.run(session, on_fail, act));
     }
 
     /// Takes every event that arrived since the last call.
@@ -275,7 +307,12 @@ struct Starter {
 
 impl Starter {
     /// Starts the app-server if it is not running, then runs `act` on its driver.
-    fn run(&self, session: u64, act: impl FnOnce(&mut CodexDriver, &Shared, &mut Outputs)) {
+    fn run(
+        &self,
+        session: u64,
+        on_fail: fn(String) -> Event,
+        act: impl FnOnce(&mut CodexDriver, &Shared, &mut Outputs),
+    ) {
         let mut shared = self.shared.lock().unwrap();
         if shared.closed {
             return;
@@ -318,7 +355,7 @@ impl Starter {
                 drop(shared);
                 drop(process);
                 self.finish_start();
-                fail(&self.inbox, &self.wake, session, message);
+                push(&self.inbox, &self.wake, session, on_fail(message));
                 return;
             }
             shared.starting = false;
@@ -425,11 +462,17 @@ impl Connection for CodexConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        model: Option<&str>,
         approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
-        CodexConnection::send(self, session, cwd, resume, approval, text);
+        CodexConnection::send(self, session, cwd, resume, model, approval, text);
         Ok(())
+    }
+
+    /// One app-server serves every directory, so `cwd` plays no part.
+    fn request_catalog(&self, session: u64, _: &str) {
+        CodexConnection::request_catalog(self, session);
     }
 
     fn set_approval(&self, session: u64, approval: ApprovalState) {
@@ -542,6 +585,12 @@ struct ClaudeShared {
     /// [`MODE_TIMEOUT`], shorter in tests.
     mode_timeout: Option<Duration>,
     launch: Launch,
+    /// [`PROBE_TIMEOUT`] for the catalog probe, shorter in tests.
+    probe_timeout: Option<Duration>,
+    /// Processes reading the models Claude offers, here so dropping the connection
+    /// ends them too. Keyed by `next_probe`.
+    catalog_probes: HashMap<u64, Process>,
+    next_probe: u64,
 }
 
 /// A session's process, from when it begins starting until it exits.
@@ -561,6 +610,7 @@ struct Live {
     /// What the process was started with, for a replacement.
     cwd: PathBuf,
     resume: Option<String>,
+    model: Option<String>,
     /// Whether the worker has a job queued to replace the process.
     replacing: bool,
 }
@@ -609,8 +659,9 @@ fn configure(shared: &mut ClaudeShared, session: u64, approval: ApprovalState) -
 
 /// What a job on a session's worker is for.
 enum Job {
-    /// A message, with the directory and saved conversation to start a process with.
-    Message(PathBuf, Option<String>),
+    /// A message, with the directory, saved conversation, and model to start a process
+    /// with.
+    Message(PathBuf, Option<String>, Option<String>),
     /// Stop or an answer: nothing to start.
     Command,
     /// Replaces a process that cannot run the waiting turn's approval mode.
@@ -673,6 +724,7 @@ impl ClaudeConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        model: Option<&str>,
         approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
@@ -688,11 +740,28 @@ impl ClaudeConnection {
                 return Err(reason);
             }
         }
-        let start = Job::Message(PathBuf::from(cwd), resume.map(str::to_owned));
+        let start = Job::Message(
+            PathBuf::from(cwd),
+            resume.map(str::to_owned),
+            model.map(str::to_owned),
+        );
         self.starter.queue(session, start, move |driver, out| {
             driver.command(Command::Send { session, text }, out)
         });
         Ok(())
+    }
+
+    /// Asks a fresh `claude` in `cwd` which models it offers, on a thread of its own;
+    /// see [`Connection::request_catalog`]. A layout helper connection refuses, starting
+    /// nothing, since its every process runs restricted.
+    pub fn request_catalog(&self, session: u64, cwd: &str) {
+        if self.starter.shared.lock().unwrap().launch == Launch::LayoutHelper {
+            let refused = catalog_failed("The layout helper does not list models.".into());
+            return push(&self.starter.inbox, &self.starter.wake, session, refused);
+        }
+        let starter = self.starter.clone();
+        let cwd = PathBuf::from(cwd);
+        std::thread::spawn(move || starter.probe_catalog(session, &cwd));
     }
 
     /// Stops or answers within a running session. With no process there is nothing
@@ -726,6 +795,11 @@ impl ClaudeConnection {
     #[doc(hidden)]
     pub fn set_mode_timeout(&self, timeout: Duration) {
         self.starter.shared.lock().unwrap().mode_timeout = Some(timeout);
+    }
+
+    /// Shortens how long a catalog probe may take to answer, for tests.
+    pub fn set_probe_timeout(&self, timeout: Duration) {
+        self.starter.shared.lock().unwrap().probe_timeout = Some(timeout);
     }
 }
 
@@ -812,10 +886,11 @@ impl ClaudeStarter {
         let message = matches!(job, Job::Message(..));
         let command = matches!(job, Job::Command);
         let mut start = match job {
-            Job::Message(cwd, resume) => Some((cwd, resume)),
+            Job::Message(cwd, resume, model) => Some((cwd, resume, model)),
             Job::Command | Job::Replace => None,
         };
         let mut carried = Vec::new();
+        let mut lost = false;
         if let Some(live) = shared.live.get_mut(&session) {
             if !message && !command {
                 live.replacing = false;
@@ -831,23 +906,34 @@ impl ClaudeStarter {
             if replace {
                 carried = live.driver.take_unsent();
                 let live = shared.live.remove(&session).expect("checked above");
-                start = start.or(Some((live.cwd.clone(), live.resume.clone())));
+                start = start.or(Some((
+                    live.cwd.clone(),
+                    live.resume.clone(),
+                    live.model.clone(),
+                )));
+                self.inbox.lock().unwrap().push((session, Event::ModelLost));
+                lost = true;
                 // Dropping the handle ends the process; its late exit is ignored.
                 drop(live);
             }
         }
         if !shared.live.contains_key(&session) {
-            let Some((cwd, resume)) = start else { return };
-            if !message && carried.is_empty() {
-                return;
+            if let Some((cwd, resume, model)) = start
+                && (message || !carried.is_empty())
+            {
+                let act = move |driver: &mut ClaudeDriver, out: &mut Outputs| {
+                    driver.carry(carried, out);
+                    if message {
+                        act(driver, out);
+                    }
+                };
+                self.start(shared, session, &cwd, resume, model, message, act);
+            } else {
+                drop(shared);
             }
-            let act = move |driver: &mut ClaudeDriver, out: &mut Outputs| {
-                driver.carry(carried, out);
-                if message {
-                    act(driver, out);
-                }
-            };
-            self.start(shared, session, &cwd, resume, message, act);
+            if lost {
+                (self.wake)();
+            }
             return;
         }
         if message {
@@ -863,12 +949,14 @@ impl ClaudeStarter {
     /// over. The driver takes it first, so it knows its turn when the first output
     /// arrives, which can come before Claude reads anything. Nothing is written to
     /// Claude until it answers `initialize`, under the lock, in the latest mode.
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &self,
         mut shared: MutexGuard<'_, ClaudeShared>,
         session: u64,
         cwd: &Path,
         resume: Option<String>,
+        model: Option<String>,
         message: bool,
         act: impl FnOnce(&mut ClaudeDriver, &mut Outputs),
     ) {
@@ -910,6 +998,7 @@ impl ClaudeStarter {
                 generation,
                 cwd: cwd.to_owned(),
                 resume: resume.clone(),
+                model: model.clone(),
                 replacing: false,
             },
         );
@@ -918,7 +1007,7 @@ impl ClaudeStarter {
         let hook = shared.before_start.clone();
         drop(shared);
         let spawned = self.spawn(
-            session, generation, program, hook, cwd, resume, mode, probe, launch,
+            session, generation, program, hook, cwd, resume, model, mode, probe, launch,
         );
 
         let mut shared = self.shared.lock().unwrap();
@@ -938,7 +1027,7 @@ impl ClaudeStarter {
             Err(message) => {
                 drop(shared);
                 self.finish_start();
-                fail(&self.inbox, &self.wake, session, message);
+                push(&self.inbox, &self.wake, session, start_failed(message));
                 return;
             }
             Ok(process) => {
@@ -973,7 +1062,8 @@ impl ClaudeStarter {
 
     /// Finds and starts the session's `claude`, holding no lock. A mode Keystone
     /// selected is always passed, on `--resume` too; with Provider settings, `probe`
-    /// asks for the user's own mode to pass.
+    /// asks for the user's own mode to pass. A model the session asked for is passed
+    /// on every launch too, since whether a resume keeps it is not known.
     #[allow(clippy::too_many_arguments)]
     fn spawn(
         &self,
@@ -983,6 +1073,7 @@ impl ClaudeStarter {
         hook: Option<StartHook>,
         cwd: &Path,
         resume: Option<String>,
+        model: Option<String>,
         mode: ApprovalMode,
         probe: bool,
         launch: Launch,
@@ -990,22 +1081,18 @@ impl ClaudeStarter {
         if let Some(hook) = hook {
             hook(session);
         }
-        let program = match program {
-            Some(program) => program,
-            None => {
-                let found = crate::find::program("claude").ok_or(
-                    "Claude Code is not installed. Install the claude CLI and run `claude` once to sign in.",
-                )?;
-                self.shared.lock().unwrap().program = Some(found.clone());
-                found
-            }
-        };
+        let program = self.find_program(program)?;
         let baseline = if probe {
             Some(self.probe_permission_mode(session, generation, &program, cwd, launch)?)
         } else {
             None
         };
-        let args = launch.args(mode, baseline.as_deref(), resume.as_deref());
+        let args = launch.args(
+            mode,
+            baseline.as_deref(),
+            model.as_deref(),
+            resume.as_deref(),
+        );
         let on_line = {
             let starter = self.clone();
             move |line: &[u8]| {
@@ -1050,6 +1137,97 @@ impl ClaudeStarter {
         };
         Process::spawn(&program, &args, cwd, on_line, on_exit)
             .map_err(|e| format!("Could not start Claude Code at {}. {e}", program.display()))
+    }
+
+    /// The `claude` to run: `program` when given, else the one found on first use.
+    fn find_program(&self, program: Option<PathBuf>) -> Result<PathBuf, String> {
+        match program {
+            Some(program) => Ok(program),
+            None => {
+                let found = crate::find::program("claude").ok_or(CLAUDE_NOT_INSTALLED)?;
+                self.shared.lock().unwrap().program = Some(found.clone());
+                Ok(found)
+            }
+        }
+    }
+
+    /// Asks a fresh `claude` in `cwd` which models it offers, as its `initialize`
+    /// answer lists them, and delivers the answer as [`Event::Catalog`] for `session`.
+    /// The process is closed as soon as it answers, with no message sent, or when
+    /// [`PROBE_TIMEOUT`] passes; one that exits first fails the catalog with why it
+    /// stopped. It belongs to the connection, so dropping the connection ends it, and
+    /// then nothing is delivered.
+    fn probe_catalog(&self, session: u64, cwd: &Path) {
+        let program = self.shared.lock().unwrap().program.clone();
+        let catalog = match self.find_program(program) {
+            Err(message) => Some(Catalog::Failed(message)),
+            Ok(program) => self.read_catalog(&program, cwd),
+        };
+        if let Some(catalog) = catalog {
+            push(&self.inbox, &self.wake, session, Event::Catalog(catalog));
+        }
+    }
+
+    /// Runs the catalog probe; `None` when the connection was dropped meanwhile.
+    fn read_catalog(&self, program: &Path, cwd: &Path) -> Option<Catalog> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let exited = tx.clone();
+        let on_line = move |line: &[u8]| {
+            let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
+                return;
+            };
+            if message["type"] == "control_response"
+                && message["response"]["request_id"] == "keystone-catalog"
+            {
+                let _ = tx.send(claude::initialize_catalog(line));
+            }
+        };
+        let on_exit = move |exit: Exit| {
+            let _ = exited.send(Some(Catalog::Failed(exit_reason("Claude Code", &exit))));
+        };
+        let process = match Process::spawn(program, &claude::ARGS, cwd, on_line, on_exit) {
+            Ok(process) => process,
+            Err(e) => {
+                return Some(Catalog::Failed(format!(
+                    "Could not start Claude Code at {}. {e}",
+                    program.display()
+                )));
+            }
+        };
+        process.send(
+            serde_json::json!({"type": "control_request", "request_id": "keystone-catalog",
+                "request": {"subtype": "initialize"}})
+            .to_string(),
+        );
+        let (id, timeout) = {
+            let mut shared = self.shared.lock().unwrap();
+            if shared.closed {
+                drop(shared);
+                drop(process);
+                return None;
+            }
+            shared.next_probe += 1;
+            let id = shared.next_probe;
+            shared.catalog_probes.insert(id, process);
+            (id, shared.probe_timeout.unwrap_or(PROBE_TIMEOUT))
+        };
+        let answer = rx.recv_timeout(timeout);
+        let process = self.shared.lock().unwrap().catalog_probes.remove(&id);
+        let closed = process.is_none();
+        drop(process);
+        if closed {
+            return None;
+        }
+        Some(match answer {
+            Ok(Some(catalog)) => catalog,
+            Ok(None) => Catalog::Failed("Claude Code did not report its models.".into()),
+            Err(RecvTimeoutError::Timeout) => {
+                Catalog::Failed("Claude Code did not answer in time.".into())
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                Catalog::Failed("Claude Code stopped before answering.".into())
+            }
+        })
     }
 
     /// The permission mode the user's own settings give a new conversation in `cwd`,
@@ -1132,10 +1310,15 @@ impl Connection for ClaudeConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
+        model: Option<&str>,
         approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
-        ClaudeConnection::send(self, session, cwd, resume, approval, text)
+        ClaudeConnection::send(self, session, cwd, resume, model, approval, text)
+    }
+
+    fn request_catalog(&self, session: u64, cwd: &str) {
+        ClaudeConnection::request_catalog(self, session, cwd);
     }
 
     fn set_approval(&self, session: u64, approval: ApprovalState) {
@@ -1164,13 +1347,17 @@ impl Drop for ClaudeConnection {
         for worker in workers {
             worker.detach();
         }
-        let live: Vec<Live> = {
+        let (live, probes): (Vec<Live>, Vec<Process>) = {
             let mut shared = self.starter.shared.lock().unwrap();
             shared.closed = true;
             shared.generation += 1;
-            shared.live.drain().map(|(_, live)| live).collect()
+            (
+                shared.live.drain().map(|(_, live)| live).collect(),
+                shared.catalog_probes.drain().map(|(_, p)| p).collect(),
+            )
         };
         drop(live);
+        drop(probes);
         let shared = self.starter.shared.lock().unwrap();
         let _ = self
             .starter

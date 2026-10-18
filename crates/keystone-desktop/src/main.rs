@@ -3,6 +3,7 @@ mod arrangement_editor;
 mod conversation;
 mod customization;
 mod customization_agent;
+mod model_selector;
 mod presentation;
 mod relative_time;
 mod reveal;
@@ -35,6 +36,9 @@ use keystone_core::{
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
 use keystone_ui::{automation, prelude::*};
+use model_selector::{
+    CatalogKey, Catalogs, Choices, provider_icon, provider_icon_color, provider_name,
+};
 use presentation::Presentation;
 use relative_time::{LocalTime, relative};
 use std::cell::RefCell;
@@ -63,21 +67,6 @@ gpui::actions!(
 
 /// The transcript and the composer share one centred column.
 const CONTENT_WIDTH: f32 = 640.;
-
-fn provider_name(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "Claude Code",
-        Provider::Codex => "Codex",
-    }
-}
-
-fn provider_color(provider: Provider, cx: &App) -> Color {
-    let colors = &cx.theme().colors;
-    Color::Custom(match provider {
-        Provider::Claude => colors.provider_claude,
-        Provider::Codex => colors.provider_codex,
-    })
-}
 
 /// Keystone's mark: two muted side stones and the keystone in the accent colour.
 fn arch_mark(size: Pixels) -> impl IntoElement {
@@ -185,6 +174,10 @@ struct Keystone {
     provider_filter: Option<Provider>,
     settings_menu: bool,
     approval_menu: bool,
+    /// The session whose model menu is open. It closes with that session's first send,
+    /// with a new session, and with a selection change, so it never shows for another.
+    model_menu: Option<u64>,
+    catalogs: Catalogs,
     /// Full access chosen from the menu for this session, waiting in the confirmation
     /// dialog. Nothing is saved or sent until Confirm.
     confirm_full_access: Option<FullAccessConfirmation>,
@@ -308,6 +301,8 @@ impl Keystone {
             provider_filter: None,
             settings_menu: false,
             approval_menu: false,
+            model_menu: None,
+            catalogs: Catalogs::default(),
             confirm_full_access: None,
             renaming: None,
             rename_input,
@@ -452,6 +447,7 @@ impl Keystone {
             self.confirm_full_access = None;
         }
         self.new_menu = false;
+        self.model_menu = None;
         self.sync_draft(cx);
         self.refresh(cx);
     }
@@ -512,6 +508,7 @@ impl Keystone {
         if self.store.workspace().selected() != previous {
             self.presentation.selection_changed();
             self.approval_menu = false;
+            self.model_menu = None;
             self.confirm_full_access = None;
         }
         self.sync_draft(cx);
@@ -985,7 +982,12 @@ impl Keystone {
         .children(font_items)
     }
 
-    fn composer(&self, current: Option<(u64, Provider)>, cx: &mut Context<Self>) -> gpui::Div {
+    fn composer(
+        &self,
+        current: Option<(u64, Provider)>,
+        window_width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let colors = cx.theme().colors;
         let conversation = current.and_then(|(id, _)| self.conversations.get(&id));
         let running = conversation.is_some_and(|c| c.running);
@@ -1051,34 +1053,39 @@ impl Keystone {
                                 }
                             })),
                     );
+                let narrow = self
+                    .presentation
+                    .current
+                    .arrangement
+                    .narrows_composer(window_width);
                 let toolbar = h_flex()
                     .gap(px(14.))
                     .child(
                         h_flex()
                             .flex_shrink(1.)
-                            .min_w_0()
+                            .min_w(model_selector::MIN_WIDTH)
                             .gap(px(7.))
-                            .child(
-                                Icon::new(IconName::Diamond)
-                                    .size(px(12.))
-                                    .color(provider_color(provider, cx)),
-                            )
-                            .child(
-                                Label::new(provider_name(provider))
-                                    .size(TextSize::Ui)
-                                    .weight(FontWeight::MEDIUM),
-                            )
-                            .child(
-                                Label::new(status)
-                                    .size(TextSize::Ui)
-                                    .color(Color::Muted)
-                                    .truncate(),
-                            ),
+                            .child(self.model_selector(session, provider, window_width, cx))
+                            .when(!narrow, |d| {
+                                d.child(
+                                    div()
+                                        .id("composer-hint")
+                                        .automation_id("composer-hint")
+                                        .flex_shrink(1000.)
+                                        .min_w_0()
+                                        .child(
+                                            Label::new(status)
+                                                .size(TextSize::Ui)
+                                                .color(Color::Muted)
+                                                .truncate(),
+                                        ),
+                                )
+                            }),
                     )
                     .child(div().flex_shrink_0().w_px().h(px(14.)).bg(colors.border))
                     .child(project)
                     .when_some(mode, |d, mode| {
-                        d.child(self.approval_menu(mode, running, cx))
+                        d.child(self.approval_menu(mode, running, narrow, cx))
                     })
                     .child(div().flex_1())
                     .when(running, |d| {
@@ -1187,9 +1194,9 @@ impl Keystone {
             .cursor_pointer()
             .hover(move |s| s.bg(colors.element_filled_hover))
             .child(
-                Icon::new(IconName::Diamond)
-                    .size(px(12.))
-                    .color(provider_color(provider, cx)),
+                Icon::new(provider_icon(provider))
+                    .size(px(14.))
+                    .color(provider_icon_color(provider, cx)),
             )
             .child(
                 Label::new(provider_name(provider))
@@ -1208,50 +1215,221 @@ impl Keystone {
         workspace.sessions().iter().find(|s| s.id() == id)
     }
 
-    /// The session's approval mode, as a menu of every mode with what it allows.
+    /// The session's provider and model as one button, with the menu that chooses
+    /// them while the session has not sent.
+    fn model_selector(
+        &self,
+        session: u64,
+        provider: Provider,
+        window_width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selection = self.model_selection(session, provider);
+        let handlers = model_selector::Handlers {
+            open_change: Rc::new(cx.listener(move |this, open: &bool, _, cx| {
+                this.model_menu = open.then_some(session);
+                if *open {
+                    this.request_catalog(session, provider, cx);
+                }
+                cx.notify();
+            })),
+            choose_provider: Rc::new(cx.listener(move |this, provider: &Provider, window, cx| {
+                this.choose_provider(session, *provider, window, cx)
+            })),
+            choose_model: Rc::new(cx.listener(
+                move |this, (provider, model): &(Provider, Option<String>), window, cx| {
+                    this.choose_model(session, *provider, model.clone(), window, cx)
+                },
+            )),
+            retry: Rc::new(cx.listener(move |this, provider: &Provider, _, cx| {
+                this.retry_catalog(session, *provider, cx)
+            })),
+        };
+        let open = self.model_menu == Some(session);
+        model_selector::render(selection, open, handlers, window_width, cx)
+    }
+
+    fn model_selection(&self, session: u64, provider: Provider) -> model_selector::Selection<'_> {
+        let saved = self.session(session);
+        let choices = match self.conversation_folder(session) {
+            Some(presentation::ConversationFolder::Recorded(directory)) => {
+                self.catalogs.choices(&CatalogKey {
+                    provider,
+                    directory,
+                })
+            }
+            Some(presentation::ConversationFolder::LegacyMissing) => {
+                Choices::Unavailable("Choose a conversation folder to load choices.")
+            }
+            Some(presentation::ConversationFolder::Unsupported) | None => Choices::Unavailable(
+                "Choices need this conversation's saved folder, which this version cannot use.",
+            ),
+        };
+        model_selector::Selection {
+            provider,
+            model: saved.and_then(|s| s.model()),
+            reported_model: self
+                .conversations
+                .get(&session)
+                .and_then(|c| c.reported_model.as_deref()),
+            started: saved.is_none_or(|s| s.started()),
+            choices,
+        }
+    }
+
+    /// A provider chosen in the model menu. The session's model returns to the
+    /// provider's default and the menu stays open on that provider's catalog. The
+    /// current provider just closes the menu.
+    fn choose_provider(
+        &mut self,
+        session: u64,
+        provider: Provider,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self.session(session).filter(|s| !s.started()) else {
+            return self.close_model_menu(window, cx);
+        };
+        if current.provider() == provider {
+            return self.close_model_menu(window, cx);
+        }
+        match self.store.set_provider(session, provider) {
+            Ok(applied) => {
+                self.error = durability_warning(applied.durability);
+                self.request_catalog(session, provider, cx);
+            }
+            Err(error) => self.error = Some(format!("Provider not changed. {error}")),
+        }
+        // The sidebar shows the new placeholder title.
+        self.refresh(cx);
+    }
+
+    /// A model chosen in the model menu, saved for the session's first Send. The row
+    /// was rendered for `provider`'s catalog: a choice from a catalog the session has
+    /// left since is dropped.
+    fn choose_model(
+        &mut self,
+        session: u64,
+        provider: Provider,
+        model: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(current) = self
+            .session(session)
+            .filter(|s| !s.started() && s.provider() == provider)
+            && current.model() != model.as_deref()
+        {
+            self.error = match self.store.set_model(session, model) {
+                Ok(applied) => durability_warning(applied.durability),
+                Err(error) => Some(format!("Model not saved. {error}")),
+            };
+        }
+        self.close_model_menu(window, cx);
+    }
+
+    fn close_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_menu = None;
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn request_catalog(&mut self, session: u64, provider: Provider, cx: &mut Context<Self>) {
+        let Some(key) = self.catalog_key(session, provider) else {
+            return;
+        };
+        let directory = key.directory.clone();
+        if self.catalogs.ask(key, session) {
+            self.connection(provider)
+                .request_catalog(session, directory.as_str());
+            cx.notify();
+        }
+    }
+
+    /// Forgets a failed catalog and asks again.
+    fn retry_catalog(&mut self, session: u64, provider: Provider, cx: &mut Context<Self>) {
+        if let Some(key) = self.catalog_key(session, provider) {
+            self.catalogs.clear(&key);
+        }
+        self.request_catalog(session, provider, cx);
+    }
+
+    fn catalog_key(&self, session: u64, provider: Provider) -> Option<CatalogKey> {
+        match self.conversation_folder(session)? {
+            presentation::ConversationFolder::Recorded(directory) => Some(CatalogKey {
+                provider,
+                directory,
+            }),
+            _ => None,
+        }
+    }
+
+    fn session(&self, id: u64) -> Option<&keystone_core::Session> {
+        self.store
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| s.id() == id)
+    }
+
+    /// The session's approval mode, as a menu of every mode with what it allows. A
+    /// `narrow` composer shows only the mode's icon, and names the mode in its tooltip.
     fn approval_menu(
         &self,
         mode: ApprovalMode,
         running: bool,
+        narrow: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let session = self.store.workspace().selected();
-        let tooltip = if running {
-            "Approval mode · a change applies from the next turn"
+        let applies = if running {
+            "a change applies from the next turn"
         } else {
-            "Approval mode · applies from the next turn"
+            "applies from the next turn"
         };
-        PopoverMenu::new(
-            "approval-menu",
+        let color = (mode == ApprovalMode::FullAccess).then_some(Color::Warning);
+        let trigger = if narrow {
+            IconButton::new("approval-mode", IconName::Shield)
+                .size(ButtonSize::Compact)
+                .selected(self.approval_menu)
+                .when_some(color, IconButton::color)
+                .aria_label(format!("Approval mode · {}", mode.label()))
+                .debug_selector(|| "approval-mode".into())
+                .tooltip(Tooltip::text(format!(
+                    "Approval mode · {} · {applies}",
+                    mode.label()
+                )))
+                .into_any_element()
+        } else {
             Button::new("approval-mode", mode.label())
                 .size(ButtonSize::Compact)
                 .icon(IconName::Shield)
                 .selected(self.approval_menu)
-                .when(mode == ApprovalMode::FullAccess, |b| {
-                    b.color(Color::Warning)
-                })
+                .when_some(color, Button::color)
                 .debug_selector(|| "approval-mode".into())
-                .tooltip(Tooltip::text(tooltip)),
-        )
-        .anchor(Anchor::BottomLeft)
-        .open(self.approval_menu)
-        .on_open_change(self.scoped_listener(cx, |this, open: &bool, _, cx| {
-            this.approval_menu = *open;
-            cx.notify();
-        }))
-        .child(MenuHeader::new("Approvals"))
-        .children(ApprovalMode::ALL.map(|choice| {
-            MenuItem::new(("approval", choice as usize), choice.label())
-                .detail(choice.description())
-                .checked(choice == mode)
-                .debug_selector(|| format!("approval-{}", choice.slug()))
-                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                    if this.store.workspace().selected() != session {
-                        return;
-                    }
-                    this.choose_approval_mode(choice, window, cx)
-                }))
-        }))
+                .tooltip(Tooltip::text(format!("Approval mode · {applies}")))
+                .into_any_element()
+        };
+        PopoverMenu::new("approval-menu", trigger)
+            .anchor(Anchor::BottomLeft)
+            .open(self.approval_menu)
+            .on_open_change(self.scoped_listener(cx, |this, open: &bool, _, cx| {
+                this.approval_menu = *open;
+                cx.notify();
+            }))
+            .child(MenuHeader::new("Approvals"))
+            .children(ApprovalMode::ALL.map(|choice| {
+                MenuItem::new(("approval", choice as usize), choice.label())
+                    .detail(choice.description())
+                    .checked(choice == mode)
+                    .debug_selector(|| format!("approval-{}", choice.slug()))
+                    .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                        if this.store.workspace().selected() != session {
+                            return;
+                        }
+                        this.choose_approval_mode(choice, window, cx)
+                    }))
+            }))
     }
 
     /// A choice from the approval menu. The current mode changes nothing, and Full
@@ -1513,8 +1691,32 @@ impl Keystone {
     /// since the last wake-up.
     fn pump(&mut self, cx: &mut Context<Self>) {
         let reports = self.logs.drain();
-        let mut events = self.codex.as_ref().map(|c| c.drain()).unwrap_or_default();
-        events.extend(self.claude.as_ref().map(|c| c.drain()).unwrap_or_default());
+        let mut events = Vec::new();
+        // A catalog belongs to the connection it came from, whatever provider the
+        // asking session has since moved to.
+        for (provider, connection) in [
+            (
+                Provider::Codex,
+                self.codex.as_ref().map(|c| c as &dyn Connection),
+            ),
+            (
+                Provider::Claude,
+                self.claude.as_ref().map(|c| c as &dyn Connection),
+            ),
+        ] {
+            let Some(connection) = connection else {
+                continue;
+            };
+            for (session, event) in connection.drain() {
+                match event {
+                    Event::Catalog(catalog) => {
+                        self.catalogs.apply(provider, session, catalog);
+                        cx.notify();
+                    }
+                    event => events.push((session, event)),
+                }
+            }
+        }
         if self.receive_customization() {
             self.refresh(cx);
         }
@@ -1716,6 +1918,19 @@ impl Keystone {
             cx.notify();
             return;
         }
+        // The provider and model are fixed from the first message on. Saved before the
+        // message goes, so a crash after this leaves them fixed rather than free.
+        if !session.started() {
+            if let Err(error) = self.store.lock_model(id) {
+                self.conversation(id).error = Some(format!(
+                    "Not sent: the model choice could not be saved first. {error}"
+                ));
+                self.commit(id);
+                cx.notify();
+                return;
+            }
+            self.model_menu = None;
+        }
         let Some((provider, approval)) = self.approval(id) else {
             return;
         };
@@ -1729,9 +1944,14 @@ impl Keystone {
             self.refresh(cx);
             return;
         }
-        let sent =
-            self.connection(provider)
-                .send(id, cwd, resume.as_deref(), approval, text.clone());
+        let sent = self.connection(provider).send(
+            id,
+            cwd,
+            resume.as_deref(),
+            session.model(),
+            approval,
+            text.clone(),
+        );
         if let Err(reason) = sent {
             // Shown in the session's transcript, where a draft save cannot clear it.
             self.conversation(id).error = Some(reason.to_owned());
@@ -2158,9 +2378,9 @@ impl SessionSidebar {
             None => h_flex()
                 .gap(px(6.))
                 .child(
-                    Icon::new(IconName::Diamond)
-                        .size(px(10.))
-                        .color(provider_color(provider, cx)),
+                    Icon::new(provider_icon(provider))
+                        .size(px(14.))
+                        .color(provider_icon_color(provider, cx)),
                 )
                 .child(
                     Label::new(excerpt)
@@ -2458,11 +2678,13 @@ impl Render for Keystone {
                         || this.filter_menu
                         || this.settings_menu
                         || this.approval_menu
+                        || this.model_menu.is_some()
                     {
                         this.new_menu = false;
                         this.filter_menu = false;
                         this.settings_menu = false;
                         this.approval_menu = false;
+                        this.model_menu = None;
                         this.refresh(cx);
                         cx.stop_propagation();
                     } else if this.presentation.current.customization.is_open() {
@@ -3406,14 +3628,16 @@ mod tests {
     fn a_reader_scrolled_into_a_row_that_a_wider_window_shortens_sees_the_next_row(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (view, cx, _dir, content_top) = long_replies(cx, 850.);
+        let (view, cx, _dir, content_top) = long_replies(cx, 600.);
         let narrow = cx.debug_bounds("transcript-row-600").unwrap().size.height;
         let offset = narrow * 0.95;
         scroll_to(&view, cx, at(600, offset.into()));
+        let view_top = cx.debug_bounds("conversation").unwrap().top();
 
         // The reply wraps onto fewer lines, ending before the place being read.
         cx.simulate_resize(size(px(1500.), px(700.)));
         cx.run_until_parked();
+        let moved = cx.debug_bounds("conversation").unwrap().top() - view_top;
         let next = cx.debug_bounds("transcript-row-601").unwrap();
         assert!(
             next.size.height < offset,
@@ -3421,7 +3645,7 @@ mod tests {
         );
         assert_eq!(
             next.top(),
-            content_top,
+            content_top + moved,
             "the next row starts at the top, not above it"
         );
 
@@ -3445,13 +3669,17 @@ mod tests {
     ) {
         let (view, cx, _dir, content_top) = long_replies(cx, 1500.);
         scroll_to(&view, cx, at(600, 1000.));
+        let wide = cx.debug_bounds("transcript-row-600").unwrap().size.height;
+        assert!(wide > px(1000.), "the place being read is inside the reply");
+        let view_top = cx.debug_bounds("conversation").unwrap().top();
 
         // The reply wraps onto more lines; the place being read is still inside it.
-        cx.simulate_resize(size(px(850.), px(700.)));
+        cx.simulate_resize(size(px(600.), px(700.)));
         cx.run_until_parked();
+        let moved = cx.debug_bounds("conversation").unwrap().top() - view_top;
         let row = cx.debug_bounds("transcript-row-600").unwrap();
-        assert!(row.size.height > px(2000.));
-        assert_eq!(row.top(), content_top - px(1000.));
+        assert!(row.size.height > wide);
+        assert_eq!(row.top(), content_top + moved - px(1000.));
     }
 
     #[gpui::test]
@@ -3880,7 +4108,12 @@ mod tests {
     ) -> String {
         wait_until(cx, view, move |view| reply_with(view, text).is_some());
         let reply = view.read_with(cx, |view, _| reply_with(view, text).unwrap());
-        reply.rsplit('`').nth(1).unwrap().to_owned()
+        let label = ["**Approvals:** `", "**Mode:** `"]
+            .into_iter()
+            .find(|label| reply.contains(label))
+            .expect("a setting in the reply");
+        let start = reply.find(label).unwrap() + label.len();
+        reply[start..].split('`').next().unwrap().to_owned()
     }
 
     /// A wrapper that runs a scripted provider with extra environment, so tests sharing
@@ -4385,18 +4618,305 @@ mod tests {
         path
     }
 
-    #[gpui::test]
-    fn codex_session_streams_asks_approval_and_restores_from_its_log(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("workspace.json");
-        // SAFETY: only this test reads these variables, and it sets them before any
-        // thread that could read them starts.
+    /// Points Keystone at the scripted Codex. The variables are process-wide, so every
+    /// test that sets them holds this lock until it ends, and one test's switches
+    /// never reach a process another test starts.
+    fn codex_env() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: set under the lock, before any thread that reads them starts.
         unsafe {
             std::env::set_var("KEYSTONE_CODEX_PATH", fake("keystone-fake-codex"));
             std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "2");
         }
+        guard
+    }
+
+    /// Removes a variable when the test ends, however it ends.
+    struct EnvVar(&'static str);
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            // SAFETY: the test that set it holds the lock that `codex_env` takes.
+            unsafe { std::env::remove_var(self.0) }
+        }
+    }
+
+    /// Waits until `selector` renders, letting provider events arrive meanwhile.
+    fn wait_for(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            cx.run_until_parked();
+            if cx.debug_bounds(selector).is_some() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{selector} never rendered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn saved_session(path: &Path) -> keystone_core::Session {
+        Store::open(path).unwrap().workspace().sessions()[0].clone()
+    }
+
+    #[gpui::test]
+    fn a_draft_chooses_a_model_the_turn_runs_on_and_the_first_send_fixes_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _env = codex_env();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let store = Store::open(&path).unwrap();
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        click(cx, "welcome-codex");
+        click(cx, "model-selector");
+        assert!(cx.debug_bounds("provider-claude").is_some());
+        assert!(cx.debug_bounds("model-default").is_some());
+        wait_for(cx, "model-fake-fast");
+        assert!(cx.debug_bounds("model-fake-hidden").is_none());
+        click(cx, "model-fake-fast");
+        assert_eq!(saved_session(&path).model(), Some("fake-fast"));
+        assert!(view.read_with(cx, |view, _| view.model_menu.is_none()));
+        assert!(composer_focused(&view, cx));
+
+        send_text(&view, cx, "hello");
+        wait_until(cx, &view, |view| {
+            reply_with(view, "**Model:** `fake-fast`").is_some()
+        });
+        let session = saved_session(&path);
+        assert_eq!(session.model_locked(), Some(true));
+        assert!(session.started());
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.conversations[&1].reported_model.as_deref(),
+                Some("fake-fast")
+            );
+        });
+        // Fixed now: the button opens nothing.
+        click(cx, "model-selector");
+        assert!(cx.debug_bounds("provider-claude").is_none());
+        assert!(view.read_with(cx, |view, _| view.model_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn switching_the_provider_in_the_menu_retitles_the_draft_and_lists_its_models(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _env = codex_env();
+        // SAFETY: the same values every Claude test sets, under the Codex lock.
+        unsafe {
+            std::env::set_var("KEYSTONE_CLAUDE_PATH", fake("keystone-fake-claude"));
+            std::env::set_var("KEYSTONE_FAKE_CLAUDE_DELAY_MS", "2");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let store = Store::open(&path).unwrap();
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        click(cx, "welcome-codex");
+        click(cx, "model-selector");
+        wait_for(cx, "model-fake-fast");
+        click(cx, "model-fake-fast");
+        click(cx, "model-selector");
+        click(cx, "provider-claude");
+        let session = saved_session(&path);
+        assert_eq!(session.provider(), Provider::Claude);
+        assert_eq!(session.title(), "New Claude session");
+        assert_eq!(session.model(), None);
+        assert!(view.read_with(cx, |view, _| view.model_menu.is_some()));
+        wait_for(cx, "model-fake-opus");
+        let default = cx.debug_bounds("model-default").unwrap();
+        let opus = cx.debug_bounds("model-fake-opus").unwrap();
+        let column = cx.debug_bounds("model-column").unwrap();
+        assert!(
+            default.size.height == opus.size.height && opus.right() <= column.right(),
+            "default {default:?}, a model row {opus:?}, column {column:?}"
+        );
+        click(cx, "model-fake-opus");
+        assert_eq!(saved_session(&path).model(), Some("fake-opus"));
+
+        send_text(&view, cx, "hello");
+        wait_until(cx, &view, |view| {
+            reply_with(view, "**Model:** `fake-opus`").is_some()
+        });
+    }
+
+    #[gpui::test]
+    fn a_catalog_codex_cannot_list_shows_the_failure_and_keeps_the_default(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _env = codex_env();
+        // SAFETY: under the Codex lock, removed when the test ends.
+        unsafe { std::env::set_var("KEYSTONE_FAKE_CODEX_NO_CATALOG", "1") };
+        let _switch = EnvVar("KEYSTONE_FAKE_CODEX_NO_CATALOG");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let store = Store::open(&path).unwrap();
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        click(cx, "welcome-codex");
+        click(cx, "model-selector");
+        wait_for(cx, "model-failed");
+        assert!(cx.debug_bounds("model-retry").is_some());
+        assert!(cx.debug_bounds("model-default").is_some());
+        click(cx, "model-retry");
+        wait_for(cx, "model-failed");
+        click(cx, "model-default");
+        assert!(view.read_with(cx, |view, _| view.model_menu.is_none()));
+        assert!(composer_focused(&view, cx));
+        assert_eq!(saved_session(&path).model(), None);
+    }
+
+    /// The menu belongs to the draft it opened on. The first send closes it, and a new
+    /// session starts with its own menu closed, so no row of the old draft's menu is
+    /// shown over the new one.
+    #[gpui::test]
+    fn the_model_menu_closes_with_the_first_send_and_stays_closed_for_a_new_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _env = codex_env();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let (view, cx) = open_window(&path, cx);
+        click(cx, "welcome-codex");
+        click(cx, "model-selector");
+        wait_for(cx, "model-fake-fast");
+        assert_eq!(view.read_with(cx, |view, _| view.model_menu), Some(1));
+        view.update_in(cx, |view, window, cx| {
+            view.composer
+                .update(cx, |input, cx| input.set_value("hello".into(), cx));
+            view.composer.focus_handle(cx).focus(window, cx);
+        });
+        cx.simulate_keystrokes("ctrl-enter");
+        cx.run_until_parked();
+        assert!(saved_session(&path).started(), "the message went");
+        assert_eq!(view.read_with(cx, |view, _| view.model_menu), None);
+        assert!(cx.debug_bounds("provider-claude").is_none());
+
+        cx.simulate_keystrokes("ctrl-shift-n");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.store.workspace().selected()),
+            Some(2)
+        );
+        assert!(cx.debug_bounds("provider-claude").is_none());
+        click(cx, "model-selector");
+        assert_eq!(view.read_with(cx, |view, _| view.model_menu), Some(2));
+        assert!(cx.debug_bounds("provider-claude").is_some());
+    }
+
+    #[gpui::test]
+    fn a_refused_first_send_closes_the_model_menu_with_the_lock(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let claude = wrapper(
+            dir.path(),
+            "keystone-fake-claude",
+            "KEYSTONE_FAKE_CLAUDE_DELAY_MS=5",
+        );
+        std::fs::write(dir.path().join(".fake-claude-ignore-initialize"), "all").unwrap();
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, _| {
+            view.claude = Some(ClaudeConnection::new(Some(claude), view.wake.clone()));
+            view.presentation.project =
+                keystone_core::ProjectId::new(dir.path()).map_err(|e| e.to_string());
+        });
+        click(cx, "welcome-claude");
+        click(cx, "model-selector");
+        assert_eq!(view.read_with(cx, |view, _| view.model_menu), Some(1));
+        view.update_in(cx, |view, window, cx| {
+            let Some(presentation::ConversationFolder::Recorded(cwd)) = view.conversation_folder(1)
+            else {
+                panic!("a new session records its folder");
+            };
+            view.claude
+                .as_ref()
+                .unwrap()
+                .send(
+                    1,
+                    cwd.as_str(),
+                    None,
+                    None,
+                    ApprovalState::default(),
+                    "first".into(),
+                )
+                .unwrap();
+            view.composer
+                .update(cx, |input, cx| input.set_value("hello".into(), cx));
+            let draft = view.composer_draft(cx).unwrap();
+            view.send_message(draft, window, cx);
+            assert!(
+                view.conversations[&1]
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("cannot steer")),
+                "{:?}",
+                view.conversations[&1].error
+            );
+            assert_eq!(view.model_menu, None);
+        });
+        cx.run_until_parked();
+        assert!(saved_session(&path).started(), "the lock was saved");
+        assert!(cx.debug_bounds("provider-claude").is_none());
+    }
+
+    /// The model button keeps its full label whatever the hint beside it needs: the
+    /// hint gives way, inside the toolbar, and nothing overlaps the project button. The
+    /// composer is 640 px wide at any window size, so this is measured at 1280 × 900.
+    #[gpui::test]
+    fn the_model_button_keeps_its_label_and_the_hint_gives_way(cx: &mut gpui::TestAppContext) {
+        let _env = codex_env();
+        // SAFETY: the same values every Claude test sets, under the Codex lock.
+        unsafe {
+            std::env::set_var("KEYSTONE_CLAUDE_PATH", fake("keystone-fake-claude"));
+            std::env::set_var("KEYSTONE_FAKE_CLAUDE_DELAY_MS", "2");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let (_view, cx) = open_window(&path, cx);
+        cx.simulate_resize(size(px(1280.), px(900.)));
+        click(cx, "welcome-codex");
+        let laid_out = |cx: &mut gpui::VisualTestContext| {
+            let button = cx.debug_bounds("model-selector").unwrap();
+            let hint = cx.debug_bounds("composer-hint").unwrap();
+            let project = cx.debug_bounds("project").unwrap();
+            assert!(
+                button.right() <= hint.origin.x && hint.right() <= project.origin.x,
+                "button {button:?}, hint {hint:?}, project {project:?}"
+            );
+        };
+        laid_out(cx);
+
+        click(cx, "model-selector");
+        click(cx, "provider-claude");
+        wait_for(cx, "model-fake-opus");
+        click(cx, "model-fake-opus");
+        laid_out(cx);
+    }
+
+    #[gpui::test]
+    fn codex_session_streams_asks_approval_and_restores_from_its_log(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _env = codex_env();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
         cx.update(|cx| {
             keystone_ui::init(cx);
@@ -5164,6 +5684,7 @@ mod tests {
                     session: 1,
                     cwd: "/tmp".into(),
                     resume: None,
+                    model: None,
                 },
                 &mut out,
             );

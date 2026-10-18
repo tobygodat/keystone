@@ -5,7 +5,9 @@
 //! driver generates from `SEED`.
 
 use keystone_agent::claude::ClaudeDriver;
-use keystone_agent::{Command, Event, ItemKind, ItemStatus, Outputs, TurnStatus};
+use keystone_agent::{
+    Catalog, Command, Event, ItemKind, ItemStatus, ModelInfo, Outputs, TurnStatus,
+};
 use keystone_core::ApprovalMode;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -389,13 +391,17 @@ fn exit_fails_the_running_turn() {
     ready(&mut driver, &mut out, ApprovalMode::Provider);
     driver.command(send(1), &mut out);
     driver.on_exit("Claude Code stopped with exit code 1", &mut out);
+    let ended: Vec<&Event> = out.events.iter().rev().take(2).map(|(_, e)| e).collect();
     assert_eq!(
-        out.events.last().map(|(_, e)| e),
-        Some(&Event::TurnCompleted {
-            status: TurnStatus::Failed,
-            error: Some("Claude Code stopped with exit code 1".into()),
-            stopped: false,
-        })
+        ended,
+        vec![
+            &Event::ModelLost,
+            &Event::TurnCompleted {
+                status: TurnStatus::Failed,
+                error: Some("Claude Code stopped with exit code 1".into()),
+                stopped: false,
+            },
+        ]
     );
 }
 
@@ -1355,4 +1361,64 @@ fn messages_only_ever_run_in_the_mode_selected_when_they_were_written() {
         }
     }
     assert!(checked > 5_000, "only {checked} messages were checked");
+}
+
+#[test]
+fn the_initialize_answer_lists_models_with_the_default_folded_out() {
+    use keystone_agent::claude::initialize_catalog;
+    let line = br#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-catalog","response":{"commands":[],"current_permission_mode":"default","models":[
+        {"value":"default","displayName":"Default (recommended)","description":"Opus for most tasks","resolvedModel":"claude-opus-5-5"},
+        {"value":"opus","displayName":"Opus","description":"","resolvedModel":"claude-opus-5-5"},
+        {"value":"haiku","displayName":"Haiku","description":"Fast","resolvedModel":"claude-haiku-5-5"}]}}}"#;
+    assert_eq!(
+        initialize_catalog(line),
+        Some(Catalog::Ready {
+            models: vec![
+                ModelInfo {
+                    model: "opus".into(),
+                    label: "Opus".into(),
+                    resolved: Some("claude-opus-5-5".into()),
+                },
+                ModelInfo {
+                    model: "haiku".into(),
+                    label: "Haiku".into(),
+                    resolved: Some("claude-haiku-5-5".into()),
+                },
+            ],
+            default_model: Some("claude-opus-5-5".into()),
+        })
+    );
+    let error = br#"{"type":"control_response","response":{"subtype":"error","request_id":"keystone-catalog","error":"not signed in"}}"#;
+    assert_eq!(
+        initialize_catalog(error),
+        Some(Catalog::Failed("not signed in".into()))
+    );
+    assert_eq!(
+        initialize_catalog(br#"{"type":"system","subtype":"init","session_id":"x"}"#),
+        None
+    );
+}
+
+#[test]
+fn init_reports_the_model_once_per_process() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    driver.command(send(1), &mut out);
+    let init = format!(
+        r#"{{"type":"system","subtype":"init","session_id":"{CONVERSATION}","capabilities":["msg_lifecycle_v1"],"model":"claude-opus-5-5"}}"#
+    );
+    driver.on_line(init.as_bytes(), &mut out);
+    driver.on_line(init.as_bytes(), &mut out);
+    let reported: Vec<&Event> = out
+        .events
+        .iter()
+        .filter_map(|(_, e)| matches!(e, Event::ModelReported { .. }).then_some(e))
+        .collect();
+    assert_eq!(
+        reported,
+        vec![&Event::ModelReported {
+            model: "claude-opus-5-5".into()
+        }]
+    );
 }

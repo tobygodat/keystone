@@ -64,6 +64,28 @@ pub struct Approval {
     pub detail: Option<String>,
 }
 
+/// One model a provider offers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelInfo {
+    /// What is sent to run it: Claude's `value`, Codex's `model`.
+    pub model: String,
+    pub label: String,
+    /// The model ID the provider says `model` runs as, when it says: Claude's
+    /// `resolvedModel`, `None` for Codex. Reports of a running model use this form.
+    pub resolved: Option<String>,
+}
+
+/// The models a provider reports it can run, or why it could not say.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Catalog {
+    Ready {
+        models: Vec<ModelInfo>,
+        /// The model ID the provider's default resolves to, when it says.
+        default_model: Option<String>,
+    },
+    Failed(String),
+}
+
 /// What a driver reports for one session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -71,6 +93,15 @@ pub enum Event {
     ThreadReady {
         thread_id: String,
     },
+    /// The provider's answer to a catalog request ([`Catalog`]).
+    Catalog(Catalog),
+    /// The model the provider says this session runs on.
+    ModelReported {
+        model: String,
+    },
+    /// The process or conversation that reported the model is gone, so the report no
+    /// longer describes anything running.
+    ModelLost,
     TurnStarted,
     ItemStarted(Item),
     /// Text to append to an in-progress item.

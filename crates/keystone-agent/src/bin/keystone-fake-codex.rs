@@ -11,6 +11,14 @@
 //! "end on steer" ends 300 ms after a steer arrives and then rejects it, as Codex does
 //! for a steer that reaches a turn that just ended. `KEYSTONE_FAKE_CODEX_REPLY`
 //! replaces the reply text exactly.
+//!
+//! `model/list` returns a scripted catalog (`fake-default`, `fake-fast`, and a hidden
+//! entry) in two pages, as Codex pages: the first answer holds `fake-default` and
+//! `"nextCursor": "page-2"`, the answer to cursor `page-2` holds the rest with a null
+//! cursor, and any other cursor is an "invalid cursor" error. With
+//! `KEYSTONE_FAKE_CODEX_NO_CATALOG=1` every `model/list` is a JSON-RPC error. `thread/start`
+//! and `thread/resume` reply with the thread's model: the `model` they were given, else
+//! `fake-default`, remembered per thread for the process. Each reply ends with it.
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -59,6 +67,8 @@ fn main() {
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     let defaults = || (json!("on-request"), json!({"type": "workspaceWrite"}));
+    let mut models: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let no_catalog = std::env::var("KEYSTONE_FAKE_CODEX_NO_CATALOG").is_ok_and(|v| v == "1");
 
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -86,16 +96,39 @@ fn main() {
             "initialized" => {}
             "thread/start" => {
                 let n = next.fetch_add(1, Ordering::Relaxed);
+                let thread = format!("fake-thread-{n}");
                 let (approval, sandbox) = defaults();
-                reply(json!({"thread": {"id": format!("fake-thread-{n}")},
-                    "approvalPolicy": approval, "sandbox": sandbox}));
+                let model = thread_model(&mut models, &thread, &params);
+                reply(json!({"thread": {"id": thread},
+                    "approvalPolicy": approval, "sandbox": sandbox, "model": model}));
             }
             "thread/resume" => {
-                let thread = params["threadId"].as_str().unwrap_or_default();
-                let (approval, sandbox) = policies.get(thread).cloned().unwrap_or_else(defaults);
+                let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
+                let (approval, sandbox) = policies.get(&thread).cloned().unwrap_or_else(defaults);
+                let model = thread_model(&mut models, &thread, &params);
                 reply(json!({"thread": {"id": thread},
-                    "approvalPolicy": approval, "sandbox": sandbox}));
+                    "approvalPolicy": approval, "sandbox": sandbox, "model": model}));
             }
+            "model/list" if no_catalog => emit(
+                &out,
+                json!({"id": id, "error": {"code": -32000, "message": "scripted catalog failure"}}),
+            ),
+            "model/list" => match params["cursor"].as_str() {
+                None => reply(json!({"data": [
+                    {"id": "fake-default", "model": "fake-default", "displayName": "Fake Default",
+                     "description": "Scripted default", "hidden": false, "isDefault": true}
+                ], "nextCursor": "page-2"})),
+                Some("page-2") => reply(json!({"data": [
+                    {"id": "fake-fast", "model": "fake-fast", "displayName": "Fake Fast",
+                     "description": "Scripted second model", "hidden": false, "isDefault": false},
+                    {"id": "fake-hidden", "model": "fake-hidden", "displayName": "Hidden",
+                     "hidden": true, "isDefault": false}
+                ], "nextCursor": null})),
+                Some(_) => emit(
+                    &out,
+                    json!({"id": id, "error": {"code": -32600, "message": "invalid cursor"}}),
+                ),
+            },
             "turn/start" => {
                 let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
                 let text = params["input"][0]["text"]
@@ -120,6 +153,10 @@ fn main() {
                     policy.0.as_str().unwrap_or("?"),
                     policy.1["type"].as_str().unwrap_or("?")
                 );
+                let model = models
+                    .get(&thread)
+                    .cloned()
+                    .unwrap_or_else(|| "fake-default".into());
                 // Unique per process, like real Codex IDs, so a restart never reuses one.
                 let turn_id = format!(
                     "fake-turn-{}-{}",
@@ -137,7 +174,9 @@ fn main() {
                 turns.lock().unwrap().insert(turn_id.clone(), turn.clone());
                 let (out, next, turns) = (out.clone(), next.clone(), turns.clone());
                 thread::spawn(move || {
-                    run_turn(&out, &next, &thread, &turn_id, &text, &policy, &turn, delay);
+                    run_turn(
+                        &out, &next, &thread, &turn_id, &text, &policy, &model, &turn, delay,
+                    );
                     turns.lock().unwrap().remove(&turn_id);
                 });
             }
@@ -197,6 +236,23 @@ fn main() {
     }
 }
 
+/// The model a thread runs on: the one `params` asks for, else the one it already has,
+/// else the scripted default.
+fn thread_model(
+    models: &mut std::collections::HashMap<String, String>,
+    thread: &str,
+    params: &Value,
+) -> String {
+    if let Some(model) = params["model"].as_str() {
+        models.insert(thread.to_owned(), model.to_owned());
+    }
+    models
+        .entry(thread.to_owned())
+        .or_insert_with(|| "fake-default".into())
+        .clone()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_turn(
     out: &Out,
     next: &AtomicU64,
@@ -204,6 +260,7 @@ fn run_turn(
     turn_id: &str,
     text: &str,
     policy: &str,
+    model: &str,
     turn: &Turn,
     delay: Duration,
 ) {
@@ -280,7 +337,7 @@ fn run_turn(
         format!(
             "Scripted Codex reply (test data, no model call). You wrote: {text}. \
              This reply streams one word at a time so streaming, steering, and stopping can be checked. \
-             **Approvals:** `{policy}`"
+             **Approvals:** `{policy}` **Model:** `{model}`"
         )
     });
     let mut steer = None;

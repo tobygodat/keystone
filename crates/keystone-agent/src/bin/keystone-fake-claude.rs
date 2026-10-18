@@ -33,6 +33,10 @@
 //! in plan mode. Approved, the mode returns to the one before plan mode, as Claude
 //! 2.1.300 does; denied, the reply says so.
 //!
+//! The `initialize` answer lists scripted models (`default`, `fake-opus`, `fake-haiku`).
+//! `--model <value>` chooses one; `init` reports the resolved model (`fake-opus` when
+//! none is given), and each reply ends with it.
+//!
 //! An answer applies only to the approval it names, and an approval Claude withdrew
 //! takes no answer. Request IDs restart in each process, as a stale answer from an
 //! earlier process would find them. With `KEYSTONE_FAKE_CLAUDE_LOG_DIR` set, each
@@ -104,6 +108,8 @@ struct Shared {
     plan_file: PathBuf,
     bypass: bool,
     wake: Condvar,
+    /// The resolved model the process runs on.
+    model: String,
     /// Whether to send `command_lifecycle` frames.
     lifecycle: bool,
     /// Where a reply pauses after its first word until this file exists. Only set
@@ -158,6 +164,12 @@ fn main() {
         .iter()
         .position(|a| a == "--permission-mode")
         .and_then(|i| args.get(i + 1).cloned());
+    let model = args
+        .iter()
+        .position(|a| a == "--model")
+        .and_then(|i| args.get(i + 1))
+        .map_or("fake-opus", |value| resolve_model(value))
+        .to_owned();
     // Settings from a file in the working directory apply to that directory alone.
     let setting = |name: &str| {
         std::fs::read_to_string(format!(".fake-claude-{name}"))
@@ -230,6 +242,7 @@ fn main() {
         plan_file,
         mode: Mutex::new(String::new()),
         wake: Condvar::new(),
+        model,
         lifecycle: frames,
         release_file: if frames {
             None
@@ -272,7 +285,10 @@ fn main() {
                             continue;
                         }
                         let mut answer = json!({"claude_code_version": VERSION,
-                            "current_permission_mode": *shared.mode.lock().unwrap()});
+                            "current_permission_mode": *shared.mode.lock().unwrap(),
+                            "models": MODELS.iter().map(|(value, name, description, resolved)| json!({
+                                "value": value, "displayName": name, "description": description,
+                                "resolvedModel": resolved})).collect::<Vec<_>>()});
                         if let Some(commands) = &commands {
                             answer["commands"] = commands.clone();
                         }
@@ -376,6 +392,32 @@ fn main() {
     let _ = worker.join();
 }
 
+/// The scripted catalog: `value`, display name, description, and what it resolves to.
+const MODELS: [(&str, &str, &str, &str); 3] = [
+    (
+        "default",
+        "Default (recommended)",
+        "Scripted default",
+        "fake-opus",
+    ),
+    ("fake-opus", "Fake Opus", "Scripted model", "fake-opus"),
+    (
+        "fake-haiku",
+        "Fake Haiku",
+        "Scripted small model",
+        "fake-haiku",
+    ),
+];
+
+/// What a `--model` value runs as. An unknown value runs as itself, as Claude would
+/// try to.
+fn resolve_model(value: &str) -> &str {
+    MODELS
+        .iter()
+        .find(|(v, ..)| *v == value)
+        .map_or(value, |(.., resolved)| resolved)
+}
+
 /// Changes the permission mode, remembering plan mode for a later `--resume`.
 fn set_mode(shared: &Shared, mode: &str) {
     let mut current = shared.mode.lock().unwrap();
@@ -442,7 +484,8 @@ fn work(
         let mode = shared.mode.lock().unwrap().clone();
         let mut init = json!({"type": "system", "subtype": "init", "session_id": session,
                "capabilities": capabilities, "permissionMode": mode, "mcp_servers": [],
-               "slash_commands": [], "skills": [], "claude_code_version": VERSION});
+               "slash_commands": [], "skills": [], "claude_code_version": VERSION,
+               "model": shared.model});
         if let Some(tools) = &tools {
             init["tools"] = tools.clone();
         }
@@ -522,8 +565,11 @@ fn answer(
         }
     }
     let mode = mode.as_str();
+    let model = &shared.model;
     let mut reply = std::env::var("KEYSTONE_FAKE_CLAUDE_REPLY").unwrap_or_else(|_| {
-        format!("Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan}")
+        format!(
+            "Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan} **Model:** `{model}`"
+        )
     });
     if text.contains("long") {
         for n in 1..=200 {

@@ -6,13 +6,18 @@
 //! Checked against codex-cli 0.162.1.
 
 use crate::driver::{ApprovalState, Command, Outputs};
-use crate::item::{Approval, Event, Item, ItemKind, ItemStatus, RequestId, TurnStatus, cap_output};
+use crate::item::{
+    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
+    cap_output,
+};
 use keystone_core::ApprovalMode;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashMap;
+
+const CATALOG_PAGES: u32 = 20;
 
 /// Notifications Keystone does not show. Codex skips sending them.
 const OPT_OUT: [&str; 6] = [
@@ -96,6 +101,13 @@ enum Pending {
     Baseline {
         cwd: String,
     },
+    /// One page of `model/list`, asked for by `session`, with the models of the pages
+    /// before it.
+    Catalog {
+        session: u64,
+        models: Vec<ModelInfo>,
+        page: u32,
+    },
     Steer {
         session: u64,
         text: String,
@@ -133,6 +145,8 @@ struct Session {
     /// Open approval requests and the decision that denies each one.
     approvals: HashMap<RequestId, &'static str>,
     cwd: String,
+    /// The model the thread is opened with. `None` leaves the choice to Codex.
+    model: Option<String>,
     /// The policy for new turns. `None` uses the user's settings.
     policy: Option<Policy>,
     /// The policy the running or starting turn was started under. A message for a
@@ -202,10 +216,12 @@ impl CodexDriver {
                 session,
                 cwd,
                 resume,
+                model,
             } => {
                 let state = self.sessions.entry(session).or_default();
                 state.opening = true;
                 state.cwd = cwd.clone();
+                state.model = model;
                 // A resumed thread reports its own override, not the user's settings, so
                 // read those from a fresh thread before the next turn needs them.
                 if resume.is_none() {
@@ -266,9 +282,45 @@ impl CodexDriver {
         }
     }
 
-    /// The app-server exited. Every running turn fails, and every thread must be
-    /// opened again in a new process.
+    /// Asks for the models Codex offers, following `nextCursor` through every page up
+    /// to [`CATALOG_PAGES`]. The answer arrives as [`Event::Catalog`] for `session`.
+    pub fn request_catalog(&mut self, session: u64, out: &mut Outputs) {
+        self.request_catalog_page(session, Vec::new(), 1, None, out);
+    }
+
+    fn request_catalog_page(
+        &mut self,
+        session: u64,
+        models: Vec<ModelInfo>,
+        page: u32,
+        cursor: Option<String>,
+        out: &mut Outputs,
+    ) {
+        let params = match cursor {
+            Some(cursor) => json!({"cursor": cursor}),
+            None => json!({}),
+        };
+        let line = self.request(
+            "model/list",
+            params,
+            Pending::Catalog {
+                session,
+                models,
+                page,
+            },
+        );
+        self.write(line, out);
+    }
+
+    /// The app-server exited. Every running turn fails, every thread must be opened
+    /// again in a new process, every reported model is gone with the process, and an
+    /// unanswered catalog request fails.
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
+        for pending in self.pending.values() {
+            if let Pending::Catalog { session, .. } = pending {
+                out.event(*session, Event::Catalog(Catalog::Failed(reason.to_owned())));
+            }
+        }
         for (&session, state) in &mut self.sessions {
             if std::mem::take(&mut state.turn) != Turn::Idle {
                 out.event(
@@ -287,6 +339,7 @@ impl CodexDriver {
                     },
                 );
             }
+            out.event(session, Event::ModelLost);
         }
         self.sessions.clear();
         self.threads.clear();
@@ -316,13 +369,16 @@ impl CodexDriver {
         resume: Option<String>,
         out: &mut Outputs,
     ) {
-        let (method, params) = match &resume {
+        let (method, mut params) = match &resume {
             Some(thread) => (
                 "thread/resume",
                 json!({"threadId": thread, "cwd": cwd, "excludeTurns": true}),
             ),
             None => ("thread/start", json!({"cwd": cwd})),
         };
+        if let Some(model) = self.sessions.get(&session).and_then(|s| s.model.clone()) {
+            params["model"] = json!(model);
+        }
         let line = self.request(
             method,
             params,
@@ -527,8 +583,13 @@ impl CodexDriver {
                     self.baselines
                         .insert(cwd, Baseline::Known(approval, sandbox));
                 }
-                match result.map(|r| r.thread.id) {
-                    Some(thread) => self.thread_ready(session, thread, out),
+                match result.map(|r| (r.thread.id, r.model)) {
+                    Some((thread, model)) => {
+                        self.thread_ready(session, thread, out);
+                        if let Some(model) = model {
+                            out.event(session, Event::ModelReported { model });
+                        }
+                    }
                     // Never fall back to a fresh thread on its own: the user would see the
                     // old conversation while Codex had none of it.
                     None => {
@@ -544,6 +605,7 @@ impl CodexDriver {
                             format!("Codex did not start a conversation: {reason}")
                         };
                         out.event(session, Event::Failed { message });
+                        out.event(session, Event::ModelLost);
                     }
                 }
             }
@@ -562,6 +624,46 @@ impl CodexDriver {
                             stopped: false,
                         },
                     );
+                }
+            }
+            Pending::Catalog {
+                session,
+                mut models,
+                page,
+            } => {
+                let listed = match error {
+                    Some(error) => Err(error.message),
+                    None => serde_json::from_slice::<Response<ModelList>>(line)
+                        .ok()
+                        .and_then(|r| r.result)
+                        .ok_or_else(|| "no models in the reply".to_owned()),
+                };
+                let listed = match listed {
+                    Ok(listed) => listed,
+                    Err(message) => {
+                        return out.event(session, Event::Catalog(Catalog::Failed(message)));
+                    }
+                };
+                models.extend(listed.visible());
+                match listed.next_cursor {
+                    Some(_) if page >= CATALOG_PAGES => out.event(
+                        session,
+                        Event::Catalog(Catalog::Failed(format!(
+                            "Codex returned more than {CATALOG_PAGES} pages of models"
+                        ))),
+                    ),
+                    Some(cursor) => {
+                        self.request_catalog_page(session, models, page + 1, Some(cursor), out)
+                    }
+                    // Codex's `isDefault` is not the user's configured default, so what
+                    // the default runs as stays unknown.
+                    None => out.event(
+                        session,
+                        Event::Catalog(Catalog::Ready {
+                            models,
+                            default_model: None,
+                        }),
+                    ),
                 }
             }
             Pending::Steer {
@@ -828,6 +930,35 @@ struct ThreadResult {
     #[serde(rename = "approvalPolicy")]
     approval_policy: Option<Value>,
     sandbox: Option<Value>,
+    model: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelList {
+    data: Vec<WireModel>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireModel {
+    model: String,
+    display_name: String,
+    #[serde(default)]
+    hidden: bool,
+}
+
+impl ModelList {
+    /// The page's visible models. Codex lists a hidden model for its own use, not for
+    /// choosing.
+    fn visible(&self) -> impl Iterator<Item = ModelInfo> + '_ {
+        self.data.iter().filter(|m| !m.hidden).map(|m| ModelInfo {
+            model: m.model.clone(),
+            label: m.display_name.clone(),
+            resolved: None,
+        })
+    }
 }
 
 impl ThreadResult {

@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::io;
 use std::path::Path;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct WorkingDirectory(String);
 
 impl WorkingDirectory {

@@ -11,7 +11,10 @@
 //! abort it and run next (two), so counting results alone is not enough.
 
 use crate::driver::{ApprovalState, Command, Outputs};
-use crate::item::{Approval, Event, Item, ItemKind, ItemStatus, RequestId, TurnStatus, cap_output};
+use crate::item::{
+    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
+    cap_output,
+};
 use keystone_core::ApprovalMode;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -99,6 +102,7 @@ impl Launch {
         self,
         mode: ApprovalMode,
         baseline: Option<&'a str>,
+        model: Option<&'a str>,
         resume: Option<&'a str>,
     ) -> Vec<&'a str> {
         match self {
@@ -106,6 +110,9 @@ impl Launch {
                 let mut args = args(mode);
                 if let Some(baseline) = baseline {
                     args.extend(["--permission-mode", baseline]);
+                }
+                if let Some(model) = model {
+                    args.extend(["--model", model]);
                 }
                 if let Some(resume) = resume {
                     args.extend(["--resume", resume]);
@@ -180,6 +187,8 @@ pub struct ClaudeDriver {
     requests: HashMap<String, Request>,
     /// Claude's session ID, from `system/init`.
     conversation: Option<String>,
+    /// The model `system/init` last reported.
+    model: Option<String>,
     /// Whether Claude reports `command_lifecycle` frames: unknown until the first frame
     /// or `init`. Steering needs them to tell which `result` ends the turn.
     lifecycle: Option<bool>,
@@ -256,6 +265,7 @@ impl ClaudeDriver {
             next_request: 0,
             requests: HashMap::new(),
             conversation: None,
+            model: None,
             lifecycle: None,
             turn: None,
             message: None,
@@ -490,11 +500,13 @@ impl ClaudeDriver {
         }
     }
 
-    /// The process exited. A running turn fails.
+    /// The process exited. A running turn fails, and the model it reported is gone
+    /// with it.
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
         if self.turn.is_some() {
             self.finish(TurnStatus::Failed, Some(reason.to_owned()), out);
         }
+        out.event(self.session, Event::ModelLost);
     }
 
     /// Keystone's ID for one of Claude's requests. Claude's IDs are only unique within
@@ -789,7 +801,7 @@ impl ClaudeDriver {
         if init.permission_mode.is_some() {
             self.confirmed = init.permission_mode;
         }
-        // Claude repeats `init` before each turn; report the ID once.
+        // Claude repeats `init` before each turn; report the ID and the model once.
         if self.conversation.as_deref() != Some(init.session_id.as_str()) {
             self.conversation = Some(init.session_id.clone());
             out.event(
@@ -798,6 +810,12 @@ impl ClaudeDriver {
                     thread_id: init.session_id,
                 },
             );
+        }
+        if let Some(model) = init.model
+            && self.model.as_deref() != Some(model.as_str())
+        {
+            self.model = Some(model.clone());
+            out.event(self.session, Event::ModelReported { model });
         }
         self.pump(out);
     }
@@ -1307,6 +1325,38 @@ impl ClaudeDriver {
     }
 }
 
+/// The catalog in Claude's answer to an `initialize` control request, or `None` when
+/// `line` is not such an answer. The `default` entry says what the default resolves to
+/// and is not itself a choice, so it becomes the catalog's default model.
+pub fn initialize_catalog(line: &[u8]) -> Option<Catalog> {
+    let Ok(ControlResponse { response }) = serde_json::from_slice::<ControlResponse>(line) else {
+        return None;
+    };
+    if response.subtype == "error" {
+        return Some(Catalog::Failed(
+            response.error.unwrap_or_else(|| "no reason given".into()),
+        ));
+    }
+    let models = response.response?.models?;
+    let default_model = models
+        .iter()
+        .find(|m| m.value == "default")
+        .and_then(|m| m.resolved_model.clone());
+    let models = models
+        .into_iter()
+        .filter(|m| m.value != "default")
+        .map(|m| ModelInfo {
+            model: m.value,
+            label: m.display_name,
+            resolved: m.resolved_model,
+        })
+        .collect();
+    Some(Catalog::Ready {
+        models,
+        default_model,
+    })
+}
+
 /// A UUID that names one sent message. Claude echoes it in lifecycle frames.
 pub fn message_uuid(seed: u64, n: u64) -> String {
     format!(
@@ -1375,6 +1425,7 @@ struct Init {
     capabilities: Vec<String>,
     #[serde(rename = "permissionMode")]
     permission_mode: Option<String>,
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1505,6 +1556,15 @@ struct ModeSet {
     current_permission_mode: Option<String>,
     commands: Option<Value>,
     claude_code_version: Option<Value>,
+    models: Option<Vec<WireModel>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireModel {
+    value: String,
+    display_name: String,
+    resolved_model: Option<String>,
 }
 
 fn helper_init_problem(init: &Value) -> Option<String> {

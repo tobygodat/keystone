@@ -1,10 +1,12 @@
 use crate::arrangement_editor::Action;
-use crate::{Keystone, ViewKey, arch_mark, now_ms};
+use crate::{Keystone, ViewKey, arch_mark, model_selector, now_ms};
 use gpui::{
     AnyElement, AvailableSpace, Bounds, Context, Empty, FontWeight, IntoElement, MouseButton,
     Pixels, Point, SharedString, Window, canvas, div, prelude::*, px, size,
 };
-use keystone_core::{Axis, Component, Composition, Edit, Node, NodePath, Place, Size, ViewId};
+use keystone_core::{
+    ApprovalMode, Axis, Component, Composition, Edit, Node, NodePath, Place, Provider, Size, ViewId,
+};
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
 use std::num::NonZeroU16;
@@ -124,6 +126,11 @@ impl Arrangement {
         self.tabs.clear();
         self.tab = None;
     }
+
+    /// Whether a window this wide is too narrow for the composer's full controls.
+    pub(crate) fn narrows_composer(&self, window_width: Pixels) -> bool {
+        self.fitted && f32::from(window_width) < self.composer_min_width
+    }
 }
 
 impl Keystone {
@@ -137,21 +144,33 @@ impl Keystone {
             .any(|(_, component)| component == Component::SessionList)
     }
 
+    /// The composer's minimum holds the widest of each control any session shows, so a
+    /// Send, a provider's report or another selection never refits the arrangement.
     fn composer_minimum_width(&self, window: &mut Window, cx: &mut Context<Self>) -> f32 {
         let Some(session) = self.selected_session() else {
             return COMPOSER_MIN;
         };
         let folder = self.conversation_folder(session.id()).unwrap();
+        let models = [Provider::Claude, Provider::Codex].map(|provider| {
+            let selection = model_selector::Selection {
+                provider,
+                model: None,
+                reported_model: None,
+                started: false,
+                choices: model_selector::Choices::Loading,
+            };
+            model_selector::trigger(selection, false, cx).0
+        });
         let provider = h_flex()
             .gap(px(7.))
             .flex_none()
-            .child(Icon::new(IconName::Diamond).size(px(12.)))
-            .child(
-                Label::new(crate::provider_name(session.provider()))
-                    .size(TextSize::Ui)
-                    .weight(FontWeight::MEDIUM),
-            )
+            .child(v_flex().children(models))
             .child(div().w_0().flex_none());
+        let approvals = ApprovalMode::ALL.map(|mode| {
+            Button::new(("measure-approval", mode as usize), mode.label())
+                .size(ButtonSize::Compact)
+                .icon(IconName::Shield)
+        });
         let mut controls = h_flex()
             .gap(px(14.))
             .font_family(cx.theme().fonts.ui.clone())
@@ -159,11 +178,7 @@ impl Keystone {
             .child(provider)
             .child(div().w_px().flex_none())
             .child(folder.button("measure-project"))
-            .child(
-                Button::new("measure-approval", session.approval_mode().label())
-                    .size(ButtonSize::Compact)
-                    .icon(IconName::Shield),
-            )
+            .child(v_flex().children(approvals))
             .child(div().w_0().flex_none())
             .child(
                 Button::new("measure-stop", "Stop")
@@ -261,8 +276,8 @@ impl Keystone {
                             cx.notify();
                         }))
                 })))
-                .child(div().flex_1().min_h_0().overflow_hidden().child(self.arrangement_view(selected, &c, false, cx)))
-                .child(div().flex_none().w_full().child(self.arrangement_view(composer, &c, true, cx)));
+                .child(div().flex_1().min_h_0().overflow_hidden().child(self.arrangement_view(selected, &c, false, viewport.width, cx)))
+                .child(div().flex_none().w_full().child(self.arrangement_view(composer, &c, true, viewport.width, cx)));
             if self.presentation.current.arrangement.sidebar_overlay {
                 if let Some((id, _)) = c.views().find(|(_, k)| *k == Component::SessionList) {
                     body = body.child(
@@ -275,13 +290,13 @@ impl Keystone {
                                 f32::from(keystone_core::SidebarWidth::DEFAULT.px()),
                             ))))
                             .occlude()
-                            .child(self.arrangement_view(id, &c, false, cx)),
+                            .child(self.arrangement_view(id, &c, false, viewport.width, cx)),
                     );
                 }
             }
             body.into_any_element()
         } else {
-            self.arrangement_node(c.root(), &c, NodePath::default(), false, cx)
+            self.arrangement_node(c.root(), &c, NodePath::default(), false, viewport.width, cx)
         }
     }
 
@@ -291,10 +306,11 @@ impl Keystone {
         c: &Composition,
         path: NodePath,
         auto: bool,
+        window_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
-            Node::View { id } => self.arrangement_view(*id, c, auto, cx),
+            Node::View { id } => self.arrangement_view(*id, c, auto, window_width, cx),
             Node::Tabs { selected, views } => {
                 let views_first = views[0];
                 let selected = if self.presentation.current.customization.is_open() {
@@ -332,6 +348,7 @@ impl Keystone {
                         views[selected],
                         c,
                         false,
+                        window_width,
                         cx,
                     )))
                     .into_any_element()
@@ -354,13 +371,14 @@ impl Keystone {
                         .justify_center()
                         .gap_3()
                         .pb(px(60.))
-                        .child(
-                            div()
-                                .h(px(110.))
-                                .w_full()
-                                .child(self.arrangement_view(first, c, false, cx)),
-                        )
-                        .child(self.arrangement_view(second, c, true, cx))
+                        .child(div().h(px(110.)).w_full().child(self.arrangement_view(
+                            first,
+                            c,
+                            false,
+                            window_width,
+                            cx,
+                        )))
+                        .child(self.arrangement_view(second, c, true, window_width, cx))
                         .into_any_element();
                 }
                 let axis = *axis;
@@ -427,6 +445,7 @@ impl Keystone {
                         c,
                         child_path,
                         child.size == Size::Auto,
+                        window_width,
                         cx,
                     );
                     split = split.child(
@@ -567,6 +586,7 @@ impl Keystone {
         id: ViewId,
         c: &Composition,
         auto: bool,
+        window_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let component = c.component(id).unwrap();
@@ -675,7 +695,7 @@ impl Keystone {
                     .items_center()
                     .justify_end()
                     .p_3()
-                    .child(self.composer(current, cx))
+                    .child(self.composer(current, window_width, cx))
                     .children(self.error_line());
             }
             Component::Conversation => {

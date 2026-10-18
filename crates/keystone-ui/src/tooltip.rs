@@ -45,7 +45,12 @@ impl Render for Tooltip {
                 .py(px(5.))
                 .surface(Elevation::Overlay, cx)
                 .rounded(radius::CONTROL)
-                .child(Label::new(self.title.clone()).size(TextSize::Sm))
+                .child(
+                    div()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .child(Label::new(self.title.clone()).size(TextSize::Sm)),
+                )
                 .when_some(self.key.clone(), |d, key| {
                     d.child(Label::new(key).size(TextSize::Sm).color(Color::Faint))
                 }),

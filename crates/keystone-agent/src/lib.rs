@@ -18,5 +18,6 @@ pub mod worker;
 pub use connection::{ClaudeConnection, CodexConnection, Connection, StartHook, Wake};
 pub use driver::{ApprovalState, Command, Outputs};
 pub use item::{
-    Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
+    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, OUTPUT_CAP, RequestId,
+    TurnStatus, cap_output,
 };

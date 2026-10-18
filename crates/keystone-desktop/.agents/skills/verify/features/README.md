@@ -17,8 +17,8 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools only obser
 - [Settlement](settlement.md) covers row and shortcut settling, un-settling, and the collapsible Settled section.
 - [Search and navigation](search.md) covers search entry points, matching, clearing, and sidebar visibility.
 - [Customize](customize.md) covers native component moves, split sizing, duplicate conversations, tabs, restricted Claude Code helper previews, Codex helper refusal, Borrow, per-project Apply/Discard/Undo/Reset, fitting, focus, and restart.
-- [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, and restoring a conversation.
+- [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, choosing the provider and model before the first Send, and restoring a conversation.
 
 ## Coverage rules
 
-For each run, record the entry points actually exercised. Do not mark an entire feature complete when only a shortcut passed. Record precondition failures rather than removing the failing step. PR viewing, saved prompts, and model controls remain separate scope. Composition controls have their own native evidence requirements.
+For each run, record the entry points actually exercised. Do not mark an entire feature complete when only a shortcut passed. Record precondition failures rather than removing the failing step. PR viewing and saved prompts remain separate scope, as do model controls beyond the draft's provider and model choice (effort, fast mode, service tier, switching after the first Send). Composition controls have their own native evidence requirements.

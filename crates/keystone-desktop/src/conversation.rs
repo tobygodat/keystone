@@ -39,6 +39,11 @@ pub struct Conversation {
     /// Approval requests waiting for an answer, oldest first.
     pub approvals: Vec<Approval>,
     pub error: Option<String>,
+    /// The model the provider last said this session runs on, in this run of the app.
+    /// Cleared when the process or conversation that reported it is gone, so a stale
+    /// report is never shown as current. A failed turn keeps it: the provider is still
+    /// there.
+    pub reported_model: Option<String>,
     /// Set while the log cannot be written. Kept apart from provider errors, so it
     /// stays visible until saving works again.
     pub save_error: Option<String>,
@@ -233,15 +238,22 @@ impl Conversation {
     /// Applies one provider event. Returns the thread ID when the provider opened one.
     pub fn apply(&mut self, event: Event) -> Option<String> {
         if let Some(pending) = &mut self.pending {
-            // The thread is saved with the session, not in this log, so it never waits.
-            if let Event::ThreadReady { thread_id } = event {
-                return Some(thread_id);
+            // The thread is saved with the session, and the model is shown from memory,
+            // not from this log, so neither waits.
+            match event {
+                Event::ThreadReady { thread_id } => return Some(thread_id),
+                Event::ModelReported { model } => self.reported_model = Some(model),
+                Event::ModelLost => self.reported_model = None,
+                event => pending.push(Pending::Event(event)),
             }
-            pending.push(Pending::Event(event));
             return None;
         }
         match event {
             Event::ThreadReady { thread_id } => return Some(thread_id),
+            Event::ModelReported { model } => self.reported_model = Some(model),
+            Event::ModelLost => self.reported_model = None,
+            // Catalogs belong to the provider, not to a conversation.
+            Event::Catalog(_) => {}
             Event::TurnStarted => {
                 self.running = true;
                 self.error = None;
@@ -569,6 +581,39 @@ mod tests {
             message: "Could not start Codex".into(),
         });
         assert!(!live.running);
+    }
+
+    /// A failed turn or a refused request leaves the provider where it was, so the
+    /// model it reported still holds. Only a lost process or conversation clears it.
+    #[test]
+    fn a_reported_model_outlives_failures_until_the_provider_is_gone() {
+        let mut live = Conversation::default();
+        live.apply(Event::ModelReported {
+            model: "gpt-6-astra".into(),
+        });
+        live.apply(Event::TurnCompleted {
+            status: TurnStatus::Failed,
+            error: Some("turn rejected".into()),
+            stopped: false,
+        });
+        live.apply(Event::Failed {
+            message: "Could not steer".into(),
+        });
+        assert_eq!(live.reported_model.as_deref(), Some("gpt-6-astra"));
+        live.apply(Event::ModelLost);
+        assert_eq!(live.reported_model, None);
+
+        // Both bypass the history-loading queue in order.
+        let mut loading = Conversation::loading();
+        loading.apply(Event::ModelReported {
+            model: "gpt-6-astra".into(),
+        });
+        loading.apply(Event::ModelLost);
+        assert_eq!(loading.reported_model, None);
+        loading.apply(Event::ModelReported {
+            model: "gpt-6-sol".into(),
+        });
+        assert_eq!(loading.reported_model.as_deref(), Some("gpt-6-sol"));
     }
 
     #[test]
@@ -900,6 +945,7 @@ mod tests {
                 session: 12,
                 cwd: "/tmp/repo".into(),
                 resume: None,
+                model: None,
             },
             &mut out,
         );

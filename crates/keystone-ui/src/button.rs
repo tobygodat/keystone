@@ -254,6 +254,7 @@ impl RenderOnce for Button {
 pub struct IconButton {
     common: Common,
     icon: IconName,
+    color: Option<Color>,
 }
 
 impl IconButton {
@@ -261,7 +262,14 @@ impl IconButton {
         Self {
             common: Common::new(id.into()),
             icon,
+            color: None,
         }
+    }
+
+    /// Overrides the icon color, for a state that needs attention.
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
     }
 
     common_builders!();
@@ -270,7 +278,9 @@ impl IconButton {
 impl RenderOnce for IconButton {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let side = self.common.size.height(cx);
-        let color = if self.common.style == ButtonStyle::Primary {
+        let color = if let Some(color) = self.color {
+            color
+        } else if self.common.style == ButtonStyle::Primary {
             Color::Custom(cx.theme().colors.text_inverse)
         } else if self.common.selected {
             Color::Custom(cx.theme().colors.selection_edge)

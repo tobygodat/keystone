@@ -536,6 +536,7 @@ fn open_auto_row(
     cx: &mut TestAppContext,
 ) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
     let (dir, view, cx) = open(cx);
+    cx.simulate_resize(gpui::size(px(1280.), px(900.)));
     click(cx, "select-component-3");
     click(cx, "component-right");
     click(cx, "select-component-2");

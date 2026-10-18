@@ -188,7 +188,8 @@ impl Worker {
             mode: ApprovalMode::ReadOnly,
             overridden: true,
         };
-        if let Err(reason) = connection.send(SESSION, cwd, None, approval, instruction(&ask)) {
+        if let Err(reason) = connection.send(SESSION, cwd, None, None, approval, instruction(&ask))
+        {
             self.report(ask.request, Outcome::Failed(reason.to_owned()));
             return Next::Wait;
         }
@@ -580,6 +581,7 @@ mod tests {
             _: u64,
             _: &str,
             _: Option<&str>,
+            _: Option<&str>,
             _: ApprovalState,
             _: String,
         ) -> Result<(), &'static str> {
@@ -587,6 +589,7 @@ mod tests {
             let _ = self.inbox.lock().unwrap().send(Message::Events);
             Ok(())
         }
+        fn request_catalog(&self, _: u64, _: &str) {}
         fn set_approval(&self, _: u64, _: ApprovalState) {}
         fn command(&self, command: Command) {
             self.commands.lock().unwrap().push(command);
