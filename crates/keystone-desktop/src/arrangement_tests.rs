@@ -4,7 +4,7 @@ use keystone_agent::{
     Item, ItemKind, ItemStatus,
     log::{Entry, SessionLog},
 };
-use keystone_core::{Provider, Store};
+use keystone_core::{Provider, Store, WorkingDirectory};
 
 fn click(cx: &mut VisualTestContext, id: &'static str) {
     let bounds = cx
@@ -29,8 +29,12 @@ fn drag(cx: &mut VisualTestContext, id: &'static str, x: f32, y: f32) {
 fn open(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-    store.create(Provider::Codex, 1).unwrap();
-    store.create(Provider::Claude, 2).unwrap();
+    store
+        .create(Provider::Codex, &working_directory(), 1)
+        .unwrap();
+    store
+        .create(Provider::Claude, &working_directory(), 2)
+        .unwrap();
     store.select(1).unwrap();
     let mut log = SessionLog::open(&dir.path().join("sessions"), 1).unwrap();
     for i in 0..50 {
@@ -491,4 +495,8 @@ fn fitting_uses_the_first_displayed_preferred_pane_and_retains_temporary_clicks(
         std::fs::read(dir.path().join("workspace.json")).unwrap(),
         saved
     );
+}
+
+fn working_directory() -> WorkingDirectory {
+    WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
 }

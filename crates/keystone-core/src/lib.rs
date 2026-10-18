@@ -12,6 +12,7 @@ use unicode_segmentation::UnicodeSegmentation;
 mod composition;
 mod layout;
 mod project;
+mod session_context;
 
 pub use composition::{
     Axis, Child, Component, Composition, Edit, Node, NodePath, Place, Problem, SavedComposition,
@@ -22,6 +23,8 @@ pub use layout::{
 };
 pub use project::ProjectId;
 use project::ProjectLayouts;
+use session_context::SavedSessionContext;
+pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory};
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
@@ -114,6 +117,8 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "is_default")]
     title_source: TitleSource,
     provider: Provider,
+    #[serde(default, skip_serializing_if = "SavedSessionContext::is_missing")]
+    execution_context: SavedSessionContext,
     settled: bool,
     draft: String,
     /// The provider's own conversation ID, used to resume after a restart.
@@ -212,6 +217,10 @@ impl Session {
 
     pub fn provider(&self) -> Provider {
         self.provider
+    }
+
+    pub fn context(&self) -> SessionContext<'_> {
+        self.execution_context.context()
     }
 
     pub fn settled(&self) -> bool {
@@ -440,7 +449,12 @@ impl Store {
     }
 
     /// Creates a session and selects it. `now` is unix milliseconds.
-    pub fn create(&mut self, provider: Provider, now: u64) -> StoreResult<Applied<u64>> {
+    pub fn create(
+        &mut self,
+        provider: Provider,
+        directory: &WorkingDirectory,
+        now: u64,
+    ) -> StoreResult<Applied<u64>> {
         let id = self.next_id;
         let next_id = id
             .checked_add(1)
@@ -451,6 +465,7 @@ impl Store {
             title: format!("New {provider} session"),
             title_source: TitleSource::Placeholder,
             provider,
+            execution_context: SavedSessionContext::recorded(directory, ContextOrigin::Created),
             settled: false,
             draft: String::new(),
             provider_thread: None,
@@ -468,6 +483,30 @@ impl Store {
             value: id,
             durability: applied.durability,
         })
+    }
+
+    pub fn choose_legacy_directory(
+        &mut self,
+        session: u64,
+        directory: &WorkingDirectory,
+    ) -> StoreResult<Applied<()>> {
+        let current = self
+            .workspace
+            .sessions
+            .iter()
+            .find(|current| current.id == session)
+            .ok_or_else(|| invalid(format!("unknown session ID {session}")))?;
+        match current.context() {
+            SessionContext::LegacyMissing => self.update_session(session, |session| {
+                session.execution_context =
+                    SavedSessionContext::recorded(directory, ContextOrigin::Chosen);
+            }),
+            SessionContext::Recorded {
+                directory: chosen,
+                origin: ContextOrigin::Chosen,
+            } if chosen == directory => Ok(self.finish_sync()),
+            _ => Err(invalid("session execution directory cannot be replaced").into()),
+        }
     }
 
     pub fn select(&mut self, id: u64) -> StoreResult<Applied<()>> {
@@ -703,6 +742,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
 
+    fn working_directory() -> WorkingDirectory {
+        WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
     #[test]
     fn directory_sync_failure_keeps_applied_snapshot_and_retry_does_not_duplicate() {
         let directory = tempfile::tempdir().unwrap();
@@ -710,7 +753,9 @@ mod tests {
         let mut store = Store::open(&path).unwrap();
         store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
 
-        let created = store.create(Provider::Claude, 1).unwrap();
+        let created = store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
         assert_eq!(created.value, 1);
         assert_eq!(
             created.durability,
@@ -739,10 +784,62 @@ mod tests {
         assert!(store.pending_directory.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), before_retry);
         assert_eq!(store.workspace().sessions().len(), 1);
-        let next = store.create(Provider::Codex, 3).unwrap();
+        let next = store
+            .create(Provider::Codex, &working_directory(), 3)
+            .unwrap();
         assert_eq!(next.value, 2);
         assert_eq!(next.durability, Durability::Synced);
         assert_eq!(Store::open(&path).unwrap().workspace().sessions().len(), 2);
+    }
+
+    #[test]
+    fn legacy_choice_sync_warning_is_applied_and_same_choice_retries_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(&path, r#"{"version":1,"next_id":2,"workspace":{"selected":1,"sessions":[{"id":1,"title":"Legacy","provider":"Codex","settled":false,"draft":"keep"}]}}"#).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        let chosen = WorkingDirectory::new(directory.path()).unwrap();
+        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        let applied = store.choose_legacy_directory(1, &chosen).unwrap();
+        assert!(matches!(
+            applied.durability,
+            Durability::DirectorySyncPending(_)
+        ));
+        let expected = SessionContext::Recorded {
+            directory: &chosen,
+            origin: ContextOrigin::Chosen,
+        };
+        assert_eq!(store.workspace().sessions()[0].context(), expected);
+        assert_eq!(
+            Store::open(&path).unwrap().workspace().sessions()[0].context(),
+            expected
+        );
+        let before = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            store
+                .choose_legacy_directory(1, &chosen)
+                .unwrap()
+                .durability,
+            Durability::DirectorySyncPending(_)
+        ));
+        assert!(store.sync_pending().is_err());
+        assert!(
+            store
+                .choose_legacy_directory(1, &working_directory())
+                .is_err()
+        );
+        assert!(store.sync_pending().is_err());
+        store.sync_directory = File::sync_all;
+        assert_eq!(
+            store
+                .choose_legacy_directory(1, &chosen)
+                .unwrap()
+                .durability,
+            Durability::Synced
+        );
+        assert!(store.pending_directory.is_none());
+        assert_eq!(store.writes(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -750,9 +847,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Codex, 1_000).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
         store.record_turn_end(1, false, 3_000).unwrap();
-        store.create(Provider::Claude, 4_000).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 4_000)
+            .unwrap();
         store.select(1).unwrap();
         store.set_draft(1, "typing".into()).unwrap();
         assert_eq!(store.workspace().sessions()[0].viewed_at(), Some(1_000));
@@ -807,8 +908,12 @@ mod tests {
     fn attention_prefers_approval_then_failure_then_an_unseen_reply() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("state.json")).unwrap();
-        store.create(Provider::Codex, 1_000).unwrap();
-        store.create(Provider::Codex, 2_000).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2_000)
+            .unwrap();
         let attention = |store: &Store, approval, running| {
             store.workspace().sessions()[0].attention(approval, running)
         };
@@ -844,8 +949,12 @@ mod tests {
     fn an_unseen_reply_holds_until_explicitly_observed() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("state.json")).unwrap();
-        store.create(Provider::Codex, 1_000).unwrap();
-        store.create(Provider::Codex, 2_000).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2_000)
+            .unwrap();
         store.record_turn_end(1, false, 3_000).unwrap();
         let first = |store: &Store| store.workspace().sessions()[0].attention(false, false);
 
@@ -865,8 +974,12 @@ mod tests {
     fn observation_clears_an_unseen_reply_after_the_clock_moves_back() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("state.json")).unwrap();
-        store.create(Provider::Codex, 1_000).unwrap();
-        store.create(Provider::Codex, 2_000).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2_000)
+            .unwrap();
         store.record_turn_end(1, false, 10_000).unwrap();
         store.select(1).unwrap();
         store.select(2).unwrap();
@@ -882,7 +995,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Codex, 1_000).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
         let title = |store: &Store| store.workspace().sessions()[0].title().to_owned();
         assert_eq!(title(&store), "New Codex session");
         let writes = store.writes();
@@ -902,7 +1017,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("state.json")).unwrap();
         let mut title_of = |text: &str| {
-            let id = store.create(Provider::Claude, 1_000).unwrap().value;
+            let id = store
+                .create(Provider::Claude, &working_directory(), 1_000)
+                .unwrap()
+                .value;
             store.record_message(id, text, 2_000).unwrap();
             store.workspace().sessions()[id as usize - 1]
                 .title()
@@ -926,8 +1044,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Codex, 1_000).unwrap();
-        store.create(Provider::Codex, 1_000).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
         let title = |store: &Store, id: u64| {
             store.workspace().sessions()[id as usize - 1]
                 .title()
@@ -980,7 +1102,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Codex, 1_000).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1_000)
+            .unwrap();
         store.record_message(1, "hi", 2_000).unwrap();
         store.record_turn_end(1, false, 3_000).unwrap();
         // A late steer opens another turn without a new message.
@@ -1052,7 +1176,9 @@ mod tests {
                     ..Appearance::default()
                 })
                 .unwrap();
-            store.create(Provider::Claude, 1_000).unwrap();
+            store
+                .create(Provider::Claude, &working_directory(), 1_000)
+                .unwrap();
             store.rename(1, "Renamed").unwrap();
 
             appearance_keys_saved_once(&path);
@@ -1173,7 +1299,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Claude, 1).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
         store.set_draft(1, "draft".into()).unwrap();
         store
             .set_appearance(Appearance {
@@ -1376,7 +1504,9 @@ mod tests {
         let path = state.join("state.json");
         let a = ProjectId::new(directory.path()).unwrap();
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
 
         store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
         let applied = store.set_project_layout(&a, Some(tabbed().into())).unwrap();

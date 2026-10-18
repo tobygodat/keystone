@@ -28,7 +28,7 @@ use keystone_agent::{
 use keystone_core::ViewId;
 use keystone_core::{
     Appearance, ApprovalMode, Attention, Density, Durability, Provider, SidebarSide, Store,
-    ThemeMode,
+    ThemeMode, WorkingDirectory,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
@@ -430,6 +430,14 @@ impl Keystone {
     }
 
     fn create(&mut self, provider: Provider, cx: &mut Context<Self>) {
+        let directory = match WorkingDirectory::new(&self.project_dir) {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
         if !self.save_draft(cx) {
             return;
         }
@@ -437,7 +445,7 @@ impl Keystone {
             let rows = self.replies.get_mut().settle(left);
             self.invalidate(left, ranges(rows), false);
         }
-        self.error = match self.store.create(provider, now_ms()) {
+        self.error = match self.store.create(provider, &directory, now_ms()) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
@@ -2401,6 +2409,10 @@ mod tests {
     use conversation::Row;
     use keystone_agent::{Event, Item, ItemKind, ItemStatus, TurnStatus};
 
+    fn working_directory() -> WorkingDirectory {
+        WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
     const MAIN_1: ViewKey = ViewKey {
         view: ViewId::MAIN,
         session: 1,
@@ -2455,7 +2467,7 @@ mod tests {
             } else {
                 Provider::Codex
             };
-            store.create(provider, 1).unwrap();
+            store.create(provider, &working_directory(), 1).unwrap();
         }
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -2542,7 +2554,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 1000);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -2609,7 +2623,9 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -2691,7 +2707,9 @@ mod tests {
     fn streaming_keeps_the_place_of_a_reader_who_scrolled_up(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -2771,8 +2789,12 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
-        store.create(Provider::Codex, 2).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2)
+            .unwrap();
         store.select(1).unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
@@ -3031,7 +3053,9 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -3261,9 +3285,13 @@ mod tests {
     fn a_message_sent_while_history_loads_is_saved_on_quit(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         // Selected, so session 1's history is not loaded until it is used below.
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         let sessions = dir.path().join("sessions");
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
@@ -3290,8 +3318,12 @@ mod tests {
     fn closing_does_not_wait_for_a_history_read_that_never_returns(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         let sessions = dir.path().join("sessions");
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
@@ -3350,7 +3382,9 @@ mod tests {
     fn a_save_failure_shows_in_the_conversation_until_saving_works(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         // A file where the sessions directory belongs makes every write fail.
         let sessions = dir.path().join("sessions");
         std::fs::write(&sessions, "").unwrap();
@@ -3388,8 +3422,12 @@ mod tests {
     fn cached_sidebar_follows_search_and_settlement(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Claude, 1).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -3437,7 +3475,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         for provider in [Provider::Claude, Provider::Codex] {
-            let id = store.create(provider, 1).unwrap().value;
+            let id = store
+                .create(provider, &working_directory(), 1)
+                .unwrap()
+                .value;
             store.set_settled(id, true).unwrap();
         }
         store.select(1).unwrap();
@@ -4507,8 +4548,12 @@ mod tests {
     fn settled_section_starts_collapsed_and_opens_below_working(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Claude, 1).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         store.set_settled(1, true).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -4537,7 +4582,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         for now in 1..=5 {
-            store.create(Provider::Codex, now).unwrap();
+            store
+                .create(Provider::Codex, &working_directory(), now)
+                .unwrap();
         }
         store.record_turn_end(1, true, 10).unwrap();
         store.record_turn_end(2, false, 11).unwrap();
@@ -4581,8 +4628,12 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
-        store.create(Provider::Codex, 2).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2)
+            .unwrap();
         store.select(1).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -4618,9 +4669,13 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         // Selected, so session 1 loads only when the test asks for it.
-        store.create(Provider::Codex, 2).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2)
+            .unwrap();
         let sessions = dir.path().join("sessions");
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
@@ -4668,8 +4723,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
-        store.create(Provider::Codex, 2).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2)
+            .unwrap();
         store.record_turn_end(1, false, 3).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -4697,7 +4756,9 @@ mod tests {
     ) -> String {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         cx.update(|cx| {
             keystone_ui::init(cx);
             bind_keys(cx);
@@ -4725,7 +4786,9 @@ mod tests {
     fn a_long_draft_wraps_and_the_composer_grows_to_its_cap(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -4777,8 +4840,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Claude, 1).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -4949,8 +5016,12 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
-        store.create(Provider::Codex, 2).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2)
+            .unwrap();
         let sessions = dir.path().join("sessions");
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
@@ -5096,7 +5167,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         Store::open(&path)
             .unwrap()
-            .create(Provider::Codex, 1)
+            .create(Provider::Codex, &working_directory(), 1)
             .unwrap();
         let (view, cx) = open_window(&path, cx);
         wait_until(cx, &view, |view| {
@@ -5316,8 +5387,12 @@ mod tests {
     fn claude_sessions_move_between_working_and_needs_action(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Claude, 1).unwrap();
-        store.create(Provider::Claude, 2).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 2)
+            .unwrap();
         store.select(1).unwrap();
         let script = claude_script(dir.path(), "");
         cx.update(keystone_ui::init);
@@ -5371,8 +5446,12 @@ mod tests {
     fn a_failed_claude_turn_moves_the_session_to_needs_action(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Claude, 1).unwrap();
-        store.create(Provider::Claude, 2).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 2)
+            .unwrap();
         store.select(1).unwrap();
         let script = claude_script(dir.path(), "KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1");
         cx.update(keystone_ui::init);
@@ -5395,8 +5474,12 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-        store.create(Provider::Claude, 1).unwrap();
-        store.create(Provider::Claude, 2).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 2)
+            .unwrap();
         store.select(1).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
@@ -5466,6 +5549,29 @@ mod tests {
         let restored = Store::open(path).unwrap();
         assert_eq!(restored.workspace().selected(), Some(2));
         assert!(!restored.workspace().sessions()[1].settled());
+    }
+
+    #[gpui::test]
+    fn invalid_creation_directory_keeps_selection_and_unsaved_draft(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let (view, cx) = open_window(&path, cx);
+        click(cx, "new-session");
+        click(cx, "new-codex");
+        let before = std::fs::read(&path).unwrap();
+        let unavailable = dir.path().join("unavailable");
+        view.update(cx, |this, cx| {
+            this.project_dir = unavailable;
+            this.composer.update(cx, |input, cx| {
+                input.set_value("Keep this draft".into(), cx)
+            });
+            this.create(Provider::Claude, cx);
+            assert!(this.error.is_some());
+            assert_eq!(this.store.workspace().selected(), Some(1));
+            assert_eq!(this.store.workspace().sessions().len(), 1);
+            assert_eq!(this.composer.read(cx).value(), "Keep this draft");
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[gpui::test]
@@ -5565,8 +5671,12 @@ mod tests {
         std::fs::create_dir(&state_dir).unwrap();
         let path = state_dir.join("workspace.json");
         let mut store = Store::open(&path).unwrap();
-        store.create(Provider::Claude, 1).unwrap();
-        store.create(Provider::Codex, 1).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
@@ -5580,6 +5690,13 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
             assert_eq!(view.store.workspace().selected(), Some(2));
+            assert_eq!(view.composer.read(cx).value(), "Keep my unsaved draft");
+            assert!(view.error.as_deref().unwrap().contains("Draft not saved"));
+        });
+        view.update(cx, |view, cx| {
+            view.create(Provider::Claude, cx);
+            assert_eq!(view.store.workspace().selected(), Some(2));
+            assert_eq!(view.store.workspace().sessions().len(), 2);
             assert_eq!(view.composer.read(cx).value(), "Keep my unsaved draft");
             assert!(view.error.as_deref().unwrap().contains("Draft not saved"));
         });
