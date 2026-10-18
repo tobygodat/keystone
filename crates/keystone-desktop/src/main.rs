@@ -19,7 +19,7 @@ use gpui::{
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{
     ApprovalState, ClaudeConnection, CodexConnection, Command, Connection, Event, ItemKind,
-    TurnStatus, Wake,
+    RequestId, TurnStatus, Wake,
 };
 use keystone_core::{
     ApprovalMode, Attention, Density, Durability, Preferences, Provider, SidebarSide, Store,
@@ -137,6 +137,11 @@ struct Renaming {
     id: u64,
     focus: DialogFocus,
     error: Option<String>,
+}
+
+struct ComposerDraft {
+    session: u64,
+    text: String,
 }
 
 struct Keystone {
@@ -906,13 +911,9 @@ impl Keystone {
         .children(font_items)
     }
 
-    fn composer(&self, current: Option<(Provider, bool)>, cx: &mut Context<Self>) -> gpui::Div {
+    fn composer(&self, current: Option<(u64, Provider)>, cx: &mut Context<Self>) -> gpui::Div {
         let colors = cx.theme().colors;
-        let conversation = self
-            .store
-            .workspace()
-            .selected()
-            .and_then(|id| self.conversations.get(&id));
+        let conversation = current.and_then(|(id, _)| self.conversations.get(&id));
         let running = conversation.is_some_and(|c| c.running);
         let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
         let mode = self.selected_session().map(|s| s.approval_mode());
@@ -940,7 +941,7 @@ impl Keystone {
                             .color(Color::Muted),
                     ),
             ),
-            Some((provider, _)) => {
+            Some((session, provider)) => {
                 let status = if waiting {
                     "Waiting for your approval"
                 } else if running {
@@ -998,9 +999,9 @@ impl Keystone {
                                 .icon(IconName::Square)
                                 .debug_selector(|| "stop".into())
                                 .tooltip(Tooltip::text("Stop this turn"))
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.stop_turn(window, cx)),
-                                ),
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.stop_turn(session, window, cx)
+                                })),
                         )
                     })
                     .child(
@@ -1031,11 +1032,16 @@ impl Keystone {
                                 .builder(),
                             )
                             .when(can_send, |d| {
-                                d.cursor_pointer().hover(|s| s.opacity(0.85)).on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.send_message(window, cx)
-                                    }),
-                                )
+                                d.cursor_pointer()
+                                    .hover(|s| s.opacity(0.85))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(draft) = this
+                                            .composer_draft(cx)
+                                            .filter(|draft| draft.session == session)
+                                        {
+                                            this.send_message(draft, window, cx)
+                                        }
+                                    }))
                             })
                             .when(!can_send, |d| d.cursor_not_allowed()),
                     );
@@ -1582,23 +1588,29 @@ impl Keystone {
         self.logs.flush();
     }
 
-    /// Sends the composer text: a new turn, or a steer for the running one.
-    fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.store.workspace().selected().and_then(|id| {
-            self.store
-                .workspace()
-                .sessions()
-                .iter()
-                .find(|s| s.id() == id)
-                .cloned()
-        }) else {
+    fn composer_draft(&self, cx: &App) -> Option<ComposerDraft> {
+        Some(ComposerDraft {
+            session: self.store.workspace().selected()?,
+            text: self.composer.read(cx).value().to_owned(),
+        })
+    }
+
+    fn send_message(&mut self, draft: ComposerDraft, window: &mut Window, cx: &mut Context<Self>) {
+        let id = draft.session;
+        let Some(session) = self
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| s.id() == id)
+            .cloned()
+        else {
             return;
         };
-        let text = self.composer.read(cx).value().trim().to_owned();
+        let text = draft.text.trim().to_owned();
         if text.is_empty() {
             return;
         }
-        let id = session.id();
         // Apply anything that already arrived, such as the end of the last turn, so
         // the message is shown in the right turn.
         self.pump(cx);
@@ -1657,24 +1669,25 @@ impl Keystone {
         self.refresh(cx);
     }
 
-    fn stop_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn stop_turn(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.composer.focus_handle(cx).focus(window, cx);
-        let Some(id) = self.store.workspace().selected() else {
-            return;
-        };
         if let Some(connection) = self.provider(id).and_then(|p| self.started(p)) {
             connection.command(Command::Interrupt { session: id });
         }
         cx.notify();
     }
 
-    fn answer(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn answer(
+        &mut self,
+        id: u64,
+        request: RequestId,
+        allow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The buttons take focus from the composer; give it back for the next message.
         self.composer.focus_handle(cx).focus(window, cx);
-        let Some(id) = self.store.workspace().selected() else {
-            return;
-        };
-        let Some(approval) = self.conversation(id).decide(allow) else {
+        let Some(approval) = self.conversation(id).decide(&request, allow) else {
             return;
         };
         self.commit(id);
@@ -1786,6 +1799,7 @@ impl Keystone {
         let mut empty = true;
         if let Some(approval) = conversation.approvals.first() {
             empty = false;
+            let (allow, deny) = (approval.request.clone(), approval.request.clone());
             let name = self.provider(session).map_or("The provider", provider_name);
             view = view.child(
                 v_flex()
@@ -1820,8 +1834,8 @@ impl Keystone {
                                     .style(ButtonStyle::Primary)
                                     .icon(IconName::Check)
                                     .debug_selector(|| "approve".into())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.answer(true, window, cx)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.answer(session, allow.clone(), true, window, cx)
                                     })),
                             )
                             .child(
@@ -1829,8 +1843,8 @@ impl Keystone {
                                     .style(ButtonStyle::Subtle)
                                     .icon(IconName::Close)
                                     .debug_selector(|| "deny".into())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.answer(false, window, cx)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.answer(session, deny.clone(), false, window, cx)
                                     })),
                             ),
                     ),
@@ -2269,7 +2283,7 @@ impl Render for Keystone {
         // A session that has reached its provider has history, so while that history
         // loads, the transcript layout is shown rather than the welcome screen.
         let has_thread = current.is_some_and(|s| s.provider_thread().is_some());
-        let current = current.map(|s| (s.provider(), s.settled()));
+        let current = current.map(|s| (s.id(), s.provider()));
         if let Some(id) = selected {
             self.conversation(id);
         }
@@ -2356,7 +2370,7 @@ impl Render for Keystone {
                 _ => {
                     let hint = format!(
                         "Your draft is saved on this machine. Ctrl Enter sends it to {}.",
-                        current.map_or("the provider", |(provider, _)| provider_name(provider))
+                        current.map_or("the provider", |(_, provider)| provider_name(provider))
                     );
                     v_flex()
                         .id("empty-conversation")
@@ -2461,9 +2475,11 @@ impl Render for Keystone {
                 .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                     this.composer.focus_handle(cx).focus(window, cx)
                 }))
-                .on_action(
-                    cx.listener(|this, _: &SendMessage, window, cx| this.send_message(window, cx)),
-                )
+                .on_action(cx.listener(|this, _: &SendMessage, window, cx| {
+                    if let Some(draft) = this.composer_draft(cx) {
+                        this.send_message(draft, window, cx)
+                    }
+                }))
                 .on_action(
                     cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)),
                 )
@@ -3587,7 +3603,8 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             view.composer
                 .update(cx, |input, cx| input.set_value(text.into(), cx));
-            view.send_message(window, cx);
+            let draft = view.composer_draft(cx).unwrap();
+            view.send_message(draft, window, cx);
         });
         cx.run_until_parked();
     }
@@ -4586,7 +4603,8 @@ mod tests {
             this.codex = Some(CodexConnection::new(Some(missing), "0", this.wake.clone()));
             this.composer
                 .update(cx, |input, cx| input.set_value("hello".into(), cx));
-            this.send_message(window, cx);
+            let draft = this.composer_draft(cx).unwrap();
+            this.send_message(draft, window, cx);
         });
         cx.run_until_parked();
         // The start fails on the connection's worker, after the send returned. Until
@@ -5079,6 +5097,80 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn a_second_press_on_an_answered_approval_leaves_the_next_one_waiting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        Store::open(&path)
+            .unwrap()
+            .create(Provider::Codex, 1)
+            .unwrap();
+        let (view, cx) = open_window(&path, cx);
+        wait_until(cx, &view, |view| {
+            view.conversations.get(&1).is_some_and(|c| !c.is_loading())
+        });
+        let mut codex = Codex::open();
+        codex.send("a");
+        for (request, command) in [(10, "touch first"), (11, "touch second")] {
+            codex.line(format!(
+                r#"{{"id":{request},"method":"item/commandExecution/requestApproval","params":{{"threadId":"{}","itemId":"exec-{request}","command":"{command}","availableDecisions":["accept","decline"]}}}}"#,
+                Codex::THREAD
+            ));
+        }
+        deliver(&view, cx, &mut codex);
+        let allow = cx
+            .debug_bounds("approve")
+            .expect("approval card rendered")
+            .center();
+        cx.update(|window, cx| {
+            for _ in 0..2 {
+                let down = gpui::MouseDownEvent {
+                    position: allow,
+                    modifiers: gpui::Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                    first_mouse: false,
+                };
+                let up = gpui::MouseUpEvent {
+                    position: allow,
+                    modifiers: gpui::Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                };
+                window.dispatch_event(gpui::InputEvent::to_platform_input(down), cx);
+                window.dispatch_event(gpui::InputEvent::to_platform_input(up), cx);
+            }
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let conversation = &view.conversations[&1];
+            let waiting: Vec<_> = conversation
+                .approvals
+                .iter()
+                .map(|a| a.action.as_str())
+                .collect();
+            assert_eq!(waiting, ["touch second"]);
+            let decisions: Vec<_> = conversation
+                .rows
+                .iter()
+                .filter(|row| matches!(row, Row::Decision { .. }))
+                .collect();
+            assert_eq!(
+                decisions,
+                [&Row::Decision {
+                    action: "touch first".into(),
+                    allowed: true
+                }]
+            );
+        });
+        assert!(
+            cx.debug_bounds("approve").is_some(),
+            "the next request stays on screen"
+        );
+    }
+
     /// A Claude driver for session 1, standing in for the `claude` process.
     struct Claude {
         driver: keystone_agent::claude::ClaudeDriver,
@@ -5253,7 +5345,7 @@ mod tests {
                 if item.status == ItemStatus::InProgress && item.text.contains("word1"))
             })
         });
-        view.update_in(cx, |this, window, cx| this.stop_turn(window, cx));
+        view.update_in(cx, |this, window, cx| this.stop_turn(1, window, cx));
         wait_until(cx, &view, |view| !running(view));
         // Stopped by the user, and seen as it ended: nothing to act on.
         assert_eq!(

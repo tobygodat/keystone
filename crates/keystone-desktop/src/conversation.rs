@@ -7,7 +7,7 @@
 
 use keystone_agent::log::{Entry, Write};
 use keystone_agent::{
-    Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, TurnStatus, cap_output,
+    Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
 };
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -321,12 +321,9 @@ impl Conversation {
         }
     }
 
-    /// Records the user's answer to the oldest pending approval.
-    pub fn decide(&mut self, allowed: bool) -> Option<Approval> {
-        if self.approvals.is_empty() {
-            return None;
-        }
-        let approval = self.approvals.remove(0);
+    pub fn decide(&mut self, request: &RequestId, allowed: bool) -> Option<Approval> {
+        let index = self.approvals.iter().position(|a| &a.request == request)?;
+        let approval = self.approvals.remove(index);
         let entry = Entry::Approval {
             action: approval.action.clone(),
             allowed,
@@ -426,7 +423,6 @@ pub fn visible(row: &Row) -> bool {
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
-    use keystone_agent::RequestId;
 
     fn message(id: &str, text: &str, status: ItemStatus) -> Item {
         Item {
@@ -525,7 +521,10 @@ mod tests {
             action: "rm -rf build".into(),
             detail: None,
         }));
-        assert_eq!(live.decide(false).unwrap().action, "rm -rf build");
+        assert_eq!(
+            live.decide(&RequestId("1".into()), false).unwrap().action,
+            "rm -rf build"
+        );
         log.save(&mut live);
         feed(
             &mut live,
@@ -870,7 +869,12 @@ mod tests {
         };
         live.apply(Event::ApprovalRequested(approval("1")));
         live.apply(Event::ApprovalRequested(approval("2")));
-        assert_eq!(live.decide(true).unwrap().action, "cmd 1");
+        assert_eq!(
+            live.decide(&RequestId("1".into()), true).unwrap().action,
+            "cmd 1"
+        );
+        assert_eq!(live.approvals, vec![approval("2")]);
+        assert!(live.decide(&RequestId("1".into()), true).is_none());
         assert_eq!(live.approvals, vec![approval("2")]);
         assert!(live.take_writes()[0].sync, "a decision is synced");
         live.apply(Event::ApprovalResolved {
