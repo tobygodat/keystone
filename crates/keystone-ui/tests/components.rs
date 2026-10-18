@@ -1108,6 +1108,267 @@ fn a_host_takes_navigation_keys_before_the_input(cx: &mut TestAppContext) {
     input.read_with(cx, |input, _| assert_eq!(input.value(), "ab"));
 }
 
+const FRUITS: [&str; 6] = ["Apple", "Banana", "Cherry", "Mango", "Melon", "Plum"];
+
+struct Controls {
+    switch: bool,
+    disabled_switch: bool,
+    slider: f32,
+    coarse: f32,
+    choice: Option<usize>,
+    choices: usize,
+    fruits: usize,
+}
+
+impl Render for Controls {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(div().h_8().debug_selector(|| "outside".into()))
+            .child(Switch::new("switch", self.switch).on_change(cx.listener(
+                |this, on: &bool, _, cx| {
+                    this.switch = *on;
+                    cx.notify();
+                },
+            )))
+            .child(
+                Switch::new("disabled-switch", self.disabled_switch)
+                    .disabled(true)
+                    .on_change(cx.listener(|this, on: &bool, _, cx| {
+                        this.disabled_switch = *on;
+                        cx.notify();
+                    })),
+            )
+            .child(div().w(gpui::px(216.)).child(
+                Slider::new("slider", self.slider, 0.0..=100.0, 10.).on_change(cx.listener(
+                    |this, value: &f32, _, cx| {
+                        this.slider = *value;
+                        cx.notify();
+                    },
+                )),
+            ))
+            .child(div().w(gpui::px(216.)).child(
+                Slider::new("coarse", self.coarse, 0.0..=100.0, 30.).on_change(cx.listener(
+                    |this, value: &f32, _, cx| {
+                        this.coarse = *value;
+                        cx.notify();
+                    },
+                )),
+            ))
+            .child(
+                Select::new("select", FRUITS.into_iter().take(self.fruits), self.choice).on_change(
+                    cx.listener(|this, ix: &usize, _, cx| {
+                        this.choice = Some(*ix);
+                        this.choices += 1;
+                        cx.notify();
+                    }),
+                ),
+            )
+    }
+}
+
+fn controls(cx: &mut TestAppContext) -> (gpui::Entity<Controls>, &mut gpui::VisualTestContext) {
+    cx.update(keystone_ui::init);
+    let (view, cx) = cx.add_window_view(|_, _| Controls {
+        switch: false,
+        disabled_switch: false,
+        slider: 50.,
+        coarse: 90.,
+        choice: Some(0),
+        choices: 0,
+        fruits: FRUITS.len(),
+    });
+    cx.run_until_parked();
+    (view, cx)
+}
+
+#[gpui::test]
+fn switch_toggles_on_click_and_space(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    let on = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |c, _| c.switch);
+    click(cx, "switch");
+    assert!(on(cx), "click turns it on");
+    press(cx, "space");
+    assert!(!on(cx), "space turns it off");
+    press(cx, "enter");
+    assert!(on(cx), "enter turns it on");
+    click(cx, "switch");
+    assert!(!on(cx), "a second click turns it off");
+}
+
+#[gpui::test]
+fn switch_disabled_ignores_click(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    click(cx, "disabled-switch");
+    press(cx, "space");
+    view.read_with(cx, |c, _| assert!(!c.disabled_switch));
+}
+
+fn slider(view: &gpui::Entity<Controls>, cx: &mut gpui::VisualTestContext) -> f32 {
+    view.read_with(cx, |c, _| c.slider)
+}
+
+#[gpui::test]
+fn slider_keys_step_and_clamp(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    click(cx, "slider-thumb");
+    assert_eq!(slider(&view, cx), 50., "pressing the thumb keeps the value");
+    for (keys, expected) in [
+        ("right", 60.),
+        ("left left", 40.),
+        ("up", 50.),
+        ("down", 40.),
+        ("end", 100.),
+        ("right", 100.),
+        ("home", 0.),
+        ("left", 0.),
+    ] {
+        cx.simulate_keystrokes(keys);
+        assert_eq!(slider(&view, cx), expected, "{keys}");
+    }
+}
+
+#[gpui::test]
+fn slider_drag_snaps_to_step(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    let track = cx.debug_bounds("slider").expect("slider");
+    let thumb = center(cx, "slider-thumb");
+    // The thumb centre travels over the track less a thumb width at each end.
+    let travel = track.size.width - gpui::px(16.);
+    let at = |fraction: f32| gpui::point(track.left() + gpui::px(8.) + travel * fraction, thumb.y);
+    drag(cx, thumb, at(0.73));
+    assert_eq!(slider(&view, cx), 70.);
+    drag(cx, at(0.7), at(0.76));
+    assert_eq!(slider(&view, cx), 80.);
+    drag(cx, at(0.8), at(2.));
+    assert_eq!(slider(&view, cx), 100.);
+    drag(cx, at(1.), at(-1.));
+    assert_eq!(slider(&view, cx), 0.);
+
+    // The move that starts a drag is the only move.
+    use gpui::MouseButton::Left;
+    cx.simulate_mouse_down(at(0.), Left, Modifiers::none());
+    cx.simulate_mouse_move(at(0.42), Left, Modifiers::none());
+    cx.simulate_mouse_up(at(0.42), Left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(slider(&view, cx), 40.);
+}
+
+#[gpui::test]
+fn slider_keys_stop_at_every_step_when_the_step_does_not_divide_the_range(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    click(cx, "coarse-thumb");
+    let coarse = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |c, _| c.coarse);
+    assert_eq!(coarse(cx), 90.);
+    for (keys, expected) in [
+        ("right", 100.),
+        ("left", 90.),
+        ("left", 60.),
+        ("right right", 100.),
+        ("home right", 30.),
+    ] {
+        cx.simulate_keystrokes(keys);
+        assert_eq!(coarse(cx), expected, "{keys}");
+    }
+}
+
+fn choice(view: &gpui::Entity<Controls>, cx: &mut gpui::VisualTestContext) -> Option<usize> {
+    view.read_with(cx, |c, _| c.choice)
+}
+
+fn menu_open(cx: &mut gpui::VisualTestContext) -> bool {
+    cx.debug_bounds("select-option-0").is_some()
+}
+
+fn option_highlighted(view: &gpui::Entity<Controls>, cx: &mut gpui::VisualTestContext) -> usize {
+    // Enter confirms the highlight, which is the only way to read it from outside.
+    cx.simulate_keystrokes("enter");
+    choice(view, cx).expect("chosen")
+}
+
+#[gpui::test]
+fn select_opens_and_confirms(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    click(cx, "select");
+    assert!(menu_open(cx), "a click opens the menu");
+    click(cx, "select-option-2");
+    assert!(!menu_open(cx), "choosing closes the menu");
+    assert_eq!(choice(&view, cx), Some(2));
+
+    press(cx, "enter");
+    assert!(menu_open(cx), "enter on the focused trigger opens the menu");
+    cx.simulate_keystrokes("down enter");
+    assert!(!menu_open(cx));
+    assert_eq!(choice(&view, cx), Some(3), "the menu opened on the choice");
+
+    cx.simulate_keystrokes("down");
+    assert!(menu_open(cx), "down on the trigger opens the menu");
+    click(cx, "outside");
+    assert!(!menu_open(cx), "a press outside closes the menu");
+    view.read_with(cx, |c, _| assert_eq!(c.choices, 2));
+}
+
+#[gpui::test]
+fn select_escape_restores_focus(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    click(cx, "select");
+    cx.simulate_keystrokes("down escape");
+    assert!(!menu_open(cx), "escape closes the menu");
+    assert_eq!(choice(&view, cx), Some(0), "escape chooses nothing");
+    cx.simulate_keystrokes("up");
+    assert!(menu_open(cx), "the trigger has focus again");
+    assert_eq!(
+        option_highlighted(&view, cx),
+        0,
+        "the highlight returned to the choice"
+    );
+}
+
+#[gpui::test]
+fn select_follows_options_that_change_while_open(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    let set_fruits = |n, cx: &mut gpui::VisualTestContext| {
+        view.update(cx, |c, cx| {
+            c.fruits = n;
+            cx.notify();
+        });
+        cx.run_until_parked();
+    };
+    click(cx, "select");
+    set_fruits(0, cx);
+    assert!(!menu_open(cx), "an empty menu shows no options");
+    set_fruits(FRUITS.len(), cx);
+    assert!(menu_open(cx));
+    cx.simulate_keystrokes("end");
+    assert_eq!(option_highlighted(&view, cx), FRUITS.len() - 1);
+}
+
+#[gpui::test]
+fn select_type_to_jump(cx: &mut TestAppContext) {
+    let (view, cx) = controls(cx);
+    for (keys, expected) in [
+        ("m", 3),
+        ("m m", 4),
+        ("m m m", 3),
+        ("p", 5),
+        ("a", 0),
+        ("z", 0),
+    ] {
+        click(cx, "select");
+        assert!(menu_open(cx), "{keys}: open");
+        cx.simulate_keystrokes(keys);
+        assert_eq!(option_highlighted(&view, cx), expected, "{keys}");
+        view.update(cx, |c, cx| {
+            c.choice = Some(0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+}
+
 struct Files {
     state: gpui::Entity<TreeState>,
     opened: Vec<NodeId>,

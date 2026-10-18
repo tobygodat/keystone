@@ -1,6 +1,6 @@
 use gpui::{
-    Context, Entity, IntoElement, Modifiers, Render, TestAppContext, Window, div, point,
-    prelude::*, px, size,
+    Context, Entity, IntoElement, Modifiers, Render, SharedString, TestAppContext, Window, div,
+    point, prelude::*, px, size,
 };
 use keystone_ui::prelude::*;
 
@@ -80,6 +80,66 @@ fn perf_virtual_list_50k(cx: &mut TestAppContext) {
     eprintln!("PERF perf_virtual_list_50k_p95={p95:.3}");
     eprintln!("PERF perf_virtual_list_50k_max={max:.3}");
     assert!(p95 < 8.0, "p95 {p95:.3} ms exceeds half the frame budget");
+}
+
+const OPTIONS: usize = 500;
+const OPENS: usize = 200;
+
+struct Picker {
+    options: Vec<SharedString>,
+    chosen: usize,
+}
+
+impl Render for Picker {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.chosen * 7 % OPTIONS;
+        div().size_full().p(px(16.)).child(
+            Select::new("perf-select", self.options.clone(), Some(selected)).on_change(
+                cx.listener(|this, _: &usize, _, cx| {
+                    this.chosen += 1;
+                    cx.notify();
+                }),
+            ),
+        )
+    }
+}
+
+/// Opens a 500-option select from its focused trigger and times the keystroke that
+/// opens it, which includes drawing the frame that first shows the menu. Each open
+/// starts on a different choice, so rows are shaped afresh, and Enter closes it.
+#[gpui::test]
+#[ignore = "benchmark"]
+fn perf_select_open_500(cx: &mut TestAppContext) {
+    cx.update(keystone_ui::init);
+    let (view, cx) = cx.add_window_view(|_, _| Picker {
+        options: (0..OPTIONS).map(|n| format!("Option {n}").into()).collect(),
+        chosen: 0,
+    });
+    cx.simulate_resize(size(px(800.), px(600.)));
+    cx.run_until_parked();
+    // Debug selectors compile out of release builds, so press the trigger by position.
+    // A press opens the menu and Escape closes it, leaving the trigger focused.
+    cx.simulate_click(point(px(40.), px(30.)), Modifiers::none());
+    cx.simulate_keystrokes("escape");
+    let mut frames = Vec::with_capacity(OPENS);
+    for _ in 0..OPENS {
+        let start = std::time::Instant::now();
+        cx.simulate_keystrokes("down");
+        frames.push(start.elapsed().as_secs_f64() * 1000.);
+        cx.simulate_keystrokes("enter");
+    }
+    assert_eq!(
+        view.read_with(cx, |picker, _| picker.chosen),
+        OPENS,
+        "every open chose"
+    );
+    frames.sort_by(f64::total_cmp);
+    let at = |q: f64| frames[((frames.len() - 1) as f64 * q).round() as usize];
+    let (p50, p95, max) = (at(0.5), at(0.95), frames[frames.len() - 1]);
+    eprintln!("PERF perf_select_open_500_p50={p50:.3}");
+    eprintln!("PERF perf_select_open_500_p95={p95:.3}");
+    eprintln!("PERF perf_select_open_500_max={max:.3}");
+    assert!(p95 < 16.7, "p95 {p95:.3} ms exceeds the frame budget");
 }
 
 struct Files {

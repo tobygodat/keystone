@@ -27,6 +27,7 @@
 | `ConfirmDialog`, `DialogFocus` | A modal question with Cancel and Confirm. See below. |
 | `ListItem` | A selectable row for lists such as the session sidebar. `on_hover` reports the pointer entering and leaving, so a list can build a row action only for the row under the pointer. |
 | `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group, and `MenuItem::detail` adds a muted line that explains it. |
+| `Switch`, `Slider`, `Select` | Settings controls: an on/off toggle, a value on a stepped range, and one choice from a list. See below. |
 | `VirtualList`, `VirtualListState` | A keyboard-driven list that renders only its visible rows, for pickers, palettes, and trees. See below. |
 | `Tree`, `TreeState`, `TreeModel` | A keyboard-driven tree of any size that loads children lazily and draws only its visible rows. See below. |
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
@@ -86,6 +87,17 @@ The gallery's tab bar section has eight tabs and an "Add tab" button that makes 
 
 The gallery's List page shows 50,000 rows.
 
+## Switch, slider, and select
+
+The caller owns each control's value and stores what `on_change` asks for. Each control takes focus in Tab order and shows a `border_focused` ring while it has it. `disabled(true)` drops the handler and focus, fades the control, and shows a not-allowed cursor. On and chosen states use the neutral selection tokens, not the accent.
+
+- `Switch::new(id, on)` asks for `!on` on a click, or on Space or Enter while focused. `label` puts text to its right. On is a `selection_edge` track with a `background` thumb.
+- `Slider::new(id, value, range, step)` reports values snapped to `step` within `range`. A press on the track or a drag picks the value under the pointer. Left and Down step down, Right and Up step up, and Home and End jump to the ends. The fill and thumb are `selection_edge` on a `selection_fill` track.
+- `Select::new(id, options, selected)` shows the chosen label, or `placeholder` while `selected` is `None`. A press, or Enter, Space, Up, or Down on the focused trigger, opens a `PopoverMenu` whose rows are a `VirtualList` of `MenuItem`s, so a long list stays cheap. The menu opens with the choice highlighted and checked, and shows eight rows before it scrolls. Enter or a click chooses and refocuses the trigger. A letter jumps to the next option that starts with it, wrapping. Escape closes the menu and refocuses the trigger. A press outside closes it.
+- Debug selectors are `{id}` for each control, `{id}-thumb` for the slider thumb, and `{id}-option-{n}` for select options, counting from 0.
+
+The gallery's Controls page shows every state, including a 500-option select.
+
 ## Tree
 
 `TreeModel` holds every node in one flat arena and the rows on screen in one flat `visible` vector. `TreeModel::new(roots)` takes `(name, NodeKind)` pairs, and `set_children(folder, children)` fills a folder and returns the new children's ids, which stay contiguous. The host keeps `Entity<TreeState>` made with `TreeState::new(model, cx)` and renders `Tree::new(id, &state, render_row)`, which draws the visible rows through `VirtualList`.
@@ -123,6 +135,8 @@ The component shapes follow Zed's `ui` crate, and the visual values follow Zeron
 `split.rs` adapts the structure of gpui-component 0.7.3's `resizable.rs` and gpui-base 0.7.3's `resizable/` (Copyright 2024 - 2026 Longbridge, Apache-2.0), with modifications. No code was copied verbatim.
 
 The tab bar's structure, a tracked horizontal scroll strip with a trailing empty slot, follows `tab/tab_bar.rs` and `tab/tab.rs` in [gpui-component](https://github.com/longbridge/gpui-kit) 0.7.3, Copyright 2024 - 2026 Longbridge, licensed Apache-2.0. `crates/keystone-ui/src/tabs.rs` is a modified, rewritten adaptation and says so in its header.
+
+`switch.rs`, `slider.rs`, and `select.rs` follow the structure of `switch.rs`, `slider.rs`, and `select.rs` in gpui-component 0.7.3, Copyright 2024 - 2026 Longbridge, licensed Apache-2.0. Each is a modified, rewritten adaptation over Keystone's theme, `PopoverMenu`, and `VirtualList`, and says so in its header. No code was copied verbatim.
 
 The tree's structure, a tree state that owns the rows beside a styled `Tree` element with Left, Right, and Enter in a `Tree` key context, follows `tree.rs` in gpui-base 0.7.3 and gpui-component 0.7.3 (Copyright 2024 - 2026 Longbridge, Apache-2.0). `crates/keystone-ui/src/tree.rs` is a modified, rewritten adaptation and says so in its header. Upstream rebuilds its entry list on every toggle, and this one splices.
 

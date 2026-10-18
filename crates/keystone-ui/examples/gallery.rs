@@ -12,9 +12,12 @@ use keystone_ui::{Appearance, Density, Fonts, Theme, automation, set_theme};
 enum Page {
     Components,
     List,
+    Controls,
     Tree,
 }
 
+#[path = "gallery/controls.rs"]
+mod controls;
 #[path = "gallery/tabs.rs"]
 mod tabs;
 #[path = "gallery/tree.rs"]
@@ -30,6 +33,7 @@ struct Gallery {
     tabs: gpui::Entity<tabs::TabsPage>,
     list: Entity<VirtualListState>,
     confirmed: Option<usize>,
+    controls: Entity<controls::ControlsPage>,
     tree: Entity<tree::TreePage>,
 }
 
@@ -403,6 +407,7 @@ impl Render for Gallery {
         let pages = [
             (Page::Components, "Components", "gallery-page-components"),
             (Page::List, "List", "gallery-page-list"),
+            (Page::Controls, "Controls", "gallery-page-controls"),
             (Page::Tree, "Tree", "gallery-page-tree"),
         ]
         .map(|(target, name, id)| {
@@ -414,6 +419,9 @@ impl Render for Gallery {
                     this.page = target;
                     if target == Page::List {
                         window.focus(&this.list.focus_handle(cx), cx);
+                    }
+                    if target == Page::Controls {
+                        window.focus(&this.controls.focus_handle(cx), cx);
                     }
                     if target == Page::Tree {
                         window.focus(&this.tree.focus_handle(cx), cx);
@@ -507,6 +515,7 @@ impl Render for Gallery {
             .map(|d| match page {
                 Page::Components => d.child(components),
                 Page::List => d.child(self.list_page(cx)),
+                Page::Controls => d.child(self.controls.clone()),
                 Page::Tree => d.child(self.tree.clone()),
             })
             .when_some(self.split.as_ref(), |d, page| {
@@ -553,6 +562,7 @@ fn main() {
                         tabs: cx.new(|_| tabs::TabsPage::new()),
                         list: cx.new(|cx| VirtualListState::new(50_000, cx)),
                         confirmed: None,
+                        controls: cx.new(controls::ControlsPage::new),
                         tree: cx.new(tree::TreePage::new),
                     })
                 },
