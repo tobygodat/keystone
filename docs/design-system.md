@@ -29,6 +29,7 @@
 | `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group, and `MenuItem::detail` adds a muted line that explains it. |
 | `Switch`, `Slider`, `Select` | Settings controls: an on/off toggle, a value on a stepped range, and one choice from a list. See below. |
 | `VirtualList`, `VirtualListState` | A keyboard-driven list that renders only its visible rows, for pickers, palettes, and trees. See below. |
+| `CommandPalette`, `CommandPaletteState`, `PaletteItem`, `fuzzy` | A centered overlay that filters commands as the user types, and the fuzzy scorer behind it. See below. |
 | `Tree`, `TreeState`, `TreeModel` | A keyboard-driven tree of any size that loads children lazily and draws only its visible rows. See below. |
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
 | `TextInput`, `InputMode` | An editable text field. `InputMode::SingleLine` propagates the Enter action to its container (for submit), refuses inserted newlines and emits `text_input::RejectedMultiline`, so search typing and paste stay on one line. `InputMode::Multiline` wraps, and arrows, Home, and End move by visual row. Every edit emits `text_input::Changed`. Call `TextInput::bind_keys` once at startup. Bound keys reach the input as actions before any key listener runs, so a host that needs Up, Down, or Enter first, such as a list or palette, wraps it in a div with `capture_action` for `text_input::Up`, `Down`, or `Newline` and stops propagation. |
@@ -123,6 +124,23 @@ The gallery's Tree page shows a 50,000-node tree with a 10,000-file folder, nest
 - Debug selectors are `{id}-pane-{n}` and `{id}-divider-{n}`, counting from 0, and `{id}-drop-target` for the highlight.
 
 The gallery's header button "Split" opens a three-pane page with an axis toggle and a draggable tab.
+
+## Command palette
+
+`CommandPalette::new(id, &state)` draws a centered overlay over the whole window that filters commands as the user types. The caller holds an `Entity<CommandPaletteState>` made with `CommandPaletteState::new(items, cx)`, creates it when the palette opens, focuses it with `window.focus(&state.focus_handle(cx), cx)`, and drops it in both handlers. `PaletteItem::new(id, label)` takes an optional `detail` and `kbd`.
+
+- The query is a single-line `TextInput`. Every edit rescores the labels with `fuzzy::score`. An empty query shows every item in its original order. Otherwise the best score comes first, then the shorter label, then the original order. A new query highlights the first row.
+- Matched characters are bold and drawn in `Color::Accent`. `Color::Strong` is too close to body text to read, and the fallback font may lack bold.
+- The input keeps focus throughout. A div around it catches `text_input::Up`, `Down`, and `Newline` with `capture_action`, so Up and Down move the highlight and Enter calls `on_confirm` with the highlighted item. PageUp and PageDown move a page. A click on a row also confirms it.
+- Escape and a press outside the card call `on_dismiss`. The card's key context is `CommandPalette`, and `keystone_ui::init` binds its keys.
+- Rows come from a `VirtualList`, so 10,000 items cost no more to draw than ten. At most eight rows show at once. With no match, the card says "No matching commands".
+- `set_query` replaces the query and filters as if it had been typed. `matches` and `highlighted_item` read the result.
+- It moves the highlight by notifying the view that drew it, so it works inside a cached view.
+- Debug selectors are `{id}` for the card, `{id}-input` for the input, and `{id}-row-{n}` for the rows.
+
+`fuzzy::score(query, candidate)` returns `None` unless the query's characters appear in the candidate in order, ignoring case. Otherwise it returns the score and the byte offset of each matched character. It rewards word starts, including camelCase humps and characters after `-`, `_`, `/`, or a space. It also rewards runs of adjacent matches and penalises gaps and a late first match. It picks the best of all alignments, not the first one found.
+
+The gallery's Palette page opens a palette of 2,000 sample commands.
 
 ## Adding a component
 

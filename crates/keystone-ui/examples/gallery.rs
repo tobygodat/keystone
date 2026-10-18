@@ -14,10 +14,13 @@ enum Page {
     List,
     Controls,
     Tree,
+    Palette,
 }
 
 #[path = "gallery/controls.rs"]
 mod controls;
+#[path = "gallery/palette.rs"]
+mod palette;
 #[path = "gallery/tabs.rs"]
 mod tabs;
 #[path = "gallery/tree.rs"]
@@ -33,6 +36,7 @@ struct Gallery {
     tabs: gpui::Entity<tabs::TabsPage>,
     list: Entity<VirtualListState>,
     confirmed: Option<usize>,
+    palette: Entity<palette::PalettePage>,
     controls: Entity<controls::ControlsPage>,
     tree: Entity<tree::TreePage>,
 }
@@ -407,6 +411,7 @@ impl Render for Gallery {
         let pages = [
             (Page::Components, "Components", "gallery-page-components"),
             (Page::List, "List", "gallery-page-list"),
+            (Page::Palette, "Palette", "gallery-page-palette"),
             (Page::Controls, "Controls", "gallery-page-controls"),
             (Page::Tree, "Tree", "gallery-page-tree"),
         ]
@@ -515,6 +520,7 @@ impl Render for Gallery {
             .map(|d| match page {
                 Page::Components => d.child(components),
                 Page::List => d.child(self.list_page(cx)),
+                Page::Palette => d.child(self.palette.clone()),
                 Page::Controls => d.child(self.controls.clone()),
                 Page::Tree => d.child(self.tree.clone()),
             })
@@ -543,6 +549,7 @@ fn main() {
         .with_assets(keystone_ui::Icons)
         .run(|cx: &mut App| {
             keystone_ui::init(cx);
+            TextInput::bind_keys(cx);
             let bounds = Bounds::centered(None, size(px(1100.), px(900.)), cx);
             cx.open_window(
                 WindowOptions {
@@ -562,6 +569,7 @@ fn main() {
                         tabs: cx.new(|_| tabs::TabsPage::new()),
                         list: cx.new(|cx| VirtualListState::new(50_000, cx)),
                         confirmed: None,
+                        palette: cx.new(|_| palette::PalettePage::new()),
                         controls: cx.new(controls::ControlsPage::new),
                         tree: cx.new(tree::TreePage::new),
                     })

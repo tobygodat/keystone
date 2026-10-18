@@ -1612,3 +1612,205 @@ fn tree_redraws_a_cached_host_when_children_arrive(cx: &mut TestAppContext) {
         "README moved down a row"
     );
 }
+
+struct PaletteHost {
+    palette: Option<gpui::Entity<CommandPaletteState>>,
+    confirmed: Option<gpui::SharedString>,
+    dismissed: bool,
+}
+
+impl Render for PaletteHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        div()
+            .size_full()
+            .child(div().h_8().debug_selector(|| "outside".into()))
+            .when_some(self.palette.clone(), |d, state| {
+                d.child(
+                    CommandPalette::new("palette", &state)
+                        .on_confirm(cx.listener(|this, item: &PaletteItem, _, cx| {
+                            this.confirmed = Some(item.id.clone());
+                            this.palette = None;
+                            cx.notify();
+                        }))
+                        .on_dismiss(move |_, cx| {
+                            view.update(cx, |this, cx| {
+                                this.dismissed = true;
+                                this.palette = None;
+                                cx.notify();
+                            })
+                        }),
+                )
+            })
+    }
+}
+
+const PALETTE_ITEMS: [&str; 8] = [
+    "New Claude session",
+    "Show sessions",
+    "Rename session",
+    "Open settings",
+    "New session",
+    "Set theme: Light",
+    "Set theme: Dark",
+    "Toggle sidebar",
+];
+
+fn open_palette(
+    cx: &mut TestAppContext,
+) -> (
+    gpui::Entity<PaletteHost>,
+    gpui::Entity<CommandPaletteState>,
+    &mut gpui::VisualTestContext,
+) {
+    cx.update(TextInput::bind_keys);
+    cx.update(keystone_ui::init);
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        let items = PALETTE_ITEMS
+            .iter()
+            .enumerate()
+            .map(|(n, label)| PaletteItem::new(format!("item-{n}"), *label))
+            .collect();
+        let state = cx.new(|cx| CommandPaletteState::new(items, cx));
+        window.focus(&gpui::Focusable::focus_handle(state.read(cx), cx), cx);
+        PaletteHost {
+            palette: Some(state),
+            confirmed: None,
+            dismissed: false,
+        }
+    });
+    cx.run_until_parked();
+    let state = host.read_with(cx, |host, _| host.palette.clone().expect("open"));
+    (host, state, cx)
+}
+
+fn shown(
+    state: &gpui::Entity<CommandPaletteState>,
+    cx: &mut gpui::VisualTestContext,
+) -> Vec<String> {
+    state.read_with(cx, |state, _| {
+        state.matches().map(|item| item.label.to_string()).collect()
+    })
+}
+
+fn palette_highlight(
+    state: &gpui::Entity<CommandPaletteState>,
+    cx: &mut gpui::VisualTestContext,
+) -> Option<String> {
+    state.read_with(cx, |state, cx| {
+        state
+            .highlighted_item(cx)
+            .map(|item| item.label.to_string())
+    })
+}
+
+fn input_focused(
+    state: &gpui::Entity<CommandPaletteState>,
+    cx: &mut gpui::VisualTestContext,
+) -> bool {
+    cx.update(|window, cx| gpui::Focusable::focus_handle(state.read(cx), cx).is_focused(window))
+}
+
+#[gpui::test]
+fn palette_filters_as_you_type(cx: &mut TestAppContext) {
+    let (_, state, cx) = open_palette(cx);
+    assert_eq!(shown(&state, cx), PALETTE_ITEMS);
+    cx.simulate_input("nwss");
+    let found = shown(&state, cx);
+    assert_eq!(found[0], "New session");
+    assert!(!found.contains(&"Show sessions".to_string()), "{found:?}");
+    assert_eq!(
+        palette_highlight(&state, cx).as_deref(),
+        Some("New session")
+    );
+    assert!(cx.debug_bounds("palette-row-0").is_some(), "row 0 drawn");
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    cx.simulate_input("zzzz");
+    assert!(shown(&state, cx).is_empty());
+    assert!(cx.debug_bounds("palette-row-0").is_none(), "no rows drawn");
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    assert_eq!(
+        shown(&state, cx),
+        PALETTE_ITEMS,
+        "an empty query restores the order"
+    );
+}
+
+#[gpui::test]
+fn palette_arrows_move_while_input_focused(cx: &mut TestAppContext) {
+    let (_, state, cx) = open_palette(cx);
+    cx.simulate_input("set");
+    let found = shown(&state, cx);
+    assert!(found.len() >= 3, "{found:?}");
+    cx.simulate_keystrokes("down down");
+    assert_eq!(palette_highlight(&state, cx), Some(found[2].clone()));
+    cx.simulate_keystrokes("up");
+    assert_eq!(palette_highlight(&state, cx), Some(found[1].clone()));
+    cx.simulate_keystrokes("up up");
+    assert_eq!(
+        palette_highlight(&state, cx),
+        Some(found[0].clone()),
+        "clamps at the top"
+    );
+    assert!(input_focused(&state, cx), "the input keeps focus");
+    state.read_with(cx, |state, cx| assert_eq!(state.query(cx), "set"));
+}
+
+#[gpui::test]
+fn palette_enter_confirms_highlighted(cx: &mut TestAppContext) {
+    let (host, state, cx) = open_palette(cx);
+    cx.simulate_input("set");
+    cx.simulate_keystrokes("down");
+    let expected = palette_highlight(&state, cx).expect("highlight");
+    let id = state.read_with(cx, |state, cx| {
+        state.highlighted_item(cx).unwrap().id.clone()
+    });
+    cx.simulate_keystrokes("enter");
+    state.read_with(cx, |state, cx| assert_eq!(state.query(cx), "set"));
+    host.read_with(cx, |host, _| {
+        assert_eq!(host.confirmed, Some(id), "{expected}");
+        assert!(host.palette.is_none());
+    });
+}
+
+#[gpui::test]
+fn palette_escape_dismisses(cx: &mut TestAppContext) {
+    let (host, _, cx) = open_palette(cx);
+    cx.simulate_input("new");
+    cx.simulate_keystrokes("escape");
+    host.read_with(cx, |host, _| {
+        assert!(host.dismissed);
+        assert!(host.palette.is_none());
+        assert_eq!(host.confirmed, None);
+    });
+}
+
+#[gpui::test]
+fn palette_press_outside_dismisses(cx: &mut TestAppContext) {
+    let (host, _, cx) = open_palette(cx);
+    let card = cx.debug_bounds("palette").expect("card");
+    cx.simulate_click(
+        gpui::point(card.left(), card.bottom() + gpui::px(40.)),
+        Modifiers::none(),
+    );
+    host.read_with(cx, |host, _| {
+        assert!(host.dismissed && host.palette.is_none())
+    });
+}
+
+#[gpui::test]
+fn palette_click_inside_keeps_open_and_row_click_confirms(cx: &mut TestAppContext) {
+    let (host, state, cx) = open_palette(cx);
+    let input = cx.debug_bounds("palette-input").expect("input");
+    cx.simulate_click(input.center(), Modifiers::none());
+    host.read_with(cx, |host, _| {
+        assert!(!host.dismissed && host.palette.is_some())
+    });
+    let row = cx.debug_bounds("palette-row-3").expect("row 3");
+    let id = state.read_with(cx, |state, _| state.matches().nth(3).unwrap().id.clone());
+    cx.simulate_click(row.center(), Modifiers::none());
+    host.read_with(cx, |host, _| {
+        assert_eq!(host.confirmed, Some(id));
+        assert!(!host.dismissed);
+    });
+}

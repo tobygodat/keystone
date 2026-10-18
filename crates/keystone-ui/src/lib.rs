@@ -5,7 +5,9 @@
 pub mod automation;
 mod button;
 mod color;
+pub mod command_palette;
 mod dialog;
+pub mod fuzzy;
 mod icon;
 mod kbd;
 mod label;
@@ -27,6 +29,7 @@ pub mod virtual_list;
 
 pub use button::{Button, ButtonSize, ButtonStyle, IconButton};
 pub use color::Color;
+pub use command_palette::{CommandPalette, CommandPaletteState, PaletteItem};
 pub use dialog::{ConfirmDialog, DialogFocus};
 pub use icon::{Icon, IconName, Icons};
 pub use kbd::Kbd;
@@ -51,6 +54,7 @@ pub use virtual_list::{VirtualList, VirtualListState};
 pub fn init(cx: &mut gpui::App) {
     cx.set_global(Theme::dark());
     virtual_list::bind_keys(cx);
+    command_palette::bind_keys(cx);
     tree::bind_keys(cx);
 }
 
@@ -68,6 +72,7 @@ pub mod prelude {
         Icon, IconButton, IconName, Kbd, Label, ListItem, Markdown, MenuHeader, MenuItem,
         MenuSeparator, PopoverMenu, StyledExt, TextSize, Tooltip, h_flex, radius, spacing, v_flex,
     };
+    pub use crate::{CommandPalette, CommandPaletteState, PaletteItem};
     pub use crate::{DraggedTab, Tab, TabBar, TabDot};
     pub use crate::{NodeId, NodeKind, Tree, TreeEntry, TreeModel, TreeState};
     pub use crate::{Select, Slider, Switch};

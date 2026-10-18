@@ -263,3 +263,192 @@ fn perf_tree_expand_10k(cx: &mut TestAppContext) {
     let (_, max) = report("perf_tree_expand_10k", samples);
     assert!(max < 16.7, "expand {max:.3} ms misses the frame");
 }
+
+const PALETTE_VERBS: [&str; 25] = [
+    "Open",
+    "Close",
+    "New",
+    "Rename",
+    "Delete",
+    "Duplicate",
+    "Move",
+    "Copy",
+    "Pin",
+    "Unpin",
+    "Archive",
+    "Restore",
+    "Export",
+    "Import",
+    "Reload",
+    "Focus",
+    "Toggle",
+    "Show",
+    "Hide",
+    "Search",
+    "Filter",
+    "Sort",
+    "Reset",
+    "Share",
+    "Inspect",
+];
+const PALETTE_NOUNS: [&str; 40] = [
+    "session",
+    "project",
+    "worktree",
+    "branch",
+    "commit",
+    "terminal",
+    "file",
+    "folder",
+    "tab",
+    "pane",
+    "sidebar",
+    "composer",
+    "transcript",
+    "settings",
+    "theme",
+    "keymap",
+    "model",
+    "provider",
+    "approval",
+    "diff",
+    "review",
+    "comment",
+    "issue",
+    "pull request",
+    "workspace",
+    "layout",
+    "split",
+    "window",
+    "notification",
+    "log",
+    "trace",
+    "profile",
+    "snippet",
+    "bookmark",
+    "history",
+    "attachment",
+    "screenshot",
+    "agent",
+    "task",
+    "schedule",
+];
+const PALETTE_SCOPES: [&str; 10] = [
+    "",
+    " in new window",
+    " for all sessions",
+    ": current project",
+    " to the right",
+    " from history",
+    " (Claude)",
+    " (Codex)",
+    " and keep focus",
+    " in background",
+];
+const PALETTE_QUERIES: [&str; 10] = [
+    "new session",
+    "open settings",
+    "toggle sidebar",
+    "nwss",
+    "rename worktree",
+    "export logs",
+    "focus composer",
+    "set theme dark",
+    "pull req",
+    "shw ntf",
+];
+
+fn palette_items(count: usize) -> Vec<PaletteItem> {
+    let mut items = Vec::with_capacity(count);
+    'fill: for scope in PALETTE_SCOPES {
+        for noun in PALETTE_NOUNS {
+            for verb in PALETTE_VERBS {
+                if items.len() == count {
+                    break 'fill;
+                }
+                let n = items.len();
+                let mut item =
+                    PaletteItem::new(format!("cmd-{n}"), format!("{verb} {noun}{scope}"));
+                if n % 3 == 0 {
+                    item = item.detail(format!("{noun} commands"));
+                }
+                if n % 7 == 0 {
+                    item = item.kbd(format!("Ctrl+{}", (b'A' + (n % 26) as u8) as char));
+                }
+                items.push(item);
+            }
+        }
+    }
+    assert_eq!(items.len(), count);
+    items
+}
+
+fn palette_keystrokes() -> Vec<String> {
+    let mut steps = Vec::new();
+    for query in PALETTE_QUERIES.iter().chain(&PALETTE_QUERIES) {
+        let chars: Vec<_> = query
+            .char_indices()
+            .map(|(at, c)| at + c.len_utf8())
+            .collect();
+        steps.extend(chars.iter().map(|&end| query[..end].to_owned()));
+        steps.extend(
+            chars
+                .iter()
+                .rev()
+                .skip(1)
+                .map(|&end| query[..end].to_owned()),
+        );
+        steps.push(String::new());
+    }
+    steps
+}
+
+/// Types and backspaces each query one keystroke at a time and times only the
+/// rescore and sort the palette runs after each edit.
+fn palette_filter(name: &str, count: usize, cx: &mut TestAppContext) {
+    cx.update(TextInput::bind_keys);
+    cx.update(keystone_ui::init);
+    let state = cx.update(|cx| cx.new(|cx| CommandPaletteState::new(palette_items(count), cx)));
+    let steps = palette_keystrokes();
+    assert!(steps.len() >= 200, "{} steps", steps.len());
+    let mut times = Vec::with_capacity(steps.len());
+    for query in &steps {
+        let shown = state.update(cx, |state, cx| {
+            let start = std::time::Instant::now();
+            state.set_query(query, cx);
+            times.push(start.elapsed().as_secs_f64() * 1000.);
+            state.matches().count()
+        });
+        if query.is_empty() {
+            assert_eq!(shown, count, "an empty query shows every item");
+        }
+    }
+    let first = state.update(cx, |state, cx| {
+        state.set_query("new session", cx);
+        state.matches().next().map(|item| item.label.to_string())
+    });
+    assert_eq!(first.as_deref(), Some("New session"));
+    times.sort_by(f64::total_cmp);
+    let at = |q: f64| times[((times.len() - 1) as f64 * q).round() as usize];
+    let (p50, p95, max) = (at(0.5), at(0.95), times[times.len() - 1]);
+    eprintln!("PERF {name}_steps={}", times.len());
+    eprintln!("PERF {name}_p50={p50:.3}");
+    eprintln!("PERF {name}_p95={p95:.3}");
+    eprintln!("PERF {name}_max={max:.3}");
+    assert!(
+        p95 < 4.0,
+        "p95 {p95:.3} ms exceeds the 4 ms keystroke budget"
+    );
+}
+
+#[gpui::test]
+#[ignore = "benchmark"]
+fn perf_palette_filter_10k(cx: &mut TestAppContext) {
+    palette_filter("perf_palette_filter_10k", 10_000, cx);
+}
+
+#[gpui::test]
+#[ignore = "benchmark"]
+fn perf_palette_filter_2k(cx: &mut TestAppContext) {
+    palette_filter("perf_palette_filter_2k", 2_000, cx);
+}

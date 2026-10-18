@@ -175,7 +175,7 @@ impl Styled for VirtualList {
 
 /// Notifies the view that drew the list as well as the state. A cached host view
 /// only redraws for its own notifications, and the state is not a view.
-fn change(
+pub(crate) fn change(
     state: &Entity<VirtualListState>,
     host: EntityId,
     cx: &mut App,
