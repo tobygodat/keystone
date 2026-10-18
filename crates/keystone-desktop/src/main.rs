@@ -5,16 +5,17 @@ mod relative_time;
 mod reveal;
 mod settings;
 mod transcript;
+mod view_state;
 
 use conversation::{Conversation, Row};
 use customization::Customization;
 use futures::StreamExt;
 use gpui::{
     Anchor, AnyElement, AnyView, App, AvailableSpace, BackgroundExecutor, Bounds, BoxShadow,
-    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle,
-    StyleRefinement, Subscription, WeakEntity, Window, WindowBounds, WindowOptions, canvas, div,
-    list, point, prelude::*, px, size,
+    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, ListOffset, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle, StyleRefinement, Subscription,
+    WeakEntity, Window, WindowBounds, WindowOptions, canvas, div, list, point, prelude::*, px,
+    size,
 };
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{
@@ -30,11 +31,12 @@ use keystone_ui::text_input::{Changed, SelectAll};
 use keystone_ui::{automation, prelude::*};
 use relative_time::{LocalTime, relative};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use view_state::{ViewId, ViewKey, ViewStates};
 
 gpui::actions!(
     keystone,
@@ -175,12 +177,7 @@ struct Keystone {
     conversations: HashMap<u64, Conversation>,
     /// Each session's log of completed items, read and written off the UI thread.
     logs: Logs,
-    /// The virtualized transcript list for each session shown so far. It holds one
-    /// entry per conversation row plus a status entry after the last row.
-    transcripts: HashMap<u64, ListState>,
-    /// Sessions whose list top row was remeasured while the user was scrolled into it,
-    /// to check against the row's new height before the list lays out.
-    remeasured_top: HashSet<u64>,
+    views: ViewStates,
     /// The directory agents work in.
     project_dir: PathBuf,
     wake: Wake,
@@ -303,8 +300,7 @@ impl Keystone {
             claude: None,
             conversations: HashMap::new(),
             logs: Logs::new(sessions_dir, wake.clone()),
-            transcripts: HashMap::new(),
-            remeasured_top: HashSet::new(),
+            views: ViewStates::default(),
             project_dir,
             wake,
             transcript_scroll: ScrollHandle::new(),
@@ -492,7 +488,10 @@ impl Keystone {
             Err(error) => Some(error.to_string()),
         };
         self.sync_draft(cx);
-        self.scroll_to_end(id);
+        self.views.scroll_to_end(ViewKey {
+            view: ViewId::MAIN,
+            session: id,
+        });
         self.refresh(cx);
     }
 
@@ -1285,47 +1284,10 @@ impl Keystone {
         self.invalidate(session, changed, true);
     }
 
-    /// Remeasures the changed rows of the session's list, and its status entry when
-    /// `status` is set, keeping the reader's place.
     fn invalidate(&mut self, session: u64, changed: Vec<Range<usize>>, status: bool) {
-        let Some(conversation) = self.conversations.get(&session) else {
-            return;
-        };
-        let count = conversation.rows.len() + 1;
-        if let Some(list) = self.transcripts.get(&session) {
-            // Rows are only appended or replaced in place, so every row the list
-            // already shows keeps its index; the status entry is always last.
-            let old = list.item_count();
-            let status_ix = old.saturating_sub(1).min(count - 1);
-            // A splice moves the view to the start of a remeasured entry. Unless it
-            // is following the bottom, which reads as the end of the list, keep it on
-            // the same entry at the same offset.
-            let top = list.logical_scroll_top();
-            let scrolled = top.item_ix < old;
-            let mut remeasured = status && top.item_ix >= status_ix;
-            for range in changed {
-                remeasured |= range.contains(&top.item_ix);
-                let range = range.start..range.end.min(status_ix);
-                if !range.is_empty() {
-                    list.splice(range.clone(), range.len());
-                }
-            }
-            // The status entry changes with almost anything, so it is always remeasured.
-            if status {
-                list.splice(status_ix..old, count - status_ix);
-            }
-            if scrolled {
-                // Rows added before the status entry move it down; follow it.
-                let item_ix = if top.item_ix == status_ix {
-                    count - 1
-                } else {
-                    top.item_ix
-                };
-                list.scroll_to(ListOffset { item_ix, ..top });
-                if remeasured && top.offset_in_item > px(0.) {
-                    self.remeasured_top.insert(session);
-                }
-            }
+        if let Some(conversation) = self.conversations.get(&session) {
+            self.views
+                .invalidate(session, conversation.rows.len(), &changed, status);
         }
     }
 
@@ -1367,12 +1329,12 @@ impl Keystone {
     /// below it, so it moves to the first row after the place it was. It spans the
     /// transcript's width so it can measure the row at the width the list is about to
     /// use.
-    fn transcript_top_check(&self, session: u64, cx: &mut Context<Self>) -> impl IntoElement {
+    fn transcript_top_check(&self, key: ViewKey, cx: &mut Context<Self>) -> impl IntoElement {
         let app = cx.weak_entity();
         canvas(
             move |bounds, window, cx| {
                 let _ = app.update(cx, |this, cx| {
-                    this.clamp_top(session, bounds.size.width, window, cx)
+                    this.clamp_top(key, bounds.size.width, window, cx)
                 });
             },
             |_, _, _, _| {},
@@ -1386,13 +1348,13 @@ impl Keystone {
 
     fn clamp_top(
         &mut self,
-        session: u64,
+        key: ViewKey,
         width: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let remeasured = self.remeasured_top.remove(&session);
-        let Some(list) = self.transcripts.get(&session).cloned() else {
+        let remeasured = self.views.take_remeasured_top(key);
+        let Some(list) = self.views.get(key).cloned() else {
             return;
         };
         // The list remeasures every entry when its width changes, and it has not
@@ -1406,7 +1368,7 @@ impl Keystone {
         let start = top.item_ix;
         while top.item_ix < list.item_count() {
             let height = self
-                .transcript_entry(session, top.item_ix, cx)
+                .transcript_entry(key.session, top.item_ix, cx)
                 .layout_as_root(space, window, cx)
                 .height;
             if top.offset_in_item < height {
@@ -1420,17 +1382,6 @@ impl Keystone {
         }
         if top.item_ix != start {
             list.scroll_to(top);
-        }
-    }
-
-    /// Scrolls the session's transcript to its latest row. It then follows new rows
-    /// until the user scrolls up.
-    fn scroll_to_end(&self, session: u64) {
-        if let Some(list) = self.transcripts.get(&session) {
-            list.scroll_to(ListOffset {
-                item_ix: list.item_count(),
-                offset_in_item: px(0.),
-            });
         }
     }
 
@@ -1662,7 +1613,10 @@ impl Keystone {
         self.composer
             .update(cx, |input, cx| input.set_value(String::new(), cx));
         self.save_draft(cx);
-        self.scroll_to_end(id);
+        self.views.scroll_to_end(ViewKey {
+            view: ViewId::MAIN,
+            session: id,
+        });
         // Clicking Send moves focus off the composer; put it back for the next message.
         self.composer.focus_handle(cx).focus(window, cx);
         // The session moves to Working and shows its new time.
@@ -1704,25 +1658,23 @@ impl Keystone {
     /// The session's transcript: a virtualized list, so a long session lays out and
     /// paints only the rows in view. It sticks to the bottom while new rows arrive,
     /// unless the user has scrolled up.
-    fn transcript_list(&mut self, session: u64, cx: &mut Context<Self>) -> gpui::List {
-        let count = self.conversations.get(&session).map_or(0, |c| c.rows.len()) + 1;
-        let state = self
-            .transcripts
-            .entry(session)
-            .or_insert_with(|| ListState::new(count, ListAlignment::Bottom, px(600.)))
-            .clone();
+    fn transcript_list(&mut self, key: ViewKey, cx: &mut Context<Self>) -> gpui::List {
+        let rows = self
+            .conversations
+            .get(&key.session)
+            .map_or(0, |c| c.rows.len());
+        let state = self.views.list(key, rows);
         let app = cx.weak_entity();
         list(state, move |index, _, cx| {
-            app.update(cx, |this, cx| this.transcript_entry(session, index, cx))
+            app.update(cx, |this, cx| this.transcript_entry(key.session, index, cx))
                 .unwrap_or_else(|_| div().into_any_element())
         })
         .size_full()
         .py_6()
     }
 
-    fn jump_to_latest(&self, session: u64, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let list = self.transcripts.get(&session)?;
-        (list.logical_scroll_top().item_ix < list.item_count()).then(|| {
+    fn jump_to_latest(&self, key: ViewKey, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        self.views.scrolled_up(key).then(|| {
             h_flex()
                 .absolute()
                 .bottom_3()
@@ -1735,7 +1687,7 @@ impl Keystone {
                         .icon(IconName::Chevron)
                         .debug_selector(|| "jump-to-latest".into())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.scroll_to_end(session);
+                            this.views.scroll_to_end(key);
                             cx.notify();
                         })),
                 )
@@ -2336,16 +2288,22 @@ impl Render for Keystone {
                 .children(error)
         } else {
             let body = match selected.filter(|_| !self.fixture) {
-                Some(id) if has_conversation => div()
-                    .id("conversation")
-                    .automation_id("conversation")
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(self.transcript_top_check(id, cx))
-                    .child(self.transcript_list(id, cx))
-                    .children(self.jump_to_latest(id, cx))
-                    .into_any_element(),
+                Some(id) if has_conversation => {
+                    let key = ViewKey {
+                        view: ViewId::MAIN,
+                        session: id,
+                    };
+                    div()
+                        .id("conversation")
+                        .automation_id("conversation")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(self.transcript_top_check(key, cx))
+                        .child(self.transcript_list(key, cx))
+                        .children(self.jump_to_latest(key, cx))
+                        .into_any_element()
+                }
                 None if self.fixture => div()
                     .flex_1()
                     .min_h_0()
@@ -2513,6 +2471,11 @@ mod tests {
     use super::*;
     use conversation::Row;
     use keystone_agent::{Event, Item, ItemKind, ItemStatus, TurnStatus};
+
+    const MAIN_1: ViewKey = ViewKey {
+        view: ViewId::MAIN,
+        session: 1,
+    };
 
     #[gpui::test]
     fn welcome_action_focuses_composer_and_preserves_draft_on_session_switch(
@@ -2769,7 +2732,10 @@ mod tests {
         // Scrolled to the top, the first rows draw and a new row does not pull the
         // view back down.
         view.update(cx, |this, cx| {
-            this.transcripts[&1].scroll_to(ListOffset::default());
+            this.views
+                .get(MAIN_1)
+                .unwrap()
+                .scroll_to(ListOffset::default());
             cx.notify();
         });
         cx.run_until_parked();
@@ -2786,7 +2752,7 @@ mod tests {
         assert!(cx.debug_bounds("transcript-row-601").is_none());
         // Sending, or selecting the session, returns to the latest row.
         view.update(cx, |this, cx| {
-            this.scroll_to_end(1);
+            this.views.scroll_to_end(MAIN_1);
             cx.notify();
         });
         cx.run_until_parked();
@@ -2869,6 +2835,100 @@ mod tests {
             read.top()
         );
         assert!(cx.debug_bounds("transcript-row-600").is_none());
+    }
+
+    #[gpui::test]
+    fn each_view_of_a_conversation_keeps_its_own_place_while_it_streams(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Codex, 1).unwrap();
+        store.create(Provider::Codex, 2).unwrap();
+        store.select(1, 3).unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 200);
+        cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| {
+            view.conversations
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 600)
+        });
+        cx.run_until_parked();
+        let other = ViewKey {
+            view: ViewId(1),
+            session: 1,
+        };
+        let reader = (100, px(40.));
+        view.update(cx, |this, _| {
+            this.views.list(other, 600).scroll_to(at(100, 40.));
+        });
+        let stream = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, id: &str| {
+            view.update(cx, |this, cx| {
+                this.conversation(1).apply(Event::ItemCompleted(Item {
+                    id: id.into(),
+                    kind: ItemKind::AgentMessage,
+                    text: format!("Reply {id}"),
+                    status: ItemStatus::Completed,
+                }));
+                this.commit(1);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        let tops = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |this, _| {
+                let main = this.views.get(MAIN_1).unwrap();
+                let other = this.views.get(other).unwrap();
+                assert_eq!(main.item_count(), other.item_count());
+                let top = other.logical_scroll_top();
+                (
+                    main.logical_scroll_top().item_ix == main.item_count(),
+                    (top.item_ix, top.offset_in_item),
+                )
+            })
+        };
+
+        stream(&view, cx, "a");
+        assert!(cx.debug_bounds("transcript-row-600").is_some());
+        assert_eq!(tops(&view, cx), (true, reader));
+
+        let row = cx.debug_bounds("session-2").unwrap().center();
+        cx.simulate_click(row, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("transcript-row-600").is_none());
+        stream(&view, cx, "b");
+        assert_eq!(tops(&view, cx), (true, reader));
+
+        let row = cx.debug_bounds("session-1").unwrap().center();
+        cx.simulate_click(row, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("transcript-row-601").is_some());
+        assert_eq!(tops(&view, cx), (true, reader));
+        view.update(cx, |this, _| {
+            assert_eq!(this.views.get(other).unwrap().item_count(), 603);
+            assert!(!this.views.take_remeasured_top(other));
+            this.views.get(other).unwrap().scroll_to(at(600, 40.));
+        });
+
+        view.update(cx, |this, cx| {
+            this.conversation(1).apply(Event::ItemCompleted(Item {
+                id: "a".into(),
+                kind: ItemKind::AgentMessage,
+                text: "Short".into(),
+                status: ItemStatus::Completed,
+            }));
+            this.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(tops(&view, cx), (true, (600, px(40.))));
+        view.update(cx, |this, _| {
+            assert_eq!(this.views.get(other).unwrap().item_count(), 603);
+            assert!(this.views.take_remeasured_top(other));
+            assert!(!this.views.take_remeasured_top(MAIN_1));
+        });
     }
 
     #[gpui::test]
@@ -3065,7 +3125,7 @@ mod tests {
 
     fn scroll_to(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, top: ListOffset) {
         view.update(cx, |this, cx| {
-            this.transcripts[&1].scroll_to(top);
+            this.views.get(MAIN_1).unwrap().scroll_to(top);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3201,14 +3261,14 @@ mod tests {
 
         // Following the bottom is unchanged by a resize.
         view.update(cx, |this, cx| {
-            this.scroll_to_end(1);
+            this.views.scroll_to_end(MAIN_1);
             cx.notify();
         });
         cx.run_until_parked();
         cx.simulate_resize(size(px(900.), px(700.)));
         cx.run_until_parked();
         view.update(cx, |this, _| {
-            let list = &this.transcripts[&1];
+            let list = this.views.get(MAIN_1).unwrap();
             assert_eq!(list.logical_scroll_top().item_ix, list.item_count());
         });
     }
