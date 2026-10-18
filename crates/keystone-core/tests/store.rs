@@ -124,6 +124,7 @@ fn preferences_survive_restart_and_default_for_older_files() {
         theme: ThemeMode::Light,
         density: Density::Compact,
         ui_font: Some("Noto Sans".into()),
+        ..Preferences::default()
     };
     store.set_preferences(preferences.clone()).unwrap();
     drop(store);

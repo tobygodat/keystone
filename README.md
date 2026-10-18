@@ -14,6 +14,12 @@ Codex and Claude Code run with your own `codex` and `claude` logins and, under P
 
 The preview saves to `$XDG_DATA_HOME/keystone/workspace.json`, or `$HOME/.local/share/keystone/workspace.json`. Set `KEYSTONE_STATE_PATH` to use an isolated state file. A file lock prevents concurrent desktop processes from writing the same workspace. Draft writes wait 250 ms after typing stops. Session changes and normal window close flush the visible draft immediately; failed saves keep the session open.
 
+## Customize the sidebar
+
+An early experiment in personalizing the interface in plain language. Click **Customize** in the top bar. It shows the sidebar even if you hid it, and hides it again when you close. You can move the sidebar left or right and set its width from 220 to 520 px. Use the buttons, drag the highlighted inner edge, or press Alt+Left, Alt+Right, Alt+[ and Alt+]. You can also type a request such as "put the sidebar on the right and make it a bit wider", choose Claude Code or Codex, and press **Preview** or Ctrl+Enter.
+
+The request uses your own `claude` or `codex` login in a new session with the provider's Read only policy and an empty temporary folder. Keystone denies any approval requests. The provider returns a validated layout proposal that only changes the preview. Changing the layout yourself while a request runs cancels it. **Apply** (Ctrl+S) saves the preview, **Discard** goes back to the saved layout, **Reset** previews the default (left, 302 px), and **Undo** restores the preceding saved layout. Undo keeps one step during the current app run. Escape or the close button discards an unapplied preview. This experiment changes sidebar side and width. A narrow window draws the sidebar narrower without changing the saved width.
+
 ## View on your laptop
 
 You can watch the app on another Wayland machine while it builds and runs on this one. Install waypipe on the laptop once with `sudo pacman -S waypipe`. Then run this from a Keystone checkout on the laptop:

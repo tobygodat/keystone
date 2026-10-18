@@ -2804,6 +2804,8 @@ dependencies = [
  "keystone-core",
  "keystone-ui",
  "libc",
+ "serde",
+ "serde_json",
  "tempfile",
  "unicode-segmentation",
 ]

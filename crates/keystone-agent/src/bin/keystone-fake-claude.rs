@@ -6,6 +6,7 @@
 //! for a command first. A message with priority "now" aborts the reply, as Claude does.
 //! Set `KEYSTONE_FAKE_CLAUDE_DELAY_MS` to change the pause between streamed words,
 //! and `KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1` to answer like a Claude with no login.
+//! `KEYSTONE_FAKE_CLAUDE_REPLY` replaces the reply text exactly.
 //! `KEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE=1` acts like a Claude older than
 //! `msg_lifecycle_v1`: no `command_lifecycle` frames and no such capability.
 //! `--resume missing` fails like a conversation Claude no longer has.
@@ -435,8 +436,9 @@ fn answer(
         }
     }
     let mode = mode.as_str();
-    let mut reply =
-        format!("Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan}");
+    let mut reply = std::env::var("KEYSTONE_FAKE_CLAUDE_REPLY").unwrap_or_else(|_| {
+        format!("Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan}")
+    });
     if text.contains("long") {
         for n in 1..=200 {
             reply.push_str(&format!(" word{n}"));

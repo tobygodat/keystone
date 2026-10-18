@@ -9,7 +9,8 @@
 //! `KEYSTONE_FAKE_CODEX_STATE` naming a file, they are kept there, so a later process
 //! resumes a thread with its override like real Codex. A turn whose prompt contains
 //! "end on steer" ends 300 ms after a steer arrives and then rejects it, as Codex does
-//! for a steer that reaches a turn that just ended.
+//! for a steer that reaches a turn that just ended. `KEYSTONE_FAKE_CODEX_REPLY`
+//! replaces the reply text exactly.
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -275,11 +276,13 @@ fn run_turn(
         }
     }
 
-    let words = format!(
-        "Scripted Codex reply (test data, no model call). You wrote: {text}. \
-         This reply streams one word at a time so streaming, steering, and stopping can be checked. \
-         **Approvals:** `{policy}`"
-    );
+    let words = std::env::var("KEYSTONE_FAKE_CODEX_REPLY").unwrap_or_else(|_| {
+        format!(
+            "Scripted Codex reply (test data, no model call). You wrote: {text}. \
+             This reply streams one word at a time so streaming, steering, and stopping can be checked. \
+             **Approvals:** `{policy}`"
+        )
+    });
     let mut steer = None;
     let message_id = format!("msg-{turn_id}");
     let streamed = stream(out, &with, &message_id, &words, turn, delay, &mut steer);

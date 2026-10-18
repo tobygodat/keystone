@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 use unicode_segmentation::UnicodeSegmentation;
 
+mod layout;
+
+pub use layout::{DIVIDER_WIDTH, MAIN_MIN_WIDTH, SidebarLayout, SidebarSide, SidebarWidth};
+
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
 const FORMAT_VERSION: u32 = 1;
@@ -287,6 +291,8 @@ pub struct Preferences {
     pub density: Density,
     /// The interface font family. `None` uses the built-in default.
     pub ui_font: Option<String>,
+    #[serde(deserialize_with = "layout::lenient")]
+    pub sidebar_layout: SidebarLayout,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -503,6 +509,14 @@ impl Store {
         let mut next = self.workspace.clone();
         next.preferences = preferences;
         self.commit(next, self.next_id)
+    }
+
+    /// Saves the sidebar layout over the latest preferences, leaving every other
+    /// preference as it is.
+    pub fn set_sidebar_layout(&mut self, layout: SidebarLayout) -> StoreResult<Applied<()>> {
+        let mut preferences = self.workspace.preferences.clone();
+        preferences.sidebar_layout = layout;
+        self.set_preferences(preferences)
     }
 
     pub fn set_provider_thread(&mut self, id: u64, thread: String) -> StoreResult<Applied<()>> {
@@ -920,6 +934,73 @@ mod tests {
         assert_eq!(
             reopened.workspace().sessions()[0].attention(false, false),
             Some(Attention::Failed)
+        );
+    }
+
+    #[test]
+    fn a_missing_or_invalid_sidebar_layout_loads_as_the_default_and_keeps_the_rest() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        for layout in [
+            "",
+            r#","sidebar_layout":{"side":"top","width_px":360}"#,
+            r#","sidebar_layout":{"side":"right","width_px":9000}"#,
+            r#","sidebar_layout":{"width_px":360}"#,
+            r#","sidebar_layout":"wide""#,
+            r#","sidebar_layout":null"#,
+        ] {
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"version":1,"next_id":2,"workspace":{{"sessions":[{{"id":1,"title":"Old","provider":"Codex","settled":false,"draft":"keep"}}],"selected":1,"preferences":{{"theme":"Dark"{layout}}}}}}}"#
+                ),
+            )
+            .unwrap();
+            let store = Store::open(&path).unwrap();
+            let workspace = store.workspace();
+            assert_eq!(
+                workspace.preferences().sidebar_layout,
+                SidebarLayout::default(),
+                "{layout}"
+            );
+            assert_eq!(workspace.preferences().theme, ThemeMode::Dark, "{layout}");
+            assert_eq!(workspace.sessions()[0].draft(), "keep", "{layout}");
+        }
+    }
+
+    #[test]
+    fn saving_the_sidebar_layout_keeps_other_preferences_and_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Claude, 1).unwrap();
+        store.set_draft(1, "draft".into()).unwrap();
+        let mut preferences = store.workspace().preferences().clone();
+        preferences.theme = ThemeMode::Light;
+        preferences.ui_font = Some("Inter".into());
+        store.set_preferences(preferences).unwrap();
+
+        let layout = SidebarLayout {
+            side: SidebarSide::Right,
+            width: SidebarWidth::new(360).unwrap(),
+        };
+        let applied = store.set_sidebar_layout(layout).unwrap();
+        assert_eq!(applied.durability, Durability::Synced);
+        let writes = store.writes();
+        store.set_sidebar_layout(layout).unwrap();
+        assert_eq!(store.writes(), writes);
+
+        let reopened = Store::open(&path).unwrap();
+        let preferences = reopened.workspace().preferences();
+        assert_eq!(preferences.sidebar_layout, layout);
+        assert_eq!(preferences.theme, ThemeMode::Light);
+        assert_eq!(preferences.ui_font.as_deref(), Some("Inter"));
+        assert_eq!(reopened.workspace().sessions()[0].draft(), "draft");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains(r#""version":1"#), "{saved}");
+        assert!(
+            saved.contains(r#""sidebar_layout":{"side":"right","width_px":360}"#),
+            "{saved}"
         );
     }
 }

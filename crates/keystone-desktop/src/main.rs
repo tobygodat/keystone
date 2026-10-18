@@ -1,10 +1,13 @@
 mod conversation;
+mod customization;
+mod customization_agent;
 mod relative_time;
 mod reveal;
 mod settings;
 mod transcript;
 
 use conversation::{Conversation, Row};
+use customization::Customization;
 use futures::StreamExt;
 use gpui::{
     Anchor, AnyElement, AnyView, App, AvailableSpace, BackgroundExecutor, Bounds, BoxShadow,
@@ -19,7 +22,8 @@ use keystone_agent::{
     TurnStatus, Wake,
 };
 use keystone_core::{
-    ApprovalMode, Attention, Density, Durability, Preferences, Provider, Store, ThemeMode,
+    ApprovalMode, Attention, Density, Durability, Preferences, Provider, SidebarSide, Store,
+    ThemeMode,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
@@ -184,6 +188,12 @@ struct Keystone {
     clock: BackgroundExecutor,
     /// The sample transcript, parsed once.
     fixture_document: Arc<Document>,
+    customization: Customization,
+    customize_prompt: Entity<TextInput>,
+    customize_provider: Provider,
+    customize_agent: Option<customization_agent::Agent>,
+    sidebar_before_customize: Option<bool>,
+    sidebar_drag: Option<customization::SidebarDrag>,
 }
 
 impl Keystone {
@@ -194,6 +204,13 @@ impl Keystone {
         });
         let search = cx.new(|cx| TextInput::new("Search", InputMode::SingleLine, cx));
         let rename_input = cx.new(|cx| TextInput::new("Session title", InputMode::SingleLine, cx));
+        let customize_prompt = cx.new(|cx| {
+            TextInput::new(
+                "e.g. Put the sidebar on the right and make it a bit wider",
+                InputMode::SingleLine,
+                cx,
+            )
+        });
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
                 this.draft_save_task = Some(cx.spawn(async move |this, cx| {
@@ -294,6 +311,12 @@ impl Keystone {
             } else {
                 ""
             })),
+            customization: Customization::default(),
+            customize_prompt,
+            customize_provider: Provider::Claude,
+            customize_agent: None,
+            sidebar_before_customize: None,
+            sidebar_drag: None,
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -556,6 +579,7 @@ impl Keystone {
                     })
             })
             .child(div().flex_1())
+            .child(self.customize_toggle(cx))
             .child(
                 self.own_press(
                     h_flex()
@@ -680,17 +704,21 @@ impl Keystone {
         )
     }
 
-    /// The left column: app bar, search, the cached session list, and the settings footer.
-    fn sidebar_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar_column(&self, width: f32, side: SidebarSide, cx: &mut Context<Self>) -> gpui::Div {
         let (colors, density) = (cx.theme().colors, cx.theme().density);
         let list = AnyView::from(self.session_sidebar.clone());
         let new_session = self.new_session_menu(cx).into_any_element();
         v_flex()
-            .w(px(302.))
+            .relative()
+            .w(px(width))
             .flex_shrink_0()
             .h_full()
+            .overflow_hidden()
             .bg(colors.sidebar)
-            .hairline_r(cx)
+            .map(|d| match side {
+                SidebarSide::Left => d.hairline_r(cx),
+                SidebarSide::Right => d.hairline_l(cx),
+            })
             .child(
                 self.drag_window(
                     h_flex()
@@ -1406,6 +1434,9 @@ impl Keystone {
         let reports = self.logs.drain();
         let mut events = self.codex.as_ref().map(|c| c.drain()).unwrap_or_default();
         events.extend(self.claude.as_ref().map(|c| c.drain()).unwrap_or_default());
+        if self.receive_customization() {
+            self.refresh(cx);
+        }
         self.receive(reports, events, cx);
     }
 
@@ -2220,7 +2251,7 @@ impl Render for SessionSidebar {
 }
 
 impl Render for Keystone {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (background, text, ui_font) = (
             theme.colors.background,
@@ -2369,69 +2400,95 @@ impl Render for Keystone {
                 .children(error)
                 .child(composer)
         };
-        h_flex()
-            .size_full()
-            .items_start()
-            .bg(background)
-            .font_family(ui_font)
-            .text_color(text)
-            .text_size(TextSize::Base.px())
-            .track_focus(&self.focus)
-            .key_context("Keystone")
-            .when(automation::enabled(), |d| {
-                d.child(automation::frame_writer())
-            })
-            // Capture runs before the focused input, so Escape closes an open menu first.
-            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape"
-                    && (this.new_menu || this.settings_menu || this.approval_menu)
-                {
-                    this.new_menu = false;
-                    this.settings_menu = false;
-                    this.approval_menu = false;
-                    this.refresh(cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &Quit, _, cx| {
-                if this.save_before_exit(cx) {
-                    cx.quit();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &NewClaude, window, cx| {
-                this.start(Provider::Claude, window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &NewCodex, window, cx| {
+        let window_width = f32::from(window.viewport_size().width);
+        let layout = self.customization.shown(self.saved_layout());
+        let customizing = self.customization.is_open();
+        let sidebar = self.sidebar.then(|| {
+            self.sidebar_column(layout.fit(window_width), layout.side, cx)
+                .when(customizing, |d| {
+                    d.child(self.resize_handle(layout.side, cx))
+                })
+        });
+        let (left, right) = match layout.side {
+            SidebarSide::Left => (sidebar, None),
+            SidebarSide::Right => (None, sidebar),
+        };
+        let root =
+            h_flex()
+                .id("keystone-root")
+                .size_full()
+                .items_start()
+                .bg(background)
+                .font_family(ui_font)
+                .text_color(text)
+                .text_size(TextSize::Base.px())
+                .track_focus(&self.focus)
+                .key_context("Keystone")
+                .when(automation::enabled(), |d| {
+                    d.child(automation::frame_writer())
+                })
+                // Capture runs before the focused input, so Escape closes an open menu first.
+                .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    if event.keystroke.key != "escape"
+                        || this.renaming.is_some()
+                        || this.confirm_full_access.is_some()
+                    {
+                        return;
+                    }
+                    if this.new_menu || this.settings_menu || this.approval_menu {
+                        this.new_menu = false;
+                        this.settings_menu = false;
+                        this.approval_menu = false;
+                        this.refresh(cx);
+                        cx.stop_propagation();
+                    } else if this.customization.is_open() {
+                        this.customize(customization::Action::Close, window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &Quit, _, cx| {
+                    if this.save_before_exit(cx) {
+                        cx.quit();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &NewClaude, window, cx| {
+                    this.start(Provider::Claude, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &NewCodex, window, cx| {
                     this.start(Provider::Codex, window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &ToggleSettle, _, cx| this.toggle_settle(cx)))
-            .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
-                this.composer.focus_handle(cx).focus(window, cx)
-            }))
-            .on_action(
-                cx.listener(|this, _: &SendMessage, window, cx| this.send_message(window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.sidebar = true;
-                this.search.focus_handle(cx).focus(window, cx);
-                this.refresh(cx);
-            }))
-            .when(self.sidebar, |d| d.child(self.sidebar_column(cx)))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.top_bar(session, cx))
-                    .child(main),
-            )
-            .children(self.full_access_dialog(cx))
-            .children(self.rename_dialog(cx))
+                }))
+                .on_action(cx.listener(|this, _: &ToggleSettle, _, cx| this.toggle_settle(cx)))
+                .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
+                    this.composer.focus_handle(cx).focus(window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &SendMessage, window, cx| this.send_message(window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                    this.sidebar = true;
+                    this.search.focus_handle(cx).focus(window, cx);
+                    this.refresh(cx);
+                }))
+                .children(left)
+                .child(
+                    v_flex()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.top_bar(session, cx))
+                        .child(main)
+                        .when(customizing, |d| {
+                            d.child(self.customize_panel(window.viewport_size(), cx))
+                        }),
+                )
+                .children(right)
+                .children(self.full_access_dialog(cx))
+                .children(self.rename_dialog(cx));
+        self.on_sidebar_drag(root, cx)
     }
 }
 
@@ -5475,6 +5532,7 @@ mod tests {
 /// The app's keyboard shortcuts, shared by `main` and the GPUI tests.
 fn bind_keys(cx: &mut App) {
     TextInput::bind_keys(cx);
+    customization::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new("ctrl-q", Quit, None),
         gpui::KeyBinding::new("ctrl-n", NewClaude, Some("!Dialog")),
