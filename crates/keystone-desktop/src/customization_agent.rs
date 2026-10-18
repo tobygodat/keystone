@@ -460,7 +460,7 @@ mod tests {
             ))),
             None
         );
-        let json = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":302}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
+        let json = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":264}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
         reply.apply(Event::ItemStarted(message("b", "", ItemStatus::InProgress)));
         assert_eq!(
             reply.apply(Event::ItemDelta {
@@ -607,7 +607,7 @@ mod tests {
             results: Arc::default(),
             wake: Arc::new(|| {}),
         };
-        let json = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":302}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
+        let json = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":264}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
         let connection = Late {
             events: Mutex::new(vec![
                 (
@@ -696,7 +696,7 @@ mod provider_tests {
         agent.drain()
     }
 
-    const CHANGE: &str = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":302}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
+    const CHANGE: &str = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":264}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
 
     #[test]
     fn claude_answers_with_a_validated_proposal_and_codex_is_refused_unstarted() {

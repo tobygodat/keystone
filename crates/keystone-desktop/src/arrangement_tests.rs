@@ -94,10 +94,12 @@ fn two_visible_occurrences_keep_scroll_and_focus_across_session_selection(cx: &m
     });
     cx.run_until_parked();
     let top = view.read_with(cx, |this, _| {
-        assert!(this.views.scrolled_up(first));
-        assert!(!this.views.scrolled_up(second));
+        assert!(this.presentation.current.views.scrolled_up(first));
+        assert!(!this.presentation.current.views.scrolled_up(second));
         assert!(
-            this.views
+            this.presentation
+                .current
+                .views
                 .get(second)
                 .unwrap()
                 .viewport_bounds()
@@ -105,29 +107,46 @@ fn two_visible_occurrences_keep_scroll_and_focus_across_session_selection(cx: &m
                 .height
                 > px(0.)
         );
-        this.views.get(first).unwrap().logical_scroll_top()
+        this.presentation
+            .current
+            .views
+            .get(first)
+            .unwrap()
+            .logical_scroll_top()
     });
     click(cx, "conversation");
     view.read_with(cx, |this, _| {
         assert_eq!(
-            this.views.send_target(&this.arrangement.visible, 1),
+            this.presentation
+                .current
+                .views
+                .send_target(&this.presentation.current.arrangement.visible, 1),
             Some(first)
         )
     });
     click(cx, "conversation-view-3");
     view.read_with(cx, |this, _| {
         assert_eq!(
-            this.views.send_target(&this.arrangement.visible, 1),
+            this.presentation
+                .current
+                .views
+                .send_target(&this.presentation.current.arrangement.visible, 1),
             Some(second)
         )
     });
     click(cx, "session-2");
     click(cx, "session-1");
     view.read_with(cx, |this, _| {
-        let restored = this.views.get(first).unwrap().logical_scroll_top();
+        let restored = this
+            .presentation
+            .current
+            .views
+            .get(first)
+            .unwrap()
+            .logical_scroll_top();
         assert_eq!(restored.item_ix, top.item_ix);
         assert_eq!(restored.offset_in_item, top.offset_in_item);
-        assert!(!this.views.scrolled_up(second));
+        assert!(!this.presentation.current.views.scrolled_up(second));
     });
 }
 
@@ -139,11 +158,11 @@ fn resize_changes_visible_geometry_without_retyping_auto_or_unrelated_fill(
     drag(cx, "split-grip-[]-0", 40., 0.);
     view.read_with(cx, |this, _| {
         let saved = this.saved_composition();
-        let c = this.customization.shown(&saved);
+        let c = this.presentation.current.customization.shown(&saved);
         let Node::Split { children, .. } = c.root() else {
             panic!()
         };
-        assert_eq!(children[0].size, Size::Px(NonZeroU16::new(342).unwrap()));
+        assert_eq!(children[0].size, Size::Px(NonZeroU16::new(304).unwrap()));
         assert_eq!(children[1].size, Size::Fill(NonZeroU16::MIN));
         let Node::Split { children, .. } = &children[1].node else {
             panic!()
@@ -178,7 +197,7 @@ fn a_narrow_composer_keeps_streaming_controls_inside_the_window(cx: &mut TestApp
     view.update_in(cx, |this, window, cx| {
         this.store
             .set_project_layout(
-                this.project.as_ref().unwrap(),
+                this.presentation.project.as_ref().unwrap(),
                 Some(preferred.clone().into()),
             )
             .unwrap();
@@ -291,7 +310,10 @@ fn checked_tab_preview_and_restored_documents_replace_runtime_selection(cx: &mut
     let (_dir, view, cx) = open(cx);
     view.update_in(cx, |this, window, cx| {
         this.store
-            .set_project_layout(this.project.as_ref().unwrap(), Some(tabbed(0).into()))
+            .set_project_layout(
+                this.presentation.project.as_ref().unwrap(),
+                Some(tabbed(0).into()),
+            )
             .unwrap();
         this.customize(Action::Close, window, cx);
     });
@@ -327,7 +349,10 @@ fn fitted_sidebar_entry_points_without_session_list_do_not_block_observation(
     let (_dir, view, cx) = open(cx);
     view.update_in(cx, |this, window, cx| {
         this.store
-            .set_project_layout(this.project.as_ref().unwrap(), Some(tabbed(0).into()))
+            .set_project_layout(
+                this.presentation.project.as_ref().unwrap(),
+                Some(tabbed(0).into()),
+            )
             .unwrap();
         this.customize(Action::Close, window, cx);
     });
@@ -337,7 +362,9 @@ fn fitted_sidebar_entry_points_without_session_list_do_not_block_observation(
     click(cx, "sidebar-toggle");
     click(cx, "conversation");
     assert!(viewed(&view, cx) >= 10);
-    view.read_with(cx, |this, _| assert!(!this.arrangement.sidebar_overlay));
+    view.read_with(cx, |this, _| {
+        assert!(!this.presentation.current.arrangement.sidebar_overlay)
+    });
     click(cx, "composer-field");
     view.update(cx, |this, cx| {
         this.store
@@ -347,7 +374,9 @@ fn fitted_sidebar_entry_points_without_session_list_do_not_block_observation(
     });
     cx.dispatch_action(crate::FocusSearch);
     cx.run_until_parked();
-    view.read_with(cx, |this, _| assert!(!this.arrangement.sidebar_overlay));
+    view.read_with(cx, |this, _| {
+        assert!(!this.presentation.current.arrangement.sidebar_overlay)
+    });
     click(cx, "conversation");
     view.read_with(cx, |this, _| {
         let session = this.selected_session().unwrap();
@@ -362,7 +391,10 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     let (dir, view, cx) = open(cx);
     view.update_in(cx, |this, window, cx| {
         this.store
-            .set_project_layout(this.project.as_ref().unwrap(), Some(tabbed(0).into()))
+            .set_project_layout(
+                this.presentation.project.as_ref().unwrap(),
+                Some(tabbed(0).into()),
+            )
             .unwrap();
         this.customize(Action::Close, window, cx);
     });
@@ -377,7 +409,7 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     view.update(cx, |this, cx| {
         let saved = this.saved_composition();
         let raw = this.saved_layout().cloned();
-        this.customization.dispatch(
+        this.presentation.current.customization.dispatch(
             Action::Ask {
                 provider: Provider::Codex,
                 prompt: "Select conversation 3".into(),
@@ -385,8 +417,8 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
             raw.as_ref(),
             &saved,
         );
-        this.customization.receive(
-            this.customization.running().unwrap(),
+        this.presentation.current.customization.receive(
+            this.presentation.current.customization.running().unwrap(),
             crate::customization_agent::Outcome::Proposal(
                 crate::customization_agent::Proposal::Change(tabbed(1)),
             ),
@@ -412,7 +444,7 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     view.update(cx, |this, cx| {
         let saved = this.saved_composition();
         let raw = this.saved_layout().cloned();
-        this.customization.dispatch(
+        this.presentation.current.customization.dispatch(
             Action::Ask {
                 provider: Provider::Codex,
                 prompt: "Select conversation 0".into(),
@@ -420,8 +452,8 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
             raw.as_ref(),
             &saved,
         );
-        this.customization.receive(
-            this.customization.running().unwrap(),
+        this.presentation.current.customization.receive(
+            this.presentation.current.customization.running().unwrap(),
             crate::customization_agent::Outcome::Proposal(
                 crate::customization_agent::Proposal::Change(tabbed(0)),
             ),
@@ -472,7 +504,10 @@ fn fitting_uses_the_first_displayed_preferred_pane_and_retains_temporary_clicks(
     .unwrap();
     view.update_in(cx, |this, window, cx| {
         this.store
-            .set_project_layout(this.project.as_ref().unwrap(), Some(preferred.into()))
+            .set_project_layout(
+                this.presentation.project.as_ref().unwrap(),
+                Some(preferred.into()),
+            )
             .unwrap();
         this.customize(Action::Close, window, cx);
     });

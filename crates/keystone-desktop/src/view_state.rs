@@ -25,6 +25,18 @@ pub struct ViewStates {
 }
 
 impl ViewStates {
+    pub fn suspend(&mut self) {
+        for t in self.transcripts.values_mut() {
+            t.revision += 1;
+            t.observation_attempt = None;
+            let top = t.list.logical_scroll_top();
+            let count = t.list.item_count();
+            t.list.splice(0..count, count);
+            t.list.scroll_to(top);
+            t.remeasured_top = true;
+        }
+    }
+
     pub fn list(&mut self, key: ViewKey, rows: usize) -> ListState {
         self.transcripts
             .entry(key)

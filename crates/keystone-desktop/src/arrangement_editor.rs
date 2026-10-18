@@ -65,27 +65,49 @@ struct Editing {
     chooser: Option<Chooser>,
 }
 
+#[derive(Clone, Default)]
+pub struct RequestIds(std::rc::Rc<std::cell::Cell<u64>>);
+impl RequestIds {
+    fn allocate(&self) -> Option<u64> {
+        let next = self.0.get().checked_add(1)?;
+        self.0.set(next);
+        Some(next)
+    }
+}
+
 pub struct Customization {
     editing: Option<Editing>,
     replaced: Option<Option<SavedComposition>>,
     last_ask: Option<(Provider, String)>,
-    next_request: u64,
+    requests: RequestIds,
     next_view: u64,
 }
 
 impl Customization {
-    pub fn new(initial: &Composition) -> Self {
+    pub fn new(initial: &Composition, requests: RequestIds) -> Self {
         Self {
             editing: None,
             replaced: None,
             last_ask: None,
-            next_request: 0,
+            requests,
             next_view: initial
                 .views()
                 .map(|(id, _)| u64::from(id.0) + 1)
                 .max()
                 .unwrap_or(0),
         }
+    }
+
+    pub fn suspend(&mut self) -> Option<u64> {
+        let running = self.running();
+        if let Some(e) = &mut self.editing {
+            e.chooser = None;
+            if running.is_some() {
+                e.interpretation =
+                    Interpretation::Failed("Request cancelled when leaving this project.".into());
+            }
+        }
+        running
     }
 
     pub fn is_open(&self) -> bool {
@@ -289,7 +311,10 @@ impl Customization {
                             axis: keystone_core::Axis::Row,
                             after: false,
                         },
-                        size: keystone_core::Size::Px(std::num::NonZeroU16::new(302).unwrap()),
+                        size: keystone_core::Size::Px(
+                            std::num::NonZeroU16::new(keystone_core::SidebarWidth::DEFAULT.px())
+                                .unwrap(),
+                        ),
                     })
                     .map_err(|e| e.to_string())
             }),
@@ -342,12 +367,11 @@ impl Customization {
         let Some((provider, prompt)) = self.last_ask.clone() else {
             return;
         };
-        let Some(request) = self.next_request.checked_add(1) else {
+        let Some(request) = self.requests.allocate() else {
             self.editing.as_mut().unwrap().note =
                 Some("No more preview requests are available.".into());
             return;
         };
-        self.next_request = request;
         let e = self.editing.as_mut().unwrap();
         e.interpretation = Interpretation::Running {
             request,
@@ -479,7 +503,7 @@ mod tests {
     #[test]
     fn direct_edits_cancel_old_proposals_and_history_restores_absence() {
         let saved = Composition::default();
-        let mut e = Customization::new(&saved);
+        let mut e = Customization::new(&saved, RequestIds::default());
         e.dispatch(Action::Open, None, &saved);
         e.dispatch(
             Action::Ask {
@@ -519,7 +543,7 @@ mod tests {
         let source = ProjectId::new(dir.path()).unwrap();
         let saved = Composition::default();
         let raw = SavedComposition::from(saved.clone());
-        let mut e = Customization::new(&saved);
+        let mut e = Customization::new(&saved, RequestIds::default());
         e.dispatch(Action::Open, None, &saved);
         e.dispatch(Action::Duplicate(ViewId::MAIN), None, &saved);
         let retained: Vec<_> = e.shown(&saved).views().collect();
@@ -541,7 +565,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source = ProjectId::new(dir.path()).unwrap();
         let saved = Composition::default();
-        let mut e = Customization::new(&saved);
+        let mut e = Customization::new(&saved, RequestIds::default());
         e.dispatch(Action::Open, None, &saved);
         e.dispatch(Action::Edit(moved(&saved)), None, &saved);
         let candidate = e.shown(&saved).clone();

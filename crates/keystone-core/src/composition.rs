@@ -636,7 +636,7 @@ mod tests {
 
         let default = Composition::default();
         assert_eq!(default, Composition::from_sidebar(SidebarLayout::default()));
-        assert_eq!(root(&default)["children"][0], view(1, json!({"px": 302})));
+        assert_eq!(root(&default)["children"][0], view(1, json!({"px": 264})));
         assert_eq!(
             default.views().collect::<Vec<_>>(),
             [
@@ -716,7 +716,7 @@ mod tests {
                 {"node": {"kind": "tabs", "selected": 1, "views": [0, 7]}, "size": {"fill": 1}},
                 {"node": {"kind": "split", "axis": "row", "children": [
                     view(2, json!({"fill": 1})),
-                    view(1, json!({"px": 302})),
+                    view(1, json!({"px": 264})),
                 ]}, "size": "auto"},
             ]})
         );

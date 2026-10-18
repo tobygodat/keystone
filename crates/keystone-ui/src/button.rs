@@ -52,6 +52,7 @@ struct Common {
     on_click: Option<ClickHandler>,
     debug_selector: Option<String>,
     focus: Option<FocusHandle>,
+    aria_label: Option<SharedString>,
 }
 
 impl Common {
@@ -66,6 +67,7 @@ impl Common {
             on_click: None,
             debug_selector: None,
             focus: None,
+            aria_label: None,
         }
     }
 
@@ -98,6 +100,9 @@ impl Common {
             .when_some(rest, |d, bg| d.bg(bg));
         if let Some(selector) = self.debug_selector {
             el = crate::automation::tag(el, selector);
+        }
+        if let Some(label) = self.aria_label {
+            el = el.role(gpui::Role::Button).aria_label(label);
         }
         if self.disabled {
             return el.opacity(0.4).cursor_not_allowed();
@@ -167,6 +172,13 @@ macro_rules! common_builders {
         /// Names the element for simulated-input tests and native verification.
         pub fn debug_selector(mut self, selector: impl FnOnce() -> String) -> Self {
             self.common.debug_selector = Some(selector());
+            self
+        }
+
+        /// Exposes the control to assistive technology as a button with this name. The
+        /// name, role, click action and focus all sit on the same element.
+        pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+            self.common.aria_label = Some(label.into());
             self
         }
     };

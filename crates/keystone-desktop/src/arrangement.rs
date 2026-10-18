@@ -39,7 +39,7 @@ struct Resize {
     extents: [f32; 2],
 }
 #[derive(Clone)]
-struct ComponentDrag(ViewId);
+struct ComponentDrag(ViewId, crate::presentation::Activation);
 struct ResizeGrip;
 
 pub fn selector(base: &str, view: ViewId) -> SharedString {
@@ -112,6 +112,14 @@ fn minimum(
 }
 
 impl Arrangement {
+    pub(crate) fn suspend(&mut self) {
+        self.visible.clear();
+        self.geometry.clear();
+        self.resize = None;
+        self.sidebar_overlay = false;
+        self.toolbar_height = px(0.);
+    }
+
     pub(crate) fn restore_tabs(&mut self) {
         self.tabs.clear();
         self.tab = None;
@@ -121,7 +129,9 @@ impl Arrangement {
 impl Keystone {
     pub(crate) fn arrangement_has_sidebar(&self) -> bool {
         let saved = self.saved_composition();
-        self.customization
+        self.presentation
+            .current
+            .customization
             .shown(&saved)
             .views()
             .any(|(_, component)| component == Component::SessionList)
@@ -131,10 +141,7 @@ impl Keystone {
         let Some(session) = self.selected_session() else {
             return COMPOSER_MIN;
         };
-        let project = self.project_dir.file_name().map_or_else(
-            || self.project_dir.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
+        let folder = self.conversation_folder(session.id()).unwrap();
         let provider = h_flex()
             .gap(px(7.))
             .flex_none()
@@ -151,11 +158,7 @@ impl Keystone {
             .text_size(TextSize::Base.px())
             .child(provider)
             .child(div().w_px().flex_none())
-            .child(
-                Button::new("measure-project", project)
-                    .size(ButtonSize::Compact)
-                    .icon(IconName::Folder),
-            )
+            .child(folder.button("measure-project"))
             .child(
                 Button::new("measure-approval", session.approval_mode().label())
                     .size(ButtonSize::Compact)
@@ -185,46 +188,56 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let saved = self.saved_composition();
-        let c = self.customization.shown(&saved).clone();
+        let c = self
+            .presentation
+            .current
+            .customization
+            .shown(&saved)
+            .clone();
         if self
+            .presentation
+            .current
             .arrangement
             .tab
             .as_ref()
             .is_some_and(|tab| tab.source != c)
         {
-            self.arrangement.tab = None;
+            self.presentation.current.arrangement.tab = None;
         }
-        self.arrangement.composer_min_width = self.composer_minimum_width(window, cx);
+        self.presentation.current.arrangement.composer_min_width =
+            self.composer_minimum_width(window, cx);
         let required = minimum(
             c.root(),
             &c,
-            self.customization.is_open(),
-            self.sidebar,
-            self.arrangement.composer_min_width,
+            self.presentation.current.customization.is_open(),
+            self.presentation.current.sidebar,
+            self.presentation.current.arrangement.composer_min_width,
         );
         let viewport = window.viewport_size();
-        let toolbar = if self.customization.is_open() {
-            f32::from(self.arrangement.toolbar_height)
+        let toolbar = if self.presentation.current.customization.is_open() {
+            f32::from(self.presentation.current.arrangement.toolbar_height)
         } else {
             0.
         };
         let fitted = f32::from(viewport.width) < required[0]
             || f32::from(viewport.height) - 44. - toolbar < required[1];
-        if fitted != self.arrangement.fitted
+        if fitted != self.presentation.current.arrangement.fitted
             || !c
                 .views()
                 .any(|(_, component)| component == Component::SessionList)
         {
-            self.arrangement.sidebar_overlay = false;
+            self.presentation.current.arrangement.sidebar_overlay = false;
         }
-        self.arrangement.fitted = fitted;
-        self.arrangement.visible.clear();
+        self.presentation.current.arrangement.fitted = fitted;
+        self.presentation.current.arrangement.visible.clear();
         if fitted {
             let conversations: Vec<_> = ordered_views(c.root())
                 .into_iter()
                 .filter(|id| c.component(*id) == Some(Component::Conversation))
                 .collect();
             let selected = self
+                .presentation
+                .current
                 .arrangement
                 .tab
                 .as_ref()
@@ -240,8 +253,8 @@ impl Keystone {
                 .child(h_flex().flex_none().gap_1().children(conversations.iter().enumerate().map(|(i, &id)| {
                     let source = c.clone();
                     self.conversation_tab(format!("fitted-tab-{}", id.0), format!("View {}", i+1), selected == id, cx)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.arrangement.tab = Some(FittedTab {
+                        .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
+                            this.presentation.current.arrangement.tab = Some(FittedTab {
                                 source: source.clone(),
                                 view: id,
                             });
@@ -250,7 +263,7 @@ impl Keystone {
                 })))
                 .child(div().flex_1().min_h_0().overflow_hidden().child(self.arrangement_view(selected, &c, false, cx)))
                 .child(div().flex_none().w_full().child(self.arrangement_view(composer, &c, true, cx)));
-            if self.arrangement.sidebar_overlay {
+            if self.presentation.current.arrangement.sidebar_overlay {
                 if let Some((id, _)) = c.views().find(|(_, k)| *k == Component::SessionList) {
                     body = body.child(
                         div()
@@ -258,9 +271,9 @@ impl Keystone {
                             .top_0()
                             .bottom_0()
                             .left_0()
-                            .w(px(
-                                SESSION_MIN.max((f32::from(viewport.width) * 0.8).min(302.))
-                            ))
+                            .w(px(SESSION_MIN.max((f32::from(viewport.width) * 0.8).min(
+                                f32::from(keystone_core::SidebarWidth::DEFAULT.px()),
+                            ))))
                             .occlude()
                             .child(self.arrangement_view(id, &c, false, cx)),
                     );
@@ -284,10 +297,12 @@ impl Keystone {
             Node::View { id } => self.arrangement_view(*id, c, auto, cx),
             Node::Tabs { selected, views } => {
                 let views_first = views[0];
-                let selected = if self.customization.is_open() {
+                let selected = if self.presentation.current.customization.is_open() {
                     *selected
                 } else {
-                    self.arrangement
+                    self.presentation
+                        .current
+                        .arrangement
                         .tabs
                         .get(&views_first)
                         .and_then(|id| views.iter().position(|v| v == id))
@@ -308,11 +323,9 @@ impl Keystone {
                                     i == selected,
                                     cx,
                                 )
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.select_conversation_tab(views_first, id, window, cx)
-                                    },
-                                ))
+                                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                                    this.select_conversation_tab(views_first, id, window, cx)
+                                }))
                             })),
                     )
                     .child(div().flex_1().min_h_0().child(self.arrangement_view(
@@ -328,7 +341,7 @@ impl Keystone {
                     && children.len() == 2
                     && self.selected_session().is_none()
                     && !self.fixture
-                    && !self.customization.is_open()
+                    && !self.presentation.current.customization.is_open()
                     && matches!(children[0].node, Node::View { id } if c.component(id) == Some(Component::Conversation))
                     && matches!(children[1].node, Node::View { id } if c.component(id) == Some(Component::Composer))
                 {
@@ -352,6 +365,7 @@ impl Keystone {
                 }
                 let axis = *axis;
                 let geometry_path = path.clone();
+                let activation = self.presentation.activation();
                 let app = cx.weak_entity();
                 let mut split = div()
                     .id(SharedString::from(format!("split-{:?}", path.0)))
@@ -365,7 +379,12 @@ impl Keystone {
                         canvas(
                             move |bounds, _, cx| {
                                 let _ = app.update(cx, |this, _| {
-                                    this.arrangement
+                                    if !this.presentation.matches(activation) {
+                                        return;
+                                    }
+                                    this.presentation
+                                        .current
+                                        .arrangement
                                         .geometry
                                         .insert(geometry_path.clone(), bounds);
                                 });
@@ -382,16 +401,16 @@ impl Keystone {
                     let child_min = minimum(
                         &child.node,
                         c,
-                        self.customization.is_open(),
-                        self.sidebar,
-                        self.arrangement.composer_min_width,
+                        self.presentation.current.customization.is_open(),
+                        self.presentation.current.sidebar,
+                        self.presentation.current.arrangement.composer_min_width,
                     );
-                    let hidden_sidebar = !self.sidebar
+                    let hidden_sidebar = !self.presentation.current.sidebar
                         && matches!(&child.node, Node::View { id } if c.component(*id) == Some(Component::SessionList));
                     if hidden_sidebar {
                         continue;
                     }
-                    if i > 0 && self.customization.is_open() {
+                    if i > 0 && self.presentation.current.customization.is_open() {
                         split = split.child(self.split_grip(
                             path.clone(),
                             axis,
@@ -400,6 +419,7 @@ impl Keystone {
                             cx,
                         ));
                     }
+                    let activation = self.presentation.activation();
                     let app = cx.weak_entity();
                     let measure = child_path.clone();
                     let content = self.arrangement_node(
@@ -443,7 +463,12 @@ impl Keystone {
                                 canvas(
                                     move |bounds, _, cx| {
                                         let _ = app.update(cx, |this, _| {
-                                            this.arrangement
+                                            if !this.presentation.matches(activation) {
+                                                return;
+                                            }
+                                            this.presentation
+                                                .current
+                                                .arrangement
                                                 .geometry
                                                 .insert(measure.clone(), bounds);
                                         });
@@ -494,14 +519,21 @@ impl Keystone {
     }
 
     pub(crate) fn measure_customize_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let activation = self.presentation.activation();
         let app = cx.weak_entity();
         canvas(
             move |bounds, window, cx| {
                 let app = app.clone();
                 window.defer(cx, move |_, cx| {
                     let _ = app.update(cx, |this, cx| {
-                        if this.arrangement.toolbar_height != bounds.size.height {
-                            this.arrangement.toolbar_height = bounds.size.height;
+                        if !this.presentation.matches(activation) {
+                            return;
+                        }
+                        if this.presentation.current.arrangement.toolbar_height
+                            != bounds.size.height
+                        {
+                            this.presentation.current.arrangement.toolbar_height =
+                                bounds.size.height;
                             cx.notify();
                         }
                     });
@@ -520,11 +552,11 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.customization.is_open() {
-            self.arrangement.tabs.remove(&group);
+        if self.presentation.current.customization.is_open() {
+            self.presentation.current.arrangement.tabs.remove(&group);
             self.customize(Action::Edit(Edit::SelectTab(id)), window, cx);
         } else {
-            self.arrangement.tabs.insert(group, id);
+            self.presentation.current.arrangement.tabs.insert(group, id);
             cx.notify();
         }
     }
@@ -537,7 +569,7 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let component = c.component(id).unwrap();
-        let editing = self.customization.is_open();
+        let editing = self.presentation.current.customization.is_open();
         let colors = cx.theme().colors;
         let current = self.selected_session().map(|s| (s.id(), s.provider()));
         let mut pane = v_flex()
@@ -548,12 +580,13 @@ impl Keystone {
             .w_full()
             .when(!auto, |d| d.h_full())
             .when(editing, |d| {
-                d.border_1()
-                    .border_color(if self.customization.selected() == Some(id) {
+                d.border_1().border_color(
+                    if self.presentation.current.customization.selected() == Some(id) {
                         colors.selection_ring
                     } else {
                         colors.border
-                    })
+                    },
+                )
             });
         if editing {
             pane = pane.child(
@@ -571,14 +604,17 @@ impl Keystone {
                             .child(Label::new("⠿").color(Color::Muted))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
+                                self.scoped_listener(cx, move |this, _, window, cx| {
                                     this.customize(Action::Select(id), window, cx)
                                 }),
                             )
-                            .on_drag(ComponentDrag(id), |_, _, _, cx| {
-                                cx.stop_propagation();
-                                cx.new(|_| Empty)
-                            }),
+                            .on_drag(
+                                ComponentDrag(id, self.presentation.activation()),
+                                |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.new(|_| Empty)
+                                },
+                            ),
                     )
                     .child(
                         Label::new(format!(
@@ -598,8 +634,12 @@ impl Keystone {
                 .count()
                 > 1
         {
-            let earlier = current
-                .is_some_and(|(session, _)| self.views.scrolled_up(ViewKey { view: id, session }));
+            let earlier = current.is_some_and(|(session, _)| {
+                self.presentation
+                    .current
+                    .views
+                    .scrolled_up(ViewKey { view: id, session })
+            });
             pane = pane.child(
                 h_flex().h(px(26.)).flex_none().px_2().child(
                     Label::new(format!(
@@ -619,10 +659,14 @@ impl Keystone {
         match component {
             Component::SessionList => {
                 pane = pane.child(
-                    self.sidebar_column(302., keystone_core::SidebarSide::Left, cx)
-                        .w_full()
-                        .flex_1()
-                        .min_h_0(),
+                    self.sidebar_column(
+                        f32::from(keystone_core::SidebarWidth::DEFAULT.px()),
+                        keystone_core::SidebarSide::Left,
+                        cx,
+                    )
+                    .w_full()
+                    .flex_1()
+                    .min_h_0(),
                 );
             }
             Component::Composer => {
@@ -634,12 +678,12 @@ impl Keystone {
                     .children(self.error_line());
             }
             Component::Conversation => {
-                self.arrangement.visible.push(id);
+                self.presentation.current.arrangement.visible.push(id);
                 if let Some((session, _)) = current {
                     let key = ViewKey { view: id, session };
                     let rows = self.conversations.get(&session).map_or(0, |c| c.rows.len());
-                    self.views.list(key, rows);
-                    let focus = self.views.focus(key, cx);
+                    self.presentation.current.views.list(key, rows);
+                    let focus = self.presentation.current.views.focus(key, cx);
                     pane = pane
                         .track_focus(&focus)
                         .border_1()
@@ -649,13 +693,18 @@ impl Keystone {
                         .key_context("Conversation")
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                this.views.focus(key, cx).focus(window, cx);
-                                this.views.activate(key);
+                            self.scoped_listener(cx, move |this, _, window, cx| {
+                                this.presentation
+                                    .current
+                                    .views
+                                    .focus(key, cx)
+                                    .focus(window, cx);
+                                this.presentation.current.views.activate(key);
                                 cx.notify();
                             }),
                         );
-                    let revision = self.views.revision(key);
+                    let revision = self.presentation.current.views.revision(key);
+                    let activation = self.presentation.activation();
                     let app = cx.weak_entity();
                     let empty = self
                         .conversations
@@ -683,6 +732,9 @@ impl Keystone {
                                             let app = app.clone();
                                             window.defer(cx, move |window, cx| {
                                                 let _ = app.update(cx, |this, cx| {
+                                                    if !this.presentation.matches(activation) {
+                                                        return;
+                                                    }
                                                     this.observe_conversation(
                                                         key, revision, window, cx,
                                                     )
@@ -829,7 +881,10 @@ impl Keystone {
                 }
             })
             .on_drop(
-                cx.listener(move |this, dragged: &ComponentDrag, window, cx| {
+                self.scoped_listener(cx, move |this, dragged: &ComponentDrag, window, cx| {
+                    if !this.presentation.matches(dragged.1) {
+                        return;
+                    }
                     this.customize(
                         Action::Edit(Edit::Move {
                             view: dragged.0,
@@ -868,11 +923,13 @@ impl Keystone {
             .hover(move |d| d.bg(colors.selection_ring))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, _| {
+                self.scoped_listener(cx, move |this, event: &gpui::MouseDownEvent, _, _| {
                     let extent = |i| {
                         let mut path = split.0.clone();
                         path.push(i);
-                        this.arrangement
+                        this.presentation
+                            .current
+                            .arrangement
                             .geometry
                             .get(&NodePath(path))
                             .map_or(1., |b| {
@@ -883,7 +940,7 @@ impl Keystone {
                                 })
                             })
                     };
-                    this.arrangement.resize = Some(Resize {
+                    this.presentation.current.arrangement.resize = Some(Resize {
                         start: event.position,
                         split: split.clone(),
                         axis,
@@ -906,7 +963,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = &self.arrangement.resize else {
+        let Some(drag) = &self.presentation.current.arrangement.resize else {
             return;
         };
         let delta = f32::from(if drag.axis == Axis::Row {
@@ -962,7 +1019,8 @@ impl Keystone {
         root: E,
         cx: &mut Context<Self>,
     ) -> E {
-        root.on_drag_move::<ResizeGrip>(cx.listener(
+        root.on_drag_move::<ResizeGrip>(self.scoped_listener(
+            cx,
             |this, event: &gpui::DragMoveEvent<ResizeGrip>, window, cx| {
                 this.resize_components(event.event.position, window, cx)
             },
@@ -976,25 +1034,36 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.views.revision(key) != revision
+        if self.presentation.current.views.revision(key) != revision
             || !window.is_window_active()
+            || self.filter_menu
             || self.new_menu
             || self.settings_menu
             || self.approval_menu
             || self.renaming.is_some()
             || self.confirm_full_access.is_some()
-            || self.customization.chooser().is_some()
-            || (self.arrangement.sidebar_overlay
-                && self.arrangement.fitted
+            || self.presentation.current.customization.chooser().is_some()
+            || (self.presentation.current.arrangement.sidebar_overlay
+                && self.presentation.current.arrangement.fitted
                 && self.arrangement_has_sidebar())
             || self.store.workspace().selected() != Some(key.session)
-            || !self.arrangement.visible.contains(&key.view)
-            || !self.views.focus(key, cx).contains_focused(window, cx)
+            || !self
+                .presentation
+                .current
+                .arrangement
+                .visible
+                .contains(&key.view)
+            || !self
+                .presentation
+                .current
+                .views
+                .focus(key, cx)
+                .contains_focused(window, cx)
         {
             return;
         }
-        self.views.note_focus(key);
-        if self.views.scrolled_up(key) || self.replies.borrow().pacing() {
+        self.presentation.current.views.note_focus(key);
+        if self.presentation.current.views.scrolled_up(key) || self.replies.borrow().pacing() {
             return;
         }
         let Some(conversation) = self.conversations.get(&key.session) else {
@@ -1012,7 +1081,12 @@ impl Keystone {
         else {
             return;
         };
-        if !self.views.attempt_observation(key, updated) {
+        if !self
+            .presentation
+            .current
+            .views
+            .attempt_observation(key, updated)
+        {
             return;
         }
         match self.store.mark_viewed(key.session, now_ms()) {

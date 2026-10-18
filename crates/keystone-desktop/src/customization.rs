@@ -48,13 +48,14 @@ pub fn label(component: Component) -> &'static str {
 
 impl Keystone {
     pub(crate) fn saved_layout(&self) -> Option<&SavedComposition> {
-        self.project
+        self.presentation
+            .project
             .as_ref()
             .ok()
             .and_then(|p| self.store.workspace().preferences().project_layout(p))
     }
     pub(crate) fn saved_composition(&self) -> Composition {
-        self.project.as_ref().map_or_else(
+        self.presentation.project.as_ref().map_or_else(
             |_| {
                 Composition::from_sidebar(
                     self.store
@@ -75,31 +76,49 @@ impl Keystone {
     ) {
         let saved = self.saved_composition();
         let raw = self.saved_layout().cloned();
-        let opening = action == Action::Open && !self.customization.is_open();
-        let closing = action == Action::Close && self.customization.is_open();
+        let opening = action == Action::Open && !self.presentation.current.customization.is_open();
+        let closing = action == Action::Close && self.presentation.current.customization.is_open();
         if opening || matches!(action, Action::Reset | Action::Discard | Action::Close) {
-            self.arrangement.restore_tabs();
+            self.presentation.current.arrangement.restore_tabs();
         }
-        let effects = self.customization.dispatch(action, raw.as_ref(), &saved);
+        let effects =
+            self.presentation
+                .current
+                .customization
+                .dispatch(action, raw.as_ref(), &saved);
         self.customize_effects(effects, window, cx);
         if opening {
-            self.sidebar_before_customize = Some(self.sidebar);
-            self.sidebar = true;
-            self.customize_prompt.focus_handle(cx).focus(window, cx);
+            self.presentation.current.sidebar_before_customize =
+                Some(self.presentation.current.sidebar);
+            self.presentation.current.sidebar = true;
+            self.presentation
+                .current
+                .customize_prompt
+                .focus_handle(cx)
+                .focus(window, cx);
         }
         if closing {
-            if let Some(shown) = self.sidebar_before_customize.take() {
-                self.sidebar = shown;
+            if let Some(shown) = self.presentation.current.sidebar_before_customize.take() {
+                self.presentation.current.sidebar = shown;
             }
             self.focus.focus(window, cx);
         }
-        if self.customization.chooser().is_some() {
-            if self.borrow_focus.is_none() {
-                self.borrow_focus = Some(cx.focus_handle());
+        if self.presentation.current.customization.chooser().is_some() {
+            if self.presentation.current.borrow_focus.is_none() {
+                self.presentation.current.borrow_focus = Some(cx.focus_handle());
             }
-            self.borrow_focus.as_ref().unwrap().focus(window, cx);
-        } else if self.borrow_focus.take().is_some() {
-            self.customize_prompt.focus_handle(cx).focus(window, cx);
+            self.presentation
+                .current
+                .borrow_focus
+                .as_ref()
+                .unwrap()
+                .focus(window, cx);
+        } else if self.presentation.current.borrow_focus.take().is_some() {
+            self.presentation
+                .current
+                .customize_prompt
+                .focus_handle(cx)
+                .focus(window, cx);
         }
         self.refresh(cx);
     }
@@ -119,7 +138,7 @@ impl Keystone {
                 }
                 Effect::Save(layout, commit) => {
                     let previous = self.saved_layout().cloned();
-                    let result = match &self.project {
+                    let result = match &self.presentation.project {
                         Ok(project) => self
                             .store
                             .set_project_layout(project, layout)
@@ -128,10 +147,13 @@ impl Keystone {
                         Err(error) => Err(format!("Cannot save this project's layout. {error}")),
                     };
                     if result.is_ok() {
-                        self.arrangement.restore_tabs();
+                        self.presentation.current.arrangement.restore_tabs();
                     }
                     let shown = self.saved_composition();
-                    self.customization.saved(commit, previous, shown, result);
+                    self.presentation
+                        .current
+                        .customization
+                        .saved(commit, previous, shown, result);
                 }
                 Effect::Borrow(source) => {
                     let raw = self
@@ -140,7 +162,11 @@ impl Keystone {
                         .preferences()
                         .project_layout(&source)
                         .cloned();
-                    let effects = self.customization.borrowed(&source, raw.as_ref());
+                    let effects = self
+                        .presentation
+                        .current
+                        .customization
+                        .borrowed(&source, raw.as_ref());
                     self.customize_effects(effects, window, cx);
                 }
             }
@@ -165,20 +191,25 @@ impl Keystone {
         let results = agent.drain();
         let any = !results.is_empty();
         for (request, outcome) in results {
-            if self.customization.receive(request, outcome) {
-                self.arrangement.restore_tabs();
+            if self
+                .presentation
+                .current
+                .customization
+                .receive(request, outcome)
+            {
+                self.presentation.current.arrangement.restore_tabs();
             }
         }
         any
     }
     pub(crate) fn customize_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let open = self.customization.is_open();
+        let open = self.presentation.current.customization.is_open();
         Button::new("customize-toggle", "Customize")
             .size(ButtonSize::Compact)
             .selected(open)
             .debug_selector(|| "customize-toggle".into())
             .tooltip(Tooltip::with_key("Arrange components", "Ctrl+Shift+L"))
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                 this.customize(if open { Action::Close } else { Action::Open }, window, cx)
             }))
     }
@@ -189,10 +220,15 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.customization.selected() else {
+        let Some(view) = self.presentation.current.customization.selected() else {
             return;
         };
-        let c = self.customization.shown(&self.saved_composition()).clone();
+        let c = self
+            .presentation
+            .current
+            .customization
+            .shown(&self.saved_composition())
+            .clone();
         let order = crate::arrangement::ordered_views(c.root());
         let Some(at) = order.iter().position(|id| *id == view) else {
             return;
@@ -224,7 +260,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.customization.selected() else {
+        let Some(id) = self.presentation.current.customization.selected() else {
             return;
         };
         fn find(
@@ -265,7 +301,12 @@ impl Keystone {
             }
             None
         }
-        let c = self.customization.shown(&self.saved_composition()).clone();
+        let c = self
+            .presentation
+            .current
+            .customization
+            .shown(&self.saved_composition())
+            .clone();
         if let Some((split, sizes)) = find(c.root(), id, &mut vec![], delta, mode) {
             self.customize(Action::Edit(Edit::Resize { split, sizes }), window, cx);
         }
@@ -277,10 +318,10 @@ impl Keystone {
     ) -> impl IntoElement {
         let colors = cx.theme().colors;
         let saved = self.saved_composition();
-        let running = self.customization.running().is_some();
-        let dirty = self.customization.can_discard(&saved);
-        let current = self.customization.shown(&saved);
-        let selected = self.customization.selected();
+        let running = self.presentation.current.customization.running().is_some();
+        let dirty = self.presentation.current.customization.can_discard(&saved);
+        let current = self.presentation.current.customization.shown(&saved);
+        let selected = self.presentation.current.customization.selected();
         let component = selected.and_then(|id| current.component(id));
         let conversations = current
             .views()
@@ -296,18 +337,20 @@ impl Keystone {
                 })
                 .disabled(disabled)
                 .debug_selector(|| id.into())
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                     this.customize(action.clone(), window, cx)
                 }))
         };
-        let status = match self.customization.interpretation() {
+        let status = match self.presentation.current.customization.interpretation() {
             Some(Interpretation::Running { .. }) => format!(
                 "Asking {}…",
-                provider_name(self.customization.asking().unwrap())
+                provider_name(self.presentation.current.customization.asking().unwrap())
             ),
             Some(Interpretation::Failed(error)) => error.clone(),
             Some(Interpretation::Unsupported(reason)) => format!("Not supported. {reason}"),
             _ => self
+                .presentation
+                .current
                 .customization
                 .note()
                 .map(str::to_owned)
@@ -322,7 +365,9 @@ impl Keystone {
         };
         v_flex()
             .id("customize-panel")
-            .capture_any_mouse_down(cx.listener(|this, _, window, cx| this.focus.focus(window, cx)))
+            .capture_any_mouse_down(
+                self.scoped_listener(cx, |this, _, window, cx| this.focus.focus(window, cx)),
+            )
             .relative()
             .child(self.measure_customize_toolbar(cx))
             .automation_id("customize-panel")
@@ -347,14 +392,18 @@ impl Keystone {
                         "customize-undo",
                         "Undo",
                         Action::Undo,
-                        !self.customization.can_undo(&saved),
+                        !self.presentation.current.customization.can_undo(&saved),
                     ))
                     .child(act("customize-discard", "Discard", Action::Discard, !dirty))
                     .child(act(
                         "customize-apply",
                         "Apply",
                         Action::Apply,
-                        !self.customization.can_apply(self.saved_layout(), &saved),
+                        !self
+                            .presentation
+                            .current
+                            .customization
+                            .can_apply(self.saved_layout(), &saved),
                     ))
                     .child(act("customize-close", "Close", Action::Close, false)),
             )
@@ -377,11 +426,13 @@ impl Keystone {
                                 };
                                 Button::new(id, provider_name(provider))
                                     .size(ButtonSize::Compact)
-                                    .selected(self.customize_provider == provider)
+                                    .selected(
+                                        self.presentation.current.customize_provider == provider,
+                                    )
                                     .disabled(running)
                                     .debug_selector(|| id.into())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.customize_provider = provider;
+                                    .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
+                                        this.presentation.current.customize_provider = provider;
                                         cx.notify();
                                     }))
                             }))
@@ -396,35 +447,54 @@ impl Keystone {
                                     .rounded(radius::CONTROL)
                                     .border_1()
                                     .border_color(colors.border)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.customize_prompt.focus_handle(cx).focus(window, cx)
+                                    .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                                        this.presentation
+                                            .current
+                                            .customize_prompt
+                                            .focus_handle(cx)
+                                            .focus(window, cx)
                                     }))
-                                    .on_action(cx.listener(|this, _: &SendMessage, window, cx| {
-                                        let prompt =
-                                            this.customize_prompt.read(cx).value().to_owned();
-                                        let provider = this.customize_provider;
-                                        this.customize(
-                                            Action::Ask { provider, prompt },
-                                            window,
-                                            cx,
-                                        );
-                                        cx.stop_propagation();
-                                    }))
-                                    .child(self.customize_prompt.clone()),
+                                    .on_action(self.scoped_listener(
+                                        cx,
+                                        |this, _: &SendMessage, window, cx| {
+                                            let prompt = this
+                                                .presentation
+                                                .current
+                                                .customize_prompt
+                                                .read(cx)
+                                                .value()
+                                                .to_owned();
+                                            let provider =
+                                                this.presentation.current.customize_provider;
+                                            this.customize(
+                                                Action::Ask { provider, prompt },
+                                                window,
+                                                cx,
+                                            );
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                    .child(self.presentation.current.customize_prompt.clone()),
                             )
                             .child(act(
                                 "customize-ask",
                                 "Preview",
                                 Action::Ask {
-                                    provider: self.customize_provider,
-                                    prompt: self.customize_prompt.read(cx).value().to_owned(),
+                                    provider: self.presentation.current.customize_provider,
+                                    prompt: self
+                                        .presentation
+                                        .current
+                                        .customize_prompt
+                                        .read(cx)
+                                        .value()
+                                        .to_owned(),
                                 },
                                 running,
                             ))
                             .when(running, |d| {
                                 d.child(act("customize-cancel", "Cancel", Action::Cancel, false))
                             })
-                            .when(self.customization.can_retry(), |d| {
+                            .when(self.presentation.current.customization.can_retry(), |d| {
                                 d.child(act("customize-retry", "Retry", Action::Retry, false))
                             }),
                     )
@@ -452,11 +522,9 @@ impl Keystone {
                                 .size(ButtonSize::Compact)
                                 .selected(selected == Some(id))
                                 .debug_selector(move || format!("select-component-{}", id.0))
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.customize(Action::Select(id), window, cx)
-                                    },
-                                ))
+                                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                                    this.customize(Action::Select(id), window, cx)
+                                }))
                             }))
                             .children(selected.map(|id| {
                                 act(
@@ -500,9 +568,12 @@ impl Keystone {
                                         .size(ButtonSize::Compact)
                                         .disabled(selected.is_none())
                                         .debug_selector(|| id.into())
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.move_component(axis, after, window, cx)
-                                        }))
+                                        .on_click(self.scoped_listener(
+                                            cx,
+                                            move |this, _, window, cx| {
+                                                this.move_component(axis, after, window, cx)
+                                            },
+                                        ))
                                 }),
                             )
                             .children(
@@ -520,9 +591,12 @@ impl Keystone {
                                         .size(ButtonSize::Compact)
                                         .disabled(selected.is_none())
                                         .debug_selector(|| id.into())
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.size_component(0, Some(mode), window, cx)
-                                        }))
+                                        .on_click(self.scoped_listener(
+                                            cx,
+                                            move |this, _, window, cx| {
+                                                this.size_component(0, Some(mode), window, cx)
+                                            },
+                                        ))
                                 }),
                             )
                             .when(
@@ -543,7 +617,7 @@ impl Keystone {
                     .automation_id("customize-status")
                     .child(Label::new(status).size(TextSize::Sm).color(Color::Muted)),
             )
-            .children(self.project.as_ref().err().map(|error| {
+            .children(self.presentation.project.as_ref().err().map(|error| {
                 Label::new(format!("Layout cannot be saved. {error}"))
                     .size(TextSize::Sm)
                     .color(Color::Warning)
@@ -551,8 +625,8 @@ impl Keystone {
     }
 
     pub(crate) fn borrow_dialog(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let chooser = self.customization.chooser()?;
-        let focus = self.borrow_focus.as_ref()?;
+        let chooser = self.presentation.current.customization.chooser()?;
+        let focus = self.presentation.current.borrow_focus.as_ref()?;
         let colors = cx.theme().colors;
         let close = |id: &'static str, text: &'static str, action: Action| {
             Button::new(id, text)
@@ -563,7 +637,7 @@ impl Keystone {
                     ButtonStyle::Subtle
                 })
                 .debug_selector(|| id.into())
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                     this.customize(action.clone(), window, cx)
                 }))
         };
@@ -572,7 +646,7 @@ impl Keystone {
             .workspace()
             .preferences()
             .project_layouts()
-            .filter(|(id, _)| self.project.as_ref().ok() != Some(id))
+            .filter(|(id, _)| self.presentation.project.as_ref().ok() != Some(id))
             .collect();
         let (title, description) = match chooser {
             Chooser::Replace(_) => (
@@ -697,7 +771,7 @@ impl Keystone {
                                     .size(TextSize::Sm)
                                     .color(Color::Muted),
                                 )
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                                     this.customize(Action::Choose(id.clone()), window, cx)
                                 }))
                         })),
@@ -774,7 +848,9 @@ mod tests {
         click(cx, "component-duplicate");
         view.read_with(cx, |this, cx| {
             assert_eq!(
-                this.customization
+                this.presentation
+                    .current
+                    .customization
                     .shown(&this.saved_composition())
                     .views()
                     .filter(|(_, c)| *c == Component::Conversation)
@@ -825,7 +901,11 @@ mod tests {
         click(cx, "customize-toggle");
         click(cx, "component-duplicate");
         let candidate = view.read_with(cx, |this, _| {
-            this.customization.shown(&this.saved_composition()).clone()
+            this.presentation
+                .current
+                .customization
+                .shown(&this.saved_composition())
+                .clone()
         });
         click(cx, "customize-borrow");
         click(cx, "borrow-source-0");
@@ -834,7 +914,10 @@ mod tests {
         click(cx, "borrow-keep");
         view.read_with(cx, |this, _| {
             assert_eq!(
-                this.customization.shown(&this.saved_composition()),
+                this.presentation
+                    .current
+                    .customization
+                    .shown(&this.saved_composition()),
                 &candidate
             )
         });
@@ -844,7 +927,7 @@ mod tests {
         click(cx, "borrow-replace");
         view.read_with(cx, |this, _| {
             let saved = this.saved_composition();
-            let next = this.customization.shown(&saved);
+            let next = this.presentation.current.customization.shown(&saved);
             assert!(
                 next.views()
                     .all(|(id, _)| !candidate.views().any(|(old, _)| id == old))
@@ -857,7 +940,10 @@ mod tests {
         click(cx, "customize-discard");
         view.read_with(cx, |this, _| {
             assert_eq!(
-                this.customization.shown(&this.saved_composition()),
+                this.presentation
+                    .current
+                    .customization
+                    .shown(&this.saved_composition()),
                 &this.saved_composition()
             )
         });
@@ -894,7 +980,7 @@ mod tests {
         click(cx, "borrow-preview");
         view.read_with(cx, |this, _| {
             let saved = this.saved_composition();
-            let candidate = this.customization.shown(&saved);
+            let candidate = this.presentation.current.customization.shown(&saved);
             assert_eq!(
                 candidate
                     .views()
@@ -948,14 +1034,17 @@ mod tests {
             assert_eq!(this.composer.read(cx).value(), "same editor");
             assert!(this.saved_layout().is_none());
             assert_ne!(
-                this.customization.shown(&this.saved_composition()),
+                this.presentation
+                    .current
+                    .customization
+                    .shown(&this.saved_composition()),
                 &this.saved_composition()
             );
         });
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         view.read_with(cx, |this, _| {
-            assert!(!this.customization.is_open());
+            assert!(!this.presentation.current.customization.is_open());
             assert!(this.saved_layout().is_none());
         });
         assert!(cx.debug_bounds("composer-field").is_some());

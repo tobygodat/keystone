@@ -34,6 +34,18 @@ const FORMAT_VERSION: u32 = 1;
 pub struct Applied<T> {
     pub value: T,
     pub durability: Durability,
+    /// The snapshot that holds this change. A no-op names the current snapshot.
+    pub revision: Revision,
+}
+
+/// A position in one [`Store`]'s write order, issued by it and meaningful only to it.
+/// Ask that store with [`Store::is_durable`] whether the snapshot has been confirmed.
+#[derive(Clone, Copy, Debug)]
+pub struct Revision(u64);
+
+struct PendingSync {
+    directory: File,
+    oldest_unconfirmed: Revision,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -395,10 +407,11 @@ pub struct Store {
     workspace: Workspace,
     next_id: u64,
     unknown: Map<String, Value>,
-    pending_directory: Option<File>,
+    pending: Option<PendingSync>,
     writes: u64,
-    #[cfg(test)]
-    sync_directory: fn(&File) -> io::Result<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub sync_directory: fn(&File) -> io::Result<()>,
 }
 
 impl Store {
@@ -412,9 +425,9 @@ impl Store {
                     workspace: Workspace::default(),
                     next_id: 1,
                     unknown: Map::new(),
-                    pending_directory: None,
+                    pending: None,
                     writes: 0,
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     sync_directory: File::sync_all,
                 });
             }
@@ -426,9 +439,9 @@ impl Store {
             workspace: snapshot.workspace,
             next_id: snapshot.next_id,
             unknown: snapshot.unknown,
-            pending_directory: None,
+            pending: None,
             writes: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             sync_directory: File::sync_all,
         })
     }
@@ -482,6 +495,7 @@ impl Store {
         Ok(Applied {
             value: id,
             durability: applied.durability,
+            revision: applied.revision,
         })
     }
 
@@ -660,13 +674,21 @@ impl Store {
         self.commit(next, self.next_id)
     }
 
+    /// Whether the snapshot `revision` names has been confirmed by a directory sync.
+    /// Only answers for revisions this store issued. Once true, it stays true.
+    pub fn is_durable(&self, revision: Revision) -> bool {
+        self.pending
+            .as_ref()
+            .is_none_or(|pending| revision.0 < pending.oldest_unconfirmed.0)
+    }
+
     pub fn sync_pending(&mut self) -> io::Result<()> {
-        if let Some(directory) = &self.pending_directory {
-            #[cfg(test)]
-            (self.sync_directory)(directory)?;
-            #[cfg(not(test))]
-            directory.sync_all()?;
-            self.pending_directory = None;
+        if let Some(pending) = &self.pending {
+            #[cfg(any(test, feature = "test-support"))]
+            (self.sync_directory)(&pending.directory)?;
+            #[cfg(not(any(test, feature = "test-support")))]
+            pending.directory.sync_all()?;
+            self.pending = None;
         }
         Ok(())
     }
@@ -678,6 +700,7 @@ impl Store {
                 Ok(()) => Durability::Synced,
                 Err(error) => Durability::DirectorySyncPending(error.to_string()),
             },
+            revision: Revision(self.writes),
         }
     }
 
@@ -702,7 +725,14 @@ impl Store {
         self.writes += 1;
         self.workspace = snapshot.workspace;
         self.next_id = snapshot.next_id;
-        self.pending_directory = Some(directory);
+        let oldest_unconfirmed = self
+            .pending
+            .take()
+            .map_or(Revision(self.writes), |pending| pending.oldest_unconfirmed);
+        self.pending = Some(PendingSync {
+            directory,
+            oldest_unconfirmed,
+        });
         Ok(self.finish_sync())
     }
 }
@@ -781,7 +811,7 @@ mod tests {
         store.sync_directory = File::sync_all;
         store.sync_pending().unwrap();
         store.sync_pending().unwrap();
-        assert!(store.pending_directory.is_none());
+        assert!(store.pending.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), before_retry);
         assert_eq!(store.workspace().sessions().len(), 1);
         let next = store
@@ -837,9 +867,92 @@ mod tests {
                 .durability,
             Durability::Synced
         );
-        assert!(store.pending_directory.is_none());
+        assert!(store.pending.is_none());
         assert_eq!(store.writes(), 1);
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_confirmed_choice_stays_confirmed_through_later_unrelated_debt() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let path = state.join("state.json");
+        std::fs::write(&path, r#"{"version":1,"next_id":2,"workspace":{"selected":1,"sessions":[{"id":1,"title":"Legacy","provider":"Codex","settled":false,"draft":"keep"}]}}"#).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        let chosen = WorkingDirectory::new(directory.path()).unwrap();
+
+        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        let choice = store.choose_legacy_directory(1, &chosen).unwrap();
+        assert!(matches!(
+            choice.durability,
+            Durability::DirectorySyncPending(_)
+        ));
+        assert!(!store.is_durable(choice.revision));
+
+        store.sync_directory = File::sync_all;
+        let unrelated = store.set_draft(1, "typed later".into()).unwrap();
+        assert_eq!(unrelated.durability, Durability::Synced);
+        assert!(store.is_durable(choice.revision));
+        assert!(store.is_durable(unrelated.revision));
+
+        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        let debt = store.set_approval_mode(1, ApprovalMode::ReadOnly).unwrap();
+        assert!(matches!(
+            debt.durability,
+            Durability::DirectorySyncPending(_)
+        ));
+        assert!(
+            store.is_durable(choice.revision),
+            "confirmed once, confirmed for good"
+        );
+        assert!(store.is_durable(unrelated.revision));
+        assert!(!store.is_durable(debt.revision));
+
+        let writes = store.writes();
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let rejected = store.set_provider_thread(1, "rejected-thread".into());
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(rejected.is_err());
+        assert_eq!(
+            store.writes(),
+            writes,
+            "a failure before the rename writes nothing"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(store.workspace().sessions()[0].provider_thread().is_none());
+        assert!(!store.is_durable(debt.revision));
+
+        let retry = store.set_approval_mode(1, ApprovalMode::ReadOnly).unwrap();
+        assert!(matches!(
+            retry.durability,
+            Durability::DirectorySyncPending(_)
+        ));
+        assert_eq!(
+            store.writes(),
+            writes,
+            "a no-op retries the sync without a write"
+        );
+        assert!(!store.is_durable(retry.revision));
+
+        store.sync_directory = File::sync_all;
+        let repaired = store.set_approval_mode(1, ApprovalMode::ReadOnly).unwrap();
+        assert_eq!(repaired.durability, Durability::Synced);
+        assert_eq!(store.writes(), writes);
+        assert!(store.is_durable(debt.revision));
+        assert!(store.is_durable(retry.revision));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains(r#""origin":"chosen""#), "{saved}");
+        assert!(!saved.contains("rejected-thread"), "{saved}");
+        assert_eq!(
+            Store::open(&path).unwrap().workspace().sessions()[0].context(),
+            SessionContext::Recorded {
+                directory: &chosen,
+                origin: ContextOrigin::Chosen,
+            }
+        );
     }
 
     #[test]
@@ -1211,7 +1324,7 @@ mod tests {
             let saved = json(&path);
             assert_eq!(
                 saved_sidebar(&saved),
-                &serde_json::json!({"side": "left", "width_px": 302}),
+                &serde_json::json!({"side": "left", "width_px": 264}),
                 "{layout}"
             );
             assert_eq!(saved["future"], serde_json::json!({"a": [1, 2]}));

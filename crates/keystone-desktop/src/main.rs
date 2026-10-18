@@ -3,13 +3,13 @@ mod arrangement_editor;
 mod conversation;
 mod customization;
 mod customization_agent;
+mod presentation;
 mod relative_time;
 mod reveal;
 mod settings;
 mod transcript;
 mod view_state;
 
-use arrangement_editor::Customization;
 use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
@@ -26,13 +26,16 @@ use keystone_agent::{
 };
 #[cfg(test)]
 use keystone_core::ViewId;
+#[cfg(test)]
+use keystone_core::WorkingDirectory;
 use keystone_core::{
-    Appearance, ApprovalMode, Attention, Density, Durability, Provider, SidebarSide, Store,
-    ThemeMode, WorkingDirectory,
+    Appearance, ApprovalMode, Attention, Density, Durability, Provider, Revision, SidebarSide,
+    Store, ThemeMode,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
 use keystone_ui::{automation, prelude::*};
+use presentation::Presentation;
 use relative_time::{LocalTime, relative};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -40,7 +43,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use view_state::{ViewKey, ViewStates};
+use view_state::ViewKey;
 
 gpui::actions!(
     keystone,
@@ -131,6 +134,9 @@ fn turn_failed(event: &Event) -> Option<bool> {
 /// How long closing waits for saved histories to finish loading.
 const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+const FOLDER_UNCONFIRMED: &str =
+    "Folder selected. Could not confirm it will survive a system crash. Send will retry saving.";
+
 fn durability_warning(durability: Durability) -> Option<String> {
     match durability {
         Durability::Synced => None,
@@ -147,14 +153,27 @@ struct Renaming {
     error: Option<String>,
 }
 
+struct FullAccessConfirmation {
+    session: u64,
+    activation: presentation::Activation,
+    identity: Rc<()>,
+    focus: DialogFocus,
+}
+
 struct ComposerDraft {
     session: u64,
     text: String,
 }
 
+struct FolderWarning {
+    session: u64,
+    revision: Revision,
+}
+
 struct Keystone {
     store: Store,
     error: Option<String>,
+    folder_warning: Option<FolderWarning>,
     composer: Entity<TextInput>,
     search: Entity<TextInput>,
     session_sidebar: Entity<SessionSidebar>,
@@ -162,11 +181,13 @@ struct Keystone {
     draft_save_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
     new_menu: bool,
+    filter_menu: bool,
+    provider_filter: Option<Provider>,
     settings_menu: bool,
     approval_menu: bool,
     /// Full access chosen from the menu for this session, waiting in the confirmation
     /// dialog. Nothing is saved or sent until Confirm.
-    confirm_full_access: Option<(u64, DialogFocus)>,
+    confirm_full_access: Option<FullAccessConfirmation>,
     renaming: Option<Renaming>,
     rename_input: Entity<TextInput>,
     /// Set by a press on the top bar. The first move then hands the window to the
@@ -174,7 +195,6 @@ struct Keystone {
     window_drag: bool,
     /// Whether the sidebar's Settled section is expanded. It starts collapsed.
     settled_open: bool,
-    sidebar: bool,
     fixture: bool,
     /// The shared Codex app-server connection, created on the first message.
     codex: Option<CodexConnection>,
@@ -183,12 +203,7 @@ struct Keystone {
     conversations: HashMap<u64, Conversation>,
     /// Each session's log of completed items, read and written off the UI thread.
     logs: Logs,
-    views: ViewStates,
-    /// The directory agents work in.
-    project_dir: PathBuf,
-    project: Result<keystone_core::ProjectId, String>,
-    arrangement: arrangement::Arrangement,
-    borrow_focus: Option<FocusHandle>,
+    presentation: Presentation,
     wake: Wake,
     /// Scrolls the sample transcript, which is not a list.
     transcript_scroll: ScrollHandle,
@@ -199,11 +214,7 @@ struct Keystone {
     clock: BackgroundExecutor,
     /// The sample transcript, parsed once.
     fixture_document: Arc<Document>,
-    customization: Customization,
-    customize_prompt: Entity<TextInput>,
-    customize_provider: Provider,
     customize_agent: Option<customization_agent::Agent>,
-    sidebar_before_customize: Option<bool>,
 }
 
 impl Keystone {
@@ -214,8 +225,6 @@ impl Keystone {
         });
         let search = cx.new(|cx| TextInput::new("Search", InputMode::SingleLine, cx));
         let rename_input = cx.new(|cx| TextInput::new("Session title", InputMode::SingleLine, cx));
-        let customize_prompt =
-            cx.new(|cx| TextInput::new("Describe a layout change…", InputMode::SingleLine, cx));
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
                 this.draft_save_task = Some(cx.spawn(async move |this, cx| {
@@ -259,7 +268,8 @@ impl Keystone {
                     .timer(std::time::Duration::from_secs(60))
                     .await;
                 let aged = this.update(cx, |this, cx| {
-                    if this.sidebar && this.session_sidebar.read(cx).shows_time {
+                    if this.presentation.current.sidebar && this.session_sidebar.read(cx).shows_time
+                    {
                         this.refresh(cx);
                     }
                 });
@@ -282,18 +292,11 @@ impl Keystone {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let project = keystone_core::ProjectId::new(&project_dir).map_err(|e| e.to_string());
-        let initial = project.as_ref().map_or_else(
-            |_| {
-                keystone_core::Composition::from_sidebar(
-                    store.workspace().preferences().sidebar_layout().shown(),
-                )
-            },
-            |p| store.workspace().preferences().composition(p),
-        );
-        let customization = Customization::new(&initial);
+        let presentation = Presentation::new(project, store.workspace().preferences(), cx);
         let mut result = Self {
             store,
             error: None,
+            folder_warning: None,
             composer,
             search,
             session_sidebar,
@@ -301,6 +304,8 @@ impl Keystone {
             draft_save_task: None,
             focus: cx.focus_handle(),
             new_menu: false,
+            filter_menu: false,
+            provider_filter: None,
             settings_menu: false,
             approval_menu: false,
             confirm_full_access: None,
@@ -308,17 +313,12 @@ impl Keystone {
             rename_input,
             window_drag: false,
             settled_open: false,
-            sidebar: true,
             fixture,
             codex: None,
             claude: None,
             conversations: HashMap::new(),
             logs: Logs::new(sessions_dir, wake.clone()),
-            views: ViewStates::default(),
-            project_dir,
-            project,
-            arrangement: arrangement::Arrangement::default(),
-            borrow_focus: None,
+            presentation,
             wake,
             transcript_scroll: ScrollHandle::new(),
             replies: RefCell::default(),
@@ -329,11 +329,7 @@ impl Keystone {
             } else {
                 ""
             })),
-            customization,
-            customize_prompt,
-            customize_provider: Provider::Claude,
             customize_agent: None,
-            sidebar_before_customize: None,
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -430,7 +426,7 @@ impl Keystone {
     }
 
     fn create(&mut self, provider: Provider, cx: &mut Context<Self>) {
-        let directory = match WorkingDirectory::new(&self.project_dir) {
+        let directory = match self.presentation.creation_directory() {
             Ok(directory) => directory,
             Err(error) => {
                 self.error = Some(error.to_string());
@@ -445,10 +441,16 @@ impl Keystone {
             let rows = self.replies.get_mut().settle(left);
             self.invalidate(left, ranges(rows), false);
         }
+        let previous = self.store.workspace().selected();
         self.error = match self.store.create(provider, &directory, now_ms()) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
+        if self.store.workspace().selected() != previous {
+            self.presentation.selection_changed();
+            self.approval_menu = false;
+            self.confirm_full_access = None;
+        }
         self.new_menu = false;
         self.sync_draft(cx);
         self.refresh(cx);
@@ -493,6 +495,7 @@ impl Keystone {
     }
 
     fn select(&mut self, id: u64, cx: &mut Context<Self>) {
+        let previous = self.store.workspace().selected();
         if !self.save_draft(cx) {
             return;
         }
@@ -501,11 +504,16 @@ impl Keystone {
             self.invalidate(left, ranges(rows), false);
         }
         self.replies.get_mut().forget(id);
-        self.arrangement.sidebar_overlay = false;
+        self.presentation.current.arrangement.sidebar_overlay = false;
         self.error = match self.store.select(id) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
+        if self.store.workspace().selected() != previous {
+            self.presentation.selection_changed();
+            self.approval_menu = false;
+            self.confirm_full_access = None;
+        }
         self.sync_draft(cx);
 
         self.refresh(cx);
@@ -554,18 +562,20 @@ impl Keystone {
                 self.own_press(
                     IconButton::new("sidebar-toggle", IconName::Panel)
                         .debug_selector(|| "sidebar-toggle".into())
-                        .tooltip(Tooltip::text(if self.sidebar {
+                        .tooltip(Tooltip::text(if self.presentation.current.sidebar {
                             "Hide sidebar"
                         } else {
                             "Show sidebar"
                         }))
-                        .on_click(cx.listener(|this, _, window, cx| {
+                        .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                             this.focus.focus(window, cx);
-                            if this.arrangement.fitted {
-                                this.arrangement.sidebar_overlay = this.arrangement_has_sidebar()
-                                    && !this.arrangement.sidebar_overlay;
+                            if this.presentation.current.arrangement.fitted {
+                                this.presentation.current.arrangement.sidebar_overlay = this
+                                    .arrangement_has_sidebar()
+                                    && !this.presentation.current.arrangement.sidebar_overlay;
                             } else {
-                                this.sidebar = !this.sidebar;
+                                this.presentation.current.sidebar =
+                                    !this.presentation.current.sidebar;
                             }
                             this.refresh(cx);
                         })),
@@ -587,7 +597,7 @@ impl Keystone {
                             .hover(move |s| s.bg(hover))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, _, _, _| this.window_drag = false),
+                                self.scoped_listener(cx, |this, _, _, _| this.window_drag = false),
                             )
                             .child(
                                 Label::new(title)
@@ -596,9 +606,9 @@ impl Keystone {
                                     .truncate(),
                             )
                             .tooltip(Tooltip::with_key("Rename session", "F2").builder())
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_rename(window, cx)),
-                            ),
+                            .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                                this.open_rename(window, cx)
+                            })),
                     )
                     .when(settled, |d| {
                         d.child(Label::new("Settled").color(Color::Muted))
@@ -626,7 +636,7 @@ impl Keystone {
                             IconButton::new("close", IconName::Close)
                                 .debug_selector(|| "close".into())
                                 .tooltip(Tooltip::with_key("Close window", "Ctrl+Q"))
-                                .on_click(cx.listener(|this, _, window, cx| {
+                                .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                                     if this.save_before_exit(cx) {
                                         window.remove_window();
                                     }
@@ -733,7 +743,6 @@ impl Keystone {
     fn sidebar_column(&self, width: f32, side: SidebarSide, cx: &mut Context<Self>) -> gpui::Div {
         let (colors, density) = (cx.theme().colors, cx.theme().density);
         let list = AnyView::from(self.session_sidebar.clone());
-        let new_session = self.new_session_menu(cx).into_any_element();
         v_flex()
             .relative()
             .w(px(width))
@@ -741,7 +750,9 @@ impl Keystone {
             .h_full()
             .overflow_hidden()
             .bg(colors.sidebar)
-            .capture_any_mouse_down(cx.listener(|this, _, window, cx| this.focus.focus(window, cx)))
+            .capture_any_mouse_down(
+                self.scoped_listener(cx, |this, _, window, cx| this.focus.focus(window, cx)),
+            )
             .map(|d| match side {
                 SidebarSide::Left => d.hairline_r(cx),
                 SidebarSide::Right => d.hairline_l(cx),
@@ -770,32 +781,46 @@ impl Keystone {
                                     Label::new("preview").size(TextSize::Xs).color(Color::Muted),
                                 ),
                         )
-                        .child(div().flex_1())
-                        .child(self.own_press(new_session, cx)),
+                        .child(div().flex_1()),
                     cx,
                 ),
             )
             .child(
                 h_flex()
-                    .id("search")
                     .flex_shrink_0()
                     .h(density.control(px(36.)))
-                    .pl(px(14.))
                     .pr_2()
-                    .gap_2()
-                    .cursor(gpui::CursorStyle::IBeam)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.search.focus_handle(cx).focus(window, cx)
-                    }))
-                    .child(Icon::new(IconName::Search).size(px(15.)))
                     .child(
-                        div()
+                        h_flex()
+                            .id("search")
                             .flex_1()
                             .min_w_0()
-                            .automation_id("search-field")
-                            .child(self.search.clone()),
+                            .h_full()
+                            .pl(px(14.))
+                            .gap_2()
+                            .cursor(gpui::CursorStyle::IBeam)
+                            .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                                this.search.focus_handle(cx).focus(window, cx)
+                            }))
+                            .child(Icon::new(IconName::Search).size(px(15.)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .automation_id("search-field")
+                                    .child(self.search.clone()),
+                            ),
                     )
-                    .child(Label::new("Ctrl F").size(TextSize::Sm).color(Color::Faint)),
+                    .child(self.filter_menu(cx))
+                    .child(
+                        IconButton::new("new-project", IconName::Folder)
+                            .debug_selector(|| "new-project".into())
+                            .tooltip(Tooltip::text(self.project_tooltip()))
+                            .on_click(
+                                self.scoped_listener(cx, |this, _, _, cx| this.choose_project(cx)),
+                            ),
+                    )
+                    .child(self.new_session_menu(cx)),
             )
             // A reused cached view skips prepaint, so it would report no element
             // geometry. Verification trades that speed for names.
@@ -816,18 +841,45 @@ impl Keystone {
                     .hairline_t(cx)
                     .child(self.settings_menu(cx))
                     .child(
-                        div().flex_1().child(
-                            Label::new("Local workspace")
-                                .size(TextSize::Ui)
-                                .color(Color::Muted),
-                        ),
-                    )
-                    .child(
-                        Label::new("Claude Code + Codex")
-                            .size(TextSize::Sm)
-                            .color(Color::Faint),
+                        Label::new("Local workspace")
+                            .size(TextSize::Ui)
+                            .color(Color::Muted),
                     ),
             )
+    }
+
+    fn filter_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let choices = [
+            (None, "All sessions", "filter-all"),
+            (Some(Provider::Claude), "Claude Code", "filter-claude"),
+            (Some(Provider::Codex), "Codex", "filter-codex"),
+        ];
+        let mut menu = PopoverMenu::new(
+            "filter-menu",
+            IconButton::new("filter", IconName::Filter)
+                .debug_selector(|| "filter".into())
+                .selected(self.filter_menu || self.provider_filter.is_some())
+                .tooltip(Tooltip::text("Filter sessions")),
+        )
+        .anchor(Anchor::TopRight)
+        .open(self.filter_menu)
+        .on_open_change(self.scoped_listener(cx, |this, open: &bool, _, cx| {
+            this.filter_menu = *open;
+            cx.notify();
+        }));
+        for (provider, label, id) in choices {
+            menu = menu.child(
+                MenuItem::new(id, label)
+                    .checked(self.provider_filter == provider)
+                    .debug_selector(|| id.into())
+                    .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
+                        this.provider_filter = provider;
+                        this.filter_menu = false;
+                        this.refresh(cx);
+                    })),
+            );
+        }
+        menu
     }
 
     fn new_session_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -840,7 +892,7 @@ impl Keystone {
         )
         .anchor(Anchor::TopRight)
         .open(self.new_menu)
-        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+        .on_open_change(self.scoped_listener(cx, |this, open: &bool, _, cx| {
             this.new_menu = *open;
             cx.notify();
         }))
@@ -849,18 +901,18 @@ impl Keystone {
                 .icon(IconName::Chat)
                 .kbd("Ctrl+N")
                 .debug_selector(|| "new-claude".into())
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.start(Provider::Claude, window, cx)),
-                ),
+                .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                    this.start(Provider::Claude, window, cx)
+                })),
         )
         .child(
             MenuItem::new("new-codex", "New Codex session")
                 .icon(IconName::Chat)
                 .kbd("Ctrl+Shift+N")
                 .debug_selector(|| "new-codex".into())
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.start(Provider::Codex, window, cx)),
-                ),
+                .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                    this.start(Provider::Codex, window, cx)
+                })),
         )
     }
 
@@ -889,7 +941,7 @@ impl Keystone {
                 let label = font.clone().unwrap_or_else(|| "Default".into());
                 MenuItem::new(("font", index), label)
                     .checked(checked)
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                         let font = font.clone();
                         this.update_appearance(|a| a.ui_font = font, window, cx)
                     }))
@@ -905,7 +957,7 @@ impl Keystone {
         )
         .anchor(Anchor::BottomLeft)
         .open(self.settings_menu)
-        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+        .on_open_change(self.scoped_listener(cx, |this, open: &bool, _, cx| {
             this.settings_menu = *open;
             cx.notify();
         }))
@@ -914,7 +966,7 @@ impl Keystone {
             MenuItem::new(selector, label)
                 .checked(appearance.theme == mode)
                 .debug_selector(|| selector.into())
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                     this.update_appearance(|a| a.theme = mode, window, cx)
                 }))
         }))
@@ -924,7 +976,7 @@ impl Keystone {
             MenuItem::new(selector, label)
                 .checked(appearance.density == density)
                 .debug_selector(|| selector.into())
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                     this.update_appearance(|a| a.density = density, window, cx)
                 }))
         }))
@@ -971,19 +1023,34 @@ impl Keystone {
                 } else {
                     "Ctrl+Enter to send · Enter for a new line"
                 };
-                let project = self.project_dir.file_name().map_or_else(
-                    || self.project_dir.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
-                let project = Button::new("project", project)
-                    .size(ButtonSize::Compact)
-                    .icon(IconName::Folder)
-                    .debug_selector(|| "project".into())
-                    .tooltip(Tooltip::text(format!(
-                        "Open project folder · {}",
-                        self.project_dir.display()
-                    )))
-                    .on_click(cx.listener(|this, _, _, cx| cx.open_with_system(&this.project_dir)));
+                let id = session;
+                let folder = self.conversation_folder(id).unwrap();
+                let action = folder.clone();
+                let project = div()
+                    .id("conversation-folder")
+                    .flex_none()
+                    .tooltip(Tooltip::text(folder.tooltip()).builder())
+                    .child(
+                        folder
+                            .button("project")
+                            .aria_label(folder.tooltip())
+                            .track_focus(&self.presentation.current.folder_focus)
+                            .debug_selector(|| "project".into())
+                            .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
+                                if this.store.workspace().selected() != Some(id) {
+                                    return;
+                                }
+                                match &action {
+                                    presentation::ConversationFolder::Recorded(directory) => {
+                                        cx.open_with_system(directory.path())
+                                    }
+                                    presentation::ConversationFolder::LegacyMissing => {
+                                        this.choose_legacy_folder(id, cx)
+                                    }
+                                    presentation::ConversationFolder::Unsupported => {}
+                                }
+                            })),
+                    );
                 let toolbar = h_flex()
                     .gap(px(14.))
                     .child(
@@ -1130,7 +1197,9 @@ impl Keystone {
                     .weight(FontWeight::MEDIUM),
             )
             .tooltip(Tooltip::with_key(tooltip, key).builder())
-            .on_click(cx.listener(move |this, _, window, cx| this.start(provider, window, cx)))
+            .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                this.start(provider, window, cx)
+            }))
     }
 
     fn selected_session(&self) -> Option<&keystone_core::Session> {
@@ -1146,6 +1215,7 @@ impl Keystone {
         running: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let session = self.store.workspace().selected();
         let tooltip = if running {
             "Approval mode · a change applies from the next turn"
         } else {
@@ -1165,7 +1235,7 @@ impl Keystone {
         )
         .anchor(Anchor::BottomLeft)
         .open(self.approval_menu)
-        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+        .on_open_change(self.scoped_listener(cx, |this, open: &bool, _, cx| {
             this.approval_menu = *open;
             cx.notify();
         }))
@@ -1175,7 +1245,10 @@ impl Keystone {
                 .detail(choice.description())
                 .checked(choice == mode)
                 .debug_selector(|| format!("approval-{}", choice.slug()))
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                    if this.store.workspace().selected() != session {
+                        return;
+                    }
                     this.choose_approval_mode(choice, window, cx)
                 }))
         }))
@@ -1197,7 +1270,12 @@ impl Keystone {
         if mode == current {
             self.composer.focus_handle(cx).focus(window, cx);
         } else if mode == ApprovalMode::FullAccess {
-            self.confirm_full_access = Some((id, DialogFocus::new(window, cx)));
+            self.confirm_full_access = Some(FullAccessConfirmation {
+                session: id,
+                activation: self.presentation.activation(),
+                identity: Rc::new(()),
+                focus: DialogFocus::new(window, cx),
+            });
         } else {
             self.set_approval_mode(id, mode, window, cx);
         }
@@ -1206,15 +1284,23 @@ impl Keystone {
 
     /// The confirmation for Full access, while it is open.
     fn full_access_dialog(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let (id, focus) = self.confirm_full_access.as_ref()?;
-        let provider = provider_name(self.provider(*id)?);
-        let cancel = cx.listener(|this, _: &(), window, cx| {
-            this.confirm_full_access = None;
+        let confirmation = self.confirm_full_access.as_ref()?;
+        let provider = provider_name(self.provider(confirmation.session)?);
+        let focus = &confirmation.focus;
+        let cancel_identity = confirmation.identity.clone();
+        let confirm_identity = confirmation.identity.clone();
+        let cancel = self.scoped_listener(cx, move |this, _: &(), window, cx| {
+            if this
+                .take_full_access_confirmation(&cancel_identity)
+                .is_none()
+            {
+                return;
+            }
             this.composer.focus_handle(cx).focus(window, cx);
             cx.notify();
         });
-        let confirm = cx.listener(|this, _: &(), window, cx| {
-            if let Some((id, _)) = this.confirm_full_access.take() {
+        let confirm = self.scoped_listener(cx, move |this, _: &(), window, cx| {
+            if let Some(id) = this.take_full_access_confirmation(&confirm_identity) {
                 this.set_approval_mode(id, ApprovalMode::FullAccess, window, cx);
             }
         });
@@ -1232,6 +1318,17 @@ impl Keystone {
             .on_cancel(move |window, cx| cancel(&(), window, cx))
             .on_confirm(move |window, cx| confirm(&(), window, cx)),
         )
+    }
+
+    fn take_full_access_confirmation(&mut self, identity: &Rc<()>) -> Option<u64> {
+        let confirmation = self.confirm_full_access.as_ref()?;
+        if !Rc::ptr_eq(identity, &confirmation.identity)
+            || !self.presentation.matches(confirmation.activation)
+            || self.store.workspace().selected() != Some(confirmation.session)
+        {
+            return None;
+        }
+        Some(self.confirm_full_access.take().unwrap().session)
     }
 
     /// Saves the session's mode, then hands it to its provider at once, so a
@@ -1309,7 +1406,7 @@ impl Keystone {
 
     fn invalidate(&mut self, session: u64, changed: Vec<Range<usize>>, status: bool) {
         if let Some(conversation) = self.conversations.get(&session) {
-            self.views
+            self.presentation
                 .invalidate(session, conversation.rows.len(), &changed, status);
         }
     }
@@ -1353,10 +1450,14 @@ impl Keystone {
     /// transcript's width so it can measure the row at the width the list is about to
     /// use.
     fn transcript_top_check(&self, key: ViewKey, cx: &mut Context<Self>) -> impl IntoElement {
+        let activation = self.presentation.activation();
         let app = cx.weak_entity();
         canvas(
             move |bounds, window, cx| {
                 let _ = app.update(cx, |this, cx| {
+                    if !this.presentation.matches(activation) {
+                        return;
+                    }
                     this.clamp_top(key, bounds.size.width, window, cx)
                 });
             },
@@ -1376,8 +1477,8 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let remeasured = self.views.take_remeasured_top(key);
-        let Some(list) = self.views.get(key).cloned() else {
+        let remeasured = self.presentation.current.views.take_remeasured_top(key);
+        let Some(list) = self.presentation.current.views.get(key).cloned() else {
             return;
         };
         // The list remeasures every entry when its width changes, and it has not
@@ -1588,7 +1689,10 @@ impl Keystone {
         // Apply anything that already arrived, such as the end of the last turn, so
         // the message is shown in the right turn.
         self.pump(cx);
-        let cwd = self.project_dir.to_string_lossy().into_owned();
+        let Some(directory) = self.dispatch_directory(id, cx) else {
+            return;
+        };
+        let cwd = directory.as_str();
         // Read after pumping: the pump may have just saved a newer thread ID.
         let resume = self
             .store
@@ -1617,9 +1721,17 @@ impl Keystone {
         };
         // A failure to start the provider arrives later as an error in this
         // conversation. A refusal comes now, and the text stays in the composer.
+        if let Err(error) = self.store.sync_pending() {
+            self.conversation(id).error = Some(format!(
+                "Not sent. Could not finish saving changes. Your draft is kept. Send will retry saving. {error}"
+            ));
+            self.commit(id);
+            self.refresh(cx);
+            return;
+        }
         let sent =
             self.connection(provider)
-                .send(id, &cwd, resume.as_deref(), approval, text.clone());
+                .send(id, cwd, resume.as_deref(), approval, text.clone());
         if let Err(reason) = sent {
             // Shown in the session's transcript, where a draft save cannot clear it.
             self.conversation(id).error = Some(reason.to_owned());
@@ -1636,8 +1748,13 @@ impl Keystone {
         self.composer
             .update(cx, |input, cx| input.set_value(String::new(), cx));
         self.save_draft(cx);
-        if let Some(key) = self.views.send_target(&self.arrangement.visible, id) {
-            self.views.scroll_to_end(key);
+        if let Some(key) = self
+            .presentation
+            .current
+            .views
+            .send_target(&self.presentation.current.arrangement.visible, id)
+        {
+            self.presentation.current.views.scroll_to_end(key);
         }
         // Clicking Send moves focus off the composer; put it back for the next message.
         self.composer.focus_handle(cx).focus(window, cx);
@@ -1685,7 +1802,7 @@ impl Keystone {
             .conversations
             .get(&key.session)
             .map_or(0, |c| c.rows.len());
-        let state = self.views.list(key, rows);
+        let state = self.presentation.current.views.list(key, rows);
         let app = cx.weak_entity();
         list(state, move |index, _, cx| {
             app.update(cx, |this, cx| this.transcript_entry(key, index, cx))
@@ -1696,7 +1813,7 @@ impl Keystone {
     }
 
     fn jump_to_latest(&self, key: ViewKey, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        self.views.scrolled_up(key).then(|| {
+        self.presentation.current.views.scrolled_up(key).then(|| {
             h_flex()
                 .absolute()
                 .bottom_3()
@@ -1713,11 +1830,18 @@ impl Keystone {
                     .debug_selector(move || {
                         arrangement::selector("jump-to-latest", key.view).to_string()
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.views.focus(key, cx).focus(window, cx);
-                        this.views.scroll_to_end(key);
-                        cx.notify();
-                    })),
+                    .on_click(self.scoped_listener(
+                        cx,
+                        move |this, _, window, cx| {
+                            this.presentation
+                                .current
+                                .views
+                                .focus(key, cx)
+                                .focus(window, cx);
+                            this.presentation.current.views.scroll_to_end(key);
+                            cx.notify();
+                        },
+                    )),
                 )
         })
     }
@@ -1867,9 +1991,23 @@ impl Keystone {
     }
 
     fn error_line(&self) -> Option<impl IntoElement> {
+        self.status_line()
+            .map(|(message, color)| Label::new(message).size(TextSize::Ui).color(color))
+    }
+
+    fn status_line(&self) -> Option<(String, Color)> {
         self.error
             .clone()
-            .map(|error| Label::new(error).size(TextSize::Ui).color(Color::Danger))
+            .map(|error| (error, Color::Danger))
+            .or_else(|| {
+                self.folder_warning
+                    .as_ref()
+                    .filter(|warning| {
+                        self.store.workspace().selected() == Some(warning.session)
+                            && !self.store.is_durable(warning.revision)
+                    })
+                    .map(|_| (FOLDER_UNCONFIRMED.into(), Color::Warning))
+            })
     }
 }
 
@@ -1991,6 +2129,7 @@ impl SessionSidebar {
         sidebar: &WeakEntity<Self>,
         cx: &App,
     ) -> impl IntoElement {
+        let activation = app.read(cx).presentation.activation();
         let mark = Self::state_mark(&row, cx);
         let SessionRow {
             id,
@@ -2045,7 +2184,11 @@ impl SessionSidebar {
             .debug_selector(move || format!("session-{id}"))
             .selected(selected)
             .on_click(move |_, _, cx| {
-                let _ = select.update(cx, |this, cx| this.select(id, cx));
+                let _ = select.update(cx, |this, cx| {
+                    if this.presentation.matches(activation) {
+                        this.select(id, cx);
+                    }
+                });
             })
             .child(
                 h_flex()
@@ -2088,7 +2231,11 @@ impl SessionSidebar {
                                 "Move out of active work"
                             }))
                             .on_click(move |_, _, cx| {
-                                let _ = settle.update(cx, |this, cx| this.settle(id, !settled, cx));
+                                let _ = settle.update(cx, |this, cx| {
+                                    if this.presentation.matches(activation) {
+                                        this.settle(id, !settled, cx);
+                                    }
+                                });
                             }),
                         )
                     }),
@@ -2103,6 +2250,7 @@ impl SessionSidebar {
         cx: &App,
     ) -> impl IntoElement {
         let colors = cx.theme().colors;
+        let activation = app.read(cx).presentation.activation();
         let app = app.downgrade();
         h_flex()
             .id(section.id())
@@ -2141,6 +2289,9 @@ impl SessionSidebar {
                     .hover(move |s| s.bg(colors.element_hover))
                     .on_click(move |_, _, cx| {
                         let _ = app.update(cx, |this, cx| {
+                            if !this.presentation.matches(activation) {
+                                return;
+                            }
                             this.settled_open = !this.settled_open;
                             this.refresh(cx);
                         });
@@ -2157,12 +2308,14 @@ impl SessionSidebar {
         let this = app.read(cx);
         let workspace = this.store.workspace();
         let query = this.search.read(cx).value().to_lowercase();
+        let provider_filter = this.provider_filter;
         let now = LocalTime::at(now_ms());
         let mut sections: [Vec<SessionRow>; 3] = Default::default();
         for session in workspace.sessions().iter().filter(|s| {
-            format!("{} {}", s.title(), s.provider())
-                .to_lowercase()
-                .contains(&query)
+            provider_filter.is_none_or(|p| s.provider() == p)
+                && format!("{} {}", s.title(), s.provider())
+                    .to_lowercase()
+                    .contains(&query)
         }) {
             let live = this.conversations.get(&session.id());
             let row = SessionRow {
@@ -2252,6 +2405,7 @@ impl Render for SessionSidebar {
 
 impl Render for Keystone {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.focus_project_transition(window, cx);
         let theme = cx.theme();
         let (background, text, ui_font) = (
             theme.colors.background,
@@ -2270,135 +2424,163 @@ impl Render for Keystone {
             self.conversation(id);
         }
         let main = self.arrangement_body(window, cx);
-        let customizing = self.customization.is_open();
-        let root =
-            v_flex()
-                .id("keystone-root")
-                .size_full()
-                .bg(background)
-                .font_family(ui_font)
-                .text_color(text)
-                .text_size(TextSize::Base.px())
-                .track_focus(&self.focus)
-                .key_context(if customizing {
-                    "Keystone Customize"
-                } else {
-                    "Keystone"
-                })
-                .when(automation::enabled(), |d| {
-                    d.child(automation::frame_writer())
-                })
-                // Capture runs before the focused input, so Escape closes an open menu first.
-                .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+        let customizing = self.presentation.current.customization.is_open();
+        let root = v_flex()
+            .id("keystone-root")
+            .size_full()
+            .bg(background)
+            .font_family(ui_font)
+            .text_color(text)
+            .text_size(TextSize::Base.px())
+            .track_focus(&self.focus)
+            .key_context(if customizing {
+                "Keystone Customize"
+            } else {
+                "Keystone"
+            })
+            .when(automation::enabled(), |d| {
+                d.child(automation::frame_writer())
+            })
+            // Capture runs before the focused input, so Escape closes an open menu first.
+            .capture_key_down(self.scoped_listener(
+                cx,
+                |this, event: &gpui::KeyDownEvent, window, cx| {
                     if event.keystroke.key != "escape"
                         || this.renaming.is_some()
                         || this.confirm_full_access.is_some()
                     {
                         return;
                     }
-                    if this.customization.chooser().is_some() {
+                    if this.presentation.current.customization.chooser().is_some() {
                         this.customize(arrangement_editor::Action::CloseChooser, window, cx);
                         cx.stop_propagation();
-                    } else if this.new_menu || this.settings_menu || this.approval_menu {
+                    } else if this.new_menu
+                        || this.filter_menu
+                        || this.settings_menu
+                        || this.approval_menu
+                    {
                         this.new_menu = false;
+                        this.filter_menu = false;
                         this.settings_menu = false;
                         this.approval_menu = false;
                         this.refresh(cx);
                         cx.stop_propagation();
-                    } else if this.customization.is_open() {
+                    } else if this.presentation.current.customization.is_open() {
                         this.customize(arrangement_editor::Action::Close, window, cx);
                         cx.stop_propagation();
                     }
-                }))
-                .on_action(
-                    cx.listener(|this, _: &customization::OpenCustomize, window, cx| {
-                        this.customize(
-                            if this.customization.is_open() {
-                                arrangement_editor::Action::Close
-                            } else {
-                                arrangement_editor::Action::Open
-                            },
-                            window,
-                            cx,
-                        )
-                    }),
-                )
-                .on_action(
-                    cx.listener(|this, _: &customization::ApplyLayout, window, cx| {
-                        this.customize(arrangement_editor::Action::Apply, window, cx)
-                    }),
-                )
-                .on_action(
-                    cx.listener(|this, _: &customization::MoveLeft, window, cx| {
-                        this.move_component(keystone_core::Axis::Row, false, window, cx)
-                    }),
-                )
-                .on_action(
-                    cx.listener(|this, _: &customization::MoveRight, window, cx| {
-                        this.move_component(keystone_core::Axis::Row, true, window, cx)
-                    }),
-                )
-                .on_action(cx.listener(|this, _: &customization::MoveUp, window, cx| {
+                },
+            ))
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &customization::OpenCustomize, window, cx| {
+                    this.customize(
+                        if this.presentation.current.customization.is_open() {
+                            arrangement_editor::Action::Close
+                        } else {
+                            arrangement_editor::Action::Open
+                        },
+                        window,
+                        cx,
+                    )
+                },
+            ))
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &customization::ApplyLayout, window, cx| {
+                    this.customize(arrangement_editor::Action::Apply, window, cx)
+                },
+            ))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &customization::MoveLeft, window, cx| {
+                    this.move_component(keystone_core::Axis::Row, false, window, cx)
+                }),
+            )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &customization::MoveRight, window, cx| {
+                    this.move_component(keystone_core::Axis::Row, true, window, cx)
+                },
+            ))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &customization::MoveUp, window, cx| {
                     this.move_component(keystone_core::Axis::Column, false, window, cx)
-                }))
-                .on_action(
-                    cx.listener(|this, _: &customization::MoveDown, window, cx| {
-                        this.move_component(keystone_core::Axis::Column, true, window, cx)
-                    }),
-                )
-                .on_action(
-                    cx.listener(|this, _: &customization::Narrower, window, cx| {
-                        this.size_component(-1, None, window, cx)
-                    }),
-                )
-                .on_action(cx.listener(|this, _: &customization::Wider, window, cx| {
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &customization::MoveDown, window, cx| {
+                    this.move_component(keystone_core::Axis::Column, true, window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &customization::Narrower, window, cx| {
+                    this.size_component(-1, None, window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &customization::Wider, window, cx| {
                     this.size_component(1, None, window, cx)
-                }))
-                .on_action(cx.listener(|_, _: &NextFocus, window, cx| window.focus_next(cx)))
-                .on_action(cx.listener(|_, _: &PreviousFocus, window, cx| window.focus_prev(cx)))
-                .on_action(cx.listener(|this, _: &Quit, _, cx| {
-                    if this.save_before_exit(cx) {
-                        cx.quit();
-                    }
-                }))
-                .on_action(cx.listener(|this, _: &NewClaude, window, cx| {
-                    this.start(Provider::Claude, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &NewCodex, window, cx| {
-                    this.start(Provider::Codex, window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &ToggleSettle, _, cx| this.toggle_settle(cx)))
-                .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |_, _: &NextFocus, window, cx| window.focus_next(cx)),
+            )
+            .on_action(
+                self.scoped_listener(cx, |_, _: &PreviousFocus, window, cx| window.focus_prev(cx)),
+            )
+            .on_action(self.scoped_listener(cx, |this, _: &Quit, _, cx| {
+                if this.save_before_exit(cx) {
+                    cx.quit();
+                }
+            }))
+            .on_action(self.scoped_listener(cx, |this, _: &NewClaude, window, cx| {
+                this.start(Provider::Claude, window, cx)
+            }))
+            .on_action(self.scoped_listener(cx, |this, _: &NewCodex, window, cx| {
+                this.start(Provider::Codex, window, cx)
+            }))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &ToggleSettle, _, cx| this.toggle_settle(cx)),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &FocusComposer, window, cx| {
                     this.composer.focus_handle(cx).focus(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &SendMessage, window, cx| {
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &SendMessage, window, cx| {
                     if let Some(draft) = this.composer_draft(cx) {
                         this.send_message(draft, window, cx)
                     }
-                }))
-                .on_action(
-                    cx.listener(|this, _: &RenameSession, window, cx| this.open_rename(window, cx)),
-                )
-                .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &RenameSession, window, cx| {
+                    this.open_rename(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &FocusSearch, window, cx| {
                     if !this.arrangement_has_sidebar() {
-                        this.arrangement.sidebar_overlay = false;
+                        this.presentation.current.arrangement.sidebar_overlay = false;
                         return;
                     }
-                    this.sidebar = true;
-                    if this.arrangement.fitted {
-                        this.arrangement.sidebar_overlay = true;
+                    this.presentation.current.sidebar = true;
+                    if this.presentation.current.arrangement.fitted {
+                        this.presentation.current.arrangement.sidebar_overlay = true;
                     }
                     this.search.focus_handle(cx).focus(window, cx);
                     this.refresh(cx);
-                }))
-                .child(self.top_bar(session, cx))
-                .when(customizing, |d| {
-                    d.child(self.customize_panel(window.viewport_size(), cx))
-                })
-                .child(main)
-                .children(self.borrow_dialog(cx))
-                .children(self.full_access_dialog(cx))
-                .children(self.rename_dialog(cx));
+                }),
+            )
+            .child(self.top_bar(session, cx))
+            .when(customizing, |d| {
+                d.child(self.customize_panel(window.viewport_size(), cx))
+            })
+            .child(main)
+            .children(self.borrow_dialog(cx))
+            .children(self.full_access_dialog(cx))
+            .children(self.rename_dialog(cx));
         self.on_arrangement_drag(root, cx)
     }
 }
@@ -2677,7 +2859,9 @@ mod tests {
         // Scrolled to the top, the first rows draw and a new row does not pull the
         // view back down.
         view.update(cx, |this, cx| {
-            this.views
+            this.presentation
+                .current
+                .views
                 .get(MAIN_1)
                 .unwrap()
                 .scroll_to(ListOffset::default());
@@ -2696,7 +2880,7 @@ mod tests {
         assert_eq!(cx.debug_bounds("transcript-row-0").unwrap(), first);
         assert!(cx.debug_bounds("transcript-row-601").is_none());
         view.update(cx, |this, cx| {
-            this.views.scroll_to_end(MAIN_1);
+            this.presentation.current.views.scroll_to_end(MAIN_1);
             cx.notify();
         });
         cx.run_until_parked();
@@ -2812,7 +2996,11 @@ mod tests {
         };
         let reader = (100, px(40.));
         view.update(cx, |this, _| {
-            this.views.list(other, 600).scroll_to(at(100, 40.));
+            this.presentation
+                .current
+                .views
+                .list(other, 600)
+                .scroll_to(at(100, 40.));
         });
         let stream = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, id: &str| {
             view.update(cx, |this, cx| {
@@ -2829,8 +3017,8 @@ mod tests {
         };
         let tops = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
             view.update(cx, |this, _| {
-                let main = this.views.get(MAIN_1).unwrap();
-                let other = this.views.get(other).unwrap();
+                let main = this.presentation.current.views.get(MAIN_1).unwrap();
+                let other = this.presentation.current.views.get(other).unwrap();
                 assert_eq!(main.item_count(), other.item_count());
                 let top = other.logical_scroll_top();
                 (
@@ -2857,9 +3045,22 @@ mod tests {
         assert!(cx.debug_bounds("transcript-row-601").is_some());
         assert_eq!(tops(&view, cx), (true, reader));
         view.update(cx, |this, _| {
-            assert_eq!(this.views.get(other).unwrap().item_count(), 603);
-            assert!(!this.views.take_remeasured_top(other));
-            this.views.get(other).unwrap().scroll_to(at(600, 40.));
+            assert_eq!(
+                this.presentation
+                    .current
+                    .views
+                    .get(other)
+                    .unwrap()
+                    .item_count(),
+                603
+            );
+            assert!(!this.presentation.current.views.take_remeasured_top(other));
+            this.presentation
+                .current
+                .views
+                .get(other)
+                .unwrap()
+                .scroll_to(at(600, 40.));
         });
 
         view.update(cx, |this, cx| {
@@ -2875,9 +3076,17 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(tops(&view, cx), (true, (600, px(40.))));
         view.update(cx, |this, _| {
-            assert_eq!(this.views.get(other).unwrap().item_count(), 603);
-            assert!(this.views.take_remeasured_top(other));
-            assert!(!this.views.take_remeasured_top(MAIN_1));
+            assert_eq!(
+                this.presentation
+                    .current
+                    .views
+                    .get(other)
+                    .unwrap()
+                    .item_count(),
+                603
+            );
+            assert!(this.presentation.current.views.take_remeasured_top(other));
+            assert!(!this.presentation.current.views.take_remeasured_top(MAIN_1));
         });
     }
 
@@ -3077,7 +3286,12 @@ mod tests {
 
     fn scroll_to(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, top: ListOffset) {
         view.update(cx, |this, cx| {
-            this.views.get(MAIN_1).unwrap().scroll_to(top);
+            this.presentation
+                .current
+                .views
+                .get(MAIN_1)
+                .unwrap()
+                .scroll_to(top);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3213,14 +3427,14 @@ mod tests {
 
         // Following the bottom is unchanged by a resize.
         view.update(cx, |this, cx| {
-            this.views.scroll_to_end(MAIN_1);
+            this.presentation.current.views.scroll_to_end(MAIN_1);
             cx.notify();
         });
         cx.run_until_parked();
         cx.simulate_resize(size(px(900.), px(700.)));
         cx.run_until_parked();
         view.update(cx, |this, _| {
-            let list = this.views.get(MAIN_1).unwrap();
+            let list = this.presentation.current.views.get(MAIN_1).unwrap();
             assert_eq!(list.logical_scroll_top().item_ix, list.item_count());
         });
     }
@@ -3716,6 +3930,14 @@ mod tests {
                 {"id":2,"title":"New","provider":"Codex","settled":false,"draft":""}],"selected":2}}"#,
         )
         .unwrap();
+        {
+            let mut store = Store::open(&path).unwrap();
+            for id in [1, 2] {
+                store
+                    .choose_legacy_directory(id, &working_directory())
+                    .unwrap();
+            }
+        }
         let (view, cx) = open_window(&path, cx);
         view.update(cx, |view, _| {
             view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
@@ -5561,7 +5783,8 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
         let unavailable = dir.path().join("unavailable");
         view.update(cx, |this, cx| {
-            this.project_dir = unavailable;
+            this.presentation.project =
+                keystone_core::ProjectId::new(&unavailable).map_err(|e| e.to_string());
             this.composer.update(cx, |input, cx| {
                 input.set_value("Keep this draft".into(), cx)
             });

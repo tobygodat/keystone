@@ -28,7 +28,7 @@ pub struct SidebarWidth(u16);
 impl SidebarWidth {
     pub const MIN: u16 = 220;
     pub const MAX: u16 = 520;
-    pub const DEFAULT: Self = Self(302);
+    pub const DEFAULT: Self = Self(264);
 
     /// `None` outside the allowed range.
     pub fn new(px: u16) -> Option<Self> {
