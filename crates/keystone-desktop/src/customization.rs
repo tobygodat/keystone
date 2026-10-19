@@ -27,14 +27,41 @@ gpui::actions!(
 );
 pub fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("ctrl-shift-l", OpenCustomize, Some("Keystone && !Dialog")),
-        gpui::KeyBinding::new("alt-left", MoveLeft, Some("Customize && !Dialog")),
-        gpui::KeyBinding::new("alt-right", MoveRight, Some("Customize && !Dialog")),
-        gpui::KeyBinding::new("alt-up", MoveUp, Some("Customize && !Dialog")),
-        gpui::KeyBinding::new("alt-down", MoveDown, Some("Customize && !Dialog")),
-        gpui::KeyBinding::new("alt-[", Narrower, Some("Customize && !Dialog")),
-        gpui::KeyBinding::new("alt-]", Wider, Some("Customize && !Dialog")),
-        gpui::KeyBinding::new("ctrl-s", ApplyLayout, Some("Customize && !Dialog")),
+        gpui::KeyBinding::new(
+            "alt-left",
+            MoveLeft,
+            Some("Customize && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "alt-right",
+            MoveRight,
+            Some("Customize && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "alt-up",
+            MoveUp,
+            Some("Customize && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "alt-down",
+            MoveDown,
+            Some("Customize && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "alt-[",
+            Narrower,
+            Some("Customize && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "alt-]",
+            Wider,
+            Some("Customize && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "ctrl-s",
+            ApplyLayout,
+            Some("Customize && !Dialog && !CommandPalette"),
+        ),
     ]);
 }
 

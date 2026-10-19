@@ -1,0 +1,273 @@
+//! The commands the palette lists. Their key bindings come from the same table, so a
+//! row's shortcut hint cannot drift from the binding that runs it.
+
+use crate::customization::OpenCustomize;
+use crate::{
+    FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, Quit, RenameSession, ToggleSettle,
+    ToggleSidebar,
+};
+use gpui::{
+    Action, AppContext, Context, DummyKeyboardMapper, Entity, FocusHandle, Focusable, IntoElement,
+    KeyBinding, KeyBindingContextPredicate, Window,
+};
+use keystone_ui::{CommandPalette, CommandPaletteState, PaletteItem};
+
+pub(crate) struct Command {
+    /// Stable across releases; the palette row's id.
+    pub id: &'static str,
+    pub label: &'static str,
+    /// GPUI keystrokes. The first is the row's shortcut hint.
+    pub keys: &'static [&'static str],
+    pub context: Option<&'static str>,
+    pub action: fn() -> Box<dyn Action>,
+}
+
+/// While the palette is open its shortcuts stay inert, so focus cannot leave it
+/// behind an open overlay.
+const APP: &str = "!Dialog && !CommandPalette";
+
+pub(crate) const COMMANDS: &[Command] = &[
+    Command {
+        id: "new-codex",
+        label: "New Codex session",
+        keys: &["ctrl-shift-n"],
+        context: Some(APP),
+        action: || Box::new(NewCodex),
+    },
+    Command {
+        id: "new-claude",
+        label: "New Claude session",
+        keys: &["ctrl-n"],
+        context: Some(APP),
+        action: || Box::new(NewClaude),
+    },
+    Command {
+        id: "toggle-sidebar",
+        label: "Toggle sidebar",
+        keys: &["ctrl-b"],
+        context: Some(APP),
+        action: || Box::new(ToggleSidebar),
+    },
+    Command {
+        id: "focus-search",
+        label: "Focus search",
+        keys: &["ctrl-f"],
+        context: Some(APP),
+        action: || Box::new(FocusSearch),
+    },
+    Command {
+        id: "focus-composer",
+        label: "Focus composer",
+        keys: &["ctrl-l"],
+        context: Some(APP),
+        action: || Box::new(FocusComposer),
+    },
+    Command {
+        id: "rename-session",
+        label: "Rename session",
+        keys: &["f2"],
+        context: Some(APP),
+        action: || Box::new(RenameSession),
+    },
+    Command {
+        id: "settle-session",
+        label: "Settle session",
+        keys: &["ctrl-shift-s"],
+        context: Some(APP),
+        action: || Box::new(ToggleSettle),
+    },
+    Command {
+        id: "customize-layout",
+        label: "Customize layout",
+        keys: &["ctrl-shift-l"],
+        context: Some("Keystone && !Dialog && !CommandPalette"),
+        action: || Box::new(OpenCustomize),
+    },
+    Command {
+        id: "quit",
+        label: "Quit",
+        keys: &["ctrl-q"],
+        context: None,
+        action: || Box::new(Quit),
+    },
+];
+
+pub(crate) fn bindings() -> Vec<KeyBinding> {
+    COMMANDS
+        .iter()
+        .flat_map(|command| {
+            command.keys.iter().map(|keys| {
+                let context = command
+                    .context
+                    .map(|context| KeyBindingContextPredicate::parse(context).unwrap().into());
+                KeyBinding::load(
+                    keys,
+                    (command.action)(),
+                    context,
+                    false,
+                    None,
+                    &DummyKeyboardMapper,
+                )
+                .unwrap()
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn palette_items() -> Vec<PaletteItem> {
+    COMMANDS
+        .iter()
+        .map(|command| {
+            let item = PaletteItem::new(command.id, command.label);
+            match command.keys.first() {
+                Some(keys) => item.kbd(kbd_text(keys)),
+                None => item,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn action(id: &str) -> Option<Box<dyn Action>> {
+    COMMANDS
+        .iter()
+        .find(|command| command.id == id)
+        .map(|command| (command.action)())
+}
+
+/// `ctrl-shift-n` as `Ctrl+Shift+N`. Chords separated by spaces stay separated.
+fn kbd_text(keys: &str) -> String {
+    keys.split_whitespace()
+        .map(|stroke| {
+            stroke
+                .split('-')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().chain(chars).collect(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The open palette and the focus it returns to when it closes.
+pub(crate) struct Palette {
+    pub(crate) state: Entity<CommandPaletteState>,
+    restore: Option<FocusHandle>,
+}
+
+impl Keystone {
+    pub(crate) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return self.close_palette(window, cx);
+        }
+        self.new_menu = false;
+        self.filter_menu = false;
+        self.settings_menu = false;
+        self.approval_menu = false;
+        self.model_menu = None;
+        let restore = window.focused(cx);
+        let state = cx.new(|cx| CommandPaletteState::new(palette_items(), cx));
+        state.focus_handle(cx).focus(window, cx);
+        self.palette = Some(Palette { state, restore });
+        self.refresh(cx);
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.take() else {
+            return;
+        };
+        palette
+            .restore
+            .unwrap_or_else(|| self.focus.clone())
+            .focus(window, cx);
+        self.refresh(cx);
+    }
+
+    /// Closes first so the action reaches the restored focus, as its shortcut would.
+    fn confirm_palette(&mut self, item: &PaletteItem, window: &mut Window, cx: &mut Context<Self>) {
+        let action = action(&item.id);
+        self.close_palette(window, cx);
+        if let Some(action) = action {
+            window.dispatch_action(action, cx);
+        }
+    }
+
+    pub(crate) fn palette_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let palette = self.palette.as_ref()?;
+        let dismiss = self.scoped_listener(cx, |this, _: &(), window, cx| {
+            this.close_palette(window, cx)
+        });
+        Some(
+            CommandPalette::new("palette", &palette.state)
+                .on_confirm(
+                    self.scoped_listener(cx, |this, item: &PaletteItem, window, cx| {
+                        this.confirm_palette(item, window, cx)
+                    }),
+                )
+                .on_dismiss(move |window, cx| dismiss(&(), window, cx)),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn every_command_has_a_bound_action() {
+        let bindings = bindings();
+        let mut ids = HashSet::new();
+        let mut actions = HashSet::new();
+        for command in COMMANDS {
+            assert!(!command.keys.is_empty(), "{} has no key", command.id);
+            assert!(ids.insert(command.id), "{} is listed twice", command.id);
+            let name = (command.action)().name();
+            assert!(actions.insert(name), "{name} backs two rows");
+            assert!(
+                bindings
+                    .iter()
+                    .any(|binding| binding.action().name() == name),
+                "{name} has no binding"
+            );
+        }
+    }
+
+    #[test]
+    fn palette_kbd_matches_binding() {
+        let bindings = bindings();
+        for (command, item) in COMMANDS.iter().zip(palette_items()) {
+            let name = (command.action)().name();
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.action().name() == name)
+                .unwrap();
+            let keys = binding
+                .keystrokes()
+                .iter()
+                .map(|stroke| stroke.inner().unparse())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(item.id.as_ref(), command.id);
+            assert_eq!(item.kbd.as_deref(), Some(kbd_text(&keys).as_str()));
+        }
+    }
+
+    #[test]
+    fn kbd_text_names_each_key() {
+        for (keys, text) in [
+            ("ctrl-shift-n", "Ctrl+Shift+N"),
+            ("ctrl-b", "Ctrl+B"),
+            ("f2", "F2"),
+            ("alt-enter", "Alt+Enter"),
+            ("ctrl-k ctrl-s", "Ctrl+K Ctrl+S"),
+        ] {
+            assert_eq!(kbd_text(keys), text);
+        }
+    }
+}

@@ -18,6 +18,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools only obser
 - [Search and navigation](search.md) covers search entry points, matching, clearing, and sidebar visibility.
 - [Customize](customize.md) covers native component moves, split sizing, duplicate conversations, tabs, restricted Claude Code helper previews, Codex helper refusal, Borrow, per-project Apply/Discard/Undo/Reset, fitting, focus, and restart.
 - [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, choosing the provider and model before the first Send, and restoring a conversation.
+- [Command palette](palette.md) covers opening with Ctrl+K or Ctrl+Shift+P, filtering, running a command, dismissing with focus restored, and dialog blocking.
 
 ## Coverage rules
 

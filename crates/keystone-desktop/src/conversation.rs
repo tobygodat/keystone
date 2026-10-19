@@ -99,6 +99,25 @@ impl Conversation {
         self.pending.is_some()
     }
 
+    /// Whether a request still waits for an answer, counting requests that arrived
+    /// while the history loads and are not shown yet.
+    pub fn awaiting_approval(&self) -> bool {
+        let mut waiting: Vec<&RequestId> = self.approvals.iter().map(|a| &a.request).collect();
+        for pending in self.pending.iter().flatten() {
+            match pending {
+                Pending::Event(Event::ApprovalRequested(approval)) => {
+                    waiting.push(&approval.request)
+                }
+                Pending::Event(Event::ApprovalResolved { request }) => {
+                    waiting.retain(|waiting| *waiting != request)
+                }
+                Pending::Event(Event::TurnCompleted { .. }) => waiting.clear(),
+                _ => {}
+            }
+        }
+        !waiting.is_empty()
+    }
+
     /// Rebuilds the rows from the session's log, in the order they were first shown,
     /// then applies anything that happened while loading.
     ///
@@ -901,6 +920,31 @@ mod tests {
                 .collect();
             assert_eq!(replies, ["first", "second"]);
         }
+    }
+
+    #[test]
+    fn approvals_received_while_loading_still_wait() {
+        let approval = |id: &str| Approval {
+            request: RequestId(id.into()),
+            item_id: None,
+            action: format!("cmd {id}"),
+            detail: None,
+        };
+        let mut live = Conversation::loading();
+        assert!(!live.awaiting_approval());
+        live.apply(Event::ApprovalRequested(approval("1")));
+        assert!(live.approvals.is_empty(), "held until the history loads");
+        assert!(live.awaiting_approval());
+        live.apply(Event::ApprovalResolved {
+            request: RequestId("1".into()),
+        });
+        assert!(!live.awaiting_approval());
+        live.apply(Event::ApprovalRequested(approval("2")));
+        live.apply(completed());
+        assert!(
+            !live.awaiting_approval(),
+            "a finished turn clears its requests"
+        );
     }
 
     #[test]

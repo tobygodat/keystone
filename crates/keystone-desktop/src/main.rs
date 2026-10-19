@@ -1,5 +1,6 @@
 mod arrangement;
 mod arrangement_editor;
+mod commands;
 mod conversation;
 mod customization;
 mod customization_agent;
@@ -61,7 +62,9 @@ gpui::actions!(
         SendMessage,
         RenameSession,
         NextFocus,
-        PreviousFocus
+        PreviousFocus,
+        ToggleSidebar,
+        OpenPalette
     ]
 );
 
@@ -208,6 +211,7 @@ struct Keystone {
     /// The sample transcript, parsed once.
     fixture_document: Arc<Document>,
     customize_agent: Option<customization_agent::Agent>,
+    palette: Option<commands::Palette>,
 }
 
 impl Keystone {
@@ -325,6 +329,7 @@ impl Keystone {
                 ""
             })),
             customize_agent: None,
+            palette: None,
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -467,6 +472,16 @@ impl Keystone {
 
     /// Settles or un-settles one session. Selection does not change.
     fn settle(&mut self, id: u64, settled: bool, cx: &mut Context<Self>) {
+        if settled
+            && self
+                .conversations
+                .get(&id)
+                .is_some_and(Conversation::awaiting_approval)
+        {
+            self.error = Some("Answer the approval request before settling this session.".into());
+            self.refresh(cx);
+            return;
+        }
         if !self.save_draft(cx) {
             return;
         }
@@ -547,6 +562,17 @@ impl Keystone {
             .child(control)
     }
 
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        if self.presentation.current.arrangement.fitted {
+            self.presentation.current.arrangement.sidebar_overlay = self.arrangement_has_sidebar()
+                && !self.presentation.current.arrangement.sidebar_overlay;
+        } else {
+            self.presentation.current.sidebar = !self.presentation.current.sidebar;
+        }
+        self.refresh(cx);
+    }
+
     /// The main column's bar: the sidebar toggle, the breadcrumb, and the window controls.
     fn top_bar(&self, session: Option<(String, bool)>, cx: &mut Context<Self>) -> impl IntoElement {
         let hover = cx.theme().colors.element_hover;
@@ -565,16 +591,7 @@ impl Keystone {
                             "Show sidebar"
                         }))
                         .on_click(self.scoped_listener(cx, |this, _, window, cx| {
-                            this.focus.focus(window, cx);
-                            if this.presentation.current.arrangement.fitted {
-                                this.presentation.current.arrangement.sidebar_overlay = this
-                                    .arrangement_has_sidebar()
-                                    && !this.presentation.current.arrangement.sidebar_overlay;
-                            } else {
-                                this.presentation.current.sidebar =
-                                    !this.presentation.current.sidebar;
-                            }
-                            this.refresh(cx);
+                            this.toggle_sidebar(window, cx)
                         })),
                     cx,
                 ),
@@ -2795,6 +2812,16 @@ impl Render for Keystone {
                     this.refresh(cx);
                 }),
             )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &ToggleSidebar, window, cx| {
+                    this.toggle_sidebar(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &OpenPalette, window, cx| {
+                    this.toggle_palette(window, cx)
+                }),
+            )
             .child(self.top_bar(session, cx))
             .when(customizing, |d| {
                 d.child(self.customize_panel(window.viewport_size(), cx))
@@ -2802,7 +2829,8 @@ impl Render for Keystone {
             .child(main)
             .children(self.borrow_dialog(cx))
             .children(self.full_access_dialog(cx))
-            .children(self.rename_dialog(cx));
+            .children(self.rename_dialog(cx))
+            .children(self.palette_overlay(cx));
         self.on_arrangement_drag(root, cx)
     }
 }
@@ -6471,22 +6499,398 @@ mod tests {
             "first line\nsecond line"
         );
     }
+
+    /// A window over a saved workspace with one selected Codex session, focused the
+    /// way `main` focuses it.
+    fn open_with_session<'a>(
+        dir: &Path,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (Entity<Keystone>, &'a mut gpui::VisualTestContext) {
+        let path = dir.join("workspace.json");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        drop(store);
+        let (view, cx) = open_window(&path, cx);
+        view.update_in(cx, |this, window, cx| this.focus.focus(window, cx));
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    fn run_from_palette(cx: &mut gpui::VisualTestContext, query: &str) {
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_some(), "the palette opens");
+        cx.simulate_input(query);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    }
+
+    fn palette_open(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> bool {
+        view.read_with(cx, |view, _| view.palette.is_some())
+    }
+
+    #[gpui::test]
+    fn palette_new_session_creates_session(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_window(&dir.path().join("workspace.json"), cx);
+        view.update_in(cx, |this, window, cx| this.focus.focus(window, cx));
+        run_from_palette(cx, "new c");
+        assert!(!palette_open(&view, cx));
+        assert!(cx.debug_bounds("palette").is_none());
+        view.read_with(cx, |view, _| {
+            let sessions = view.store.workspace().sessions();
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].provider(), Provider::Codex);
+            assert_eq!(view.store.workspace().selected(), Some(sessions[0].id()));
+        });
+        assert!(
+            composer_focused(&view, cx),
+            "a new session focuses its composer"
+        );
+    }
+
+    #[gpui::test]
+    fn palette_escape_restores_focus(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        cx.simulate_keystrokes("ctrl-l");
+        cx.simulate_input("half a thought");
+        cx.run_until_parked();
+        assert!(composer_focused(&view, cx));
+
+        for open in ["ctrl-k", "ctrl-shift-p"] {
+            cx.simulate_keystrokes(open);
+            cx.run_until_parked();
+            assert!(palette_open(&view, cx), "{open} opens the palette");
+            assert!(
+                !composer_focused(&view, cx),
+                "{open}: the palette input has focus"
+            );
+            cx.simulate_input("sett");
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            assert!(!palette_open(&view, cx), "{open}: escape closes it");
+            assert!(
+                composer_focused(&view, cx),
+                "{open}: focus returns to the composer"
+            );
+            view.read_with(cx, |view, cx| {
+                assert_eq!(view.composer.read(cx).value(), "half a thought");
+                assert!(!view.store.workspace().sessions()[0].settled());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn palette_escape_leaves_customize_open(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        let customizing = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.presentation.current.customization.is_open()
+            })
+        };
+        cx.simulate_keystrokes("ctrl-shift-l");
+        cx.run_until_parked();
+        assert!(customizing(&view, cx));
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        assert!(palette_open(&view, cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!palette_open(&view, cx));
+        assert!(customizing(&view, cx), "escape closes only the palette");
+    }
+
+    #[gpui::test]
+    fn palette_blocked_by_dialog(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        cx.simulate_keystrokes("f2");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.renaming.is_some()));
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        assert!(
+            !palette_open(&view, cx),
+            "the rename dialog keeps the palette closed"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        pick_mode(cx, ApprovalMode::FullAccess);
+        assert!(asking(&view, cx));
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        assert!(
+            !palette_open(&view, cx),
+            "the full-access dialog keeps the palette closed"
+        );
+    }
+
+    #[gpui::test]
+    fn palette_runs_toggle_sidebar(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        assert!(cx.debug_bounds("session-1").is_some());
+        run_from_palette(cx, "toggle sidebar");
+        assert!(!palette_open(&view, cx));
+        assert!(cx.debug_bounds("session-1").is_none(), "the sidebar hides");
+        cx.simulate_keystrokes("ctrl-b");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("session-1").is_some(),
+            "Ctrl+B shows it again"
+        );
+    }
+
+    #[gpui::test]
+    fn palette_runs_focus_search(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        run_from_palette(cx, "focus search");
+        cx.simulate_input("codex");
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.search.read(cx).value(), "codex");
+        });
+    }
+
+    #[gpui::test]
+    fn palette_keeps_app_shortcuts_inert(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        cx.simulate_keystrokes("ctrl-l");
+        cx.simulate_input("half a thought");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-n");
+        cx.simulate_keystrokes("ctrl-l");
+        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_input("tog");
+        cx.run_until_parked();
+        assert!(palette_open(&view, cx));
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.store.workspace().sessions().len(), 1);
+            assert_eq!(
+                view.composer.read(cx).value(),
+                "half a thought",
+                "nothing sent"
+            );
+            let state = view.palette.as_ref().unwrap().state.read(cx);
+            assert_eq!(state.query(cx), "tog", "typing still reaches the palette");
+        });
+    }
+
+    #[gpui::test]
+    fn palette_tab_moves_the_highlight(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        let highlighted = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, cx| {
+                let state = view.palette.as_ref().unwrap().state.read(cx);
+                (
+                    state.highlighted_item(cx).map(|item| item.id.to_string()),
+                    state.query(cx).to_owned(),
+                )
+            })
+        };
+        cx.simulate_keystrokes("tab tab");
+        cx.run_until_parked();
+        assert_eq!(
+            highlighted(&view, cx),
+            (Some("toggle-sidebar".into()), String::new())
+        );
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        assert_eq!(
+            highlighted(&view, cx),
+            (Some("new-claude".into()), String::new())
+        );
+        assert!(palette_open(&view, cx));
+    }
+
+    #[gpui::test]
+    fn palette_keeps_customize_shortcuts_inert(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        cx.simulate_keystrokes("ctrl-shift-l");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-s");
+        cx.run_until_parked();
+        assert!(palette_open(&view, cx));
+        assert!(
+            view.read_with(cx, |view, _| view
+                .presentation
+                .current
+                .customization
+                .is_open()),
+            "Ctrl+S does not apply the layout under the palette"
+        );
+    }
+
+    fn await_approval(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) {
+        view.update(cx, |this, cx| {
+            let mut live = Conversation::default();
+            live.running = true;
+            live.approvals.push(keystone_agent::Approval {
+                request: keystone_agent::RequestId("1".into()),
+                item_id: None,
+                action: "cargo test".into(),
+                detail: None,
+            });
+            this.conversations.insert(1, live);
+            this.refresh(cx);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn settle_skips_approval_held_while_history_loads(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        view.update(cx, |this, _| {
+            let mut live = Conversation::loading();
+            live.apply(keystone_agent::Event::ApprovalRequested(
+                keystone_agent::Approval {
+                    request: keystone_agent::RequestId("1".into()),
+                    item_id: None,
+                    action: "cargo test".into(),
+                    detail: None,
+                },
+            ));
+            this.conversations.insert(1, live);
+        });
+        cx.simulate_keystrokes("ctrl-shift-s");
+        cx.run_until_parked();
+        assert_eq!(settled(&view, cx), (false, false));
+    }
+
+    fn settled(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> (bool, bool) {
+        view.read_with(cx, |view, _| {
+            let on_disk = Store::open(view.store.path()).unwrap();
+            (
+                view.store.workspace().sessions()[0].settled(),
+                on_disk.workspace().sessions()[0].settled(),
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn palette_settle_skips_session_awaiting_approval(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        await_approval(&view, cx);
+        run_from_palette(cx, "settle");
+        assert!(!palette_open(&view, cx));
+        assert_eq!(settled(&view, cx), (false, false));
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.error.as_deref(),
+                Some("Answer the approval request before settling this session.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn settle_shortcut_skips_session_awaiting_approval(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        await_approval(&view, cx);
+        cx.simulate_keystrokes("ctrl-shift-s");
+        cx.run_until_parked();
+        assert_eq!(settled(&view, cx), (false, false));
+        assert!(view.read_with(cx, |view, _| view.error.is_some()));
+
+        view.update(cx, |this, _| {
+            this.conversations.get_mut(&1).unwrap().approvals.clear()
+        });
+        cx.simulate_keystrokes("ctrl-shift-s");
+        cx.run_until_parked();
+        assert_eq!(
+            settled(&view, cx),
+            (true, true),
+            "settles once nothing waits"
+        );
+    }
+
+    #[gpui::test]
+    #[ignore = "benchmark; run through scripts/perf.py"]
+    fn perf_palette_open(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        for index in 0..200 {
+            let provider = if index % 2 == 0 {
+                Provider::Claude
+            } else {
+                Provider::Codex
+            };
+            store.create(provider, &working_directory(), 1).unwrap();
+        }
+        cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let mut frames_ms = Vec::new();
+        for _ in 0..30 {
+            view.update_in(cx, |this, window, cx| this.toggle_palette(window, cx));
+            cx.update(|window, cx| {
+                let start = std::time::Instant::now();
+                window.draw(cx).clear(cx);
+                frames_ms.push(start.elapsed().as_secs_f64() * 1000.);
+            });
+            assert!(
+                cx.debug_bounds("palette").is_some(),
+                "the timed frame drew it"
+            );
+            view.update_in(cx, |this, window, cx| this.toggle_palette(window, cx));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert!(view.read_with(cx, |view, _| view.palette.is_none()));
+        frames_ms.sort_by(f64::total_cmp);
+        eprintln!(
+            "PERF palette_open_ms={:.2} palette_open_p95_ms={:.2}",
+            frames_ms[frames_ms.len() / 2],
+            frames_ms[frames_ms.len() * 95 / 100]
+        );
+    }
 }
 /// The app's keyboard shortcuts, shared by `main` and the GPUI tests.
 fn bind_keys(cx: &mut App) {
     TextInput::bind_keys(cx);
     customization::bind_keys(cx);
+    cx.bind_keys(commands::bindings());
     cx.bind_keys([
-        gpui::KeyBinding::new("ctrl-q", Quit, None),
-        gpui::KeyBinding::new("tab", NextFocus, Some("Keystone && !Dialog")),
-        gpui::KeyBinding::new("shift-tab", PreviousFocus, Some("Keystone && !Dialog")),
-        gpui::KeyBinding::new("ctrl-n", NewClaude, Some("!Dialog")),
-        gpui::KeyBinding::new("ctrl-shift-n", NewCodex, Some("!Dialog")),
-        gpui::KeyBinding::new("ctrl-shift-s", ToggleSettle, Some("!Dialog")),
-        gpui::KeyBinding::new("ctrl-l", FocusComposer, Some("!Dialog")),
-        gpui::KeyBinding::new("ctrl-f", FocusSearch, Some("!Dialog")),
-        gpui::KeyBinding::new("ctrl-enter", SendMessage, Some("!Dialog")),
-        gpui::KeyBinding::new("f2", RenameSession, Some("!Dialog")),
+        gpui::KeyBinding::new(
+            "tab",
+            NextFocus,
+            Some("Keystone && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "shift-tab",
+            PreviousFocus,
+            Some("Keystone && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "ctrl-enter",
+            SendMessage,
+            Some("!Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new("ctrl-k", OpenPalette, Some("!Dialog")),
+        gpui::KeyBinding::new("ctrl-shift-p", OpenPalette, Some("!Dialog")),
+        // Tab would otherwise type into the palette's single-line query.
+        gpui::KeyBinding::new("tab", keystone_ui::text_input::Down, Some("CommandPalette")),
+        gpui::KeyBinding::new(
+            "shift-tab",
+            keystone_ui::text_input::Up,
+            Some("CommandPalette"),
+        ),
     ]);
 }
 
