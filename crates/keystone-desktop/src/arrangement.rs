@@ -428,11 +428,11 @@ impl Keystone {
         (f32::from(measured) + 56.).max(COMPOSER_MIN)
     }
 
-    pub(crate) fn arrangement_body(
+    pub(crate) fn update_arrangement_fitting(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) {
         let c = self.shown_composition();
         self.presentation.current.arrangement.composer_min_width =
             self.composer_minimum_width(window, cx);
@@ -462,6 +462,21 @@ impl Keystone {
             self.presentation.current.arrangement.tab = None;
         }
         self.presentation.current.arrangement.fitted = fitted;
+    }
+
+    pub(crate) fn arrangement_body(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = self.shown_composition();
+        let fitted = self.presentation.current.arrangement.fitted;
+        let viewport = window.viewport_size();
+        let toolbar = if self.presentation.current.customization.is_open() {
+            f32::from(self.presentation.current.arrangement.toolbar_height)
+        } else {
+            0.
+        };
         self.presentation.current.arrangement.visible.clear();
         if self
             .presentation
@@ -1390,7 +1405,7 @@ impl Keystone {
             || !window.is_window_active()
             || self.filter_menu
             || self.new_menu
-            || self.settings_menu
+            || self.settings.is_some()
             || self.approval_menu
             || self.renaming.is_some()
             || self.confirm_full_access.is_some()

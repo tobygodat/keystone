@@ -15,10 +15,23 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{TextSize, radius};
 use crate::virtual_list::{VirtualList, VirtualListState};
 use gpui::{
-    App, Entity, EntityId, FocusHandle, Focusable, IntoElement, RenderOnce, SharedString, Window,
-    div, prelude::*, px,
+    App, Entity, EntityId, FocusHandle, Focusable, IntoElement, KeyBinding, RenderOnce,
+    SharedString, Window, div, prelude::*, px,
 };
 use std::rc::Rc;
+
+gpui::actions!(select, [LeaveMenu]);
+
+const MENU_CONTEXT: &str = "SelectMenu";
+
+/// Tab and Shift+Tab bound in the open menu, so they reach it before a window's own
+/// Tab binding, which matches higher up the tree.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("tab", LeaveMenu, Some(MENU_CONTEXT)),
+        KeyBinding::new("shift-tab", LeaveMenu, Some(MENU_CONTEXT)),
+    ]);
+}
 
 /// The most rows the open menu shows before it scrolls.
 const VISIBLE_ROWS: usize = 8;
@@ -35,8 +48,10 @@ struct SelectState {
 /// owns `selected` and stores the index `on_change` reports. Enter, Space, Up, or Down
 /// on the focused trigger opens the menu with the choice highlighted. In the menu, the
 /// list keys move the highlight, Enter or a click chooses, typing a letter jumps to the
-/// next option that starts with it, and Escape closes and refocuses the trigger. Named
-/// `{id}` for the trigger and `{id}-option-{n}` for each option.
+/// next option that starts with it, and Escape closes and refocuses the trigger. Tab
+/// and Shift+Tab also close and refocus the trigger, then go on to the window's own
+/// binding or key handler, so focus moves on from the trigger. Named `{id}` for the
+/// trigger and `{id}-option-{n}` for each option.
 #[derive(IntoElement)]
 pub struct Select {
     id: SharedString,
@@ -44,6 +59,7 @@ pub struct Select {
     selected: Option<usize>,
     placeholder: SharedString,
     disabled: bool,
+    focus: Option<FocusHandle>,
     on_change: Option<ChangeHandler>,
 }
 
@@ -59,6 +75,7 @@ impl Select {
             selected,
             placeholder: "Choose…".into(),
             disabled: false,
+            focus: None,
             on_change: None,
         }
     }
@@ -71,6 +88,13 @@ impl Select {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Focuses the trigger through `focus` instead of a handle of its own, so a container
+    /// can move focus to it.
+    pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
+        self.focus = Some(focus.clone());
         self
     }
 
@@ -122,8 +146,11 @@ fn jump_target(options: &[SharedString], from: Option<usize>, c: char) -> Option
 }
 
 impl RenderOnce for Select {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let focus = keyed_focus(&self.id, window, cx);
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = match self.focus.take() {
+            Some(focus) => focus,
+            None => keyed_focus(&self.id, window, cx),
+        };
         let state = window.use_keyed_state(
             (gpui::ElementId::from(self.id.clone()), "menu"),
             cx,
@@ -258,8 +285,18 @@ impl Select {
         })
         .w_full()
         .h(row * options.len().min(VISIBLE_ROWS) as f32);
+        let leave = {
+            let (state, trigger) = (state.clone(), trigger.clone());
+            move |_: &LeaveMenu, window: &mut Window, cx: &mut App| {
+                close(&state, cx);
+                window.focus(&trigger, cx);
+                cx.propagate();
+            }
+        };
         let (state, trigger, rows) = (state.clone(), trigger.clone(), rows.clone());
         div()
+            .key_context(MENU_CONTEXT)
+            .on_action(leave)
             .on_key_down(move |event, window, cx| {
                 let keystroke = &event.keystroke;
                 if keystroke.key == "escape" {

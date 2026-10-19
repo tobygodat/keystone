@@ -10,6 +10,7 @@ mod presentation;
 mod relative_time;
 mod reveal;
 mod settings;
+mod settings_page;
 mod transcript;
 mod view_state;
 
@@ -32,8 +33,7 @@ use keystone_core::ViewId;
 #[cfg(test)]
 use keystone_core::WorkingDirectory;
 use keystone_core::{
-    Appearance, ApprovalMode, Attention, Density, Durability, Provider, Revision, SidebarSide,
-    Store, ThemeMode,
+    Appearance, ApprovalMode, Attention, Durability, Provider, Revision, SidebarSide, Store,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
@@ -43,6 +43,7 @@ use model_selector::{
 };
 use presentation::Presentation;
 use relative_time::{LocalTime, relative};
+use settings_page::SettingsPage;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -65,7 +66,8 @@ gpui::actions!(
         NextFocus,
         PreviousFocus,
         ToggleSidebar,
-        OpenPalette
+        OpenPalette,
+        OpenSettings
     ]
 );
 
@@ -176,7 +178,7 @@ struct Keystone {
     new_menu: bool,
     filter_menu: bool,
     provider_filter: Option<Provider>,
-    settings_menu: bool,
+    settings: Option<SettingsPage>,
     approval_menu: bool,
     /// The session whose model menu is open. It closes with that session's first send,
     /// with a new session, and with a selection change, so it never shows for another.
@@ -305,7 +307,7 @@ impl Keystone {
             new_menu: false,
             filter_menu: false,
             provider_filter: None,
-            settings_menu: false,
+            settings: None,
             approval_menu: false,
             model_menu: None,
             catalogs: Catalogs::default(),
@@ -593,13 +595,20 @@ impl Keystone {
                         } else {
                             "Show sidebar"
                         }))
-                        .on_click(self.scoped_listener(cx, |this, _, window, cx| {
-                            this.toggle_sidebar(window, cx)
-                        })),
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleSidebar), cx)
+                        }),
                     cx,
                 ),
             )
             .child(Label::new("keystone").color(Color::Muted))
+            .when(self.settings.is_some(), |d| {
+                d.child(Label::new("/").color(Color::Faint)).child(
+                    Label::new("Settings")
+                        .weight(FontWeight::MEDIUM)
+                        .color(Color::Strong),
+                )
+            })
             .when_some(session, |d, (title, settled)| {
                 d.child(Label::new("/").color(Color::Faint))
                     .child(
@@ -632,7 +641,9 @@ impl Keystone {
                     })
             })
             .child(div().flex_1())
-            .child(self.customize_toggle(cx))
+            .when(self.settings.is_none(), |d| {
+                d.child(self.customize_toggle(cx))
+            })
             .child(
                 self.own_press(
                     h_flex()
@@ -848,20 +859,33 @@ impl Keystone {
                     d.child(list.cached(StyleRefinement::default().flex_1().min_h_0().w_full()))
                 }
             })
+            .child(self.sidebar_footer(cx))
+    }
+
+    /// The bottom of the sidebar and of the settings page's column. Its cog shows
+    /// selected while the page is open and toggles it.
+    fn sidebar_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .flex_shrink_0()
+            .h(cx.theme().density.control(px(40.)))
+            .pl(px(6.))
+            .pr(px(14.))
+            .gap_0p5()
+            .hairline_t(cx)
             .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .h(density.control(px(40.)))
-                    .pl(px(6.))
-                    .pr(px(14.))
-                    .gap_0p5()
-                    .hairline_t(cx)
-                    .child(self.settings_menu(cx))
-                    .child(
-                        Label::new("Local workspace")
-                            .size(TextSize::Ui)
-                            .color(Color::Muted),
-                    ),
+                IconButton::new("settings", IconName::Settings)
+                    .size(ButtonSize::Large)
+                    .debug_selector(|| "settings".into())
+                    .selected(self.settings.is_some())
+                    .tooltip(Tooltip::text("Settings"))
+                    .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                        this.toggle_settings(window, cx)
+                    })),
+            )
+            .child(
+                Label::new("Local workspace")
+                    .size(TextSize::Ui)
+                    .color(Color::Muted),
             )
     }
 
@@ -933,73 +957,14 @@ impl Keystone {
         )
     }
 
-    fn settings_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = self.store.workspace().preferences().appearance().clone();
-        let fonts = if self.settings_menu {
-            settings::font_choices(&appearance, cx)
+    /// The welcome screen renders no composer, so focusing it there would strand the
+    /// window's shortcuts; the root keeps them working.
+    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.workspace().selected().is_some() {
+            self.composer.focus_handle(cx).focus(window, cx);
         } else {
-            Vec::new()
-        };
-        let themes = [
-            (ThemeMode::System, "System", "theme-system"),
-            (ThemeMode::Light, "Light", "theme-light"),
-            (ThemeMode::Dark, "Dark", "theme-dark"),
-        ];
-        let densities = [
-            (Density::Compact, "Compact", "density-compact"),
-            (Density::Default, "Default", "density-default"),
-            (Density::Spacious, "Spacious", "density-spacious"),
-        ];
-        let font_items = std::iter::once(None)
-            .chain(fonts.into_iter().map(Some))
-            .enumerate()
-            .map(|(index, font)| {
-                let checked = font == appearance.ui_font;
-                let label = font.clone().unwrap_or_else(|| "Default".into());
-                MenuItem::new(("font", index), label)
-                    .checked(checked)
-                    .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                        let font = font.clone();
-                        this.update_appearance(|a| a.ui_font = font, window, cx)
-                    }))
-            })
-            .collect::<Vec<_>>();
-        PopoverMenu::new(
-            "settings-menu",
-            IconButton::new("settings", IconName::Settings)
-                .size(ButtonSize::Large)
-                .debug_selector(|| "settings".into())
-                .selected(self.settings_menu)
-                .tooltip(Tooltip::text("Settings")),
-        )
-        .anchor(Anchor::BottomLeft)
-        .open(self.settings_menu)
-        .on_open_change(self.scoped_listener(cx, |this, open: &bool, _, cx| {
-            this.settings_menu = *open;
-            cx.notify();
-        }))
-        .child(MenuHeader::new("Theme"))
-        .children(themes.map(|(mode, label, selector)| {
-            MenuItem::new(selector, label)
-                .checked(appearance.theme == mode)
-                .debug_selector(|| selector.into())
-                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                    this.update_appearance(|a| a.theme = mode, window, cx)
-                }))
-        }))
-        .child(MenuSeparator)
-        .child(MenuHeader::new("Density"))
-        .children(densities.map(|(density, label, selector)| {
-            MenuItem::new(selector, label)
-                .checked(appearance.density == density)
-                .debug_selector(|| selector.into())
-                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                    this.update_appearance(|a| a.density = density, window, cx)
-                }))
-        }))
-        .child(MenuSeparator)
-        .child(MenuHeader::new("Font"))
-        .children(font_items)
+            self.focus.focus(window, cx);
+        }
     }
 
     fn composer(
@@ -2663,7 +2628,11 @@ impl Render for Keystone {
         if let Some(id) = selected {
             self.conversation(id);
         }
-        let main = self.arrangement_body(window, cx);
+        self.update_arrangement_fitting(window, cx);
+        let main = match self.settings_page(cx) {
+            Some(page) => page,
+            None => self.arrangement_body(window, cx),
+        };
         let customizing = self.presentation.current.customization.is_open();
         let root = v_flex()
             .id("keystone-root")
@@ -2681,6 +2650,11 @@ impl Render for Keystone {
             .when(automation::enabled(), |d| {
                 d.child(automation::frame_writer())
             })
+            .on_key_down(self.scoped_listener(cx, |this, event, window, cx| {
+                if this.page_key(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             // Capture runs before the focused input, so Escape closes an open menu first.
             .capture_key_down(self.scoped_listener(
                 cx,
@@ -2688,6 +2662,7 @@ impl Render for Keystone {
                     if event.keystroke.key != "escape"
                         || this.renaming.is_some()
                         || this.confirm_full_access.is_some()
+                        || this.settings.is_some()
                     {
                         return;
                     }
@@ -2696,14 +2671,12 @@ impl Render for Keystone {
                         cx.stop_propagation();
                     } else if this.new_menu
                         || this.filter_menu
-                        || this.settings_menu
                         || this.approval_menu
                         || this.model_menu.is_some()
                         || this.presentation.current.arrangement.surface_menu.is_some()
                     {
                         this.new_menu = false;
                         this.filter_menu = false;
-                        this.settings_menu = false;
                         this.approval_menu = false;
                         this.model_menu = None;
                         this.presentation.current.arrangement.surface_menu = None;
@@ -2777,6 +2750,11 @@ impl Render for Keystone {
             .on_action(
                 self.scoped_listener(cx, |_, _: &PreviousFocus, window, cx| window.focus_prev(cx)),
             )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &OpenSettings, window, cx| {
+                    this.toggle_settings(window, cx)
+                }),
+            )
             .on_action(self.scoped_listener(cx, |this, _: &Quit, _, cx| {
                 if this.save_before_exit(cx) {
                     cx.quit();
@@ -2793,7 +2771,7 @@ impl Render for Keystone {
             )
             .on_action(
                 self.scoped_listener(cx, |this, _: &FocusComposer, window, cx| {
-                    this.composer.focus_handle(cx).focus(window, cx)
+                    this.focus_composer(window, cx)
                 }),
             )
             .on_action(
@@ -2832,7 +2810,7 @@ impl Render for Keystone {
                     this.toggle_palette(window, cx)
                 }),
             )
-            .child(self.top_bar(session, cx))
+            .child(self.top_bar(session.filter(|_| self.settings.is_none()), cx))
             .when(customizing, |d| {
                 d.child(self.customize_panel(window.viewport_size(), cx))
             })
@@ -2841,6 +2819,7 @@ impl Render for Keystone {
             .children(self.full_access_dialog(cx))
             .children(self.rename_dialog(cx))
             .children(self.palette_overlay(cx));
+        let root = self.settings_yields_to_workspace(root, cx);
         self.on_arrangement_drag(root, cx)
     }
 }
@@ -3981,49 +3960,6 @@ mod tests {
         cx.run_until_parked();
         let active_row = cx.debug_bounds("session-1").unwrap().origin.y;
         assert!(cx.debug_bounds("settled-section").unwrap().origin.y > active_row);
-    }
-
-    #[gpui::test]
-    fn settings_menu_applies_and_persists_appearance(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("workspace.json");
-        let store = Store::open(&path).unwrap();
-        cx.update(keystone_ui::init);
-        cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        let settings_height =
-            |cx: &mut gpui::VisualTestContext| cx.debug_bounds("settings").unwrap().size.height;
-        assert_eq!(settings_height(cx), px(32.));
-
-        for selector in ["settings", "theme-dark", "density-compact"] {
-            let bounds = cx
-                .debug_bounds(selector)
-                .expect("settings control rendered");
-            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-            cx.run_until_parked();
-        }
-        cx.update(|_, cx| {
-            assert_eq!(cx.theme().appearance, keystone_ui::Appearance::Dark);
-            assert_eq!(cx.theme().density, keystone_ui::Density::Compact);
-        });
-        assert_eq!(settings_height(cx), px(28.));
-
-        let bounds = cx.debug_bounds("theme-light").unwrap();
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|_, cx| assert_eq!(cx.theme().appearance, keystone_ui::Appearance::Light));
-        cx.simulate_keystrokes("escape");
-        view.read_with(cx, |view, _| assert!(!view.settings_menu));
-        let saved = Store::open(&path)
-            .unwrap()
-            .workspace()
-            .preferences()
-            .appearance()
-            .clone();
-        assert_eq!(
-            (saved.theme, saved.density),
-            (ThemeMode::Light, Density::Compact)
-        );
     }
 
     /// Runs the app's tasks, with real time passing, until `done` holds. Provider

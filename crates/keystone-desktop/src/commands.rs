@@ -4,8 +4,8 @@
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::{
-    FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, Quit, RenameSession, ToggleSettle,
-    ToggleSidebar,
+    FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, OpenSettings, Quit, RenameSession,
+    ToggleSettle, ToggleSidebar,
 };
 use gpui::{
     Action, AppContext, Context, DummyKeyboardMapper, Entity, FocusHandle, Focusable, IntoElement,
@@ -83,6 +83,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-s"],
         context: Some(APP),
         action: || Box::new(ToggleSettle),
+    },
+    Command {
+        id: "open-settings",
+        label: "Open settings",
+        keys: &["ctrl-,"],
+        context: Some(APP),
+        action: || Box::new(OpenSettings),
     },
     Command {
         id: "customize-layout",
@@ -175,7 +182,6 @@ impl Keystone {
         }
         self.new_menu = false;
         self.filter_menu = false;
-        self.settings_menu = false;
         self.approval_menu = false;
         self.model_menu = None;
         let restore = window.focused(cx);

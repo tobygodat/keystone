@@ -1,4 +1,5 @@
 use gpui::{Pixels, px};
+use std::cell::Cell;
 
 pub mod spacing {
     use gpui::{Pixels, px};
@@ -19,6 +20,15 @@ pub mod radius {
     pub const PANEL: Pixels = px(10.);
     pub const POPOVER: Pixels = px(12.);
     pub const COMPOSER: Pixels = px(18.);
+}
+
+thread_local! {
+    // Per thread rather than global, so GPUI tests running in parallel keep their own.
+    static TEXT_SCALE: Cell<f32> = const { Cell::new(1.) };
+}
+
+pub(crate) fn set_text_scale(scale: f32) {
+    TEXT_SCALE.set(scale);
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,15 +52,17 @@ impl TextSize {
         TextSize::Title,
     ];
 
+    /// The size under the active theme's [`crate::Theme::text_scale`].
     pub fn px(self) -> Pixels {
-        px(match self {
-            TextSize::Xs => 10.,
-            TextSize::Sm => 11.,
-            TextSize::Ui => 12.,
-            TextSize::Base => 13.,
-            TextSize::Body => 14.,
-            TextSize::Title => 24.,
-        })
+        TEXT_SCALE.get()
+            * px(match self {
+                TextSize::Xs => 10.,
+                TextSize::Sm => 11.,
+                TextSize::Ui => 12.,
+                TextSize::Base => 13.,
+                TextSize::Body => 14.,
+                TextSize::Title => 24.,
+            })
     }
 }
 
@@ -61,4 +73,17 @@ pub enum Elevation {
     Surface,
     Raised,
     Overlay,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_sizes_follow_the_text_scale() {
+        set_text_scale(15. / 13.);
+        assert_eq!(TextSize::Base.px(), px(15.));
+        set_text_scale(1.);
+        assert_eq!(TextSize::Base.px(), px(13.));
+    }
 }

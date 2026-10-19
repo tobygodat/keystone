@@ -2,8 +2,8 @@ use crate::button::ClickHandler;
 use crate::theme::ActiveTheme;
 use crate::tokens::radius;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, IntoElement, ParentElement, RenderOnce, Styled, Window,
-    div, prelude::*, px,
+    AnyElement, App, ClickEvent, ElementId, FocusHandle, IntoElement, ParentElement, RenderOnce,
+    Styled, Window, div, prelude::*, px,
 };
 use smallvec::SmallVec;
 
@@ -16,6 +16,7 @@ pub struct ListItem {
     selected: bool,
     on_hover: Option<HoverHandler>,
     on_click: Option<ClickHandler>,
+    focus: Option<FocusHandle>,
     debug_selector: Option<String>,
     children: SmallVec<[AnyElement; 2]>,
 }
@@ -27,6 +28,7 @@ impl ListItem {
             selected: false,
             on_hover: None,
             on_click: None,
+            focus: None,
             debug_selector: None,
             children: SmallVec::new(),
         }
@@ -51,6 +53,12 @@ impl ListItem {
         self
     }
 
+    /// Makes the row focusable with a visible ring. Enter or Space clicks it while focused.
+    pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
+        self.focus = Some(focus.clone());
+        self
+    }
+
     pub fn debug_selector(mut self, selector: impl FnOnce() -> String) -> Self {
         self.debug_selector = Some(selector());
         self
@@ -67,10 +75,11 @@ impl RenderOnce for ListItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let colors = &theme.colors;
-        let (selected_bg, hover_bg, active_bg) = (
+        let (selected_bg, hover_bg, active_bg, ring) = (
             colors.element_selected,
             colors.element_hover,
             colors.element_active,
+            colors.border_focused,
         );
         let mut el = div()
             .id(self.id)
@@ -86,6 +95,13 @@ impl RenderOnce for ListItem {
                 d.bg(selected_bg).hover(move |s| s.bg(active_bg))
             })
             .when(!self.selected, |d| d.hover(move |s| s.bg(hover_bg)))
+            // As on buttons, the ring is a border that is always there.
+            .when_some(self.focus, |d, focus| {
+                d.track_focus(&focus)
+                    .border_1()
+                    .border_color(ring.opacity(0.))
+                    .focus(move |s| s.border_color(ring))
+            })
             .children(self.children);
         if let Some(selector) = self.debug_selector {
             el = crate::automation::tag(el, selector);

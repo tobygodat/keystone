@@ -17,6 +17,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools only obser
 - [Settlement](settlement.md) covers row and shortcut settling, un-settling, and the collapsible Settled section.
 - [Search and navigation](search.md) covers search entry points, matching, clearing, and sidebar visibility.
 - [Customize](customize.md) covers native component moves, split sizing, duplicate conversations, tabs, restricted Claude Code helper previews, Codex helper refusal, Borrow, per-project Apply/Discard/Undo/Reset, fitting, focus, and restart.
+- [Settings](settings.md) covers the settings page: opening, sections, theme, fonts, density, text size, and restart.
 - [Files](files.md) covers the sidebar's Sessions and Files toggle, lazy folder listing that respects `.gitignore`, opening files in an external editor, Copy path, and the spawn error row.
 - [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, choosing the provider and model before the first Send, and restoring a conversation.
 - [Command palette](palette.md) covers opening with Ctrl+K or Ctrl+Shift+P, filtering, running a command, dismissing with focus restored, and dialog blocking.

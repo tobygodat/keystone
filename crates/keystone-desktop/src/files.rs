@@ -428,7 +428,15 @@ impl Keystone {
             self.reveal_view(files, window, cx);
             return self.focus_files(window, cx);
         }
-        let visible = &self.presentation.current.arrangement.visible;
+        let visible: Vec<_> = self
+            .presentation
+            .current
+            .arrangement
+            .visible
+            .iter()
+            .copied()
+            .filter(|view| shown.component(*view) == Some(Component::Conversation))
+            .collect();
         let target = self
             .store
             .workspace()
@@ -437,7 +445,7 @@ impl Keystone {
                 self.presentation
                     .current
                     .views
-                    .send_target(visible, session)
+                    .send_target(&visible, session)
             })
             .map(|key| key.view)
             .or_else(|| visible.first().copied())

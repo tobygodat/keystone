@@ -10,7 +10,7 @@ Open the palette, filter the app's commands by typing, and run one with Enter or
 - `palette-dismiss` closes it with Escape or a press outside the card. Focus returns to where it was and nothing else changes.
 - `palette-kbd` shows each row's shortcut. Rows and bindings come from one table in `src/commands.rs`, so a hint cannot drift from its binding.
 
-The rows, in order: New Codex session, New Claude session, Toggle sidebar, Focus search, Focus composer, Rename session, Settle session, Customize layout, Quit.
+The rows, in order: New Codex session, New Claude session, Toggle sidebar, Focus search, Focus composer, Rename session, Settle session, Open settings, Customize layout, Quit.
 
 ## How to get to it (user POV)
 
@@ -43,4 +43,4 @@ Preconditions:
 - While the palette is open, the app's other shortcuts do nothing (Ctrl+N, Ctrl+Enter, Tab focus moves, and the Customize keys), so nothing changes behind it and focus cannot leave it. Ctrl+Q still quits.
 - Escape with the palette open closes only the palette. Menus and the customize panel underneath stay as they were.
 - Settle session refuses a session waiting for approval and shows the reason under the composer. See [Settlement](settlement.md).
-- Open settings is not a row yet. It is a one-row addition to the table in `src/commands.rs` once Settings has an action.
+- Open settings (`open-settings`, Ctrl+Comma) closes the palette and opens the settings page, or closes the page when it is open. See [Settings](settings.md).

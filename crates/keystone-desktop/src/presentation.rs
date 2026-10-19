@@ -336,7 +336,7 @@ impl Keystone {
         self.presentation.focus_pending = true;
         self.new_menu = false;
         self.filter_menu = false;
-        self.settings_menu = false;
+        self.settings = None;
         self.approval_menu = false;
         self.confirm_full_access = None;
         self.window_drag = false;

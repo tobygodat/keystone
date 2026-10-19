@@ -52,14 +52,16 @@ pub use virtual_list::{VirtualList, VirtualListState};
 
 /// Installs the dark theme and component key bindings. Call once before opening a window.
 pub fn init(cx: &mut gpui::App) {
-    cx.set_global(Theme::dark());
+    set_theme(Theme::dark(), cx);
     virtual_list::bind_keys(cx);
     command_palette::bind_keys(cx);
+    select::bind_keys(cx);
     tree::bind_keys(cx);
 }
 
 /// Replaces the active theme and redraws every window, including cached views.
 pub fn set_theme(theme: Theme, cx: &mut gpui::App) {
+    tokens::set_text_scale(theme.text_scale);
     cx.set_global(theme);
     cx.refresh_windows();
 }

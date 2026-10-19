@@ -7,7 +7,8 @@
 use crate::switch::keyed_focus;
 use crate::theme::ActiveTheme;
 use gpui::{
-    App, Empty, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px, relative,
+    App, Empty, FocusHandle, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px,
+    relative,
 };
 use std::ops::RangeInclusive;
 use std::rc::Rc;
@@ -59,6 +60,7 @@ pub struct Slider {
     range: RangeInclusive<f32>,
     step: f32,
     disabled: bool,
+    focus: Option<FocusHandle>,
     on_change: Option<ChangeHandler>,
 }
 
@@ -75,12 +77,20 @@ impl Slider {
             range,
             step,
             disabled: false,
+            focus: None,
             on_change: None,
         }
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Focuses the slider through `focus` instead of a handle of its own, so a container
+    /// can move focus to it.
+    pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
+        self.focus = Some(focus.clone());
         self
     }
 
@@ -91,8 +101,11 @@ impl Slider {
 }
 
 impl RenderOnce for Slider {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let focus = keyed_focus(&self.id, window, cx);
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = match self.focus.take() {
+            Some(focus) => focus,
+            None => keyed_focus(&self.id, window, cx),
+        };
         let focused = focus.is_focused(window);
         let theme = cx.theme();
         let colors = theme.colors;

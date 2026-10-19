@@ -4,7 +4,14 @@ use gpui::{App, Window, WindowAppearance};
 use keystone_core::{Appearance as SavedAppearance, Density as SavedDensity, ThemeMode};
 use keystone_ui::{Appearance, Density, Fonts, Theme};
 
-/// Interface fonts offered in the settings menu when they are installed. The default,
+/// The interface's base text size in pixels when none is saved, `TextSize::Base` at a
+/// text scale of 1.
+pub const DEFAULT_TEXT_SIZE: u8 = 13;
+
+/// The text sizes the settings page offers, in pixels.
+pub const TEXT_SIZES: std::ops::RangeInclusive<u8> = 11..=16;
+
+/// Interface fonts offered in the settings page when they are installed. The default,
 /// Inter, is listed separately as "Default".
 const FONT_CANDIDATES: [&str; 8] = [
     "Adwaita Sans",
@@ -47,26 +54,42 @@ pub fn theme_for(saved: &SavedAppearance, window: &Window, cx: &App) -> Theme {
     if let Some(font) = &saved.ui_font {
         fonts.ui = font.clone().into();
     }
-    let installed = cx.text_system().all_font_names();
-    if let Some(mono) = MONO_CANDIDATES
-        .iter()
-        .find(|font| installed.iter().any(|name| name == *font))
-    {
-        fonts.mono = (*mono).into();
+    if let Some(font) = &saved.mono_font {
+        fonts.mono = font.clone().into();
+    } else {
+        let installed = cx.text_system().all_font_names();
+        if let Some(mono) = MONO_CANDIDATES
+            .iter()
+            .find(|font| installed.iter().any(|name| name == *font))
+        {
+            fonts.mono = (*mono).into();
+        }
     }
-    Theme::new(appearance, density, fonts)
+    let mut theme = Theme::new(appearance, density, fonts);
+    theme.text_scale =
+        f32::from(saved.text_size.unwrap_or(DEFAULT_TEXT_SIZE)) / f32::from(DEFAULT_TEXT_SIZE);
+    theme
 }
 
 /// The candidate fonts that are installed, plus a saved choice that is no longer listed,
-/// so the menu always shows what is in use.
+/// so the pane always shows what is in use.
 pub fn font_choices(saved: &SavedAppearance, cx: &App) -> Vec<String> {
+    installed_choices(&FONT_CANDIDATES, saved.ui_font.as_ref(), cx)
+}
+
+/// [`font_choices`] for the code font.
+pub fn mono_choices(saved: &SavedAppearance, cx: &App) -> Vec<String> {
+    installed_choices(&MONO_CANDIDATES, saved.mono_font.as_ref(), cx)
+}
+
+fn installed_choices(candidates: &[&str], saved: Option<&String>, cx: &App) -> Vec<String> {
     let installed = cx.text_system().all_font_names();
-    let mut choices: Vec<String> = FONT_CANDIDATES
+    let mut choices: Vec<String> = candidates
         .iter()
         .filter(|font| installed.iter().any(|name| name == *font))
         .map(|font| font.to_string())
         .collect();
-    if let Some(font) = &saved.ui_font
+    if let Some(font) = saved
         && !choices.contains(font)
     {
         choices.push(font.clone());

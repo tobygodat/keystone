@@ -6,6 +6,8 @@ pub struct Theme {
     pub density: Density,
     pub colors: Colors,
     pub fonts: Fonts,
+    /// Multiplies every [`crate::TextSize`]. 1.0 keeps the built-in sizes.
+    pub text_scale: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -144,6 +146,7 @@ impl Theme {
                 Appearance::Dark => Colors::dark(),
             },
             fonts,
+            text_scale: 1.,
         }
     }
 

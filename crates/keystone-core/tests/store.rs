@@ -165,6 +165,8 @@ fn preferences_survive_restart_and_default_for_older_files() {
         theme: ThemeMode::Light,
         density: Density::Compact,
         ui_font: Some("Noto Sans".into()),
+        mono_font: Some("JetBrains Mono".into()),
+        text_size: Some(15),
     };
     store.set_appearance(appearance.clone()).unwrap();
     drop(store);
@@ -175,6 +177,31 @@ fn preferences_survive_restart_and_default_for_older_files() {
             .preferences()
             .appearance(),
         &appearance
+    );
+}
+
+#[test]
+fn appearance_saved_before_mono_font_and_text_size_loads_with_their_defaults() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    fs::write(
+        &path,
+        r#"{"version":1,"next_id":1,"workspace":{"sessions":[],"selected":null,"preferences":{"theme":"Light","density":"Compact","ui_font":"Noto Sans"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        Store::open(&path)
+            .unwrap()
+            .workspace()
+            .preferences()
+            .appearance(),
+        &Appearance {
+            theme: ThemeMode::Light,
+            density: Density::Compact,
+            ui_font: Some("Noto Sans".into()),
+            mono_font: None,
+            text_size: None,
+        }
     );
 }
 

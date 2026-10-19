@@ -350,6 +350,10 @@ pub struct Appearance {
     pub density: Density,
     /// The interface font family. `None` uses the built-in default.
     pub ui_font: Option<String>,
+    /// The code font family. `None` uses the first installed default.
+    pub mono_font: Option<String>,
+    /// The interface's base text size in pixels. `None` uses the built-in 13.
+    pub text_size: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -1482,6 +1486,7 @@ mod tests {
                     theme: ThemeMode::Dark,
                     density: Density::Compact,
                     ui_font: Some("Inter".into()),
+                    ..Appearance::default()
                 })
                 .unwrap();
             store.set_draft(1, "newer".into()).unwrap();
