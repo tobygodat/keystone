@@ -15,7 +15,7 @@ Build the actual preview:
 cargo build -p keystone-desktop --locked --offline -j 2
 ```
 
-The driver must exist at `.audit/tools/computer-use-mcp` and include the headless patch. See [setup](setup.md) if it is missing or predates the patch.
+The driver must exist at `.audit/tools/computer-use-mcp` and include the headless and wheel patches. See [setup](setup.md) if it is missing or predates either patch.
 
 The server launches `target/debug/keystone-desktop` from its own checkout. Pass `--binary PATH`, or set `KEYSTONE_BINARY`, to launch another build. In a git worktree, `.audit/` is not shared. When the worktree has no driver, the server uses the main checkout's, so do not build it again. To choose one explicitly, pass `--driver ~/keystone/.audit/tools/computer-use-mcp`. Build the worktree's own app first, or point `--binary` at a build of the same commit. `doctor` reports the hash of the binary that actually ran.
 
@@ -48,6 +48,7 @@ Prefer names and waits over coordinates and sleeps:
 - `click` with `{"id":"new-session"}` clicks a named element's visible center. It fails if the name is missing, duplicated, or clipped. `{"x":..,"y":..}` clicks pixels from the latest screenshot.
 - `wait_for` with `{"id":"new-codex"}` waits until the element is visible. Add `"present":false` to wait for it to go.
 - `input` takes driver actions: `{"actions":[{"action":"keypress","keys":["ctrl","l"]}]}`, `{"action":"type","text":"Verification draft"}`, and `{"action":"wait","duration_ms":500}`.
+- `wheel` takes a fresh named target and signed whole notch counts: `{"id":"conversation","vertical":-3}` scrolls upward three notches. Positive vertical scrolls down; positive horizontal scrolls right. It uses the same upstream `input` path as raw `scroll`, whose units remain axis distances (15 per notch). Read actual row/pixel movement, not only a successful input response. See [wheel and maximize](features/wheel-and-maximize.md) for the native acceptance journey.
 - `screenshot` returns the PNG and saves it as evidence.
 - `workspace` reads the real saved file. `snapshot` copies it into the evidence directory.
 - `call` reaches any upstream tool, such as `{"tool":"windows_list"}`.
@@ -59,6 +60,8 @@ To restart, press Ctrl+Q through `input`, wait until `windows_list` is empty and
 ## Evidence
 
 Every driver request and sanitized result is recorded in `actions.jsonl`, along with each `elements` read. Screenshots are numbered PNGs in the same directory. Read state after the user action and assert literal expected values. Never populate state with internal setters to prove a user journey.
+
+For event diagnosis, launch `python3 scripts/native-driver.py --trace-wayland`. The driver's stderr records virtual-pointer requests; each app stderr records received Wayland events. This is opt-in because traces are verbose and can contain typed content. Use scripted data and inspect traces for private information before publishing them. Require Wheel `axis_discrete` emission and received `axis_value120` (or `axis_discrete` on an older pointer version), followed by a frame, before claiming corrected native wheel delivery.
 
 Capture both the action and its resulting visible state. A screenshot alone does not prove persistence. A saved file alone does not prove rendering or restored input. For restart, inspect the reopened UI and use it again. Include the feature ID, entry point, expected outcome, observed outcome, and screenshot paths in a run report. Mark untested entry points explicitly.
 

@@ -1,0 +1,2286 @@
+{
+  "application_commit": "3fe5ff614c5c6587e3656ab421c3451a7be32296",
+  "identity": {
+    "binary": "~/keystone/target/debug/keystone-desktop",
+    "binary_sha256": "bdfa7f74fbf4efb2cba4a88eee7c54b98df9ede80c55cb4ee67deeeb164d3558",
+    "driver": "~/keystone/.audit/tools/computer-use-mcp",
+    "driver_sha256": "d76df85d502745bc5f48e65184e956cbcc1d53e8c5a501a568a5e43210c09668",
+    "scratch": "/tmp/keystone-verify-hzinncjs",
+    "driver_pid": 1400939,
+    "trace_wayland": true
+  },
+  "driver_upstream_commit": "7acd4518c0028f034e33dfd20bb5b159adf15be5",
+  "doctor_initial": {
+    "server_info": {
+      "accessibility": "private AT-SPI bus; only accessible applications expose semantic elements",
+      "application_access": "host access by default: inherited user HOME, files, processes, network, environment and cwd",
+      "backend": "nested Sway / GLES2 (DMA-BUF, Vulkan WSI, Xwayland DRI3)",
+      "coordinates": "desktop pixels at scale 1, not host-screen coordinates",
+      "input": "all Codex computer actions: screenshot plus click/double_click/move/drag/scroll/type/keypress/wait; mouse modifiers and Unicode text",
+      "lifecycle": "one desktop per MCP connection; explicitly stop it when finished",
+      "name": "computer-use-mcp",
+      "sandbox": "optional Bubblewrap mode via session_start sandbox=true",
+      "version": "0.3.2"
+    },
+    "session_status": {
+      "running": true,
+      "session": {
+        "compositor_pid": 1400945,
+        "dbus_address": "unix:path=/tmp/computer-use-gmhpfh/bus/session",
+        "headless": true,
+        "height": 1000,
+        "sandboxed": false,
+        "sway_socket": "/tmp/computer-use-gmhpfh/sway-ipc",
+        "wayland_socket": "/tmp/computer-use-gmhpfh/sway-runtime/wayland-1",
+        "width": 1600,
+        "xwayland": true
+      }
+    },
+    "windows_list": {
+      "windows": [
+        {
+          "app_id": null,
+          "focused": true,
+          "id": 5,
+          "pid": 1400975,
+          "rect": {
+            "height": 1000,
+            "width": 1600,
+            "x": 0,
+            "y": 0
+          },
+          "shell": "xdg_shell",
+          "title": ""
+        }
+      ]
+    },
+    "processes": [
+      {
+        "pid": 1400975,
+        "exe": "~/keystone/target/debug/keystone-desktop",
+        "sha256": "bdfa7f74fbf4efb2cba4a88eee7c54b98df9ede80c55cb4ee67deeeb164d3558",
+        "matches_launch": true
+      }
+    ],
+    "binary_sha256_now": "bdfa7f74fbf4efb2cba4a88eee7c54b98df9ede80c55cb4ee67deeeb164d3558",
+    "binary_unchanged": true
+  },
+  "doctor_restarted": {
+    "server_info": {
+      "accessibility": "private AT-SPI bus; only accessible applications expose semantic elements",
+      "application_access": "host access by default: inherited user HOME, files, processes, network, environment and cwd",
+      "backend": "nested Sway / GLES2 (DMA-BUF, Vulkan WSI, Xwayland DRI3)",
+      "coordinates": "desktop pixels at scale 1, not host-screen coordinates",
+      "input": "all Codex computer actions: screenshot plus click/double_click/move/drag/scroll/type/keypress/wait; mouse modifiers and Unicode text",
+      "lifecycle": "one desktop per MCP connection; explicitly stop it when finished",
+      "name": "computer-use-mcp",
+      "sandbox": "optional Bubblewrap mode via session_start sandbox=true",
+      "version": "0.3.2"
+    },
+    "session_status": {
+      "running": true,
+      "session": {
+        "compositor_pid": 1400945,
+        "dbus_address": "unix:path=/tmp/computer-use-gmhpfh/bus/session",
+        "headless": true,
+        "height": 1000,
+        "sandboxed": false,
+        "sway_socket": "/tmp/computer-use-gmhpfh/sway-ipc",
+        "wayland_socket": "/tmp/computer-use-gmhpfh/sway-runtime/wayland-1",
+        "width": 1600,
+        "xwayland": true
+      }
+    },
+    "windows_list": {
+      "windows": [
+        {
+          "app_id": null,
+          "focused": true,
+          "id": 6,
+          "pid": 1401031,
+          "rect": {
+            "height": 1000,
+            "width": 1600,
+            "x": 0,
+            "y": 0
+          },
+          "shell": "xdg_shell",
+          "title": ""
+        }
+      ]
+    },
+    "processes": [
+      {
+        "pid": 1400975,
+        "exited": true,
+        "exit": {
+          "launcher_pid": 1400974,
+          "stderr": "~/keystone/.audit/verify-20261019T004311-1400861/app-01.stderr.log",
+          "pid": 1400975,
+          "returncode": 0,
+          "signal": null
+        }
+      },
+      {
+        "pid": 1401031,
+        "exe": "~/keystone/target/debug/keystone-desktop",
+        "sha256": "bdfa7f74fbf4efb2cba4a88eee7c54b98df9ede80c55cb4ee67deeeb164d3558",
+        "matches_launch": true
+      }
+    ],
+    "binary_sha256_now": "bdfa7f74fbf4efb2cba4a88eee7c54b98df9ede80c55cb4ee67deeeb164d3558",
+    "binary_unchanged": true
+  },
+  "doctor_final_quit": {
+    "server_info": {
+      "accessibility": "private AT-SPI bus; only accessible applications expose semantic elements",
+      "application_access": "host access by default: inherited user HOME, files, processes, network, environment and cwd",
+      "backend": "nested Sway / GLES2 (DMA-BUF, Vulkan WSI, Xwayland DRI3)",
+      "coordinates": "desktop pixels at scale 1, not host-screen coordinates",
+      "input": "all Codex computer actions: screenshot plus click/double_click/move/drag/scroll/type/keypress/wait; mouse modifiers and Unicode text",
+      "lifecycle": "one desktop per MCP connection; explicitly stop it when finished",
+      "name": "computer-use-mcp",
+      "sandbox": "optional Bubblewrap mode via session_start sandbox=true",
+      "version": "0.3.2"
+    },
+    "session_status": {
+      "running": true,
+      "session": {
+        "compositor_pid": 1400945,
+        "dbus_address": "unix:path=/tmp/computer-use-gmhpfh/bus/session",
+        "headless": true,
+        "height": 1000,
+        "sandboxed": false,
+        "sway_socket": "/tmp/computer-use-gmhpfh/sway-ipc",
+        "wayland_socket": "/tmp/computer-use-gmhpfh/sway-runtime/wayland-1",
+        "width": 1600,
+        "xwayland": true
+      }
+    },
+    "windows_list": {
+      "windows": []
+    },
+    "processes": [
+      {
+        "pid": 1400975,
+        "exited": true,
+        "exit": {
+          "launcher_pid": 1400974,
+          "stderr": "~/keystone/.audit/verify-20261019T004311-1400861/app-01.stderr.log",
+          "pid": 1400975,
+          "returncode": 0,
+          "signal": null
+        }
+      },
+      {
+        "pid": 1401031,
+        "exited": true,
+        "exit": {
+          "launcher_pid": 1401030,
+          "stderr": "~/keystone/.audit/verify-20261019T004311-1400861/app-02.stderr.log",
+          "pid": 1401031,
+          "returncode": 0,
+          "signal": null
+        }
+      }
+    ],
+    "binary_sha256_now": "bdfa7f74fbf4efb2cba4a88eee7c54b98df9ede80c55cb4ee67deeeb164d3558",
+    "binary_unchanged": true
+  },
+  "flow_results": {
+    "both_panes_both_directions": true,
+    "untargeted_pane_exact_bounds_preserved": true,
+    "send_targets_last_focused_second_pane": true,
+    "earlier_does_not_acknowledge": true,
+    "composer_completion_unread": true,
+    "focused_latest_acknowledges": true
+  },
+  "before_earlier_focus": {
+    "id": 1,
+    "title": "New Codex session",
+    "provider": "Codex",
+    "execution_context": {
+      "version": 1,
+      "directory": "~/keystone",
+      "origin": "created"
+    },
+    "settled": false,
+    "draft": "Native arrangement draft remains intact.",
+    "provider_thread": "KEY-19-stopped-fixture",
+    "created_at": 1792384993024,
+    "updated_at": 1792384994272,
+    "viewed_at": 1792384984272,
+    "last_turn": "Finished",
+    "model_locked": false
+  },
+  "real_completion_earlier": {
+    "id": 1,
+    "title": "Native arrangement draft remains intact.",
+    "title_source": "FirstMessage",
+    "provider": "Codex",
+    "execution_context": {
+      "version": 1,
+      "directory": "~/keystone",
+      "origin": "created"
+    },
+    "settled": false,
+    "draft": "",
+    "provider_thread": "KEY-19-stopped-fixture",
+    "created_at": 1792384993024,
+    "updated_at": 1792385003238,
+    "viewed_at": 1792384984272,
+    "last_turn": "Finished",
+    "model_locked": true
+  },
+  "real_completion_latest": {
+    "id": 1,
+    "title": "Native arrangement draft remains intact.",
+    "title_source": "FirstMessage",
+    "provider": "Codex",
+    "execution_context": {
+      "version": 1,
+      "directory": "~/keystone",
+      "origin": "created"
+    },
+    "settled": false,
+    "draft": "",
+    "provider_thread": "KEY-19-stopped-fixture",
+    "created_at": 1792384993024,
+    "updated_at": 1792385003238,
+    "viewed_at": 1792385003812,
+    "last_turn": "Finished",
+    "model_locked": true
+  },
+  "keyboard": {
+    "passed": false,
+    "observed_jump_remains": true,
+    "diagnosis": "Jump button has no track_focus; Button defaults focus=None. No jump keyboard command exists."
+  },
+  "cleanup": {
+    "snapshot": {
+      "path": "~/keystone/.audit/verify-20261019T004311-1400861/state-0145-1792385041495638979.json",
+      "sha256": "6fd508425954a5a27634e0b16a9247e157c08f30c847d13946fa781c74580ca2"
+    },
+    "evidence": "~/keystone/.audit/verify-20261019T004311-1400861",
+    "errors": [],
+    "scratch_retained": null
+  },
+  "compositor_version": "sway 1.12",
+  "maximize_verdict": "unsupported by isolated Sway; two set_maximized requests received unchanged geometry/configure, no successful maximize or restore claim",
+  "observations": {
+    "wheel-baseline": {
+      "revision": 6,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 62,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 145
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 216,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 216,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159",
+          "bounds": {
+            "x": 277,
+            "y": 270,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 270,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-157-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 467,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 476,
+            "w": 1308,
+            "h": 145
+          }
+        },
+        {
+          "id": "transcript-row-158-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 621,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 621,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 675,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 675,
+            "w": 1308,
+            "h": 154
+          }
+        }
+      ]
+    },
+    "first-up": {
+      "revision": 7,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": 34,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 117
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 188,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 188,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 242,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 242,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 396,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 396,
+            "w": 1308,
+            "h": 52
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-157-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 467,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 476,
+            "w": 1308,
+            "h": 145
+          }
+        },
+        {
+          "id": "transcript-row-158-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 621,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 621,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 675,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 675,
+            "w": 1308,
+            "h": 154
+          }
+        }
+      ]
+    },
+    "first-down": {
+      "revision": 8,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159",
+          "bounds": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 58
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-157-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 467,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 476,
+            "w": 1308,
+            "h": 145
+          }
+        },
+        {
+          "id": "transcript-row-158-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 621,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 621,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 675,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 675,
+            "w": 1308,
+            "h": 154
+          }
+        }
+      ]
+    },
+    "second-up": {
+      "revision": 9,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159",
+          "bounds": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 58
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-153-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 351,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 476,
+            "w": 1308,
+            "h": 29
+          }
+        },
+        {
+          "id": "transcript-row-154-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 505,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 505,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-155-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 559,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 559,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-156-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 713,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 713,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 767,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 767,
+            "w": 1308,
+            "h": 86
+          }
+        },
+        {
+          "id": "jump-to-latest-view-3",
+          "bounds": {
+            "x": 870,
+            "y": 813,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 813,
+            "w": 121,
+            "h": 28
+          }
+        }
+      ]
+    },
+    "second-down": {
+      "revision": 10,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159",
+          "bounds": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 58
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 499,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 499,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-156-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 653,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 653,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 707,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 707,
+            "w": 1308,
+            "h": 146
+          }
+        },
+        {
+          "id": "jump-to-latest-view-3",
+          "bounds": {
+            "x": 870,
+            "y": 813,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 813,
+            "w": 121,
+            "h": 28
+          }
+        }
+      ]
+    },
+    "before-send": {
+      "revision": 10,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159",
+          "bounds": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 58
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 499,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 499,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-156-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 653,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 653,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 707,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 707,
+            "w": 1308,
+            "h": 146
+          }
+        },
+        {
+          "id": "jump-to-latest-view-3",
+          "bounds": {
+            "x": 870,
+            "y": 813,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 813,
+            "w": 121,
+            "h": 28
+          }
+        }
+      ]
+    },
+    "completed-composer-focused": {
+      "revision": 15,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159",
+          "bounds": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 58
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-158-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 457,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 476,
+            "w": 1308,
+            "h": 35
+          }
+        },
+        {
+          "id": "transcript-row-159-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 511,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 511,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-160-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 665,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 665,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-161-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 719,
+            "w": 1308,
+            "h": 110
+          },
+          "visible": {
+            "x": 277,
+            "y": 719,
+            "w": 1308,
+            "h": 110
+          }
+        }
+      ]
+    },
+    "keyboard-after-tab-enter-space": {
+      "revision": 16,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-159",
+          "bounds": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 390,
+            "w": 1308,
+            "h": 58
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 408,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          },
+          "visible": {
+            "x": 265,
+            "y": 476,
+            "w": 1332,
+            "h": 377
+          }
+        },
+        {
+          "id": "transcript-row-158-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 457,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 476,
+            "w": 1308,
+            "h": 35
+          }
+        },
+        {
+          "id": "transcript-row-159-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 511,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 511,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-160-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 665,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 665,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-161-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 719,
+            "w": 1308,
+            "h": 110
+          },
+          "visible": {
+            "x": 277,
+            "y": 719,
+            "w": 1308,
+            "h": 110
+          }
+        }
+      ]
+    },
+    "composer-before-wheel": {
+      "revision": 26,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 319
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 319
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 350,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 350,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 418,
+            "w": 1332,
+            "h": 319
+          },
+          "visible": {
+            "x": 265,
+            "y": 418,
+            "w": 1332,
+            "h": 319
+          }
+        },
+        {
+          "id": "transcript-row-159-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 395,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 418,
+            "w": 1308,
+            "h": 131
+          }
+        },
+        {
+          "id": "transcript-row-160-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 549,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 549,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-161-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 603,
+            "w": 1308,
+            "h": 110
+          },
+          "visible": {
+            "x": 277,
+            "y": 603,
+            "w": 1308,
+            "h": 110
+          }
+        }
+      ]
+    },
+    "composer-after-up": {
+      "revision": 26,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 319
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 319
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 350,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 350,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 418,
+            "w": 1332,
+            "h": 319
+          },
+          "visible": {
+            "x": 265,
+            "y": 418,
+            "w": 1332,
+            "h": 319
+          }
+        },
+        {
+          "id": "transcript-row-159-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 395,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 418,
+            "w": 1308,
+            "h": 131
+          }
+        },
+        {
+          "id": "transcript-row-160-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 549,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 549,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-161-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 603,
+            "w": 1308,
+            "h": 110
+          },
+          "visible": {
+            "x": 277,
+            "y": 603,
+            "w": 1308,
+            "h": 110
+          }
+        }
+      ]
+    },
+    "composer-after-down": {
+      "revision": 26,
+      "pid": 1401031,
+      "elements": [
+        {
+          "id": "conversation",
+          "bounds": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 319
+          },
+          "visible": {
+            "x": 265,
+            "y": 71,
+            "w": 1332,
+            "h": 319
+          }
+        },
+        {
+          "id": "transcript-row-155",
+          "bounds": {
+            "x": 277,
+            "y": -26,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 71,
+            "w": 1308,
+            "h": 57
+          }
+        },
+        {
+          "id": "transcript-row-156",
+          "bounds": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 128,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-157",
+          "bounds": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 182,
+            "w": 1308,
+            "h": 154
+          }
+        },
+        {
+          "id": "transcript-row-158",
+          "bounds": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 336,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "jump-to-latest",
+          "bounds": {
+            "x": 870,
+            "y": 350,
+            "w": 121,
+            "h": 28
+          },
+          "visible": {
+            "x": 870,
+            "y": 350,
+            "w": 121,
+            "h": 28
+          }
+        },
+        {
+          "id": "conversation-view-3",
+          "bounds": {
+            "x": 265,
+            "y": 418,
+            "w": 1332,
+            "h": 319
+          },
+          "visible": {
+            "x": 265,
+            "y": 418,
+            "w": 1332,
+            "h": 319
+          }
+        },
+        {
+          "id": "transcript-row-159-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 395,
+            "w": 1308,
+            "h": 154
+          },
+          "visible": {
+            "x": 277,
+            "y": 418,
+            "w": 1308,
+            "h": 131
+          }
+        },
+        {
+          "id": "transcript-row-160-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 549,
+            "w": 1308,
+            "h": 54
+          },
+          "visible": {
+            "x": 277,
+            "y": 549,
+            "w": 1308,
+            "h": 54
+          }
+        },
+        {
+          "id": "transcript-row-161-view-3",
+          "bounds": {
+            "x": 277,
+            "y": 603,
+            "w": 1308,
+            "h": 110
+          },
+          "visible": {
+            "x": 277,
+            "y": 603,
+            "w": 1308,
+            "h": 110
+          }
+        }
+      ]
+    }
+  },
+  "maximize": {
+    "maximize-before": {
+      "windows": [
+        {
+          "id": 6,
+          "pid": 1401031,
+          "rect": {
+            "x": 250,
+            "y": 100,
+            "width": 1100,
+            "height": 800
+          },
+          "window_rect": {
+            "x": 1,
+            "y": 1,
+            "width": 1098,
+            "height": 798
+          },
+          "fullscreen_mode": 0,
+          "floating": "user_on"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "HEADLESS-1",
+          "rect": {
+            "x": 0,
+            "y": 0,
+            "width": 1600,
+            "height": 1000
+          },
+          "scale": 1.0,
+          "current_mode": {
+            "width": 1600,
+            "height": 1000,
+            "refresh": 0
+          },
+          "active": true
+        }
+      ]
+    },
+    "maximize-after": {
+      "windows": [
+        {
+          "id": 6,
+          "pid": 1401031,
+          "rect": {
+            "x": 250,
+            "y": 100,
+            "width": 1100,
+            "height": 800
+          },
+          "window_rect": {
+            "x": 1,
+            "y": 1,
+            "width": 1098,
+            "height": 798
+          },
+          "fullscreen_mode": 0,
+          "floating": "user_on"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "HEADLESS-1",
+          "rect": {
+            "x": 0,
+            "y": 0,
+            "width": 1600,
+            "height": 1000
+          },
+          "scale": 1.0,
+          "current_mode": {
+            "width": 1600,
+            "height": 1000,
+            "refresh": 0
+          },
+          "active": true
+        }
+      ]
+    },
+    "maximize-restore": {
+      "windows": [
+        {
+          "id": 6,
+          "pid": 1401031,
+          "rect": {
+            "x": 250,
+            "y": 100,
+            "width": 1100,
+            "height": 800
+          },
+          "window_rect": {
+            "x": 1,
+            "y": 1,
+            "width": 1098,
+            "height": 798
+          },
+          "fullscreen_mode": 0,
+          "floating": "user_on"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "HEADLESS-1",
+          "rect": {
+            "x": 0,
+            "y": 0,
+            "width": 1600,
+            "height": 1000
+          },
+          "scale": 1.0,
+          "current_mode": {
+            "width": 1600,
+            "height": 1000,
+            "refresh": 0
+          },
+          "active": true
+        }
+      ]
+    }
+  },
+  "limits": [
+    "Keyboard Jump to latest is inaccessible in current app; separate TOB-30 focus work, not a driver pass.",
+    "Sway unsupported maximize; no other compositor tested.",
+    "Final script timed out waiting 5 seconds for long-draft persistence. Continuation re-read exact 3009-character draft and passed wheel/quit/cleanup assertions without retyping. Both logs retained.",
+    "Combined main with Files40/Settings41 not yet tested.",
+    "Scripted Codex only; no live provider, physical wheel, IME or performance claims."
+  ],
+  "patches_sha256": {
+    "scripts/patches/computer-use-mcp-headless.patch": "dce9f3222a1b0af29480e01fadf19f9d87ad882bc6910adbb877f7f5daf6e778",
+    "scripts/patches/computer-use-mcp-wheel.patch": "5953a8d62251f4b40316e286fd4706a5b79fe68e3b0f87e1f830c43b39e05045"
+  }
+}

@@ -1,0 +1,1469 @@
+{
+  "base": "0950083723835c1285edc86195e24f856e64c609",
+  "binary_build_commit": "5b1abbf708fa3313210b46b635aaae3af3f509f9",
+  "base_and_build_tree": "613a4e34ae218ceb3432faf022aa9bf09e20f15c",
+  "identity": {
+    "binary": "~/keystone/.audit/binaries/main40/keystone-desktop",
+    "binary_sha256": "92bfcd834cd6159417cda3b4a1470a0d49afb183b0af47a589b1010826272da9",
+    "driver": "~/keystone/.audit/tools/computer-use-mcp",
+    "driver_sha256": "d76df85d502745bc5f48e65184e956cbcc1d53e8c5a501a568a5e43210c09668",
+    "scratch": "/tmp/keystone-verify-lev0mwr3",
+    "driver_pid": 1436736,
+    "trace_wayland": true
+  },
+  "doctor_initial": {
+    "server_info": {
+      "accessibility": "private AT-SPI bus; only accessible applications expose semantic elements",
+      "application_access": "host access by default: inherited user HOME, files, processes, network, environment and cwd",
+      "backend": "nested Sway / GLES2 (DMA-BUF, Vulkan WSI, Xwayland DRI3)",
+      "coordinates": "desktop pixels at scale 1, not host-screen coordinates",
+      "input": "all Codex computer actions: screenshot plus click/double_click/move/drag/scroll/type/keypress/wait; mouse modifiers and Unicode text",
+      "lifecycle": "one desktop per MCP connection; explicitly stop it when finished",
+      "name": "computer-use-mcp",
+      "sandbox": "optional Bubblewrap mode via session_start sandbox=true",
+      "version": "0.3.2"
+    },
+    "session_status": {
+      "running": true,
+      "session": {
+        "compositor_pid": 1436741,
+        "dbus_address": "unix:path=/tmp/computer-use-5kFcE2/bus/session",
+        "headless": true,
+        "height": 1000,
+        "sandboxed": false,
+        "sway_socket": "/tmp/computer-use-5kFcE2/sway-ipc",
+        "wayland_socket": "/tmp/computer-use-5kFcE2/sway-runtime/wayland-1",
+        "width": 1600,
+        "xwayland": true
+      }
+    },
+    "windows_list": {
+      "windows": [
+        {
+          "app_id": null,
+          "focused": true,
+          "id": 5,
+          "pid": 1436767,
+          "rect": {
+            "height": 1000,
+            "width": 1600,
+            "x": 0,
+            "y": 0
+          },
+          "shell": "xdg_shell",
+          "title": ""
+        }
+      ]
+    },
+    "processes": [
+      {
+        "pid": 1436767,
+        "exe": "~/keystone/.audit/binaries/main40/keystone-desktop",
+        "sha256": "92bfcd834cd6159417cda3b4a1470a0d49afb183b0af47a589b1010826272da9",
+        "matches_launch": true
+      }
+    ],
+    "binary_sha256_now": "92bfcd834cd6159417cda3b4a1470a0d49afb183b0af47a589b1010826272da9",
+    "binary_unchanged": true
+  },
+  "doctor_restarted": {
+    "server_info": {
+      "accessibility": "private AT-SPI bus; only accessible applications expose semantic elements",
+      "application_access": "host access by default: inherited user HOME, files, processes, network, environment and cwd",
+      "backend": "nested Sway / GLES2 (DMA-BUF, Vulkan WSI, Xwayland DRI3)",
+      "coordinates": "desktop pixels at scale 1, not host-screen coordinates",
+      "input": "all Codex computer actions: screenshot plus click/double_click/move/drag/scroll/type/keypress/wait; mouse modifiers and Unicode text",
+      "lifecycle": "one desktop per MCP connection; explicitly stop it when finished",
+      "name": "computer-use-mcp",
+      "sandbox": "optional Bubblewrap mode via session_start sandbox=true",
+      "version": "0.3.2"
+    },
+    "session_status": {
+      "running": true,
+      "session": {
+        "compositor_pid": 1436741,
+        "dbus_address": "unix:path=/tmp/computer-use-5kFcE2/bus/session",
+        "headless": true,
+        "height": 1000,
+        "sandboxed": false,
+        "sway_socket": "/tmp/computer-use-5kFcE2/sway-ipc",
+        "wayland_socket": "/tmp/computer-use-5kFcE2/sway-runtime/wayland-1",
+        "width": 1600,
+        "xwayland": true
+      }
+    },
+    "windows_list": {
+      "windows": [
+        {
+          "app_id": null,
+          "focused": true,
+          "id": 6,
+          "pid": 1436915,
+          "rect": {
+            "height": 1000,
+            "width": 1600,
+            "x": 0,
+            "y": 0
+          },
+          "shell": "xdg_shell",
+          "title": ""
+        }
+      ]
+    },
+    "processes": [
+      {
+        "pid": 1436767,
+        "exited": true,
+        "exit": {
+          "launcher_pid": 1436764,
+          "stderr": "~/keystone/.audit/verify-20261019T010338-1436665/app-01.stderr.log",
+          "pid": 1436767,
+          "returncode": 0,
+          "signal": null
+        }
+      },
+      {
+        "pid": 1436915,
+        "exe": "~/keystone/.audit/binaries/main40/keystone-desktop",
+        "sha256": "92bfcd834cd6159417cda3b4a1470a0d49afb183b0af47a589b1010826272da9",
+        "matches_launch": true
+      }
+    ],
+    "binary_sha256_now": "92bfcd834cd6159417cda3b4a1470a0d49afb183b0af47a589b1010826272da9",
+    "binary_unchanged": true
+  },
+  "doctor_final_quit": {
+    "server_info": {
+      "accessibility": "private AT-SPI bus; only accessible applications expose semantic elements",
+      "application_access": "host access by default: inherited user HOME, files, processes, network, environment and cwd",
+      "backend": "nested Sway / GLES2 (DMA-BUF, Vulkan WSI, Xwayland DRI3)",
+      "coordinates": "desktop pixels at scale 1, not host-screen coordinates",
+      "input": "all Codex computer actions: screenshot plus click/double_click/move/drag/scroll/type/keypress/wait; mouse modifiers and Unicode text",
+      "lifecycle": "one desktop per MCP connection; explicitly stop it when finished",
+      "name": "computer-use-mcp",
+      "sandbox": "optional Bubblewrap mode via session_start sandbox=true",
+      "version": "0.3.2"
+    },
+    "session_status": {
+      "running": true,
+      "session": {
+        "compositor_pid": 1436741,
+        "dbus_address": "unix:path=/tmp/computer-use-5kFcE2/bus/session",
+        "headless": true,
+        "height": 1000,
+        "sandboxed": false,
+        "sway_socket": "/tmp/computer-use-5kFcE2/sway-ipc",
+        "wayland_socket": "/tmp/computer-use-5kFcE2/sway-runtime/wayland-1",
+        "width": 1600,
+        "xwayland": true
+      }
+    },
+    "windows_list": {
+      "windows": []
+    },
+    "processes": [
+      {
+        "pid": 1436767,
+        "exited": true,
+        "exit": {
+          "launcher_pid": 1436764,
+          "stderr": "~/keystone/.audit/verify-20261019T010338-1436665/app-01.stderr.log",
+          "pid": 1436767,
+          "returncode": 0,
+          "signal": null
+        }
+      },
+      {
+        "pid": 1436915,
+        "exited": true,
+        "exit": {
+          "launcher_pid": 1436914,
+          "stderr": "~/keystone/.audit/verify-20261019T010338-1436665/app-02.stderr.log",
+          "pid": 1436915,
+          "returncode": 0,
+          "signal": null
+        }
+      }
+    ],
+    "binary_sha256_now": "92bfcd834cd6159417cda3b4a1470a0d49afb183b0af47a589b1010826272da9",
+    "binary_unchanged": true
+  },
+  "editor_env_received": {
+    "VISUAL": "/nonexistent/isolated-visual",
+    "EDITOR": "/nonexistent/isolated-editor"
+  },
+  "flow_results": {
+    "both_panes_both_directions": true,
+    "untargeted_pane_exact_bounds_preserved": true,
+    "send_targets_last_focused_second_pane": true,
+    "earlier_does_not_acknowledge": true,
+    "composer_completion_unread": true,
+    "focused_latest_acknowledges": true
+  },
+  "before_earlier_focus": {
+    "id": 1,
+    "title": "New Codex session",
+    "provider": "Codex",
+    "execution_context": {
+      "version": 1,
+      "directory": "~/keystone",
+      "origin": "created"
+    },
+    "settled": false,
+    "draft": "Native arrangement draft remains intact.",
+    "provider_thread": "KEY-19-stopped-fixture",
+    "created_at": 1792386219363,
+    "updated_at": 1792386220603,
+    "viewed_at": 1792386210603,
+    "last_turn": "Finished",
+    "model_locked": false
+  },
+  "real_completion_earlier": {
+    "id": 1,
+    "title": "Native arrangement draft remains intact.",
+    "title_source": "FirstMessage",
+    "provider": "Codex",
+    "execution_context": {
+      "version": 1,
+      "directory": "~/keystone",
+      "origin": "created"
+    },
+    "settled": false,
+    "draft": "",
+    "provider_thread": "KEY-19-stopped-fixture",
+    "created_at": 1792386219363,
+    "updated_at": 1792386229539,
+    "viewed_at": 1792386210603,
+    "last_turn": "Finished",
+    "model_locked": true
+  },
+  "real_completion_latest": {
+    "id": 1,
+    "title": "Native arrangement draft remains intact.",
+    "title_source": "FirstMessage",
+    "provider": "Codex",
+    "execution_context": {
+      "version": 1,
+      "directory": "~/keystone",
+      "origin": "created"
+    },
+    "settled": false,
+    "draft": "",
+    "provider_thread": "KEY-19-stopped-fixture",
+    "created_at": 1792386219363,
+    "updated_at": 1792386229539,
+    "viewed_at": 1792386230117,
+    "last_turn": "Finished",
+    "model_locked": true
+  },
+  "cleanup": {
+    "snapshot": {
+      "path": "~/keystone/.audit/verify-20261019T010338-1436665/state-0124-1792386234218355282.json",
+      "sha256": "f8fe2bcaba3c7b9003cf3b76f8c18d32f5e1a6080f65b0ea2a36b51bc15e0f9d"
+    },
+    "evidence": "~/keystone/.audit/verify-20261019T010338-1436665",
+    "errors": [],
+    "scratch_retained": null
+  },
+  "observations": {
+    "wheel-baseline": [
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 62,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 145
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 216,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 216,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159",
+        "bounds": {
+          "x": 277,
+          "y": 270,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 270,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-157-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 467,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 476,
+          "w": 1308,
+          "h": 145
+        }
+      },
+      {
+        "id": "transcript-row-158-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 621,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 621,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 675,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 675,
+          "w": 1308,
+          "h": 154
+        }
+      }
+    ],
+    "first-up": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": 34,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 117
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 188,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 188,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 242,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 242,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 396,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 396,
+          "w": 1308,
+          "h": 52
+        }
+      },
+      {
+        "id": "transcript-row-157-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 467,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 476,
+          "w": 1308,
+          "h": 145
+        }
+      },
+      {
+        "id": "transcript-row-158-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 621,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 621,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 675,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 675,
+          "w": 1308,
+          "h": 154
+        }
+      }
+    ],
+    "first-down": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": -26,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 57
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159",
+        "bounds": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 58
+        }
+      },
+      {
+        "id": "transcript-row-157-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 467,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 476,
+          "w": 1308,
+          "h": 145
+        }
+      },
+      {
+        "id": "transcript-row-158-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 621,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 621,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 675,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 675,
+          "w": 1308,
+          "h": 154
+        }
+      }
+    ],
+    "second-up": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": -26,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 57
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159",
+        "bounds": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 58
+        }
+      },
+      {
+        "id": "transcript-row-153-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 351,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 476,
+          "w": 1308,
+          "h": 29
+        }
+      },
+      {
+        "id": "transcript-row-154-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 505,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 505,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-155-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 559,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 559,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-156-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 713,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 713,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 767,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 767,
+          "w": 1308,
+          "h": 86
+        }
+      }
+    ],
+    "second-down": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": -26,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 57
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159",
+        "bounds": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 58
+        }
+      },
+      {
+        "id": "transcript-row-155-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 499,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 499,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-156-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 653,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 653,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 707,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 707,
+          "w": 1308,
+          "h": 146
+        }
+      }
+    ],
+    "before-send": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": -26,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 57
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159",
+        "bounds": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 58
+        }
+      },
+      {
+        "id": "transcript-row-155-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 499,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 499,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-156-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 653,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 653,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 707,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 707,
+          "w": 1308,
+          "h": 146
+        }
+      }
+    ],
+    "completed-composer-focused": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": -26,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 57
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159",
+        "bounds": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 390,
+          "w": 1308,
+          "h": 58
+        }
+      },
+      {
+        "id": "transcript-row-158-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 457,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 476,
+          "w": 1308,
+          "h": 35
+        }
+      },
+      {
+        "id": "transcript-row-159-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 511,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 511,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-160-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 665,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 665,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-161-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 719,
+          "w": 1308,
+          "h": 110
+        },
+        "visible": {
+          "x": 277,
+          "y": 719,
+          "w": 1308,
+          "h": 110
+        }
+      }
+    ],
+    "composer-before-wheel": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": -26,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 57
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 395,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 418,
+          "w": 1308,
+          "h": 131
+        }
+      },
+      {
+        "id": "transcript-row-160-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 549,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 549,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-161-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 603,
+          "w": 1308,
+          "h": 110
+        },
+        "visible": {
+          "x": 277,
+          "y": 603,
+          "w": 1308,
+          "h": 110
+        }
+      }
+    ],
+    "composer-after-up": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": -26,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 57
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 395,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 418,
+          "w": 1308,
+          "h": 131
+        }
+      },
+      {
+        "id": "transcript-row-160-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 549,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 549,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-161-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 603,
+          "w": 1308,
+          "h": 110
+        },
+        "visible": {
+          "x": 277,
+          "y": 603,
+          "w": 1308,
+          "h": 110
+        }
+      }
+    ],
+    "composer-after-down": [
+      {
+        "id": "transcript-row-155",
+        "bounds": {
+          "x": 277,
+          "y": -26,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 71,
+          "w": 1308,
+          "h": 57
+        }
+      },
+      {
+        "id": "transcript-row-156",
+        "bounds": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 128,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-157",
+        "bounds": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 182,
+          "w": 1308,
+          "h": 154
+        }
+      },
+      {
+        "id": "transcript-row-158",
+        "bounds": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 336,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-159-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 395,
+          "w": 1308,
+          "h": 154
+        },
+        "visible": {
+          "x": 277,
+          "y": 418,
+          "w": 1308,
+          "h": 131
+        }
+      },
+      {
+        "id": "transcript-row-160-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 549,
+          "w": 1308,
+          "h": 54
+        },
+        "visible": {
+          "x": 277,
+          "y": 549,
+          "w": 1308,
+          "h": 54
+        }
+      },
+      {
+        "id": "transcript-row-161-view-3",
+        "bounds": {
+          "x": 277,
+          "y": 603,
+          "w": 1308,
+          "h": 110
+        },
+        "visible": {
+          "x": 277,
+          "y": 603,
+          "w": 1308,
+          "h": 110
+        }
+      }
+    ]
+  },
+  "driver.stderr.log_events": [
+    "[1877458.307][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(788, 0, 15.0000, 1)",
+    "[1877459.926][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(789, 1, 7.5000, 1)",
+    "[1877459.941][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(789, 0, -7.5000, -1)",
+    "[1880734.126][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(4063, 0, -45.0000, -3)",
+    "[1881378.653][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(4708, 0, 15.0000, 1)",
+    "[1882020.456][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(5350, 0, -75.0000, -5)",
+    "[1882658.739][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(5988, 0, 15.0000, 1)",
+    "[1890861.814][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(14191, 0, -90.0000, -6)",
+    "[1891412.316][rs] -> zwlr_virtual_pointer_v1@9.axis_discrete(14742, 0, 45.0000, 3)"
+  ],
+  "app-01.stderr.log_events": [
+    "[05:03:39.359953] wl_pointer#25.axis_value120(0, 120)",
+    "[05:03:39.361629] wl_pointer#25.axis_value120(0, -120)",
+    "[05:03:39.361633] wl_pointer#25.axis_value120(1, 120)"
+  ],
+  "app-02.stderr.log_events": [
+    "[05:03:42.636156] wl_pointer#25.axis_value120(0, -360)",
+    "[05:03:43.280310] wl_pointer#25.axis_value120(0, 120)",
+    "[05:03:43.922499] wl_pointer#25.axis_value120(0, -600)",
+    "[05:03:44.560452] wl_pointer#25.axis_value120(0, 120)",
+    "[05:03:52.763329] wl_pointer#25.axis_value120(0, -720)",
+    "[05:03:53.313851] wl_pointer#25.axis_value120(0, 360)"
+  ]
+}

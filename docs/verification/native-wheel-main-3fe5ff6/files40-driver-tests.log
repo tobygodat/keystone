@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (~/.cache/keystone/work/KEY-19/driver-source/target/debug/deps/computer_use_mcp-867acca68cdda7db)
+
+running 1 test
+test desktop::wheel_ticks_preserve_distance_and_direction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (~/.cache/keystone/work/KEY-19/driver-source/target/debug/deps/computer_use_mcp-1b95d13b548af887)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

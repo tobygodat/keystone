@@ -90,8 +90,9 @@ def digest(path):
 
 
 class Run:
-    def __init__(self, driver, root, evidence, binary):
+    def __init__(self, driver, root, evidence, binary, trace_wayland=False):
         self.env = {}
+        self.trace_wayland = trace_wayland
         self.prime_keyboard = True
         self.binary = Path(binary).resolve()
         self.binary_sha = digest(self.binary)
@@ -111,9 +112,10 @@ class Run:
         self.log = (self.evidence / 'actions.jsonl').open('a')
         self.stderr = (self.evidence / 'driver.stderr.log').open('w')
         try:
+            driver_env = {**os.environ, **({'WAYLAND_DEBUG': 'client'} if trace_wayland else {})}
             self.process = subprocess.Popen([str(Path(driver).resolve())], stdin=subprocess.PIPE,
                                             stdout=subprocess.PIPE, stderr=self.stderr, text=True,
-                                            bufsize=1, cwd=root)
+                                            bufsize=1, cwd=root, env=driver_env)
         except Exception as error:
             shutil.rmtree(self.scratch)
             self.record('cleanup', {'startup_error': str(error), 'scratch_retained': None,
@@ -125,7 +127,7 @@ class Run:
         self.record('identity', {'binary': str(self.binary), 'binary_sha256': self.binary_sha,
                                 'driver': str(Path(driver).resolve()),
                                 'driver_sha256': driver_sha, 'scratch': str(self.scratch),
-                                'driver_pid': self.process.pid})
+                                'driver_pid': self.process.pid, 'trace_wayland': trace_wayland})
 
     def read_responses(self):
         try:
@@ -215,6 +217,8 @@ class Run:
             self.call('input', {'actions': [{'action': 'keypress', 'keys': ['F24']}]})
         self.geometry.unlink(missing_ok=True)
         extra = [f'{key}={value}' for key, value in sorted(self.env.items())]
+        if self.trace_wayland:
+            extra.append('WAYLAND_DEBUG=client')
         number = len(self.exit_files) + 1
         status = self.evidence / f'exit-{number:02d}.json'
         log = self.evidence / f'app-{number:02d}.stderr.log'
@@ -424,8 +428,14 @@ TOOLS = [
              'button': {'type': 'string', 'enum': ['left', 'right', 'middle'], 'default': 'left'},
              'count': {'type': 'integer', 'default': 1}})),
     ('input', 'Pass ordered actions to the driver: keypress {keys}, type {text}, wait {duration_ms}, '
-     'scroll, drag, move. Re-observe after state changes rather than batching across them.',
+     'scroll (signed axis distances; 15 units per wheel notch), drag, move. '
+     'Re-observe after state changes rather than batching across them.',
      schema({'actions': {'type': 'array', 'items': {'type': 'object'}}}, ['actions'])),
+    ('wheel', 'Scroll a named element or desktop pixels by signed whole wheel notches. '
+     'Positive vertical scrolls down; positive horizontal scrolls right. Requires the wheel driver patch.',
+     schema({'id': ID, 'x': {'type': 'integer'}, 'y': {'type': 'integer'},
+             'horizontal': {'type': 'integer', 'minimum': -100, 'maximum': 100, 'default': 0},
+             'vertical': {'type': 'integer', 'minimum': -100, 'maximum': 100, 'default': 0}})),
     ('wait_for', 'Wait until a named element is visible, or gone with present=false.',
      schema({'id': ID, 'present': {'type': 'boolean', 'default': True},
              'timeout_ms': {'type': 'integer', 'default': 5000}}, ['id'])),
@@ -456,7 +466,8 @@ class Server:
             if self.run is not None and not self.run.closed:
                 raise RuntimeError('A run is active; stop it first')
             evidence = ROOT / '.audit' / f'verify-{time.strftime("%Y%m%dT%H%M%S")}-{os.getpid()}'
-            self.run = Run(self.args.driver, ROOT, evidence, self.args.binary)
+            self.run = Run(self.args.driver, ROOT, evidence, self.args.binary,
+                           self.args.trace_wayland)
             started = self.run.start(arguments.get('width', 1280), arguments.get('height', 900),
                                      arguments.get('headless', True), arguments.get('env'))
             return {**started, 'evidence': str(evidence), 'state': str(self.run.state)}, None
@@ -483,6 +494,20 @@ class Server:
             return {'clicked': arguments.get('id'), **target}, None
         if name == 'input':
             return run.call('input', {'actions': arguments['actions']}).get('structuredContent'), None
+        if name == 'wheel':
+            horizontal, vertical = arguments.get('horizontal', 0), arguments.get('vertical', 0)
+            if any(type(value) is not int or not -100 <= value <= 100
+                   for value in (horizontal, vertical)):
+                raise ValueError('Wheel notches must be integers within +/-100')
+            if 'id' in arguments:
+                target = run.find(arguments['id'])['center']
+            elif 'x' in arguments and 'y' in arguments:
+                target = {'x': arguments['x'], 'y': arguments['y']}
+            else:
+                raise ValueError('Pass id, or both x and y')
+            action = {'action': 'scroll', **target, 'scroll_x': horizontal * 15,
+                      'scroll_y': vertical * 15}
+            return run.call('input', {'actions': [action]}).get('structuredContent'), None
         if name == 'wait_for':
             return run.wait_for(arguments['id'], arguments.get('present', True),
                                 arguments.get('timeout_ms', 5000)), None
@@ -565,6 +590,8 @@ class Server:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--driver', default=str(default_driver()))
+    parser.add_argument('--trace-wayland', action='store_true',
+                        help='Record native driver requests and app Wayland events in evidence stderr logs')
     add_binary_argument(parser)
     args = parser.parse_args()
     server = Server(args)

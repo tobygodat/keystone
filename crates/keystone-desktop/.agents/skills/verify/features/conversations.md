@@ -50,7 +50,7 @@ Named elements: `send`, `stop`, `approval`, `approve`, `deny`, `turn-status`, `c
 
 ## Not covered
 
-- Wheel scrolling. Driver scroll actions reach no GPUI view (KS-012).
+- Wheel scrolling requires the corrected driver and separate [native wheel journey](wheel-and-maximize.md); older headless-only drivers omit discrete data (KS-012).
 - A copy click before any key press in the run copies nothing (KS-013).
 
 ## Repeated conversations and unread

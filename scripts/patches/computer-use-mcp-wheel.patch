@@ -1,0 +1,91 @@
+diff --git i/src/desktop.rs w/src/desktop.rs
+index 323ee29..d22f1c5 100644
+--- i/src/desktop.rs
++++ w/src/desktop.rs
+@@ -206,6 +206,7 @@ struct Worker {
+     pressed: Vec<u32>,
+     button: Option<u32>,
+     keymap_set: bool,
++    wheel_remainder: [f64; 2],
+ }
+ impl Worker {
+     fn connect(socket: UnixStream, stop: Arc<AtomicBool>) -> Result<Self> {
+@@ -252,6 +253,7 @@ impl Worker {
+             pressed: Vec::with_capacity(16),
+             button: None,
+             keymap_set: false,
++            wheel_remainder: [0.0; 2],
+         };
+         // Install a complete initial keymap before reporting readiness.
+         let initial = prepare_keyboard(&InputAction::Key {
+@@ -512,16 +514,19 @@ impl Worker {
+                 } => {
+                     self.motion(x, y);
+                     self.pointer.axis_source(wl_pointer::AxisSource::Wheel);
+-                    if horizontal != 0.0 {
+-                        self.pointer.axis(
+-                            self.time(),
+-                            wl_pointer::Axis::HorizontalScroll,
+-                            horizontal,
+-                        );
+-                    }
+-                    if vertical != 0.0 {
+-                        self.pointer
+-                            .axis(self.time(), wl_pointer::Axis::VerticalScroll, vertical);
++                    for (index, axis, distance) in [
++                        (0, wl_pointer::Axis::HorizontalScroll, horizontal),
++                        (1, wl_pointer::Axis::VerticalScroll, vertical),
++                    ] {
++                        if distance == 0.0 {
++                            continue;
++                        }
++                        let ticks = wheel_ticks(&mut self.wheel_remainder[index], distance);
++                        if ticks == 0 {
++                            self.pointer.axis(self.time(), axis, distance);
++                        } else {
++                            self.pointer.axis_discrete(self.time(), axis, distance, ticks);
++                        }
+                     }
+                     self.pointer.frame();
+                 }
+@@ -771,6 +776,40 @@ fn encode_png(source: &[u8], layout: Layout, flipped: bool) -> Result<Capture> {
+     })
+ }
+ 
++fn wheel_ticks(remainder: &mut f64, distance: f64) -> i32 {
++    let ticks = (distance / 15.0).trunc() as i32;
++    *remainder += distance - f64::from(ticks) * 15.0;
++    let carry = (*remainder / 15.0).trunc() as i32;
++    *remainder -= f64::from(carry) * 15.0;
++    ticks + carry
++}
++
++#[test]
++fn wheel_ticks_preserve_distance_and_direction() {
++    let mut remainder = 0.0;
++    assert_eq!(wheel_ticks(&mut remainder, -45.0), -3);
++    assert_eq!(wheel_ticks(&mut remainder, 15.0), 1);
++    assert_eq!(wheel_ticks(&mut remainder, 0.0), 0);
++    for _ in 0..4 {
++        assert_eq!(wheel_ticks(&mut remainder, 3.0), 0);
++    }
++    assert_eq!(wheel_ticks(&mut remainder, 3.0), 1);
++    assert_eq!(remainder, 0.0);
++    assert_eq!(wheel_ticks(&mut remainder, -7.5), 0);
++    assert_eq!(wheel_ticks(&mut remainder, -7.5), -1);
++    assert_eq!(wheel_ticks(&mut remainder, 6.0), 0);
++    assert_eq!(wheel_ticks(&mut remainder, -6.0), 0);
++    assert_eq!(remainder, 0.0);
++    assert_eq!(wheel_ticks(&mut remainder, -7.5), 0);
++    assert_eq!(wheel_ticks(&mut remainder, 15.0), 1);
++    assert_eq!(remainder, -7.5);
++    assert_eq!(wheel_ticks(&mut remainder, -7.5), -1);
++    let mut horizontal = 0.0;
++    assert_eq!(wheel_ticks(&mut horizontal, 7.5), 0);
++    assert_eq!(wheel_ticks(&mut remainder, -15.0), -1);
++    assert_eq!(horizontal, 7.5);
++}
++
+ fn validate_action(action: &InputAction, bounds: Option<(u32, u32)>) -> Result<()> {
+     let point = |x: u32, y: u32| -> Result<()> {
+         let (width, height) = bounds.unwrap_or((3840, 2160));

@@ -1,5 +1,7 @@
 # Native verification driver proof
 
+For the corrected reusable wheel path, two-pane/composer proof and the explicit Sway maximize and keyboard Jump limitations, see the [2026-10-19 receipt](verification/native-wheel-main-3fe5ff6/README.md). Older runs below describe their own historical builds and drivers.
+
 The project-local [verify skill](../crates/keystone-desktop/.agents/skills/verify/SKILL.md) drives the real Rust GPUI executable through computer-use-mcp and a private Sway desktop. It includes four feature maps for sessions, drafts and restart, settlement, and search. The `keystone-verify` MCP server in `.mcp.json` wraps the driver, records evidence, and resolves named elements.
 
 ## Verified journey
