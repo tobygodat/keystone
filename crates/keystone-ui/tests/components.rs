@@ -1551,6 +1551,30 @@ fn tree_lazy_folder_shows_loading_until_filled(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tree_reload_on_expand_asks_on_every_expand(cx: &mut TestAppContext) {
+    let (view, cx) = open_tree(cx);
+    view.update(cx, |files, cx| {
+        let model = TreeModel::new([("remote", NodeKind::Folder)]);
+        files.state = cx.new(|cx| TreeState::new(model, cx).reload_on_expand());
+        cx.notify();
+    });
+    let focus = view.read_with(cx, |files, cx| {
+        gpui::Focusable::focus_handle(files.state.read(cx), cx)
+    });
+    cx.update(|window, cx| window.focus(&focus, cx));
+    cx.simulate_keystrokes("right");
+    view.update(cx, |files, cx| {
+        files.state.update(cx, |state, cx| {
+            state.set_children(0, [("a", NodeKind::File)], cx);
+        })
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("left right");
+    assert_eq!(tree_rows(&view, cx), ["remote", "a"], "old children stay");
+    view.read_with(cx, |files, _| assert_eq!(files.requested, [0, 0]));
+}
+
+#[gpui::test]
 fn tree_chevron_click_toggles_without_opening(cx: &mut TestAppContext) {
     let (view, cx) = open_tree(cx);
     let chevron = cx.debug_bounds("tree-chevron-0").expect("src chevron");

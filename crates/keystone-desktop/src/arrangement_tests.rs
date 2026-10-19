@@ -305,41 +305,433 @@ fn tabbed(selected: usize) -> Composition {
     .unwrap()
 }
 
-#[gpui::test]
-fn checked_tab_preview_and_restored_documents_replace_runtime_selection(cx: &mut TestAppContext) {
-    let (_dir, view, cx) = open(cx);
+fn tabbed_three() -> Composition {
+    serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "views": [
+            {"id": 0, "component": "conversation"},
+            {"id": 2, "component": "composer"},
+            {"id": 3, "component": "conversation"},
+            {"id": 4, "component": "conversation"}
+        ],
+        "root": {"kind": "split", "axis": "column", "children": [
+            {"node": {"kind": "tabs", "selected": 0, "views": [0, 3, 4]}, "size": {"fill": 1}},
+            {"node": {"kind": "view", "id": 2}, "size": "auto"}
+        ]}
+    }))
+    .unwrap()
+}
+
+/// Saves `layout` for the project and leaves Customize.
+fn use_layout(view: &Entity<Keystone>, cx: &mut VisualTestContext, layout: Composition) {
     view.update_in(cx, |this, window, cx| {
         this.store
             .set_project_layout(
                 this.presentation.project.as_ref().unwrap(),
-                Some(tabbed(0).into()),
+                Some(layout.into()),
             )
             .unwrap();
         this.customize(Action::Close, window, cx);
     });
     cx.run_until_parked();
-    let writes = view.read_with(cx, |this, _| this.store.writes());
-    click(cx, "conversation-tab-3");
+}
+
+fn toggle_files(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("ctrl-shift-e");
+    cx.run_until_parked();
+}
+
+/// Two conversations and Files in one tab group, with the first conversation in front.
+fn tabbed_with_files() -> Composition {
+    serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "views": [
+            {"id": 0, "component": "conversation"},
+            {"id": 2, "component": "composer"},
+            {"id": 3, "component": "conversation"},
+            {"id": 5, "component": "files"}
+        ],
+        "root": {"kind": "split", "axis": "column", "children": [
+            {"node": {"kind": "tabs", "selected": 0, "views": [0, 3, 5]}, "size": {"fill": 1}},
+            {"node": {"kind": "view", "id": 2}, "size": "auto"}
+        ]}
+    }))
+    .unwrap()
+}
+
+/// A lone conversation beside a group of a second conversation and Files, Files behind.
+fn files_tabbed_beside() -> Composition {
+    serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "views": [
+            {"id": 0, "component": "conversation"},
+            {"id": 2, "component": "composer"},
+            {"id": 3, "component": "conversation"},
+            {"id": 5, "component": "files"}
+        ],
+        "root": {"kind": "split", "axis": "column", "children": [
+            {"node": {"kind": "split", "axis": "row", "children": [
+                {"node": {"kind": "view", "id": 0}, "size": {"fill": 1}},
+                {"node": {"kind": "tabs", "selected": 0, "views": [3, 5]}, "size": {"fill": 1}}
+            ]}, "size": {"fill": 1}},
+            {"node": {"kind": "view", "id": 2}, "size": "auto"}
+        ]}
+    }))
+    .unwrap()
+}
+
+#[gpui::test]
+fn a_tab_opened_from_the_plus_menu_is_the_one_shown(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    click(cx, "surface-tabs-0-tab-1");
     assert!(cx.debug_bounds("conversation-view-3").is_some());
-    view.read_with(cx, |this, _| assert_eq!(this.store.writes(), writes));
+    click(cx, "surface-add");
+    click(cx, "surface-add-files");
+    assert!(
+        cx.debug_bounds("files-tree-row-0").is_some(),
+        "the Files tab just opened is in front"
+    );
+    assert!(cx.debug_bounds("conversation-view-3").is_none());
+    toggle_files(cx);
+    assert!(
+        cx.debug_bounds("files-tree-row-0").is_none(),
+        "the tree held focus, so the shortcut closes Files"
+    );
+}
+
+#[gpui::test]
+fn a_fitted_tab_chosen_in_customize_shows_its_view(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed_with_files());
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
     click(cx, "customize-toggle");
     assert!(cx.debug_bounds("conversation").is_some());
-    click(cx, "conversation-tab-3");
+    click(cx, "fitted-tab-5");
+    assert!(
+        cx.debug_bounds("files-tree-row-0").is_some(),
+        "the Files tab chosen is in front"
+    );
+    assert!(cx.debug_bounds("conversation").is_none());
+    toggle_files(cx);
+    assert!(
+        cx.debug_bounds("files-tree-row-0").is_none(),
+        "the tree held focus, so the shortcut closes Files"
+    );
+}
+
+#[gpui::test]
+fn a_tab_choice_that_cannot_be_saved_leaves_focus_where_it_was(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    click(cx, "conversation");
+    let path = dir.path().join("workspace.json");
+    let backup = dir.path().join("backup.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    click(cx, "surface-tabs-0-tab-1");
+    assert!(cx.debug_bounds("conversation").is_some(), "the tab stays");
+    view.read_with(cx, |this, _| {
+        assert!(
+            this.error
+                .as_ref()
+                .is_some_and(|e| e.starts_with("Layout not changed.")),
+            "{:?}",
+            this.error
+        );
+    });
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    toggle_files(cx);
+    assert!(
+        cx.debug_bounds("files-tree-row-1").is_some(),
+        "shortcuts still reach the app"
+    );
+}
+
+#[gpui::test]
+fn revealing_a_hidden_files_tab_by_shortcut_releases_the_plus_menu(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, files_tabbed_beside());
+    click(cx, "surface-add");
+    assert!(cx.debug_bounds("surface-add-conversation").is_some());
+    toggle_files(cx);
+    assert!(
+        cx.debug_bounds("files-tree-row-0").is_some(),
+        "Files comes forward in its group"
+    );
+    assert!(cx.debug_bounds("surface-add-conversation").is_none());
+    unread(&view, cx);
+    click(cx, "conversation");
+    assert!(
+        viewed(&view, cx) >= 10,
+        "the focused conversation acknowledges the reply"
+    );
+}
+
+#[gpui::test]
+fn revealing_files_in_a_wide_window_leaves_no_fitted_choice_behind(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    toggle_files(cx);
+    assert!(cx.debug_bounds("files-tree-row-0").is_some());
+    click(cx, "conversation");
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("conversation").is_some(),
+        "the fitted tabs start from the conversation the user was in"
+    );
+    unread(&view, cx);
+    assert!(
+        viewed(&view, cx) >= 10,
+        "the conversation keeps focus and acknowledges the reply"
+    );
+}
+
+#[gpui::test]
+fn switching_tabs_moves_focus_to_the_shown_conversation(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    click(cx, "conversation");
+    click(cx, "surface-tabs-0-tab-1");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    unread(&view, cx);
+    assert!(
+        viewed(&view, cx) >= 10,
+        "the conversation brought forward holds focus and acknowledges the reply"
+    );
+    toggle_files(cx);
+    assert!(
+        cx.debug_bounds("files-tree-row-1").is_some(),
+        "shortcuts still reach the app after the switch"
+    );
+}
+
+#[gpui::test]
+fn widening_from_a_fitted_tab_restores_focus_to_the_displayed_conversation(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    click(cx, "conversation");
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    click(cx, "fitted-tab-3");
+    cx.simulate_resize(gpui::size(px(1200.), px(900.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("conversation").is_some());
+    assert!(cx.debug_bounds("conversation-view-3").is_none());
+    view.update_in(cx, |this, window, cx| {
+        assert!(this.view_contains_focus(ViewId::MAIN, window, cx));
+    });
+    unread(&view, cx);
+    assert!(viewed(&view, cx) >= 10);
+    toggle_files(cx);
+    assert!(cx.debug_bounds("files-tree-row-1").is_some());
+}
+
+#[gpui::test]
+fn a_files_shortcut_that_cannot_save_keeps_focus_on_the_displayed_conversation(
+    cx: &mut TestAppContext,
+) {
+    let (dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed_with_files());
+    click(cx, "conversation");
+    let path = dir.path().join("workspace.json");
+    let backup = dir.path().join("backup.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    toggle_files(cx);
+    assert!(cx.debug_bounds("conversation").is_some());
+    assert!(cx.debug_bounds("files-tree-row-0").is_none());
+    view.update_in(cx, |this, window, cx| {
+        assert!(
+            this.error
+                .as_ref()
+                .unwrap()
+                .starts_with("Layout not changed.")
+        );
+        assert!(this.view_contains_focus(ViewId::MAIN, window, cx));
+    });
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    toggle_files(cx);
+    assert!(cx.debug_bounds("files-tree-row-1").is_some());
+    toggle_files(cx);
+    assert!(cx.debug_bounds("files-tree-row-0").is_none());
+}
+
+#[gpui::test]
+fn a_files_menu_insert_that_cannot_save_does_not_focus_an_absent_tree(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    click(cx, "conversation");
+    let path = dir.path().join("workspace.json");
+    let backup = dir.path().join("backup.json");
+    std::fs::rename(&path, &backup).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    click(cx, "surface-add");
+    click(cx, "surface-add-files");
+    assert!(cx.debug_bounds("files-tree-row-0").is_none());
+    view.update_in(cx, |this, window, cx| {
+        assert!(
+            this.error
+                .as_ref()
+                .unwrap()
+                .starts_with("Layout not changed.")
+        );
+        let root = this.files_root().unwrap();
+        assert!(
+            !this
+                .files
+                .browser(&root, cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        );
+    });
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&backup, &path).unwrap();
+    toggle_files(cx);
+    assert!(cx.debug_bounds("files-tree-row-1").is_some());
+}
+
+#[gpui::test]
+fn switching_fitted_tabs_moves_focus_to_the_shown_conversation(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    click(cx, "conversation");
+    click(cx, "fitted-tab-3");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    unread(&view, cx);
+    assert!(
+        viewed(&view, cx) >= 10,
+        "the conversation brought forward holds focus and acknowledges the reply"
+    );
+    toggle_files(cx);
+    assert!(
+        cx.debug_bounds("files-tree-row-1").is_some(),
+        "shortcuts still reach the app after the switch"
+    );
+}
+
+#[gpui::test]
+fn closing_the_focused_tab_in_customize_moves_focus_to_its_neighbor(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(1));
+    click(cx, "customize-toggle");
+    click(cx, "conversation-view-3");
+    click(cx, "surface-tabs-0-tab-1-close");
+    assert!(cx.debug_bounds("conversation-view-3").is_none());
+    assert!(cx.debug_bounds("conversation").is_some());
+    unread(&view, cx);
+    assert!(
+        viewed(&view, cx) >= 10,
+        "the conversation left on screen holds focus and acknowledges the reply"
+    );
+}
+
+#[gpui::test]
+fn closing_an_inactive_tab_keeps_the_tab_the_user_chose(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed_three());
+    click(cx, "surface-tabs-0-tab-1");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    let inactive = cx.debug_bounds("surface-tabs-0-tab-2").unwrap().center();
+    cx.simulate_mouse_move(inactive, None::<MouseButton>, Modifiers::none());
+    cx.run_until_parked();
+    click(cx, "surface-tabs-0-tab-2-close");
+    assert!(
+        cx.debug_bounds("conversation-view-4").is_none(),
+        "tab closed"
+    );
+    assert!(
+        cx.debug_bounds("conversation-view-3").is_some(),
+        "the chosen tab stays in front"
+    );
+    assert!(cx.debug_bounds("conversation").is_none());
+}
+
+#[gpui::test]
+fn closing_a_surface_menu_anchor_no_longer_blocks_observation(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    toggle_files(cx);
+    click(cx, "surface-add");
+    assert!(cx.debug_bounds("surface-add-conversation").is_some());
+    toggle_files(cx);
+    if cx.debug_bounds("files-tree-row-0").is_some() {
+        toggle_files(cx);
+    }
+    assert!(
+        cx.debug_bounds("files-tree-row-0").is_none(),
+        "Files closed"
+    );
+    unread(&view, cx);
+    click(cx, "conversation");
+    assert!(
+        viewed(&view, cx) >= 10,
+        "the focused conversation acknowledges the reply"
+    );
+}
+
+#[gpui::test]
+fn fitting_away_the_tab_strips_closes_the_surface_menu(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed(0));
+    toggle_files(cx);
+    click(cx, "surface-add");
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("surface-add").is_none(),
+        "no strip when fitted"
+    );
+    click(cx, "fitted-tab-0");
+    unread(&view, cx);
+    assert!(
+        viewed(&view, cx) >= 10,
+        "the conversation brought forward acknowledges the reply"
+    );
+}
+
+#[gpui::test]
+fn a_tab_choice_is_saved_and_customize_previews_replace_it(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    use_layout(&view, cx, tabbed_three());
+    let writes = view.read_with(cx, |this, _| this.store.writes());
+    click(cx, "surface-tabs-0-tab-1");
+    assert!(cx.debug_bounds("conversation-view-3").is_some());
+    view.read_with(cx, |this, _| {
+        assert_eq!(this.store.writes(), writes + 1, "the choice is saved");
+    });
+    click(cx, "customize-toggle");
+    assert!(
+        cx.debug_bounds("conversation-view-3").is_some(),
+        "Customize starts from the saved choice"
+    );
+    click(cx, "surface-tabs-0-tab-0");
+    assert!(cx.debug_bounds("conversation").is_some());
+    click(cx, "customize-discard");
+    assert!(
+        cx.debug_bounds("conversation-view-3").is_some(),
+        "a discarded draft shows the saved choice again"
+    );
+    click(cx, "surface-tabs-0-tab-0");
     click(cx, "customize-apply");
     click(cx, "customize-close");
-    click(cx, "conversation-tab-0");
+    assert!(cx.debug_bounds("conversation").is_some());
+    click(cx, "surface-tabs-0-tab-2");
+    assert!(cx.debug_bounds("conversation-view-4").is_some());
     click(cx, "customize-toggle");
-    assert!(cx.debug_bounds("conversation-view-3").is_some());
     click(cx, "customize-undo");
-    assert!(cx.debug_bounds("conversation").is_some());
-    click(cx, "customize-close");
-    assert!(cx.debug_bounds("conversation").is_some());
-    click(cx, "conversation-tab-3");
-    click(cx, "customize-toggle");
-    click(cx, "conversation-tab-3");
-    click(cx, "customize-discard");
-    click(cx, "customize-close");
-    assert!(cx.debug_bounds("conversation").is_some());
+    assert!(
+        cx.debug_bounds("conversation-view-3").is_some(),
+        "choosing a tab keeps Undo, which restores the layout before Apply"
+    );
 }
 
 #[gpui::test]
@@ -417,8 +809,9 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
             raw.as_ref(),
             &saved,
         );
-        this.presentation.current.customization.receive(
-            this.presentation.current.customization.running().unwrap(),
+        let request = this.presentation.current.customization.running().unwrap();
+        this.receive_customization_outcome(
+            request,
             crate::customization_agent::Outcome::Proposal(
                 crate::customization_agent::Proposal::Change(tabbed(1)),
             ),
@@ -452,8 +845,9 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
             raw.as_ref(),
             &saved,
         );
-        this.presentation.current.customization.receive(
-            this.presentation.current.customization.running().unwrap(),
+        let request = this.presentation.current.customization.running().unwrap();
+        this.receive_customization_outcome(
+            request,
             crate::customization_agent::Outcome::Proposal(
                 crate::customization_agent::Proposal::Change(tabbed(0)),
             ),
@@ -481,9 +875,7 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
 }
 
 #[gpui::test]
-fn fitting_uses_the_first_displayed_preferred_pane_and_retains_temporary_clicks(
-    cx: &mut TestAppContext,
-) {
+fn fitting_uses_the_first_displayed_preferred_pane_and_refits_to_it_again(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx);
     let preferred: Composition = serde_json::from_value(serde_json::json!({
         "version": 1,
@@ -525,7 +917,11 @@ fn fitting_uses_the_first_displayed_preferred_pane_and_retains_temporary_clicks(
     assert!(cx.debug_bounds("conversation-view-4").is_some());
     cx.simulate_resize(gpui::size(px(400.), px(900.)));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("conversation-view-4").is_some());
+    assert!(
+        cx.debug_bounds("conversation-view-3").is_some(),
+        "refitting starts from the layout's choice again"
+    );
+    assert!(cx.debug_bounds("conversation-view-4").is_none());
     assert_eq!(
         std::fs::read(dir.path().join("workspace.json")).unwrap(),
         saved

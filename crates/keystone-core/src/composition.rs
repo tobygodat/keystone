@@ -28,21 +28,28 @@ pub enum Component {
     SessionList,
     Conversation,
     Composer,
+    Files,
 }
 
 impl Component {
-    pub const ALL: [Component; 3] = [
+    pub const ALL: [Component; 4] = [
         Component::SessionList,
         Component::Conversation,
         Component::Composer,
+        Component::Files,
     ];
 
-    fn allows(self, count: usize) -> bool {
+    pub fn allows(self, count: usize) -> bool {
         match self {
-            Self::SessionList => count <= 1,
+            Self::SessionList | Self::Files => count <= 1,
             Self::Conversation => count >= 1,
             Self::Composer => count == 1,
         }
+    }
+
+    /// Whether occurrences of this component can share an area as tabs.
+    pub fn is_surface(self) -> bool {
+        matches!(self, Self::Conversation | Self::Files)
     }
 }
 
@@ -77,7 +84,7 @@ pub enum Node {
         axis: Axis,
         children: Vec<Child>,
     },
-    /// Conversation occurrences sharing one area, showing `views[selected]`.
+    /// Surface occurrences sharing one area, showing `views[selected]`.
     Tabs {
         selected: usize,
         views: Vec<ViewId>,
@@ -136,7 +143,7 @@ pub enum Problem {
     TooDeep,
     TooLarge,
     SingleChild,
-    TabNotConversation(ViewId),
+    TabNotSurface(ViewId),
     TabOutOfRange,
     NotTabbed(ViewId),
     NoSplit,
@@ -155,8 +162,12 @@ impl fmt::Display for Problem {
             Self::TooDeep => write!(f, "deeper than {MAX_DEPTH} levels"),
             Self::TooLarge => write!(f, "more than {MAX_NODES} nodes"),
             Self::SingleChild => f.write_str("a split or tab group has fewer than two children"),
-            Self::TabNotConversation(view) => {
-                write!(f, "view {} is tabbed but is not a conversation", view.0)
+            Self::TabNotSurface(view) => {
+                write!(
+                    f,
+                    "view {} is tabbed but is not a conversation or files view",
+                    view.0
+                )
             }
             Self::TabOutOfRange => f.write_str("the selected tab does not exist"),
             Self::NotTabbed(view) => write!(f, "view {} is not in a tab group", view.0),
@@ -406,8 +417,8 @@ fn check(
             }
             for &view in tabbed {
                 count(placed, Some(view))?;
-                if views[&view] != Component::Conversation {
-                    return Err(Problem::TabNotConversation(view));
+                if !views[&view].is_surface() {
+                    return Err(Problem::TabNotSurface(view));
                 }
             }
             Ok(())
@@ -840,14 +851,14 @@ mod tests {
             ),
             (
                 open(ViewId(9), Component::Conversation, Place::TabWith(COMPOSER)),
-                Problem::TabNotConversation(COMPOSER),
+                Problem::TabNotSurface(COMPOSER),
             ),
             (
                 Edit::Move {
                     view: SESSION_LIST,
                     to: Place::TabWith(ViewId::MAIN),
                 },
-                Problem::TabNotConversation(SESSION_LIST),
+                Problem::TabNotSurface(SESSION_LIST),
             ),
             (
                 Edit::Move {
@@ -894,6 +905,70 @@ mod tests {
         );
         let listless = single.edit(Edit::Close(SESSION_LIST)).unwrap();
         assert_eq!(root(&listless), root(&single)["children"][1]["node"]);
+    }
+
+    #[test]
+    fn files_opens_beside_or_tabbed_with_a_conversation_but_only_once() {
+        let files = ViewId(7);
+        let beside = Composition::default()
+            .edit(Edit::Open {
+                view: files,
+                component: Component::Files,
+                at: Place::Beside {
+                    target: ViewId::MAIN,
+                    axis: Axis::Row,
+                    after: true,
+                },
+                size: px(300),
+            })
+            .unwrap();
+        assert_eq!(
+            root(&beside)["children"][1]["node"]["children"][0]["node"]["children"],
+            json!([view(0, json!({"fill": 1})), view(7, json!({"px": 300}))])
+        );
+        assert_eq!(
+            serde_json::to_value(&beside).unwrap()["views"][3],
+            json!({"id": 7, "component": "files"})
+        );
+        assert_eq!(
+            serde_json::from_value::<Composition>(serde_json::to_value(&beside).unwrap()).unwrap(),
+            beside
+        );
+
+        let tabbed = beside
+            .edit(Edit::Move {
+                view: files,
+                to: Place::TabWith(ViewId::MAIN),
+            })
+            .unwrap();
+        assert_eq!(
+            root(&tabbed)["children"][1]["node"]["children"][0]["node"],
+            json!({"kind": "tabs", "selected": 1, "views": [0, 7]})
+        );
+        assert_eq!(
+            tabbed.edit(Edit::Close(files)).unwrap(),
+            Composition::default()
+        );
+
+        let second = Edit::Open {
+            view: ViewId(8),
+            component: Component::Files,
+            at: Place::TabWith(ViewId::MAIN),
+            size: Size::FILL,
+        };
+        assert_eq!(tabbed.edit(second), Err(Problem::Count(Component::Files)));
+        assert_eq!(
+            tabbed.edit(Edit::Move {
+                view: COMPOSER,
+                to: Place::TabWith(files),
+            }),
+            Err(Problem::TabNotSurface(COMPOSER))
+        );
+        assert!(
+            Composition::default()
+                .views()
+                .all(|(_, c)| c != Component::Files)
+        );
     }
 
     fn deepest_main(depth: usize) -> Result<Composition, Problem> {

@@ -4,6 +4,10 @@ use keystone_core::{
 };
 use std::collections::BTreeMap;
 
+/// The width a Files view opens at beside a conversation.
+pub const FILES_WIDTH: keystone_core::Size =
+    keystone_core::Size::Px(std::num::NonZeroU16::new(300).unwrap());
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Interpretation {
     Idle,
@@ -26,6 +30,7 @@ pub enum Action {
     Select(ViewId),
     Duplicate(ViewId),
     AddSessionList,
+    AddFiles,
     Reset,
     Ask { provider: Provider, prompt: String },
     Retry,
@@ -156,8 +161,14 @@ impl Customization {
     pub fn can_undo(&self, saved: &Composition) -> bool {
         self.replaced.is_some() && !self.can_discard(saved)
     }
+    /// Withdraws Undo once the saved layout changed outside Customize, so it cannot
+    /// restore a layout from before edits the user made since.
+    pub fn forget_undo(&mut self) {
+        self.replaced = None;
+    }
 
-    fn allocate(&mut self) -> Result<ViewId, String> {
+    /// A view id no composition of this project has used, for an edit outside Customize too.
+    pub fn allocate(&mut self) -> Result<ViewId, String> {
         let id = u32::try_from(self.next_view)
             .map_err(|_| "No more component IDs are available.".to_owned())?;
         self.next_view += 1;
@@ -315,6 +326,24 @@ impl Customization {
                             std::num::NonZeroU16::new(keystone_core::SidebarWidth::DEFAULT.px())
                                 .unwrap(),
                         ),
+                    })
+                    .map_err(|e| e.to_string())
+            }),
+            Action::AddFiles => self.allocate().and_then(|view| {
+                current
+                    .edit(Edit::Open {
+                        view,
+                        component: Component::Files,
+                        at: keystone_core::Place::Beside {
+                            target: current
+                                .views()
+                                .find(|(_, c)| *c == Component::Conversation)
+                                .unwrap()
+                                .0,
+                            axis: keystone_core::Axis::Row,
+                            after: true,
+                        },
+                        size: FILES_WIDTH,
                     })
                     .map_err(|e| e.to_string())
             }),

@@ -12,9 +12,11 @@ gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev =
 gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "766668f691fa78b37460b1dda3b162e9bb80a3ad", features = ["wayland", "x11"] }
 anyhow = "1"
 futures = "0.3"
+ignore = "0.4.33"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+shlex = "2.0.1"
 tempfile = "3"
 unicode-segmentation = "1"
 

@@ -1,8 +1,9 @@
 use crate::arrangement_editor::Action;
+use crate::customization::label;
 use crate::{Keystone, ViewKey, arch_mark, model_selector, now_ms};
 use gpui::{
-    AnyElement, AvailableSpace, Bounds, Context, Empty, FontWeight, IntoElement, MouseButton,
-    Pixels, Point, SharedString, Window, canvas, div, prelude::*, px, size,
+    Anchor, AnyElement, AvailableSpace, Bounds, Context, Empty, Focusable, FontWeight, IntoElement,
+    MouseButton, Pixels, Point, SharedString, Window, canvas, div, prelude::*, px, size,
 };
 use keystone_core::{
     ApprovalMode, Axis, Component, Composition, Edit, Node, NodePath, Place, Provider, Size, ViewId,
@@ -15,22 +16,22 @@ const GRIP: f32 = 6.;
 const CONVERSATION_MIN: f32 = 320.;
 const COMPOSER_MIN: f32 = 420.;
 const SESSION_MIN: f32 = 220.;
+const FILES_MIN: f32 = 220.;
 
 #[derive(Default)]
 pub struct Arrangement {
     pub visible: Vec<ViewId>,
     pub fitted: bool,
-    tab: Option<FittedTab>,
-    tabs: HashMap<ViewId, ViewId>,
+    /// The surface the fitted tabs show, chosen while the window was fitted.
+    tab: Option<ViewId>,
     pub sidebar_overlay: bool,
+    /// The surface group whose "+" menu is open, by the view it would tab with. The
+    /// menu counts as open only while that view's strip is drawn.
+    pub surface_menu: Option<ViewId>,
     geometry: HashMap<NodePath, Bounds<Pixels>>,
     toolbar_height: Pixels,
     composer_min_width: f32,
     resize: Option<Resize>,
-}
-struct FittedTab {
-    source: Composition,
-    view: ViewId,
 }
 struct Resize {
     start: Point<Pixels>,
@@ -64,9 +65,14 @@ pub fn ordered_views(node: &Node) -> Vec<ViewId> {
 }
 
 fn first_displayed_conversation(node: &Node, c: &Composition) -> Option<ViewId> {
+    let conversation = |id: &ViewId| c.component(*id) == Some(Component::Conversation);
     match node {
-        Node::View { id } => (c.component(*id) == Some(Component::Conversation)).then_some(*id),
-        Node::Tabs { selected, views } => Some(views[*selected]),
+        Node::View { id } => conversation(id).then_some(*id),
+        Node::Tabs { selected, views } => views
+            .get(*selected)
+            .filter(|id| conversation(id))
+            .or_else(|| views.iter().find(|id| conversation(id)))
+            .copied(),
         Node::Split { children, .. } => children
             .iter()
             .find_map(|child| first_displayed_conversation(&child.node, c)),
@@ -92,6 +98,7 @@ fn minimum(
                     [0., 0.]
                 }
             }
+            Component::Files => [FILES_MIN, 160. + header],
         },
         Node::Tabs { .. } => [CONVERSATION_MIN, 154. + header],
         Node::Split { axis, children } => {
@@ -119,11 +126,11 @@ impl Arrangement {
         self.geometry.clear();
         self.resize = None;
         self.sidebar_overlay = false;
+        self.surface_menu = None;
         self.toolbar_height = px(0.);
     }
 
     pub(crate) fn restore_tabs(&mut self) {
-        self.tabs.clear();
         self.tab = None;
     }
 
@@ -133,15 +140,239 @@ impl Arrangement {
     }
 }
 
+/// The tab group holding `view` and its selected index.
+fn tabs_holding(node: &Node, view: ViewId) -> Option<(&[ViewId], usize)> {
+    match node {
+        Node::View { .. } => None,
+        Node::Tabs { selected, views } => views.contains(&view).then_some((views, *selected)),
+        Node::Split { children, .. } => children
+            .iter()
+            .find_map(|child| tabs_holding(&child.node, view)),
+    }
+}
+
+fn displays(node: &Node, view: ViewId) -> bool {
+    match node {
+        Node::View { id } => *id == view,
+        Node::Tabs { selected, views } => views[*selected] == view,
+        Node::Split { children, .. } => children.iter().any(|child| displays(&child.node, view)),
+    }
+}
+
+/// Whether a strip drawn for `node` has `anchor` in front, so its "+" is on screen.
+fn strip_shows(node: &Node, c: &Composition, anchor: ViewId) -> bool {
+    match node {
+        Node::View { id } => *id == anchor && c.component(anchor) == Some(Component::Files),
+        Node::Tabs { selected, views } => views[*selected] == anchor,
+        Node::Split { children, .. } => children
+            .iter()
+            .any(|child| strip_shows(&child.node, c, anchor)),
+    }
+}
+
+/// A tab's title: the component, and the occurrence id when there can be several.
+fn tab_label(id: ViewId, c: &Composition) -> String {
+    match c.component(id).unwrap() {
+        Component::Files => label(Component::Files).to_owned(),
+        component => format!("{} {}", label(component), id.0),
+    }
+}
+
 impl Keystone {
-    pub(crate) fn arrangement_has_sidebar(&self) -> bool {
+    /// The composition on screen: the Customize draft while it is open, else the saved one.
+    pub(crate) fn shown_composition(&self) -> Composition {
         let saved = self.saved_composition();
         self.presentation
             .current
             .customization
             .shown(&saved)
+            .clone()
+    }
+
+    pub(crate) fn arrangement_has_sidebar(&self) -> bool {
+        self.shown_composition()
             .views()
             .any(|(_, component)| component == Component::SessionList)
+    }
+
+    /// Applies `edit` to the project's layout right away, or to the Customize draft while
+    /// it is open, and reports a refused edit or a failed save in the error line. A
+    /// structural edit withdraws Customize Undo; choosing a tab does not.
+    pub(crate) fn edit_surfaces(
+        &mut self,
+        edit: Edit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.shown_composition();
+        let closing = match edit {
+            Edit::Close(view) if self.view_contains_focus(view, window, cx) => Some(view),
+            _ => None,
+        };
+        let selecting = matches!(edit, Edit::SelectTab(_));
+        if self.presentation.current.customization.is_open() {
+            self.customize(Action::Edit(edit), window, cx);
+        } else {
+            let result = match (before.edit(edit), &self.presentation.project) {
+                (Err(problem), _) => Err(problem.to_string()),
+                (Ok(_), Err(error)) => Err(format!("Cannot save this project's layout. {error}")),
+                (Ok(layout), Ok(project)) => self
+                    .store
+                    .set_project_layout(project, Some(layout.into()))
+                    .map(|applied| crate::durability_warning(applied.durability))
+                    .map_err(|error| error.to_string()),
+            };
+            match result {
+                Ok(warning) => {
+                    self.error = warning;
+                    if !selecting {
+                        self.presentation.current.customization.forget_undo();
+                    }
+                }
+                Err(error) => self.error = Some(format!("Layout not changed. {error}")),
+            }
+        }
+        // A closed view's focus handle outlives it, and a handle that is no longer drawn
+        // swallows every shortcut, so focus moves to what took the view's place.
+        if let Some(closed) = closing
+            && self.shown_composition().component(closed).is_none()
+        {
+            let shown = self.shown_in_place_of(closed, &before);
+            self.focus_view(shown, window, cx);
+        }
+        self.refresh(cx);
+    }
+
+    /// The view on screen where `closed` was: the rest of its tab group, or whatever
+    /// the fitted tabs fall back to.
+    fn shown_in_place_of(&self, closed: ViewId, before: &Composition) -> Option<ViewId> {
+        let after = self.shown_composition();
+        if self.presentation.current.arrangement.fitted {
+            return self
+                .fitted_tab(&after)
+                .or_else(|| first_displayed_conversation(after.root(), &after));
+        }
+        let (group, _) = tabs_holding(before.root(), closed)?;
+        let sibling = group.iter().copied().find(|&view| view != closed)?;
+        Some(match tabs_holding(after.root(), sibling) {
+            Some((views, selected)) => views[selected],
+            None => sibling,
+        })
+    }
+
+    /// Focuses the content of `view`, or the window when there is none to focus.
+    fn focus_view(&mut self, view: Option<ViewId>, window: &mut Window, cx: &mut Context<Self>) {
+        let component = view.and_then(|view| self.shown_composition().component(view));
+        let session = self.store.workspace().selected();
+        match (component, view, session) {
+            (Some(Component::Files), _, _) => self.focus_files(window, cx),
+            (Some(Component::Conversation), Some(view), Some(session)) => self
+                .presentation
+                .current
+                .views
+                .focus(ViewKey { view, session }, cx)
+                .focus(window, cx),
+            _ => self.focus.focus(window, cx),
+        }
+    }
+
+    /// Moves focus to `shown` when one of the `hidden` views it covers held it, or when
+    /// nothing in particular did. A click on a tab lands focus on the window first, so
+    /// the tab brought forward takes it from there.
+    fn focus_replacing(
+        &mut self,
+        hidden: &[ViewId],
+        shown: ViewId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus.is_focused(window)
+            || hidden
+                .iter()
+                .any(|&view| view != shown && self.view_contains_focus(view, window, cx))
+        {
+            self.focus_view(Some(shown), window, cx);
+        }
+    }
+
+    pub(crate) fn view_contains_focus(
+        &mut self,
+        view: ViewId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let handle = match self.shown_composition().component(view) {
+            Some(Component::Files) => self
+                .files_root()
+                .ok()
+                .map(|root| self.files.browser(&root, cx).focus_handle(cx)),
+            Some(Component::Conversation) => self.store.workspace().selected().map(|session| {
+                self.presentation
+                    .current
+                    .views
+                    .focus(ViewKey { view, session }, cx)
+            }),
+            _ => None,
+        };
+        handle.is_some_and(|handle| handle.contains_focused(window, cx))
+    }
+
+    /// The fitted tab's choice while `c` still shows that surface.
+    fn fitted_tab(&self, c: &Composition) -> Option<ViewId> {
+        self.presentation
+            .current
+            .arrangement
+            .tab
+            .filter(|&view| c.component(view).is_some_and(Component::is_surface))
+    }
+
+    /// Brings `view` to the front: of the fitted tabs in a fitted window, else of its
+    /// tab group.
+    pub(crate) fn reveal_view(
+        &mut self,
+        view: ViewId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.presentation.current.arrangement.fitted {
+            return self.select_tab(view, window, cx);
+        }
+        let surfaces: Vec<_> = self
+            .shown_composition()
+            .views()
+            .filter(|(_, component)| component.is_surface())
+            .map(|(id, _)| id)
+            .collect();
+        self.presentation.current.arrangement.tab = Some(view);
+        self.focus_replacing(&surfaces, view, window, cx);
+        cx.notify();
+    }
+
+    /// Opens a new occurrence of `component` at `at` with a fresh view id.
+    pub(crate) fn open_surface(
+        &mut self,
+        component: Component,
+        at: Place,
+        size: Size,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.presentation.current.customization.allocate() {
+            Ok(view) => self.edit_surfaces(
+                Edit::Open {
+                    view,
+                    component,
+                    at,
+                    size,
+                },
+                window,
+                cx,
+            ),
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
     }
 
     /// The composer's minimum holds the widest of each control any session shows, so a
@@ -202,23 +433,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let saved = self.saved_composition();
-        let c = self
-            .presentation
-            .current
-            .customization
-            .shown(&saved)
-            .clone();
-        if self
-            .presentation
-            .current
-            .arrangement
-            .tab
-            .as_ref()
-            .is_some_and(|tab| tab.source != c)
-        {
-            self.presentation.current.arrangement.tab = None;
-        }
+        let c = self.shown_composition();
         self.presentation.current.arrangement.composer_min_width =
             self.composer_minimum_width(window, cx);
         let required = minimum(
@@ -243,20 +458,27 @@ impl Keystone {
         {
             self.presentation.current.arrangement.sidebar_overlay = false;
         }
+        if !fitted {
+            self.presentation.current.arrangement.tab = None;
+        }
         self.presentation.current.arrangement.fitted = fitted;
         self.presentation.current.arrangement.visible.clear();
-        if fitted {
-            let conversations: Vec<_> = ordered_views(c.root())
+        if self
+            .presentation
+            .current
+            .arrangement
+            .surface_menu
+            .is_some_and(|anchor| fitted || !strip_shows(c.root(), &c, anchor))
+        {
+            self.presentation.current.arrangement.surface_menu = None;
+        }
+        let body = if fitted {
+            let surfaces: Vec<_> = ordered_views(c.root())
                 .into_iter()
-                .filter(|id| c.component(*id) == Some(Component::Conversation))
+                .filter(|id| c.component(*id).is_some_and(Component::is_surface))
                 .collect();
             let selected = self
-                .presentation
-                .current
-                .arrangement
-                .tab
-                .as_ref()
-                .map(|tab| tab.view)
+                .fitted_tab(&c)
                 .unwrap_or_else(|| first_displayed_conversation(c.root(), &c).unwrap());
             let composer = c
                 .views()
@@ -265,15 +487,10 @@ impl Keystone {
                 .0;
             let mut body = v_flex().relative().flex_1().min_h_0().w_full()
                 .when(f32::from(viewport.height)-44.-toolbar > 230., |d| d.child(div().flex_none().child(Label::new("Views use tabs and the composer stays below until this window has more room.").size(TextSize::Sm).color(Color::Muted))))
-                .child(h_flex().flex_none().gap_1().children(conversations.iter().enumerate().map(|(i, &id)| {
-                    let source = c.clone();
-                    self.conversation_tab(format!("fitted-tab-{}", id.0), format!("View {}", i+1), selected == id, cx)
-                        .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
-                            this.presentation.current.arrangement.tab = Some(FittedTab {
-                                source: source.clone(),
-                                view: id,
-                            });
-                            cx.notify();
+                .child(h_flex().flex_none().gap_1().children(surfaces.iter().map(|&id| {
+                    self.conversation_tab(format!("fitted-tab-{}", id.0), tab_label(id, &c), selected == id, cx)
+                        .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                            this.reveal_view(id, window, cx)
                         }))
                 })))
                 .child(div().flex_1().min_h_0().overflow_hidden().child(self.arrangement_view(selected, &c, false, viewport.width, cx)))
@@ -297,7 +514,35 @@ impl Keystone {
             body.into_any_element()
         } else {
             self.arrangement_node(c.root(), &c, NodePath::default(), false, viewport.width, cx)
+        };
+        let displayed: Vec<_> = c
+            .views()
+            .filter(|(view, component)| {
+                component.is_surface()
+                    && if fitted {
+                        self.fitted_tab(&c)
+                            .or_else(|| first_displayed_conversation(c.root(), &c))
+                            == Some(*view)
+                    } else {
+                        displays(c.root(), *view)
+                    }
+            })
+            .map(|(view, _)| view)
+            .collect();
+        for (view, _) in c
+            .views()
+            .filter(|(view, component)| component.is_surface() && !displayed.contains(view))
+        {
+            if self.view_contains_focus(view, window, cx) {
+                let replacement = tabs_holding(c.root(), view)
+                    .map(|(views, selected)| views[selected])
+                    .filter(|view| displayed.contains(view))
+                    .or_else(|| displayed.first().copied());
+                self.focus_view(replacement, window, cx);
+                break;
+            }
         }
+        body
     }
 
     fn arrangement_node(
@@ -310,48 +555,12 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
+            Node::View { id } if c.component(*id) == Some(Component::Files) => {
+                self.surface_group(std::slice::from_ref(id), 0, c, window_width, cx)
+            }
             Node::View { id } => self.arrangement_view(*id, c, auto, window_width, cx),
             Node::Tabs { selected, views } => {
-                let views_first = views[0];
-                let selected = if self.presentation.current.customization.is_open() {
-                    *selected
-                } else {
-                    self.presentation
-                        .current
-                        .arrangement
-                        .tabs
-                        .get(&views_first)
-                        .and_then(|id| views.iter().position(|v| v == id))
-                        .unwrap_or(*selected)
-                };
-                v_flex()
-                    .size_full()
-                    .min_h_0()
-                    .min_w_0()
-                    .child(
-                        h_flex()
-                            .flex_none()
-                            .gap_1()
-                            .children(views.iter().enumerate().map(|(i, &id)| {
-                                self.conversation_tab(
-                                    format!("conversation-tab-{}", id.0),
-                                    format!("View {}", id.0),
-                                    i == selected,
-                                    cx,
-                                )
-                                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                                    this.select_conversation_tab(views_first, id, window, cx)
-                                }))
-                            })),
-                    )
-                    .child(div().flex_1().min_h_0().child(self.arrangement_view(
-                        views[selected],
-                        c,
-                        false,
-                        window_width,
-                        cx,
-                    )))
-                    .into_any_element()
+                self.surface_group(views, *selected, c, window_width, cx)
             }
             Node::Split { axis, children } => {
                 if *axis == Axis::Column
@@ -506,6 +715,121 @@ impl Keystone {
         }
     }
 
+    /// Surfaces sharing one area under a tab strip: the tabs, each with a close button,
+    /// and a "+" that opens another surface there. A lone Files view is a group of one,
+    /// so it can be closed and joined; a lone conversation keeps its plain chrome.
+    fn surface_group(
+        &mut self,
+        views: &[ViewId],
+        selected: usize,
+        c: &Composition,
+        window_width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (select, close) = (views.to_vec(), views.to_vec());
+        let colors = cx.theme().colors;
+        let bar = TabBar::new(SharedString::from(if views.len() == 1 {
+            "files".to_owned()
+        } else {
+            format!("surface-tabs-{}", views[0].0)
+        }))
+        .children(
+            views
+                .iter()
+                .map(|&id| Tab::new(("surface-tab", id.0 as usize), tab_label(id, c))),
+        )
+        .selected(selected)
+        .on_select(
+            self.scoped_listener(cx, move |this, ix: &usize, window, cx| {
+                this.select_tab(select[*ix], window, cx)
+            }),
+        )
+        .on_close(
+            self.scoped_listener(cx, move |this, ix: &usize, window, cx| {
+                this.edit_surfaces(Edit::Close(close[*ix]), window, cx)
+            }),
+        );
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .pr_1()
+                    .bg(colors.sidebar)
+                    .hairline_b(cx)
+                    .child(div().flex_1().min_w_0().child(bar))
+                    .child(self.surface_menu(views[selected], c, cx)),
+            )
+            .child(div().flex_1().min_h_0().child(self.arrangement_view(
+                views[selected],
+                c,
+                false,
+                window_width,
+                cx,
+            )))
+            .into_any_element()
+    }
+
+    /// The "+" of a surface group, listing the surfaces the composition still allows.
+    /// A chosen one opens as a tab with `anchor`.
+    fn surface_menu(
+        &self,
+        anchor: ViewId,
+        c: &Composition,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.presentation.current.arrangement.surface_menu == Some(anchor);
+        let mut menu = PopoverMenu::new(
+            ("surface-menu", anchor.0 as usize),
+            IconButton::new(("surface-add", anchor.0 as usize), IconName::Plus)
+                .size(ButtonSize::Compact)
+                .selected(open)
+                .debug_selector(|| "surface-add".into())
+                .tooltip(Tooltip::text("Open a surface")),
+        )
+        .anchor(Anchor::TopRight)
+        .open(open)
+        .on_open_change(self.scoped_listener(cx, move |this, open: &bool, _, cx| {
+            this.presentation.current.arrangement.surface_menu = open.then_some(anchor);
+            cx.notify();
+        }))
+        .child(MenuHeader::new("Open a surface"));
+        for (component, icon, id) in [
+            (Component::Files, IconName::Folder, "surface-add-files"),
+            (
+                Component::Conversation,
+                IconName::Chat,
+                "surface-add-conversation",
+            ),
+        ] {
+            let count = c.views().filter(|(_, k)| *k == component).count();
+            if !component.allows(count + 1) {
+                continue;
+            }
+            menu = menu.child(
+                MenuItem::new(id, label(component))
+                    .icon(icon)
+                    .debug_selector(|| id.into())
+                    .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                        this.open_surface(
+                            component,
+                            Place::TabWith(anchor),
+                            Size::Fill(NonZeroU16::MIN),
+                            window,
+                            cx,
+                        );
+                        if component == Component::Files {
+                            this.focus_files(window, cx);
+                        }
+                    })),
+            );
+        }
+        menu
+    }
+
     fn conversation_tab(
         &self,
         id: String,
@@ -565,20 +889,24 @@ impl Keystone {
         .inset_0()
     }
 
-    fn select_conversation_tab(
-        &mut self,
-        group: ViewId,
-        id: ViewId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.presentation.current.customization.is_open() {
-            self.presentation.current.arrangement.tabs.remove(&group);
-            self.customize(Action::Edit(Edit::SelectTab(id)), window, cx);
-        } else {
-            self.presentation.current.arrangement.tabs.insert(group, id);
-            cx.notify();
+    /// Brings a tabbed `view` to the front of its group, in the layout or the Customize
+    /// draft, and gives it focus when the tab it hides held focus.
+    fn select_tab(&mut self, view: ViewId, window: &mut Window, cx: &mut Context<Self>) {
+        let c = self.shown_composition();
+        let Some((views, selected)) = tabs_holding(c.root(), view) else {
+            return;
+        };
+        let views = views.to_vec();
+        if views[selected] != view {
+            self.edit_surfaces(Edit::SelectTab(view), window, cx);
+            let shown = self.shown_composition();
+            if tabs_holding(shown.root(), view)
+                .is_none_or(|(views, selected)| views[selected] != view)
+            {
+                return;
+            }
         }
+        self.focus_replacing(&views, view, window, cx);
     }
 
     fn arrangement_view(
@@ -697,6 +1025,9 @@ impl Keystone {
                     .p_3()
                     .child(self.composer(current, window_width, cx))
                     .children(self.error_line());
+            }
+            Component::Files => {
+                pane = pane.child(self.file_list(cx));
             }
             Component::Conversation => {
                 self.presentation.current.arrangement.visible.push(id);
@@ -817,7 +1148,7 @@ impl Keystone {
             }
         }
         if editing {
-            let tab = component == Component::Conversation;
+            let tab = component.is_surface();
             pane = pane
                 .children([
                     self.drop_target(
@@ -1064,6 +1395,7 @@ impl Keystone {
             || self.renaming.is_some()
             || self.confirm_full_access.is_some()
             || self.presentation.current.customization.chooser().is_some()
+            || self.presentation.current.arrangement.surface_menu.is_some()
             || (self.presentation.current.arrangement.sidebar_overlay
                 && self.presentation.current.arrangement.fitted
                 && self.arrangement_has_sidebar())

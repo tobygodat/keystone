@@ -2,6 +2,7 @@
 //! row's shortcut hint cannot drift from the binding that runs it.
 
 use crate::customization::OpenCustomize;
+use crate::files::ToggleFiles;
 use crate::{
     FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, Quit, RenameSession, ToggleSettle,
     ToggleSidebar,
@@ -47,6 +48,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-b"],
         context: Some(APP),
         action: || Box::new(ToggleSidebar),
+    },
+    Command {
+        id: "toggle-files",
+        label: "Toggle files",
+        keys: &["ctrl-shift-e"],
+        context: Some(APP),
+        action: || Box::new(ToggleFiles),
     },
     Command {
         id: "focus-search",

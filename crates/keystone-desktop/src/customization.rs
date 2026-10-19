@@ -1,5 +1,5 @@
 use crate::arrangement_editor::{Action, Chooser, Effect, Interpretation};
-use crate::customization_agent::{Agent, Programs, REQUEST_TIMEOUT};
+use crate::customization_agent::{Agent, Outcome, Programs, REQUEST_TIMEOUT};
 use crate::{Keystone, SendMessage, provider_name};
 use gpui::{
     Context, Focusable, FontWeight, IntoElement, MouseButton, SharedString, Window, div,
@@ -70,6 +70,7 @@ pub fn label(component: Component) -> &'static str {
         Component::SessionList => "Session list",
         Component::Conversation => "Conversation",
         Component::Composer => "Composer",
+        Component::Files => "Files",
     }
 }
 
@@ -218,16 +219,21 @@ impl Keystone {
         let results = agent.drain();
         let any = !results.is_empty();
         for (request, outcome) in results {
-            if self
-                .presentation
-                .current
-                .customization
-                .receive(request, outcome)
-            {
-                self.presentation.current.arrangement.restore_tabs();
-            }
+            self.receive_customization_outcome(request, outcome);
         }
         any
+    }
+    /// Takes in the agent's answer to `request`; a proposal it previews replaces the
+    /// fitted tab the user had chosen.
+    pub(crate) fn receive_customization_outcome(&mut self, request: u64, outcome: Outcome) {
+        if self
+            .presentation
+            .current
+            .customization
+            .receive(request, outcome)
+        {
+            self.presentation.current.arrangement.restore_tabs();
+        }
     }
     pub(crate) fn customize_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.presentation.current.customization.is_open();
@@ -636,7 +642,15 @@ impl Keystone {
                                         false,
                                     ))
                                 },
-                            ),
+                            )
+                            .when(!current.views().any(|(_, c)| c == Component::Files), |d| {
+                                d.child(act(
+                                    "component-add-files",
+                                    "Add files",
+                                    Action::AddFiles,
+                                    false,
+                                ))
+                            }),
                     ),
             )
             .child(
@@ -909,6 +923,36 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("borrow-dialog").is_none());
         assert!(cx.debug_bounds("customize-panel").is_some());
+    }
+    #[gpui::test]
+    fn undo_is_withdrawn_once_a_live_edit_changes_the_applied_layout(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let (view, cx) = open(&path, cx);
+        click(cx, "welcome-codex");
+        click(cx, "customize-toggle");
+        click(cx, "component-duplicate");
+        click(cx, "customize-apply");
+        click(cx, "customize-close");
+        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("files-tab-0").is_some(),
+            "Files opened live"
+        );
+        click(cx, "customize-toggle");
+        click(cx, "customize-undo");
+        assert!(
+            cx.debug_bounds("files-tab-0").is_some(),
+            "Undo cannot take back a layout that changed since Apply"
+        );
+        view.read_with(cx, |this, _| {
+            assert!(
+                this.saved_composition()
+                    .views()
+                    .any(|(_, c)| c == Component::Files)
+            );
+        });
     }
     #[gpui::test]
     fn borrow_confirmation_preserves_preview_then_stages_an_independent_copy(

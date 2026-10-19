@@ -360,6 +360,7 @@ pub struct TreeState {
     /// The view that last drew the tree. A cached view redraws only for its own
     /// notifications, so every change notifies it too.
     host: Cell<Option<EntityId>>,
+    reload: bool,
 }
 
 impl TreeState {
@@ -369,7 +370,16 @@ impl TreeState {
             model,
             list: cx.new(|cx| VirtualListState::new(rows, cx)),
             host: Cell::new(None),
+            reload: false,
         }
+    }
+
+    /// Asks for a folder's children every time it expands, not only the first time, so
+    /// a tree over a changing source refreshes a folder by collapsing and expanding it.
+    /// The old children stay on screen until [`Self::set_children`] replaces them.
+    pub fn reload_on_expand(mut self) -> Self {
+        self.reload = true;
+        self
     }
 
     pub fn model(&self) -> &TreeModel {
@@ -388,17 +398,19 @@ impl TreeState {
     }
 
     /// Expands the folder at `row`. Returns the folder when its children have never
-    /// been requested, so the caller can load them and call [`Self::set_children`].
+    /// been requested, or on every expand with [`Self::reload_on_expand`], so the
+    /// caller can load them and call [`Self::set_children`].
     pub fn expand(&mut self, row: usize, cx: &mut Context<Self>) -> Option<NodeId> {
         let request = match self.model.visible[row] {
             Row::Node(id)
-                if matches!(
-                    self.model.node(id).body,
-                    Body::Folder {
-                        children: Children::Unloaded,
-                        ..
-                    }
-                ) =>
+                if self.reload
+                    || matches!(
+                        self.model.node(id).body,
+                        Body::Folder {
+                            children: Children::Unloaded,
+                            ..
+                        }
+                    ) =>
             {
                 Some(id)
             }
@@ -581,8 +593,9 @@ impl Tree {
         self
     }
 
-    /// Called when a folder whose children were never loaded expands. The tree shows
-    /// a Loading row under it until the caller calls [`TreeState::set_children`].
+    /// Called when a folder whose children were never loaded expands, or when any folder
+    /// expands under [`TreeState::reload_on_expand`]. The tree shows a Loading row
+    /// under a folder that never loaded until the caller calls [`TreeState::set_children`].
     pub fn on_expand(mut self, handler: impl Fn(&NodeId, &mut Window, &mut App) + 'static) -> Self {
         self.on_expand = Some(Rc::new(handler));
         self

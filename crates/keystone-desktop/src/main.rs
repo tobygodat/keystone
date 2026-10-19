@@ -4,6 +4,7 @@ mod commands;
 mod conversation;
 mod customization;
 mod customization_agent;
+mod files;
 mod model_selector;
 mod presentation;
 mod relative_time;
@@ -212,6 +213,7 @@ struct Keystone {
     fixture_document: Arc<Document>,
     customize_agent: Option<customization_agent::Agent>,
     palette: Option<commands::Palette>,
+    files: files::Files,
 }
 
 impl Keystone {
@@ -330,6 +332,7 @@ impl Keystone {
             })),
             customize_agent: None,
             palette: None,
+            files: files::Files::default(),
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -2696,12 +2699,14 @@ impl Render for Keystone {
                         || this.settings_menu
                         || this.approval_menu
                         || this.model_menu.is_some()
+                        || this.presentation.current.arrangement.surface_menu.is_some()
                     {
                         this.new_menu = false;
                         this.filter_menu = false;
                         this.settings_menu = false;
                         this.approval_menu = false;
                         this.model_menu = None;
+                        this.presentation.current.arrangement.surface_menu = None;
                         this.refresh(cx);
                         cx.stop_propagation();
                     } else if this.presentation.current.customization.is_open() {
@@ -2710,6 +2715,11 @@ impl Render for Keystone {
                     }
                 },
             ))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &files::ToggleFiles, window, cx| {
+                    this.toggle_files(window, cx)
+                }),
+            )
             .on_action(self.scoped_listener(
                 cx,
                 |this, _: &customization::OpenCustomize, window, cx| {
@@ -6647,6 +6657,84 @@ mod tests {
     }
 
     #[gpui::test]
+    fn palette_runs_toggle_files(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        let saved_files_views = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.saved_layout().map(|layout| {
+                    layout
+                        .shown()
+                        .views()
+                        .filter(|(_, c)| *c == keystone_core::Component::Files)
+                        .count()
+                })
+            })
+        };
+        assert_eq!(saved_files_views(&view, cx), None, "no project layout yet");
+        run_from_palette(cx, "toggle files");
+        assert!(
+            cx.debug_bounds("files-tree-row-1").is_some(),
+            "Files opens beside the conversation"
+        );
+        assert!(cx.debug_bounds("conversation").is_some());
+        assert_eq!(saved_files_views(&view, cx), Some(1), "the layout is saved");
+        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("files-tree-row-1").is_none(),
+            "Ctrl+Shift+E closes Files"
+        );
+        assert_eq!(saved_files_views(&view, cx), Some(0));
+    }
+
+    #[gpui::test]
+    fn surface_menu_adds_a_conversation_tab_beside_files(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+        let (_view, cx) = open_with_session(dir.path(), cx);
+        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("files-tab-0").is_some(), "a lone Files tab");
+        assert!(cx.debug_bounds("surface-add-files").is_none());
+
+        click(cx, "surface-add");
+        assert!(
+            cx.debug_bounds("surface-add-files").is_none(),
+            "the only Files view is already open"
+        );
+        click(cx, "surface-add-conversation");
+        assert!(cx.debug_bounds("files-tab-0").is_none(), "no longer alone");
+        assert!(
+            cx.debug_bounds("conversation-view-4").is_some(),
+            "the new conversation is the selected tab"
+        );
+        assert!(cx.debug_bounds("files-tree-row-1").is_none());
+        let strip = cx
+            .debug_bounds("surface-tabs-3-tab-0")
+            .expect("the Files tab is first in its group");
+        cx.simulate_click(strip.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("files-tree-row-1").is_some(),
+            "Files tab shows again"
+        );
+        assert!(
+            cx.debug_bounds("conversation").is_some(),
+            "the main conversation is untouched"
+        );
+
+        click(cx, "surface-tabs-3-tab-1");
+        click(cx, "surface-tabs-3-tab-1-close");
+        assert!(cx.debug_bounds("conversation-view-4").is_none());
+        assert!(
+            cx.debug_bounds("files-tab-0").is_some(),
+            "Files is alone again"
+        );
+    }
+
+    #[gpui::test]
     fn palette_runs_focus_search(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
@@ -6866,6 +6954,7 @@ fn bind_keys(cx: &mut App) {
     TextInput::bind_keys(cx);
     customization::bind_keys(cx);
     cx.bind_keys(commands::bindings());
+    files::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new(
             "tab",
