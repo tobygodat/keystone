@@ -3,7 +3,7 @@ use crate::presentation::ConversationFolder;
 use crate::*;
 use gpui::EventEmitter;
 use keystone_agent::idle::{IdleCandidate, IdlePolicy};
-use keystone_agent::recovery::{self, Snapshot, TurnEvidence};
+use keystone_agent::recovery::{self, RecoveryBatch, Snapshot, TurnEvidence};
 use keystone_agent::{Catalog, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{AccountId, Applied, ProjectId, SavedComposition, WorkingDirectory};
@@ -119,7 +119,12 @@ impl AppState {
     fn record_loss(&mut self, session: u64, lost: u64) {
         if lost > 0 {
             let lost = lost.max(self.logs.lost_entries(session));
-            self.log_losses.insert(session, format!("Session {session}: {lost} entries were lost (log budget exceeded). Further log writes are disabled until restart."));
+            let entries = if lost == 1 {
+                "1 log entry was".to_owned()
+            } else {
+                format!("{lost} log entries were")
+            };
+            self.log_losses.insert(session, format!("Session {session}: {entries} lost (log budget exceeded). Later entries are still saved, and after a restart the conversation marks the gap."));
         }
     }
     pub(crate) fn conversations(&self) -> &HashMap<u64, Conversation> {
@@ -716,6 +721,15 @@ impl AppState {
             let _ = wake_tx.unbounded_send(());
         });
         let logs = Logs::with_database(store.database(), wake.clone());
+        // A small log budget for scripted native runs; release builds keep the default.
+        #[cfg(debug_assertions)]
+        let logs = match std::env::var("KEYSTONE_TEST_LOG_BUDGET_BYTES")
+            .ok()
+            .and_then(|bytes| bytes.parse().ok())
+        {
+            Some(bytes) => logs.with_budget(bytes),
+            None => logs,
+        };
         Self {
             store,
             error: None,
@@ -1033,9 +1047,21 @@ impl AppState {
                     session,
                     ticket,
                     error,
+                    lost,
                 } => {
                     match self.idle_saves.get(&session) {
-                        Some((saved, _)) if *saved == ticket => self.idle_saved(session, error),
+                        // A process outlives any loss in its session, as before markers
+                        // were saved as they happen.
+                        Some((saved, _)) if *saved == ticket => self.idle_saved(
+                            session,
+                            error.or_else(|| {
+                                (lost > 0)
+                                    .then(|| format!("Session {session}: log entries were lost"))
+                            }),
+                        ),
+                        // Earlier loss is marked in the log and does not hold back a
+                        // recovery saved after it; a rejected batch is held for Retry
+                        // when it is queued.
                         _ => self.recovery_saved(session, ticket, error),
                     }
                     sidebar_changed = true;
@@ -1499,13 +1525,12 @@ impl AppState {
         match batch {
             Some(batch) => {
                 let report = batch.report.clone();
-                conversation.apply_recovery(batch);
+                conversation.apply_recovery(batch.clone());
                 conversation.recovery = Some(Recovery::Saving {
                     report,
                     error: None,
                 });
-                self.commit(session);
-                self.logs.checkpoint(session, ticket);
+                self.save_recovery(session, ticket, batch);
             }
             None => {
                 self.recoveries.remove(&session);
@@ -1514,6 +1539,18 @@ impl AppState {
             }
         }
         self.refresh(cx);
+    }
+
+    /// Commits a shown recovery batch, then asks the log to confirm it. A batch the log
+    /// rejects over its budget is held for Retry instead of being confirmed.
+    fn save_recovery(&mut self, session: u64, ticket: u64, batch: RecoveryBatch) {
+        let lost = self.logs.lost_entries(session);
+        self.commit(session);
+        if self.logs.lost_entries(session) == lost {
+            self.logs.checkpoint(session, ticket);
+        } else if let Some(conversation) = self.conversations.get_mut(&session) {
+            conversation.recovery = Some(Recovery::Unsaved(batch));
+        }
     }
 
     /// The log confirmed, or failed to confirm, a recovery batch.
@@ -1552,8 +1589,11 @@ impl AppState {
         };
         if matches!(
             conversation.recovery,
-            Some(Recovery::Review(_) | Recovery::Unavailable(_))
+            Some(Recovery::Review(_) | Recovery::Unavailable(_) | Recovery::Unsaved(_))
         ) {
+            if matches!(conversation.recovery, Some(Recovery::Unsaved(_))) {
+                self.recoveries.remove(&session);
+            }
             conversation.recovery = None;
             self.reviewing.remove(&session);
             if conversation.is_loading() {
@@ -1606,6 +1646,17 @@ impl AppState {
                     self.logs.checkpoint(session, *ticket);
                 }
                 self.commit(session);
+                self.refresh(cx);
+            }
+            Some(Recovery::Unsaved(batch)) => {
+                conversation.recovery = Some(Recovery::Saving {
+                    report: batch.report.clone(),
+                    error: None,
+                });
+                conversation.log_recovery(batch.clone());
+                if let Some(ticket) = self.recoveries.get(&session).copied() {
+                    self.save_recovery(session, ticket, batch);
+                }
                 self.refresh(cx);
             }
             // Rows still loading are not Keystone's history: the check waits for them.

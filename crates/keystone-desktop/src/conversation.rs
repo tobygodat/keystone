@@ -5,7 +5,7 @@
 //! hands to [`keystone_agent::log::Logs`], and saved history arrives through
 //! [`Conversation::restore`].
 
-use keystone_agent::log::{Entry, Write};
+use keystone_agent::log::{Entry, Write, lost_count, with_lost_count};
 use keystone_agent::recovery::{Operation, RecoveryBatch, RecoveryReport};
 use keystone_agent::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
@@ -51,6 +51,9 @@ pub enum Recovery {
     /// The provider's saved conversation could not be read, so this turn's outcome is
     /// unknown. Nothing was saved for it.
     Unavailable(String),
+    /// Recovered rows are shown, but the log rejected the batch over its budget. Retry
+    /// logs it again; once the user continues, a later restart may not show it.
+    Unsaved(RecoveryBatch),
 }
 
 #[derive(Default)]
@@ -233,6 +236,10 @@ impl Conversation {
                     exited = false;
                     review = None;
                 }
+                // A gap marker says what is missing, not what happened, so it changes
+                // neither the recovery check nor the turn it is in.
+                Entry::Item { item, .. }
+                    if item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX) => {}
                 Entry::Item { item, .. } => {
                     settled = false;
                     last_local = item.id.starts_with(LOCAL) && item.kind == ItemKind::UserMessage;
@@ -259,6 +266,10 @@ impl Conversation {
                 }
                 Entry::Item { item, .. } => match self.position_for(&item) {
                     Some(index) => {
+                        // A gap marker saved again may stand for an earlier lost entry.
+                        if lost_count(&item).is_some() {
+                            places[index] = places[index].min(place);
+                        }
                         self.rows[index] = Row::Item(item);
                         None
                     }
@@ -292,6 +303,24 @@ impl Conversation {
             .collect();
         // Stable, so rows with the same place keep their order in the file.
         ordered.sort_by_key(|(place, _, _)| *place);
+        // Log gap markers with nothing between them read as one gap.
+        ordered.dedup_by(|(_, _, later), (_, _, kept)| {
+            let (Row::Item(later), Row::Item(kept)) = (later, kept) else {
+                return false;
+            };
+            let (Some(more), Some(count)) = (lost_count(later), lost_count(kept)) else {
+                return false;
+            };
+            // The same marker saved twice, after a write whose outcome was unknown,
+            // already counts the earlier copy.
+            let total = if later.id == kept.id {
+                count.max(more)
+            } else {
+                count.saturating_add(more)
+            };
+            with_lost_count(kept, total);
+            true
+        });
         let (origins, rows): (Vec<usize>, Vec<Row>) = ordered
             .into_iter()
             .map(|(_, origin, row)| (origin, row))
@@ -361,6 +390,11 @@ impl Conversation {
         if let Some(first) = first {
             self.changed.extend(first..self.rows.len().max(len));
         }
+        self.write(Entry::Recovery { batch }, true);
+    }
+
+    /// Logs a recovery batch already shown, whose earlier write the log rejected.
+    pub fn log_recovery(&mut self, batch: RecoveryBatch) {
         self.write(Entry::Recovery { batch }, true);
     }
 
@@ -712,6 +746,132 @@ mod tests {
     }
 
     use super::*;
+
+    fn gap_marker(id: &str, count: u64, seq: Option<u64>, run: Option<u64>) -> Entry {
+        let mut item = Item {
+            id: format!("{}{id}", keystone_agent::log::LOSS_MARKER_PREFIX),
+            kind: ItemKind::Other {
+                name: String::new(),
+            },
+            text: String::new(),
+            status: ItemStatus::Failed,
+        };
+        with_lost_count(&mut item, count);
+        Entry::Item { item, seq, run }
+    }
+
+    fn shown(conversation: &Conversation) -> Vec<String> {
+        conversation
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) => Some(item.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn adjacent_log_gap_markers_restore_as_one_gap_and_separate_ones_stay_in_place() {
+        let placed = |item: Item, seq| Entry::Item {
+            item,
+            seq: Some(seq),
+            run: Some(7),
+        };
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            placed(message("kept", "kept at 2", ItemStatus::Completed), 2),
+            gap_marker("a", 1, Some(3), Some(7)),
+            gap_marker("b", 1, Some(1), Some(7)),
+            gap_marker("c", 2, Some(4), Some(7)),
+            placed(message("later", "later at 5", ItemStatus::Completed), 5),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            [
+                "1 log entry was lost (log budget exceeded).",
+                "kept at 2",
+                "3 log entries were lost (log budget exceeded).",
+                "later at 5",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gap_marker_after_an_unanswered_message_still_asks_for_a_recovery_check() {
+        let local = Entry::Item {
+            item: Item {
+                id: format!("{LOCAL}1"),
+                kind: ItemKind::UserMessage,
+                text: "hi".into(),
+                status: ItemStatus::Completed,
+            },
+            seq: Some(0),
+            run: Some(1),
+        };
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![local, gap_marker("reply", 3, Some(1), Some(1))]));
+        assert!(conversation.needs_recovery());
+        assert_eq!(
+            shown(&conversation),
+            ["hi", "3 log entries were lost (log budget exceeded)."]
+        );
+    }
+
+    #[test]
+    fn a_gap_marker_saved_again_with_an_earlier_place_moves_before_the_rows_after_it() {
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            Entry::Item {
+                item: message("kept", "kept at 2", ItemStatus::Completed),
+                seq: Some(2),
+                run: Some(1),
+            },
+            gap_marker("same", 1, Some(3), Some(1)),
+            gap_marker("same", 2, Some(1), Some(1)),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            [
+                "2 log entries were lost (log budget exceeded).",
+                "kept at 2"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_same_gap_marker_saved_twice_shows_once_with_its_larger_count() {
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            gap_marker("same", 1, Some(3), Some(1)),
+            gap_marker("same", 2, Some(1), Some(1)),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            ["2 log entries were lost (log budget exceeded)."]
+        );
+    }
+
+    #[test]
+    fn a_gap_marker_without_a_place_merges_with_the_next_runs_marker() {
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            Entry::Item {
+                item: message("old", "earlier run", ItemStatus::Completed),
+                seq: Some(0),
+                run: Some(1),
+            },
+            gap_marker("turn", 1, None, None),
+            gap_marker("item", 1, Some(0), Some(100)),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            [
+                "earlier run",
+                "2 log entries were lost (log budget exceeded).",
+            ]
+        );
+    }
 
     fn message(id: &str, text: &str, status: ItemStatus) -> Item {
         Item {

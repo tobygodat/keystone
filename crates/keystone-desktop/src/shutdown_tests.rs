@@ -292,6 +292,134 @@ fn failed_nonselected_log_barrier_vetoes_close_and_retry_needs_no_send(cx: &mut 
     assert_eq!(texts, ["retained exactly once"]);
 }
 
+/// A completed command whose command line alone is over the log budget, so capping its
+/// output cannot make it fit.
+fn oversized_command() -> keystone_agent::Item {
+    keystone_agent::Item {
+        id: "oversized-rejected-item".into(),
+        kind: ItemKind::Command {
+            command: "a".repeat(16 * 1024 * 1024),
+            exit_code: Some(0),
+        },
+        text: String::new(),
+        status: keystone_agent::ItemStatus::Completed,
+    }
+}
+
+fn saved_texts(sessions: &Path, session: u64) -> Vec<String> {
+    keystone_agent::log::read(sessions, session)
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            keystone_agent::log::Entry::Item { item, .. } => Some(item.text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn log_budget_gap_is_marked_before_quit_so_a_crash_keeps_it_in_its_conversation(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_view, state, cx) = open(dir.path(), cx);
+    state.update(cx, |state, cx| {
+        let logs = Logs::with_database(state.store().database(), state.test_wake().clone())
+            .with_budget(3000);
+        state.test_set_logs(logs);
+        state.ensure_history(1);
+        state.ensure_history(2);
+        state.flush_logs(cx).unwrap();
+    });
+    let writer = lock_database(&dir.path().join("workspace.sqlite3"));
+    state.update(cx, |state, cx| {
+        for text in [
+            "kept before the pressure".to_owned(),
+            "1".repeat(1000),
+            "2".repeat(1000),
+            "3".repeat(1000),
+            "4".repeat(1000),
+        ] {
+            state.test_conversation(2).push_local(&text);
+            state.commit(2);
+        }
+        state.publish(cx);
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !state.read_with(cx, |state, _| {
+        state.conversations()[&2].save_error.is_some() && state.log_losses().next().is_some()
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the locked writer must fail first"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+    let notice = state.read_with(cx, |state, _| {
+        state.log_losses().cloned().collect::<Vec<_>>()
+    });
+    assert_eq!(
+        notice,
+        [
+            "Session 2: 2 log entries were lost (log budget exceeded). Later entries are still saved, and after a restart the conversation marks the gap."
+        ]
+    );
+    drop(writer);
+    state.update(cx, |state, cx| {
+        state.test_conversation(2).push_local("saved after the gap");
+        state.commit(2);
+        state
+            .test_conversation(1)
+            .push_local("another conversation");
+        state.commit(1);
+        state.publish(cx);
+    });
+    // No Quit: the log is read as a crash would leave it.
+    let sessions = dir.path().join("sessions");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !saved_texts(&sessions, 2).contains(&"saved after the gap".to_owned())
+        || saved_texts(&sessions, 1).is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "later entries must save without Quit: {:?}",
+            saved_texts(&sessions, 2)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut restored = Conversation::loading();
+    restored.restore(Ok(keystone_agent::log::read(&sessions, 2).unwrap()));
+    let texts: Vec<_> = restored
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Item(item) => Some(item.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "kept before the pressure".to_owned(),
+            "1".repeat(1000),
+            "2".repeat(1000),
+            "2 log entries were lost (log budget exceeded).".to_owned(),
+            "saved after the gap".to_owned(),
+        ]
+    );
+    let Row::Item(marker) = &restored.rows[3] else {
+        panic!("the gap marker is an item row");
+    };
+    assert_eq!(
+        transcript::loss_summary(marker).badges,
+        [("Partial", Color::Warning)]
+    );
+    let (_, rendered) = cx.add_window_view(|_, _| RestoredRow(restored.rows[3].clone()));
+    assert!(rendered.debug_bounds("log-loss-notice-0").is_some());
+    assert_eq!(saved_texts(&sessions, 1), ["another conversation"]);
+}
+
 #[gpui::test]
 fn terminal_budget_loss_stays_visible_but_repaired_pending_writes_allow_quit(
     cx: &mut TestAppContext,
@@ -311,14 +439,7 @@ fn terminal_budget_loss_stays_visible_but_repaired_pending_writes_allow_quit(
         state.commit(2);
         state
             .test_conversation(2)
-            .apply(Event::ItemCompleted(keystone_agent::Item {
-                id: "oversized-rejected-item".into(),
-                kind: ItemKind::Other {
-                    name: "scripted output".into(),
-                },
-                text: "a".repeat(16 * 1024 * 1024),
-                status: keystone_agent::ItemStatus::Completed,
-            }));
+            .apply(Event::ItemCompleted(oversized_command()));
         state.commit(2);
         state.publish(cx);
     });
@@ -367,7 +488,7 @@ fn terminal_budget_loss_stays_visible_but_repaired_pending_writes_allow_quit(
         texts,
         [
             "retained before the gap",
-            "1 log entries were lost (log budget exceeded)."
+            "1 log entry was lost (log budget exceeded)."
         ]
     );
     assert_eq!(
@@ -389,14 +510,7 @@ fn nonselected_terminal_loss_is_visible_before_any_quit_attempt(cx: &mut TestApp
         state.flush_logs(cx).unwrap();
         state
             .test_conversation(2)
-            .apply(Event::ItemCompleted(keystone_agent::Item {
-                id: "oversized-rejected-item".into(),
-                kind: ItemKind::Other {
-                    name: "scripted output".into(),
-                },
-                text: "a".repeat(16 * 1024 * 1024),
-                status: keystone_agent::ItemStatus::Completed,
-            }));
+            .apply(Event::ItemCompleted(oversized_command()));
         state.commit(2);
         state.publish(cx);
     });
@@ -405,7 +519,7 @@ fn nonselected_terminal_loss_is_visible_before_any_quit_attempt(cx: &mut TestApp
             view.status_line(cx)
                 .unwrap()
                 .0
-                .contains("1 entries were lost")
+                .contains("1 log entry was lost")
         );
     });
     view.update_in(cx, |view, window, cx| view.toggle_settings(window, cx));
@@ -416,7 +530,7 @@ fn nonselected_terminal_loss_is_visible_before_any_quit_attempt(cx: &mut TestApp
             view.status_line(cx)
                 .unwrap()
                 .0
-                .contains("1 entries were lost")
+                .contains("1 log entry was lost")
         );
     });
 }

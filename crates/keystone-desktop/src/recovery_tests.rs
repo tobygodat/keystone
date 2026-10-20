@@ -410,6 +410,128 @@ fn a_recovery_that_cannot_be_saved_holds_send_until_storage_is_repaired(
     assert_eq!(batches(&sessions), 1);
 }
 
+#[gpui::test]
+fn retry_saves_a_rejected_recovery_once_the_log_has_room(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let (store, home, cwd) = claude_workspace(dir);
+    let sessions = dir.join("sessions");
+    killed_turn(&sessions, 1, "u1", "hello");
+    claude_store(
+        &home,
+        "claude-thread",
+        &cwd,
+        &[
+            prompt("u1", "hello"),
+            assistant(
+                "msg_A",
+                json!({"type": "text", "text": "A recovered reply."}),
+            ),
+        ],
+    );
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    state.update(cx, |state, cx| {
+        let logs = Logs::with_database(state.store().database(), state.test_wake().clone())
+            .with_budget(3000);
+        state.test_set_logs(logs);
+        state.ensure_history(2);
+        state.flush_logs(cx).unwrap();
+    });
+    // A locked store retains another session's writes until the shared budget is full.
+    let writer = crate::tests::lock_database(&dir.join("workspace.sqlite3"));
+    state.update(cx, |state, cx| {
+        for n in 0..40 {
+            state
+                .test_conversation(2)
+                .push_local(&n.to_string().repeat(40));
+            state.commit(2);
+        }
+        state.publish(cx);
+        state.ensure_history(1);
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        cx.run_until_parked();
+        let recovery = state.read_with(cx, |state, _| {
+            state.conversations.get(&1).and_then(|c| c.recovery.clone())
+        });
+        if matches!(recovery, Some(Recovery::Unsaved(_))) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{recovery:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(writer);
+    state.update(cx, |state, cx| state.flush_logs(cx).unwrap());
+    state.update(cx, |state, cx| state.retry_recovery(1, cx));
+    wait_until(cx, &state, |state| {
+        !matches!(
+            state.conversations[&1].recovery,
+            Some(Recovery::Unsaved(_) | Recovery::Saving { .. })
+        )
+    });
+    assert_eq!(batches(&sessions), 1);
+    let saved = keystone_agent::log::read(&sessions, 1).unwrap();
+    assert!(saved.iter().any(|entry| matches!(entry,
+        Entry::Recovery { batch } if format!("{:?}", batch.operations).contains("A recovered reply."))));
+}
+
+#[gpui::test]
+fn a_recovery_the_log_budget_rejects_says_it_is_not_saved_and_continue_goes_on(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let (store, home, cwd) = claude_workspace(dir);
+    let sessions = dir.join("sessions");
+    killed_turn(&sessions, 1, "u1", "hello");
+    claude_store(
+        &home,
+        "claude-thread",
+        &cwd,
+        &[
+            prompt("u1", "hello"),
+            assistant(
+                "msg_A",
+                json!({"type": "text", "text": "A recovered reply too large for the log. ".repeat(20)}),
+            ),
+        ],
+    );
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    state.update(cx, |state, _| {
+        let logs = Logs::with_database(state.store().database(), state.test_wake().clone())
+            .with_budget(600);
+        state.test_set_logs(logs);
+        state.ensure_history(1);
+    });
+    wait_until(cx, &state, |state| {
+        matches!(
+            state
+                .conversations
+                .get(&1)
+                .and_then(|c| c.recovery.as_ref()),
+            Some(Recovery::Unsaved(_))
+        )
+    });
+    assert_eq!(batches(&sessions), 0);
+    // Still no room: Retry holds the batch again and never confirms it.
+    state.update(cx, |state, cx| state.retry_recovery(1, cx));
+    assert!(matches!(
+        state.read_with(cx, |state, _| state.conversations[&1].recovery.clone()),
+        Some(Recovery::Unsaved(_))
+    ));
+    assert_eq!(batches(&sessions), 0);
+    state.update(cx, |state, cx| {
+        assert!(state.conversations[&1].rows.iter().any(|row| matches!(row,
+            Row::Item(item) if item.text.starts_with("A recovered reply"))));
+        assert!(state.log_losses().next().is_some());
+        state.continue_after_recovery(1, cx);
+        assert_eq!(state.conversations[&1].recovery, None);
+    });
+}
+
 /// A scripted provider that records its store and keeps Keystone's environment.
 fn store_wrapper(dir: &Path, name: &str) -> PathBuf {
     let binary = std::env::current_exe()

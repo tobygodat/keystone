@@ -2257,6 +2257,13 @@ impl Keystone {
                 true,
                 true,
             ),
+            Recovery::Unsaved(_) => (
+                "The recovered history is shown, but the log had no room to save it. Retry saves it once there is room; if you continue without it, a restart may not show it. Your draft is kept and nothing was resent."
+                    .to_owned(),
+                Color::Warning,
+                true,
+                true,
+            ),
         };
         let keyboard = self
             .presentation

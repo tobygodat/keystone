@@ -302,14 +302,7 @@ pub fn row(
             ItemKind::Other { .. }
                 if item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX) =>
             {
-                div()
-                    .automation_id(format!("log-loss-notice-{index}"))
-                    .child(
-                        Label::new(item.text.clone())
-                            .size(TextSize::Ui)
-                            .color(Color::Muted),
-                    )
-                    .into_any_element()
+                report(format!("log-loss-notice-{index}"), loss_summary(item), cx)
             }
             ItemKind::Tool { .. } | ItemKind::Other { .. } => {
                 let control = activity.expect("tool disclosure");
@@ -371,37 +364,11 @@ pub fn row(
                 .color(color)
                 .into_any_element()
         }
-        Row::Recovery(report) => {
-            let summary = recovery_summary(report);
-            v_flex()
-                .automation_id(format!("recovery-report-{index}"))
-                .gap_1()
-                .child(
-                    h_flex()
-                        .items_start()
-                        .gap_2()
-                        .children(
-                            summary
-                                .badges
-                                .iter()
-                                .map(|(text, color)| badge(text, *color, cx)),
-                        )
-                        .child(
-                            div().flex_1().min_w_0().child(
-                                Label::new(summary.headline)
-                                    .size(TextSize::Ui)
-                                    .color(Color::Muted),
-                            ),
-                        ),
-                )
-                .children(summary.details.into_iter().map(|line| {
-                    Label::new(line)
-                        .size(TextSize::Sm)
-                        .color(Color::Muted)
-                        .into_any_element()
-                }))
-                .into_any_element()
-        }
+        Row::Recovery(recovery) => report(
+            format!("recovery-report-{index}"),
+            recovery_summary(recovery),
+            cx,
+        ),
         Row::Decision { action, allowed } => Label::new(format!(
             "{} {action}",
             if *allowed { "Allowed:" } else { "Denied:" }
@@ -410,6 +377,38 @@ pub fn row(
         .color(Color::Muted)
         .into_any_element(),
     }
+}
+
+/// A report row: badges, then the headline, then a line per detail.
+fn report(id: String, summary: RecoverySummary, cx: &App) -> AnyElement {
+    v_flex()
+        .automation_id(id)
+        .gap_1()
+        .child(
+            h_flex()
+                .items_start()
+                .gap_2()
+                .children(
+                    summary
+                        .badges
+                        .iter()
+                        .map(|(text, color)| badge(text, *color, cx)),
+                )
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Label::new(summary.headline)
+                            .size(TextSize::Ui)
+                            .color(Color::Muted),
+                    ),
+                ),
+        )
+        .children(summary.details.into_iter().map(|line| {
+            Label::new(line)
+                .size(TextSize::Sm)
+                .color(Color::Muted)
+                .into_any_element()
+        }))
+        .into_any_element()
 }
 
 /// A small outlined label beside a row.
@@ -445,6 +444,19 @@ fn plural(count: u64, one: &str, many: &str) -> String {
         format!("1 {one}")
     } else {
         format!("{count} {many}")
+    }
+}
+
+/// How a log gap marker reads, as a partial recovery does: what is shown here is not
+/// everything that happened.
+pub fn loss_summary(marker: &Item) -> RecoverySummary {
+    RecoverySummary {
+        badges: vec![("Partial", Color::Warning)],
+        headline: marker.text.clone(),
+        details: vec![
+            "Keystone showed them while it ran, but its log was full, so they were not saved."
+                .into(),
+        ],
     }
 }
 
