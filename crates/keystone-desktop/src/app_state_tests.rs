@@ -1117,3 +1117,6 @@ fn an_account_folder_swapped_for_a_link_to_another_never_sends(cx: &mut gpui::Te
 
 #[path = "recovery_tests.rs"]
 mod recovery;
+
+#[path = "idle_tests.rs"]
+mod idle;

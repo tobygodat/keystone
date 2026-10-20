@@ -335,6 +335,157 @@ fn codex_agent_launches_and_reads_claude(cx: &mut gpui::TestAppContext) {
     cross_provider_scenario(Provider::Codex, cx);
 }
 
+/// A Claude child an agent launched is evicted when proven idle like any session.
+/// Dormant, it cannot be steered (`busy`, as an idle target always is), reads and
+/// waits answer from Keystone's own copy without starting it, an interrupt is a no-op,
+/// and the user's next Send resumes it.
+#[gpui::test]
+fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
+    cx: &mut gpui::TestAppContext,
+) {
+    use keystone_agent::idle::{IdlePolicy, ManualClock};
+    let directory = tempfile::tempdir().unwrap();
+    let wrapper = directory.path().join("claude-idle");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nKEYSTONE_FAKE_CLAUDE_IDLE=1 KEYSTONE_FAKE_CLAUDE_DELAY_MS=1 KEYSTONE_FAKE_CLAUDE_ARGV_LOG={} exec {} \"$@\"\n",
+            directory.path().join("argv").display(),
+            scripted(Provider::Claude).display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("argv"), "").unwrap();
+    std::fs::set_permissions(
+        &wrapper,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .unwrap();
+    let state = setup(directory.path(), Provider::Codex, cx);
+    let clock = Arc::new(ManualClock::default());
+    state.update(cx, |state, _| {
+        let claude = ClaudeConnection::new(Some(wrapper), state.wake.clone());
+        claude.enable_idle_eviction(IdlePolicy {
+            timeout: Duration::from_secs(600),
+            clock: clock.clone(),
+        });
+        state.claude.insert(None, claude);
+    });
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text: "orchestrator test: launch claude".into()
+            },
+            cx
+        ))
+    });
+    wait_until(&state, cx, |state| {
+        state.conversations.get(&1).is_some_and(|c| !c.running)
+            && transcript(state, 1).contains("Scripted orchestrator")
+            && state.conversations.get(&2).is_some_and(|c| !c.running)
+            && state
+                .claude
+                .get(&None)
+                .and_then(|c| c.residency(2))
+                .is_some_and(|r| r == "armed")
+    });
+    assert!(
+        state
+            .read_with(cx, |state, _| transcript(state, 1))
+            .contains("Scripted orchestrator success:")
+    );
+    clock.advance(Duration::from_secs(601));
+    wait_until(&state, cx, |state| {
+        state.claude.get(&None).is_some_and(|c| c.pid(2).is_none())
+    });
+    let rows = state.read_with(cx, |state, _| state.conversations[&2].rows.len());
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text: "long".into()
+            },
+            cx
+        ))
+    });
+    wait_until(&state, cx, |state| {
+        state.started(1).is_some_and(|c| c.is_running(1))
+    });
+    let caller = state.read_with(cx, |state, _| {
+        state.orchestrator.as_ref().unwrap().last_caller.unwrap()
+    });
+    state.update(cx, |state, cx| {
+        let send = state.orchestrate(
+            caller,
+            "session_send",
+            json!({"session":2, "message":"wake up", "client_request_id":"dormant-send"}),
+            cx,
+        );
+        assert!(send.unwrap_err().contains("busy"));
+        let read = state
+            .orchestrate(caller, "session_read", json!({"session":2}), cx)
+            .unwrap();
+        assert_eq!(read["running"], false);
+        assert_eq!(read["rows"].as_array().unwrap().len(), rows);
+        let wait = state
+            .orchestrate(caller, "session_wait", json!({"session":2,"timeout":0}), cx)
+            .unwrap();
+        assert_eq!(wait["running"], false);
+        assert!(
+            state
+                .orchestrate(caller, "session_interrupt", json!({"session":2}), cx)
+                .is_ok()
+        );
+        state.stop_turn(1, cx);
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            state.claude.get(&None).unwrap().pid(2),
+            None,
+            "nothing started it"
+        );
+        assert_eq!(state.conversations[&2].rows.len(), rows);
+    });
+    wait_until(&state, cx, |state| {
+        !state.started(1).is_some_and(|c| c.is_running(1))
+    });
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 2,
+                text: "resume the child".into()
+            },
+            cx
+        ))
+    });
+    wait_until(&state, cx, |state| {
+        state.conversations.get(&2).is_some_and(|c| !c.running)
+            && transcript(state, 2).contains("resume the child")
+    });
+    let launches: Vec<Vec<String>> = std::fs::read_to_string(directory.path().join("argv"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        // The child runs Read only, so its chat launches name plan mode; version
+        // checks and catalog probes do not.
+        .filter(|args: &Vec<String>| args.iter().any(|a| a == "--permission-mode"))
+        .collect();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    let thread = state.read_with(cx, |state, _| {
+        state
+            .session(2)
+            .unwrap()
+            .provider_thread()
+            .unwrap()
+            .to_owned()
+    });
+    let resume = launches[1].iter().position(|a| a == "--resume").unwrap();
+    assert_eq!(launches[1][resume + 1], thread);
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
 #[test]
 fn a_launch_account_is_default_or_one_of_that_providers_added_accounts() {
     let mut store = Store::in_memory().unwrap();

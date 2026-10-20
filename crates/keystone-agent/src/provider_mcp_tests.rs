@@ -768,7 +768,98 @@ fn live(driver: ClaudeDriver, lease: Lease) -> Live {
         resume: None,
         model: None,
         replacing: false,
+        seen: 0,
+        epoch: 0,
+        idle: Idle::Busy(None),
     }
+}
+
+/// A message the launching agent may no longer send leaves the queue, and with it the
+/// reason the running process was not idle.
+#[test]
+fn a_refused_queued_message_no_longer_keeps_the_process_busy() {
+    let server = server();
+    let (_, _, lease) = server.issuer().issue(7).unwrap().into_parts();
+    let connection = ClaudeConnection::new(None, Arc::new(|| {}));
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+    claude_init(&mut driver, &mut out);
+    claude_lifecycle(&mut driver, &mut out);
+    let mut current = live(driver, lease);
+    current.process = Some(
+        Process::spawn(
+            std::path::Path::new("/bin/cat"),
+            &[],
+            std::path::Path::new("/"),
+            &LaunchProfile::default(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap(),
+    );
+    let waiting = Idle::Busy(Some("a message is waiting to be sent"));
+    current.idle = waiting.clone();
+    {
+        let mut shared = connection.starter.shared.lock().unwrap();
+        shared.idle = Some(IdlePolicy::after(Duration::from_secs(600)));
+        shared.live.insert(7, current);
+        shared.queued.insert(7, 1);
+    }
+    let caller = Caller {
+        session: 99,
+        generation: 0,
+    };
+    let job = Job::Message(PathBuf::from("/synthetic"), None, None, Some(caller));
+    connection
+        .starter
+        .run(7, job, |_, _| panic!("the refused message was dispatched"));
+    let shared = connection.starter.shared.lock().unwrap();
+    assert!(!shared.queued.contains_key(&7));
+    assert_ne!(shared.live[&7].idle, waiting);
+}
+
+/// The first check's timeout cannot end the check at the interval's end, which may
+/// come sooner than that timeout when the interval is short.
+#[test]
+fn the_first_checks_timeout_does_not_end_the_confirming_check() {
+    let server = server();
+    let (_, _, lease) = server.issuer().issue(7).unwrap().into_parts();
+    let connection = ClaudeConnection::new(None, Arc::new(|| {}));
+    let mut out = Outputs::default();
+    let driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+    let mut current = live(driver, lease);
+    let epoch = current.epoch();
+    let timer = |confirm| Timer {
+        session: 7,
+        generation: current.generation,
+        epoch,
+        kind: TimerKind::CheckTimedOut { confirm },
+    };
+    let (first, confirming) = (timer(false), timer(true));
+    current.idle = Idle::Checking {
+        epoch,
+        confirm: true,
+    };
+    connection
+        .starter
+        .shared
+        .lock()
+        .unwrap()
+        .live
+        .insert(7, current);
+    connection.starter.fire(first);
+    let phase = connection.starter.shared.lock().unwrap().live[&7]
+        .idle
+        .clone();
+    assert!(
+        matches!(phase, Idle::Checking { confirm: true, .. }),
+        "{phase:?}"
+    );
+    connection.starter.fire(confirming);
+    let phase = connection.starter.shared.lock().unwrap().live[&7]
+        .idle
+        .clone();
+    assert!(matches!(phase, Idle::Resident { .. }), "{phase:?}");
 }
 
 #[test]

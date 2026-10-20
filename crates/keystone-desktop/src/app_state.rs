@@ -2,6 +2,7 @@ use crate::conversation::Recovery;
 use crate::presentation::ConversationFolder;
 use crate::*;
 use gpui::EventEmitter;
+use keystone_agent::idle::{IdleCandidate, IdlePolicy};
 use keystone_agent::recovery::{self, Snapshot, TurnEvidence};
 use keystone_agent::{Catalog, LaunchProfile};
 use keystone_core::SessionContext;
@@ -74,6 +75,12 @@ pub(crate) struct AppState {
     reviewing: HashMap<u64, keystone_agent::recovery::RecoveryReport>,
     /// Sessions whose user chose to send before their history arrived.
     send_unloaded: std::collections::HashSet<u64>,
+    /// Idle processes waiting for their session's log to save, by session: the log
+    /// checkpoint's ticket and the provider's candidate.
+    idle_saves: HashMap<u64, (u64, IdleCandidate)>,
+    /// Idle eviction for new Claude connections, in place of the debug-build setting.
+    #[cfg(test)]
+    pub(crate) test_idle: Option<IdlePolicy>,
     /// The default Claude account's config dir, in place of the inherited one.
     #[cfg(test)]
     pub(crate) test_claude_home: Option<PathBuf>,
@@ -731,6 +738,9 @@ impl AppState {
             active_reads: Arc::default(),
             recover_after_load: Default::default(),
             send_unloaded: Default::default(),
+            idle_saves: HashMap::new(),
+            #[cfg(test)]
+            test_idle: None,
             reviewing: HashMap::new(),
             #[cfg(test)]
             test_claude_home: None,
@@ -1024,7 +1034,10 @@ impl AppState {
                     ticket,
                     error,
                 } => {
-                    self.recovery_saved(session, ticket, error);
+                    match self.idle_saves.get(&session) {
+                        Some((saved, _)) if *saved == ticket => self.idle_saved(session, error),
+                        _ => self.recovery_saved(session, ticket, error),
+                    }
                     sidebar_changed = true;
                     session
                 }
@@ -1052,6 +1065,10 @@ impl AppState {
                     continue;
                 }
                 Event::RecoveryNeeded => recover.push(session),
+                Event::IdleCandidate(candidate) => {
+                    self.offer_idle(session, candidate);
+                    continue;
+                }
                 _ => {}
             }
             let failed = turn_failed(&event);
@@ -1183,15 +1200,102 @@ impl AppState {
             Provider::Codex => self.codex.entry(key).or_insert_with(|| {
                 CodexConnection::with_profile(codex, env!("CARGO_PKG_VERSION"), profile, wake)
             }),
-            Provider::Claude => self
-                .claude
-                .entry(key)
-                .or_insert_with(|| ClaudeConnection::with_profile(claude, profile, wake)),
+            Provider::Claude => {
+                let idle = self.idle_policy();
+                self.claude.entry(key).or_insert_with(|| {
+                    let connection = ClaudeConnection::with_profile(claude, profile, wake);
+                    if let Some(policy) = idle {
+                        connection.enable_idle_eviction(policy);
+                    }
+                    connection
+                })
+            }
         };
         if let Some(orchestrator) = &self.orchestrator {
             connection.set_mcp(orchestrator.server.issuer());
         }
         Ok(connection)
+    }
+
+    /// Idle eviction for new Claude connections. Off: no Claude profile has a proven
+    /// quiescence contract (`docs/design/providers.md`). Debug builds take a short
+    /// interval from `KEYSTONE_TEST_CLAUDE_IDLE_MS`, for scripted providers: only with
+    /// `KEYSTONE_CLAUDE_PATH` naming the Claude to run, never the one on `PATH`.
+    fn idle_policy(&self) -> Option<IdlePolicy> {
+        #[cfg(test)]
+        if let Some(policy) = &self.test_idle {
+            return Some(policy.clone());
+        }
+        #[cfg(debug_assertions)]
+        if let Some(ms) = std::env::var("KEYSTONE_TEST_CLAUDE_IDLE_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            && std::env::var_os("KEYSTONE_CLAUDE_PATH").is_some()
+        {
+            return Some(IdlePolicy::after(std::time::Duration::from_millis(ms)));
+        }
+        None
+    }
+
+    /// A provider proved the session's process idle, and every event before that is
+    /// applied. Once the conversation ID is saved and synced and a log checkpoint saves
+    /// everything queued so far, the process may end. Anything not saved, or a session
+    /// busy here, keeps it running; its next activity proves it again.
+    fn offer_idle(&mut self, session: u64, candidate: IdleCandidate) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        let thread_saved = self
+            .session(session)
+            .is_some_and(|s| s.provider_thread() == Some(candidate.thread.as_str()))
+            && !self
+                .pending
+                .iter()
+                .any(|update| matches!(update, PendingSave::Thread(id, _) if *id == session));
+        let settled = self
+            .conversations
+            .get(&session)
+            .is_some_and(|c| !c.is_loading() && !c.running && c.save_error.is_none());
+        let declined = if !thread_saved {
+            Some("its conversation ID is not saved yet")
+        } else if !settled {
+            Some("its conversation is loading, running or not being saved")
+        } else if self.store.sync_pending().is_err() {
+            Some("the workspace could not be saved")
+        } else {
+            None
+        };
+        if let Some(reason) = declined {
+            if let Some(connection) = self.started(session) {
+                connection.decline_idle(session, candidate, format!("Keystone kept it: {reason}"));
+            }
+            return;
+        }
+        self.next_ticket += 1;
+        self.idle_saves
+            .insert(session, (self.next_ticket, candidate));
+        self.logs.checkpoint(session, self.next_ticket);
+    }
+
+    /// The log saved, or failed to save, everything before an idle candidate.
+    fn idle_saved(&mut self, session: u64, error: Option<String>) {
+        let Some((_, candidate)) = self.idle_saves.remove(&session) else {
+            return;
+        };
+        if self.phase != Phase::Running {
+            return;
+        }
+        let Some(connection) = self.started(session) else {
+            return;
+        };
+        match error {
+            None => connection.evict_idle(session, candidate),
+            Some(error) => connection.decline_idle(
+                session,
+                candidate,
+                format!("Keystone kept it: the conversation could not be saved: {error}"),
+            ),
+        }
     }
 
     /// The connection a session's account already has, if any.

@@ -48,6 +48,8 @@ struct Life {
     sentinel: Option<i32>,
     sentinel_reaped: AtomicBool,
     lock: Mutex<()>,
+    /// Set once [`Process::end`] finished teardown, so dropping does not repeat it.
+    ended: AtomicBool,
 }
 
 impl Life {
@@ -88,6 +90,7 @@ impl Process {
             sentinel: spawn_sentinel(child.id()),
             sentinel_reaped: AtomicBool::new(false),
             lock: Mutex::new(()),
+            ended: AtomicBool::new(false),
         });
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -154,11 +157,46 @@ impl Process {
     pub fn send(&self, line: String) {
         let _ = self.stdin.send(line);
     }
+
+    /// Whether the tree holds a process Keystone may not signal, such as a command run
+    /// through `sudo`. [`Process::end`] cannot end one, where dropping's SIGTERM may
+    /// reach it through its parent.
+    pub fn has_foreign(&self) -> bool {
+        Targets::collect(&self.life).has_foreign()
+    }
+
+    /// Ends the process tree on the calling thread and returns only once the leader
+    /// and every process found in its tree that Keystone may signal have exited,
+    /// however long that takes. For a caller that must not start a successor beside the
+    /// old tree, and that checked [`Process::has_foreign`] first.
+    ///
+    /// Nothing gets SIGTERM, whose handler could start a process outside the tree as it
+    /// exits. The tree is frozen with SIGSTOP instead, rescanning once everything found
+    /// has stopped, until a scan finds nothing new: a stopped process forks nothing,
+    /// and a child forked before its parent stopped is found through that parent. Then
+    /// the closed set gets SIGKILL. A process that had already left the tree before
+    /// this began is out of reach, as it is for dropping.
+    pub fn end(self) {
+        let mut targets = Targets::collect(&self.life);
+        loop {
+            targets.signal(&self.life, Signal::Stop);
+            targets.wait_until(&self.life, Targets::stopped);
+            if !targets.absorb(Targets::collect(&self.life)) {
+                break;
+            }
+        }
+        targets.signal(&self.life, Signal::Kill);
+        targets.wait_until(&self.life, Targets::exited);
+        reap_sentinel(&self.life);
+        self.life.ended.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
-        terminate(&self.life, true);
+        if !self.life.ended.load(Ordering::SeqCst) {
+            terminate(&self.life, true);
+        }
     }
 }
 
@@ -272,23 +310,33 @@ fn terminate(life: &Arc<Life>, last: bool) {
     thread::spawn(move || {
         thread::sleep(KILL_GRACE);
         targets.signal(&life, Signal::Kill);
-        #[cfg(unix)]
-        if last && let Some(sentinel) = life.sentinel {
-            let _guard = life.lock.lock().unwrap();
-            if !life.sentinel_reaped.swap(true, Ordering::SeqCst) {
-                // SAFETY: the sentinel is Keystone's own unreaped child.
-                unsafe {
-                    libc::kill(sentinel, libc::SIGKILL);
-                    libc::waitpid(sentinel, std::ptr::null_mut(), 0);
-                }
-            }
+        if last {
+            reap_sentinel(&life);
         }
     });
+}
+
+/// Reaps the group's sentinel, releasing the group ID. Only teardown's end does this.
+fn reap_sentinel(life: &Life) {
+    #[cfg(unix)]
+    if let Some(sentinel) = life.sentinel {
+        let _guard = life.lock.lock().unwrap();
+        if !life.sentinel_reaped.swap(true, Ordering::SeqCst) {
+            // SAFETY: the sentinel is Keystone's own unreaped child.
+            unsafe {
+                libc::kill(sentinel, libc::SIGKILL);
+                libc::waitpid(sentinel, std::ptr::null_mut(), 0);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = life;
 }
 
 #[derive(Clone, Copy)]
 enum Signal {
     Term,
+    Stop,
     Kill,
 }
 
@@ -325,6 +373,7 @@ impl Targets {
         {
             let number = match signal {
                 Signal::Term => libc::SIGTERM,
+                Signal::Stop => libc::SIGSTOP,
                 Signal::Kill => libc::SIGKILL,
             };
             let _guard = life.lock.lock().unwrap();
@@ -344,6 +393,64 @@ impl Targets {
         #[cfg(not(unix))]
         let _ = (life, signal);
     }
+
+    fn has_foreign(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return self.descendants.iter().any(pidfd::Pidfd::is_foreign);
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
+    /// Adds the processes `found` has that these lack. Returns whether there were any.
+    fn absorb(&mut self, found: Targets) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let before = self.descendants.len();
+            for pin in found.descendants {
+                if !self.descendants.iter().any(|known| known.pid == pin.pid) {
+                    self.descendants.push(pin);
+                }
+            }
+            self.descendants.len() > before
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = found;
+            false
+        }
+    }
+
+    /// Waits until the leader and every process found satisfy `done`, reading each
+    /// one's state as `/proc` reports it.
+    fn wait_until(&self, life: &Life, done: fn(Option<char>) -> bool) {
+        #[cfg(target_os = "linux")]
+        loop {
+            let leader = {
+                // While unreaped, the leader's PID is still its own.
+                let _guard = life.lock.lock().unwrap();
+                life.reaped.load(Ordering::SeqCst) || done(pidfd::state(life.pid))
+            };
+            if leader && self.descendants.iter().all(|pin| pin.is(done)) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (life, done);
+    }
+
+    /// Whether a process in `state`, sent SIGSTOP, forks nothing more: it has stopped,
+    /// or waits in the kernel, where the pending stop makes any fork fail and stops
+    /// it before it runs again.
+    fn stopped(state: Option<char>) -> bool {
+        matches!(state, Some('T' | 't' | 'D')) || Self::exited(state)
+    }
+
+    /// Whether a process in `state` has exited. A zombie has, though its parent has not
+    /// reaped it yet.
+    fn exited(state: Option<char>) -> bool {
+        matches!(state, None | Some('Z' | 'X'))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -352,14 +459,43 @@ mod pidfd {
 
     /// A handle to one specific process. Signals sent through it never reach a later
     /// process that reuses the same PID.
-    pub struct Pidfd(OwnedFd);
+    pub struct Pidfd {
+        fd: OwnedFd,
+        pub pid: u32,
+    }
+
+    /// The state letter `/proc` reports for `pid`, `None` once nothing holds that PID.
+    pub fn state(pid: u32) -> Option<char> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        text.rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .next()?
+            .chars()
+            .next()
+    }
 
     impl Pidfd {
         fn open(pid: u32) -> Option<Self> {
             // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor.
             let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
             // SAFETY: a non-negative result is a descriptor this call now owns.
-            (fd >= 0).then(|| Self(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
+            (fd >= 0).then(|| Self {
+                fd: unsafe { OwnedFd::from_raw_fd(fd as i32) },
+                pid,
+            })
+        }
+
+        /// Whether the pinned process's state satisfies `check`. The state is read by
+        /// PID, so it counts only if the pinned process still holds that PID after the
+        /// read; once the process is reaped its state is `None`.
+        pub fn is(&self, check: fn(Option<char>) -> bool) -> bool {
+            let state = state(self.pid);
+            if self.is_alive() {
+                check(state)
+            } else {
+                check(None)
+            }
         }
 
         /// Whether the pinned process is still running. Signal 0 checks without sending.
@@ -368,7 +504,7 @@ mod pidfd {
             unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
-                    self.0.as_raw_fd(),
+                    self.fd.as_raw_fd(),
                     0,
                     std::ptr::null::<libc::siginfo_t>(),
                     0u32,
@@ -376,12 +512,28 @@ mod pidfd {
             }
         }
 
+        /// Whether Keystone may not signal the pinned process, such as one running as
+        /// another user.
+        pub fn is_foreign(&self) -> bool {
+            // SAFETY: the descriptor is valid for the lifetime of `self`.
+            let refused = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.fd.as_raw_fd(),
+                    0,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                ) != 0
+            };
+            refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+
         pub fn signal(&self, signal: libc::c_int) {
             // SAFETY: the descriptor is valid for the lifetime of `self`.
             unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
-                    self.0.as_raw_fd(),
+                    self.fd.as_raw_fd(),
                     signal,
                     std::ptr::null::<libc::siginfo_t>(),
                     0u32,
@@ -647,6 +799,164 @@ mod tests {
         for child in children {
             assert!(!alive(child), "child {child} survived");
         }
+    }
+
+    /// `end` returns only after the tree is gone, including a descendant that ignores
+    /// SIGTERM, without waiting out a grace period for it.
+    #[test]
+    fn ending_a_process_returns_once_its_tree_is_gone() {
+        let process = Process::spawn(
+            Path::new("/bin/sh"),
+            &["-c", "sh -c 'trap \"\" TERM; sleep 30' & sleep 30 & wait"],
+            Path::new("/"),
+            &LaunchProfile::default(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let pid = process.pid();
+        thread::sleep(Duration::from_millis(200));
+        let mut tree = vec![pid];
+        tree.extend(children_of(pid));
+        let grandchildren: Vec<u32> = tree.iter().flat_map(|&p| children_of(p)).collect();
+        tree.extend(grandchildren);
+        assert!(tree.len() >= 3, "{tree:?}");
+        let started = std::time::Instant::now();
+        process.end();
+        assert!(started.elapsed() < KILL_GRACE, "{:?}", started.elapsed());
+        for member in tree {
+            assert!(!alive(member), "{member} survived end()");
+        }
+    }
+
+    /// Spawns `python3 -c code` in `dir` and waits for its first line.
+    fn python(dir: &Path, code: &str) -> Process {
+        let (tx, rx) = channel();
+        let process = Process::spawn(
+            Path::new("/usr/bin/python3"),
+            &["-c", code],
+            dir,
+            &LaunchProfile::default(),
+            move |_| {
+                let _ = tx.send(());
+            },
+            |_| {},
+        )
+        .unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        process
+    }
+
+    /// The PIDs a test provider wrote to `file` in `dir`, one per line. Each is
+    /// SIGKILLed here as well, so a failing test leaves nothing behind.
+    fn escaped(dir: &Path, file: &str) -> Vec<(u32, bool)> {
+        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .map(|pid: u32| {
+                let survived = alive(pid);
+                // SAFETY: test cleanup of a process this test started.
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                (pid, survived)
+            })
+            .collect()
+    }
+
+    /// A reviewer's case: a SIGTERM handler that starts a process outside the tree as
+    /// the leader exits. `end` sends no SIGTERM, so it never runs.
+    #[test]
+    fn ending_a_process_runs_no_exit_handler_that_escapes_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = python(
+            dir.path(),
+            r#"import os, signal, time
+def term(sig, frame):
+    if os.fork() == 0:
+        os.setsid()
+        open('escaped', 'a').write(f'{os.getpid()}\n')
+        time.sleep(30)
+        os._exit(0)
+    time.sleep(0.2)
+    os._exit(0)
+signal.signal(signal.SIGTERM, term)
+print('ready', flush=True)
+while True: time.sleep(1)
+"#,
+        );
+        process.end();
+        thread::sleep(Duration::from_millis(300));
+        let escaped = escaped(dir.path(), "escaped");
+        assert!(escaped.is_empty(), "the handler ran: {escaped:?}");
+    }
+
+    /// A tree holding a process of another user is reported, so eviction can leave it
+    /// running rather than leave that process behind. Needs passwordless `sudo`.
+    #[test]
+    fn a_tree_running_a_command_as_another_user_is_foreign() {
+        let sudo = std::process::Command::new("sudo")
+            .args(["-n", "true"])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !sudo {
+            eprintln!("skipped: no passwordless sudo");
+            return;
+        }
+        let process = Process::spawn(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 30 & sudo -n sleep 30 & wait"],
+            Path::new("/"),
+            &LaunchProfile::default(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process.has_foreign() {
+            assert!(
+                Instant::now() < deadline,
+                "sudo's tree never seen as foreign"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let mine = Process::spawn(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 30 & wait"],
+            Path::new("/"),
+            &LaunchProfile::default(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert!(!mine.has_foreign());
+        drop(process);
+        mine.end();
+    }
+
+    /// A leader that keeps forking children into sessions of their own while teardown
+    /// scans its tree: none of them outlives `end`, though the leader dies first.
+    #[test]
+    fn ending_a_forking_tree_leaves_none_of_it_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = python(
+            dir.path(),
+            r#"import os, time
+print('ready', flush=True)
+while True:
+    if os.fork() == 0:
+        os.setsid()
+        open('forked', 'a').write(f'{os.getpid()}\n')
+        time.sleep(30)
+        os._exit(0)
+    time.sleep(0.001)
+"#,
+        );
+        thread::sleep(Duration::from_millis(300));
+        process.end();
+        let pids = escaped(dir.path(), "forked");
+        assert!(pids.len() > 10, "{}", pids.len());
+        let survivors: Vec<u32> = pids.iter().filter(|(_, s)| *s).map(|(p, _)| *p).collect();
+        assert!(survivors.is_empty(), "{survivors:?} of {}", pids.len());
     }
 
     #[test]

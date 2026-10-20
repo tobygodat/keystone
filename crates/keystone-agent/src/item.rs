@@ -146,6 +146,10 @@ pub enum Event {
     /// streamed. Arrives in the same batch as the turn's end; act on it once the
     /// whole batch is applied.
     RecoveryNeeded,
+    /// The session's process is proven idle. The app saves everything it got before
+    /// this, then may end the process with [`crate::Connection::evict_idle`]. Never a
+    /// transcript event.
+    IdleCandidate(crate::idle::IdleCandidate),
 }
 
 /// Bytes kept from each end of long tool output.

@@ -564,7 +564,7 @@ impl Conversation {
             Event::ProviderNotice { message } => self.provider_notice = message,
             // Recovery's control events belong to the app, never to the transcript.
             Event::RecoveryNeeded => self.provider_exited(),
-            Event::HistoryRead { .. } => {}
+            Event::HistoryRead { .. } | Event::IdleCandidate(_) => {}
         }
         None
     }

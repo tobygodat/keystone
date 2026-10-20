@@ -11,6 +11,7 @@ mod connection;
 mod driver;
 pub mod find;
 pub mod host;
+pub mod idle;
 mod item;
 pub mod log;
 pub mod mcp;

@@ -5,6 +5,7 @@ use crate::claude::{self, ClaudeDriver, Launch};
 use crate::codex::CodexDriver;
 use crate::driver::{ApprovalState, Command, Outputs};
 use crate::host::{Exit, Process};
+use crate::idle::{IdleCandidate, IdlePolicy, QUIESCE_TIMEOUT, Timer, TimerKind, Timers};
 use crate::item::{Catalog, Event};
 use crate::mcp::{Caller, Issuer, Lease};
 use crate::profile::LaunchProfile;
@@ -97,6 +98,13 @@ pub trait Connection {
     fn set_approval(&self, session: u64, approval: ApprovalState);
     /// Stops or answers within a session.
     fn command(&self, command: Command);
+    /// Ends the session's process that `candidate` names, once the app has saved
+    /// everything before the candidate arrived ([`Event::IdleCandidate`]). Nothing
+    /// happens if anything changed since; the next message starts the process again.
+    fn evict_idle(&self, _session: u64, _candidate: IdleCandidate) {}
+    /// The app will not let the process `candidate` names end, for `reason`: it stays
+    /// running until something happens to it.
+    fn decline_idle(&self, _session: u64, _candidate: IdleCandidate, _reason: String) {}
     /// Takes every event that arrived since the last call.
     fn drain(&self) -> Vec<(u64, Event)>;
 }
@@ -838,6 +846,8 @@ fn deliver(shared: &mut Shared, inbox: &Mutex<Vec<(u64, Event)>>, mut out: Outpu
 /// [`send`]: ClaudeConnection::send
 pub struct ClaudeConnection {
     starter: ClaudeStarter,
+    /// The idle deadline thread, once idle eviction is enabled.
+    scheduler: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 type Workers = Arc<Mutex<HashMap<u64, Worker>>>;
@@ -879,6 +889,36 @@ struct ClaudeShared {
     /// ends them too. Keyed by `next_probe`.
     catalog_probes: HashMap<u64, Process>,
     next_probe: u64,
+    /// When idle processes are ended; `None`, the default, keeps every one running.
+    idle: Option<IdlePolicy>,
+}
+
+/// Where a session's process stands toward idle eviction. Each phase but `Busy` holds
+/// for one activity epoch only.
+#[derive(Clone, Debug, PartialEq)]
+enum Idle {
+    /// Working, or not yet checked since the last activity, and why when known.
+    Busy(Option<&'static str>),
+    /// A quiescence check is queued or in flight; `confirm` when its interval ended.
+    Checking { epoch: u64, confirm: bool },
+    /// Proven idle; the interval runs.
+    Armed { epoch: u64 },
+    /// Proven idle at the interval's end and offered to the app.
+    Offered { epoch: u64 },
+    /// Could not be proven idle; stays running until something happens.
+    Resident { epoch: u64, reason: String },
+}
+
+impl Idle {
+    fn epoch(&self) -> Option<u64> {
+        match self {
+            Idle::Busy(_) => None,
+            Idle::Checking { epoch, .. }
+            | Idle::Armed { epoch }
+            | Idle::Offered { epoch }
+            | Idle::Resident { epoch, .. } => Some(*epoch),
+        }
+    }
 }
 
 /// A session's process, from when it begins starting until it exits.
@@ -902,6 +942,37 @@ struct Live {
     model: Option<String>,
     /// Whether the worker has a job queued to replace the process.
     replacing: bool,
+    /// The driver's activity count last seen, and the epoch that counts its changes
+    /// and every message admitted since the process started.
+    seen: u64,
+    epoch: u64,
+    idle: Idle,
+}
+
+impl Live {
+    /// The activity epoch, counting any driver activity not yet counted.
+    fn epoch(&mut self) -> u64 {
+        if self.driver.activity() != self.seen {
+            self.seen = self.driver.activity();
+            self.epoch += 1;
+        }
+        self.epoch
+    }
+
+    /// Ends the process and everything it started, returning only once they are gone.
+    fn retire(self) {
+        let Live {
+            _lease,
+            process,
+            probe,
+            ..
+        } = self;
+        drop(_lease);
+        drop(probe);
+        if let Some(process) = process {
+            process.end();
+        }
+    }
 }
 
 impl ClaudeShared {
@@ -958,6 +1029,17 @@ enum Job {
     Command,
     /// Replaces a process that cannot run the waiting turn's approval mode.
     Replace,
+    /// Sends the quiescence check the idle phase waits for.
+    Check { generation: u64 },
+    /// Ends a process the app confirmed after saving.
+    Evict(IdleCandidate),
+}
+
+/// What idle tracking asks for once the lock is released.
+enum IdleStep {
+    Check { generation: u64 },
+    Timer(Duration, Timer),
+    Offered,
 }
 
 impl ClaudeConnection {
@@ -1007,8 +1089,50 @@ impl ClaudeConnection {
                 started: Arc::default(),
                 inbox: Arc::default(),
                 workers: Arc::default(),
+                timers: Arc::default(),
             },
+            scheduler: Mutex::default(),
         }
+    }
+
+    /// Ends each session process proven idle for `policy`'s timeout; see
+    /// `docs/design/providers.md`. Off by default: no Claude profile has a proven
+    /// quiescence contract, so only tests and scripted providers enable it. A layout
+    /// helper connection ignores it.
+    #[doc(hidden)]
+    pub fn enable_idle_eviction(&self, policy: IdlePolicy) {
+        let mut scheduler = self.scheduler.lock().unwrap();
+        let mut shared = self.starter.shared.lock().unwrap();
+        if shared.launch != Launch::Chat || shared.closed || scheduler.is_some() {
+            return;
+        }
+        let starter = self.starter.clone();
+        *scheduler = Some(crate::idle::schedule(
+            self.starter.timers.clone(),
+            policy.clock.clone(),
+            move |timer| starter.fire(timer),
+        ));
+        shared.idle = Some(policy);
+    }
+
+    /// Where the session's process stands toward idle eviction: `armed`, `checking`,
+    /// `offered`, or why it stays running. `None` with no process.
+    #[doc(hidden)]
+    pub fn residency(&self, session: u64) -> Option<String> {
+        let shared = self.starter.shared.lock().unwrap();
+        let live = shared.live.get(&session)?;
+        if shared.idle.is_none() {
+            return Some(
+                "idle eviction is off: no Claude profile has a proven quiescence contract".into(),
+            );
+        }
+        Some(match &live.idle {
+            Idle::Busy(reason) => reason.unwrap_or("busy").to_owned(),
+            Idle::Checking { .. } => "checking".into(),
+            Idle::Armed { .. } => "armed".into(),
+            Idle::Offered { .. } => "offered".into(),
+            Idle::Resident { reason, .. } => reason.clone(),
+        })
     }
 
     /// The session's process ID while it runs.
@@ -1071,6 +1195,9 @@ impl ClaudeConnection {
             let refused = shared.steer_blocked(session);
             if refused.is_none() {
                 *shared.queued.entry(session).or_default() += 1;
+                if let Some(live) = shared.live.get_mut(&session) {
+                    live.epoch += 1;
+                }
             }
             self.starter.deliver(shared, session, out);
             if let Some(reason) = refused {
@@ -1163,9 +1290,195 @@ struct ClaudeStarter {
     /// Kept apart from `shared`, so draining never waits for a process to start.
     inbox: Inbox,
     workers: Workers,
+    timers: Arc<Timers>,
 }
 
 impl ClaudeStarter {
+    /// An idle deadline came. Returns false once the connection is closed.
+    fn fire(&self, timer: Timer) -> bool {
+        let mut shared = self.shared.lock().unwrap();
+        if shared.closed {
+            return false;
+        }
+        let Some(live) = shared.live.get_mut(&timer.session) else {
+            return true;
+        };
+        if live.generation != timer.generation || live.epoch() != timer.epoch {
+            return true;
+        }
+        match (timer.kind, &live.idle) {
+            (TimerKind::Expired, Idle::Armed { epoch }) if *epoch == timer.epoch => {
+                live.idle = Idle::Checking {
+                    epoch: timer.epoch,
+                    confirm: true,
+                };
+                drop(shared);
+                let generation = timer.generation;
+                self.queue(timer.session, Job::Check { generation }, |_, _| {});
+            }
+            (
+                TimerKind::CheckTimedOut { confirm },
+                Idle::Checking {
+                    epoch,
+                    confirm: phase,
+                },
+            ) if *epoch == timer.epoch && confirm == *phase => {
+                live.driver.abandon_quiescence();
+                live.idle = Idle::Resident {
+                    epoch: timer.epoch,
+                    reason: "Claude Code did not answer the quiescence check in time".into(),
+                };
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Moves the session's idle phase on after anything happened to it, under the
+    /// lock: activity starts over, a locally idle process is checked, a passed check
+    /// arms the interval, and a passed check at its end offers the process to the app,
+    /// queued behind the session's earlier events.
+    fn idle_step(&self, shared: &mut ClaudeShared, session: u64) -> Option<IdleStep> {
+        let policy = shared.idle.clone()?;
+        let waiting = shared.queued.contains_key(&session);
+        let live = shared.live.get_mut(&session)?;
+        let epoch = live.epoch();
+        if live.idle.epoch().is_some_and(|phase| phase != epoch) {
+            live.driver.abandon_quiescence();
+            live.idle = Idle::Busy(None);
+        }
+        let blocker = [
+            (waiting, "a message is waiting to be sent"),
+            (live.process.is_none(), "it is starting"),
+            (live.probe.is_some(), "it is reading approval settings"),
+            (live.replacing, "it is being replaced"),
+        ]
+        .into_iter()
+        .find_map(|(blocked, reason)| blocked.then_some(reason))
+        .or_else(|| live.driver.check_blocker());
+        if let Some(reason) = blocker {
+            live.driver.abandon_quiescence();
+            live.idle = Idle::Busy(Some(reason));
+            return None;
+        }
+        let generation = live.generation;
+        match live.idle {
+            Idle::Busy(_) => {
+                live.idle = Idle::Checking {
+                    epoch,
+                    confirm: false,
+                };
+                Some(IdleStep::Check { generation })
+            }
+            Idle::Checking { confirm, .. } => match live.driver.take_quiescence()? {
+                Err(reason) => {
+                    live.idle = Idle::Resident { epoch, reason };
+                    None
+                }
+                Ok(()) if !confirm => {
+                    live.idle = Idle::Armed { epoch };
+                    let timer = Timer {
+                        session,
+                        generation,
+                        epoch,
+                        kind: TimerKind::Expired,
+                    };
+                    Some(IdleStep::Timer(policy.clock.now() + policy.timeout, timer))
+                }
+                Ok(()) => {
+                    let thread = live.driver.conversation()?.to_owned();
+                    live.idle = Idle::Offered { epoch };
+                    let candidate = IdleCandidate {
+                        generation,
+                        epoch,
+                        thread,
+                    };
+                    self.inbox
+                        .lock()
+                        .unwrap()
+                        .push((session, Event::IdleCandidate(candidate)));
+                    Some(IdleStep::Offered)
+                }
+            },
+            _ => None,
+        }
+    }
+
+    /// Sends the quiescence check for the session's current idle phase, if it still
+    /// is current, and times it.
+    fn check_idle(&self, mut shared: MutexGuard<'_, ClaudeShared>, session: u64, generation: u64) {
+        let Some(policy) = shared.idle.clone() else {
+            return;
+        };
+        let Some(live) = shared.live.get_mut(&session) else {
+            return;
+        };
+        let epoch = live.epoch();
+        let confirm = match live.idle {
+            Idle::Checking {
+                epoch: phase,
+                confirm,
+            } if phase == epoch && live.generation == generation => confirm,
+            _ => return,
+        };
+        let mut out = Outputs::default();
+        live.driver.check_quiescence(&mut out);
+        let timer = Timer {
+            session,
+            generation,
+            epoch,
+            kind: TimerKind::CheckTimedOut { confirm },
+        };
+        self.timers.at(policy.clock.now() + QUIESCE_TIMEOUT, timer);
+        self.deliver(shared, session, out);
+    }
+
+    /// Ends the process `candidate` names if it is still exactly as proven: same
+    /// process and epoch, offered, and nothing waiting. It leaves routing under the
+    /// lock, so nothing more reaches it, and is ended on this worker after, so a
+    /// message queued meanwhile starts its successor only once it is gone. The
+    /// conversation, approval state and requested model stay for that successor.
+    fn evict(
+        &self,
+        mut shared: MutexGuard<'_, ClaudeShared>,
+        session: u64,
+        candidate: IdleCandidate,
+    ) {
+        let waiting = shared.queued.contains_key(&session);
+        let Some(live) = shared.live.get_mut(&session) else {
+            return;
+        };
+        let epoch = live.epoch();
+        let current = live.generation == candidate.generation
+            && epoch == candidate.epoch
+            && live.idle == Idle::Offered { epoch }
+            && live.driver.conversation() == Some(candidate.thread.as_str())
+            && !waiting
+            && live.process.is_some()
+            && live.probe.is_none()
+            && !live.replacing
+            && live.driver.idle_blocker().is_none();
+        if !current {
+            return;
+        }
+        if live.process.as_ref().is_some_and(Process::has_foreign) {
+            live.idle = Idle::Resident {
+                epoch,
+                reason: "it started a process running as another user, which Keystone cannot end"
+                    .into(),
+            };
+            return;
+        }
+        let live = shared.live.remove(&session).expect("checked above");
+        if let Some(issuer) = &shared.mcp {
+            issuer.set_running(session, false);
+        }
+        self.inbox.lock().unwrap().push((session, Event::ModelLost));
+        drop(shared);
+        (self.wake)();
+        live.retire();
+    }
+
     /// Queues `act` for the session's driver on the session's worker.
     fn queue(
         &self,
@@ -1186,6 +1499,8 @@ impl ClaudeStarter {
     /// queues the process's replacement when a waiting turn needs one.
     fn deliver(&self, mut shared: MutexGuard<'_, ClaudeShared>, session: u64, out: Outputs) {
         let wake = claude_deliver(&mut shared, &self.inbox, session, out);
+        let idle = self.idle_step(&mut shared, session);
+        let wake = wake || matches!(idle, Some(IdleStep::Offered));
         let timeout = shared.mode_timeout.unwrap_or(MODE_TIMEOUT);
         let mut timed = Vec::new();
         let mut replace = false;
@@ -1206,6 +1521,13 @@ impl ClaudeStarter {
         }
         if replace {
             self.queue(session, Job::Replace, |_, _| {});
+        }
+        match idle {
+            Some(IdleStep::Check { generation }) => {
+                self.queue(session, Job::Check { generation }, |_, _| {})
+            }
+            Some(IdleStep::Timer(at, timer)) => self.timers.at(at, timer),
+            Some(IdleStep::Offered) | None => {}
         }
         for id in timed {
             let starter = self.clone();
@@ -1257,13 +1579,23 @@ impl ClaudeStarter {
                         .into(),
                 ),
             );
+            // Nothing waits any more, which may leave a running process idle.
+            let shared = self.shared.lock().unwrap();
+            if shared.idle.is_some() {
+                self.deliver(shared, session, Outputs::default());
+            }
             return;
         }
+        let job = match job {
+            Job::Check { generation } => return self.check_idle(shared, session, generation),
+            Job::Evict(candidate) => return self.evict(shared, session, candidate),
+            job => job,
+        };
         let message = matches!(job, Job::Message(..));
         let command = matches!(job, Job::Command);
         let mut start = match job {
             Job::Message(cwd, resume, model, _) => Some((cwd, resume, model)),
-            Job::Command | Job::Replace => None,
+            _ => None,
         };
         let mut carried = Vec::new();
         let mut lost = false;
@@ -1407,6 +1739,9 @@ impl ClaudeStarter {
                 resume: resume.clone(),
                 model: model.clone(),
                 replacing: false,
+                seen: 0,
+                epoch: 0,
+                idle: Idle::Busy(None),
             },
         );
         shared.starting += 1;
@@ -1883,6 +2218,25 @@ impl Connection for ClaudeConnection {
         ClaudeConnection::command(self, command);
     }
 
+    fn evict_idle(&self, session: u64, candidate: IdleCandidate) {
+        self.starter
+            .queue(session, Job::Evict(candidate), |_, _| {});
+    }
+
+    fn decline_idle(&self, session: u64, candidate: IdleCandidate, reason: String) {
+        let mut shared = self.starter.shared.lock().unwrap();
+        let Some(live) = shared.live.get_mut(&session) else {
+            return;
+        };
+        let epoch = live.epoch();
+        if live.generation == candidate.generation
+            && epoch == candidate.epoch
+            && live.idle == (Idle::Offered { epoch })
+        {
+            live.idle = Idle::Resident { epoch, reason };
+        }
+    }
+
     fn drain(&self) -> Vec<(u64, Event)> {
         ClaudeConnection::drain(self)
     }
@@ -1894,6 +2248,10 @@ impl Drop for ClaudeConnection {
     /// for, and starts only up to [`START_WAIT`]; a start that finishes after this
     /// ends its own process.
     fn drop(&mut self) {
+        self.starter.timers.close();
+        if let Some(scheduler) = self.scheduler.get_mut().unwrap().take() {
+            let _ = scheduler.join();
+        }
         let workers: Vec<Worker> = {
             let mut workers = self.starter.workers.lock().unwrap();
             workers.drain().map(|(_, worker)| worker).collect()

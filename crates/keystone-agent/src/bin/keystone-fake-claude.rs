@@ -4,7 +4,8 @@
 //! It speaks the subset of Claude Code's stream-json and control protocol Keystone
 //! uses and replies with labeled test text. A prompt containing "run" asks approval
 //! for a command first. A message with priority "now" aborts the reply, as Claude does.
-//! Set `KEYSTONE_FAKE_CLAUDE_DELAY_MS` to change the pause between streamed words,
+//! Set `KEYSTONE_FAKE_CLAUDE_DELAY_MS` (or a working directory's `.fake-claude-delay-ms`)
+//! to change the pause between streamed words,
 //! and `KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1` to answer like a Claude with no login.
 //! `KEYSTONE_FAKE_CLAUDE_REPLY` replaces the reply text exactly.
 //! `KEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE=1` acts like a Claude older than
@@ -63,6 +64,27 @@
 //! resumed session never reuses one. A prompt containing "crash" records its whole
 //! reply after the first streamed word, then exits, as a Claude that dies mid-stream
 //! after saving.
+//!
+//! An `idle` setting of `1` reports what idle eviction needs, as the published Agent
+//! SDK types describe it: `session_state_changed` (`running` as a turn starts, `idle`
+//! once nothing is queued), and `background_tasks_changed` whenever its task set
+//! changes. Every `initialize` answer then carries `session_state` and the pending
+//! approval and dialog lists, and a repeated `initialize` is followed by a snapshot
+//! of the task set. A `quiesce` setting of `missing` leaves those fields out,
+//! `running` reports the session running, and `no-snapshot` sends no snapshot. While
+//! `.fake-claude-hold-snapshot` exists, the next such answer consumes it, creates
+//! `.fake-claude-holding-snapshot`, and sends its snapshot only once
+//! `.fake-claude-release-snapshot` exists, removing both, so a test can act between
+//! the two. Also in this mode, the lines of a
+//! `.fake-claude-emit` file are written out as they are, `$SESSION` replaced by the
+//! session ID, as soon as the file appears, and the file is removed. In this
+//! mode a prompt containing "background task" or "ambient task" starts a task that a
+//! foreground Bash call hands to the background and that runs until
+//! `.fake-claude-release-background` (or `-ambient`) exists in the working directory;
+//! "hook" starts a hook that outlives the turn until `.fake-claude-release-hook`
+//! exists; and "hold tool" keeps a Bash call running until `.fake-claude-release-tool`
+//! exists. A `child` setting of `1` starts a `sleep` child at launch and appends its
+//! ID to `.fake-claude-children`, so a test can check the whole tree ends.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -203,6 +225,77 @@ struct Shared {
     /// Where a reply pauses after its first word until this file exists. Only set
     /// without lifecycle frames.
     release_file: Option<PathBuf>,
+    /// Whether to report session state and background tasks (the `idle` setting).
+    idle: bool,
+    /// The live background tasks, as `background_tasks_changed` lists them.
+    tasks: Mutex<Vec<Value>>,
+    session_state: Mutex<&'static str>,
+}
+
+impl Shared {
+    fn set_session_state(&self, out: &Out, session: &str, state: &'static str) {
+        if !self.idle {
+            return;
+        }
+        *self.session_state.lock().unwrap() = state;
+        emit(
+            out,
+            json!({"type": "system", "subtype": "session_state_changed", "state": state,
+                   "uuid": format!("fake-state-{}", std::process::id()), "session_id": session}),
+        );
+    }
+
+    fn emit_tasks(&self, out: &Out, session: &str) {
+        let tasks = self.tasks.lock().unwrap().clone();
+        emit(
+            out,
+            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks,
+                   "uuid": format!("fake-tasks-{}", std::process::id()), "session_id": session}),
+        );
+    }
+}
+
+/// Waits until `.fake-claude-release-<name>` exists in the working directory.
+fn wait_for_release(name: &str) {
+    let file = PathBuf::from(format!(".fake-claude-release-{name}"));
+    while !file.exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Starts a background task the turn's Bash call hands off, which ends once released.
+fn start_task(out: &Out, shared: &Arc<Shared>, session: &str, turn: u64, ambient: bool) {
+    let name = if ambient { "ambient" } else { "background" };
+    let task = format!("fake-task-{}-{turn}", std::process::id());
+    let run = format!("{task}-run-1");
+    let mut entry = json!({"task_id": task, "run_id": run, "task_type": "local_bash",
+        "description": format!("Scripted {name} task")});
+    if ambient {
+        entry["ambient"] = json!(true);
+    }
+    shared.tasks.lock().unwrap().push(entry);
+    shared.emit_tasks(out, session);
+    emit(
+        out,
+        json!({"type": "system", "subtype": "task_started", "task_id": task, "run_id": run,
+               "task_type": "local_bash", "description": format!("Scripted {name} task"),
+               "ambient": ambient, "session_id": session}),
+    );
+    let (out, shared, session) = (out.clone(), shared.clone(), session.to_owned());
+    thread::spawn(move || {
+        wait_for_release(name);
+        emit(
+            &out,
+            json!({"type": "system", "subtype": "task_notification", "task_id": task, "run_id": run,
+                   "status": "completed", "summary": "done", "session_id": session}),
+        );
+        shared
+            .tasks
+            .lock()
+            .unwrap()
+            .retain(|entry| entry["task_id"] != task.as_str());
+        shared.emit_tasks(&out, &session);
+    });
 }
 
 /// With `KEYSTONE_FAKE_ENV_RECEIPT` naming a file, appends one JSON line per process:
@@ -269,12 +362,6 @@ fn main() {
     }
     let session = resume.unwrap_or_else(|| format!("fake-claude-session-{}", std::process::id()));
     open_store(&session);
-    let delay = Duration::from_millis(
-        std::env::var("KEYSTONE_FAKE_CLAUDE_DELAY_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(60),
-    );
     let signed_out = std::env::var("KEYSTONE_FAKE_CLAUDE_SIGNED_OUT").is_ok_and(|v| v == "1");
     let frames = !std::env::var("KEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE").is_ok_and(|v| v == "1");
     let log = std::env::var_os("KEYSTONE_FAKE_CLAUDE_LOG_DIR")
@@ -318,6 +405,11 @@ fn main() {
                 .ok()
             })
     };
+    let delay = Duration::from_millis(
+        setting("delay-ms")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60),
+    );
     let user_mode = setting("user-mode").unwrap_or_else(|| "default".into());
     let plan_file = std::env::var_os("KEYSTONE_FAKE_CLAUDE_LOG_DIR")
         .map_or_else(PathBuf::new, PathBuf::from)
@@ -385,13 +477,43 @@ fn main() {
         } else {
             std::env::var_os("KEYSTONE_FAKE_CLAUDE_RELEASE_FILE").map(PathBuf::from)
         },
+        idle: setting("idle").as_deref() == Some("1"),
+        tasks: Mutex::default(),
+        session_state: Mutex::new("idle"),
     });
     set_mode(&shared, &mode);
     let skip_init = setting("skip-init").as_deref() == Some("1");
+    let quiesce = setting("quiesce");
+    let mut initializes = 0;
+    if setting("child").as_deref() == Some("1")
+        && let Ok(child) = std::process::Command::new("sleep").arg("3600").spawn()
+        && let Ok(mut children) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(".fake-claude-children")
+    {
+        let _ = writeln!(children, "{}", child.id());
+    }
     let worker = {
         let (out, shared, session) = (out.clone(), shared.clone(), session.clone());
         thread::spawn(move || work(&out, &shared, &session, delay, signed_out, tools, skip_init))
     };
+    if shared.idle {
+        let (out, session) = (out.clone(), session.clone());
+        thread::spawn(move || {
+            let file = PathBuf::from(".fake-claude-emit");
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&file) {
+                    let _ = std::fs::remove_file(&file);
+                    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                        let line = line.replace("$SESSION", &session);
+                        emit(&out, serde_json::from_str(&line).unwrap());
+                    }
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+    }
 
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -428,7 +550,51 @@ fn main() {
                         if let Some(commands) = &commands {
                             answer["commands"] = commands.clone();
                         }
-                        reply(answer)
+                        initializes += 1;
+                        if !shared.idle {
+                            reply(answer);
+                            continue;
+                        }
+                        let mut response =
+                            json!({"subtype": "success", "request_id": id, "response": answer});
+                        if quiesce.as_deref() != Some("missing") {
+                            let pending: Vec<Value> = shared
+                                .state
+                                .lock()
+                                .unwrap()
+                                .approval
+                                .iter()
+                                .map(|(request, _)| json!({"type": "control_request", "request_id": request}))
+                                .collect();
+                            let state = if quiesce.as_deref() == Some("running") {
+                                "running"
+                            } else {
+                                *shared.session_state.lock().unwrap()
+                            };
+                            response["pending_permission_requests"] = json!(pending);
+                            response["pending_user_dialog_requests"] = json!([]);
+                            response["session_state"] = json!(state);
+                        }
+                        emit(
+                            &out,
+                            json!({"type": "control_response", "response": response}),
+                        );
+                        match quiesce.as_deref() {
+                            _ if initializes == 1 => {}
+                            Some("no-snapshot") => {}
+                            _ if std::fs::remove_file(".fake-claude-hold-snapshot").is_ok() => {
+                                let (out, shared, session) =
+                                    (out.clone(), shared.clone(), session.clone());
+                                thread::spawn(move || {
+                                    let _ = std::fs::write(".fake-claude-holding-snapshot", "");
+                                    wait_for_release("snapshot");
+                                    let _ = std::fs::remove_file(".fake-claude-release-snapshot");
+                                    shared.emit_tasks(&out, &session);
+                                    let _ = std::fs::remove_file(".fake-claude-holding-snapshot");
+                                });
+                            }
+                            _ => shared.emit_tasks(&out, &session),
+                        }
                     }
                     Some("mcp_set_servers") => {
                         let config = &message["request"]["servers"]["keystone"];
@@ -601,7 +767,7 @@ fn stream(out: &Out, event: Value) {
 
 fn work(
     out: &Out,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     session: &str,
     delay: Duration,
     signed_out: bool,
@@ -647,6 +813,7 @@ fn work(
         if !skip_init {
             emit(out, init);
         }
+        shared.set_session_state(out, session, "running");
         if std::env::var("KEYSTONE_FAKE_CLAUDE_SUBAGENT_INIT").is_ok_and(|value| value == "1") {
             emit(
                 out,
@@ -677,10 +844,18 @@ fn work(
             );
             "cancelled"
         } else {
-            answer(out, shared, turn, &next.uuid, &next.text, &mode, delay)
+            answer(
+                out, shared, session, turn, &next.uuid, &next.text, &mode, delay,
+            )
         };
         lifecycle(out, shared, session, &next.uuid, ended);
-        shared.state.lock().unwrap().busy = false;
+        let mut state = shared.state.lock().unwrap();
+        state.busy = false;
+        let queued = !state.queue.is_empty();
+        drop(state);
+        if !queued {
+            shared.set_session_state(out, session, "idle");
+        }
     }
 }
 
@@ -688,7 +863,8 @@ fn work(
 #[allow(clippy::too_many_arguments)]
 fn answer(
     out: &Out,
-    shared: &Shared,
+    shared: &Arc<Shared>,
+    session: &str,
     turn: u64,
     request: &str,
     text: &str,
@@ -746,6 +922,9 @@ fn answer(
         for n in 1..=200 {
             reply.push_str(&format!(" word{n}"));
         }
+    }
+    if shared.idle {
+        idle_scripts(out, shared, session, turn, text);
     }
     if text.contains("run") {
         let message = format!("fake-tool-{}-{turn}", std::process::id());
@@ -895,6 +1074,65 @@ fn answer(
         json!({"type": "result", "subtype": "success", "is_error": false, "result": sent}),
     );
     "completed"
+}
+
+/// The idle-mode prompts: a Bash call handed to a background or ambient task, a hook
+/// that outlives the turn, and a Bash call held until released.
+fn idle_scripts(out: &Out, shared: &Arc<Shared>, session: &str, turn: u64, text: &str) {
+    let bash = |id: &str, result: Option<&str>| {
+        let message = format!("fake-bash-{}-{turn}-{id}", std::process::id());
+        let tool = format!("fake-bash-toolu-{}-{turn}-{id}", std::process::id());
+        emit(
+            out,
+            json!({"type": "assistant", "message": {"id": message, "content":
+                   [{"type": "tool_use", "id": tool, "name": "Bash", "input": {"command": "sleep 600"}}]},
+                   "parent_tool_use_id": null}),
+        );
+        let result = result.map_or_else(
+            || {
+                wait_for_release("tool");
+                "held tool done".to_owned()
+            },
+            str::to_owned,
+        );
+        emit(
+            out,
+            json!({"type": "user", "message": {"role": "user", "content":
+                   [{"type": "tool_result", "tool_use_id": tool, "content": result, "is_error": false}]},
+                   "parent_tool_use_id": null}),
+        );
+    };
+    for (word, ambient) in [("background task", false), ("ambient task", true)] {
+        if text.contains(word) {
+            start_task(out, shared, session, turn, ambient);
+            bash(
+                word,
+                Some("Command running in background with ID: fake-task"),
+            );
+        }
+    }
+    if text.contains("hook") {
+        let hook = format!("fake-hook-{}-{turn}", std::process::id());
+        emit(
+            out,
+            json!({"type": "system", "subtype": "hook_started", "hook_id": hook,
+                   "hook_name": "PostToolUse:Bash", "hook_event": "PostToolUse", "session_id": session}),
+        );
+        let (out, session) = (out.clone(), session.to_owned());
+        thread::spawn(move || {
+            wait_for_release("hook");
+            emit(
+                &out,
+                json!({"type": "system", "subtype": "hook_response", "hook_id": hook,
+                       "hook_name": "PostToolUse:Bash", "hook_event": "PostToolUse", "output": "",
+                       "stdout": "", "stderr": "", "exit_code": 0, "outcome": "success",
+                       "session_id": session}),
+            );
+        });
+    }
+    if text.contains("hold tool") {
+        bash("held", None);
+    }
 }
 
 fn aborted(out: &Out, message: &str, sent: &str, abort: Abort) -> &'static str {

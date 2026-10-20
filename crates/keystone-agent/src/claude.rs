@@ -169,6 +169,17 @@ enum Request {
         version: u64,
         target: &'static str,
     },
+    /// A repeated `initialize` asking whether the process is quiescent, for idle
+    /// eviction ([`ClaudeDriver::check_quiescence`]).
+    Quiesce,
+}
+
+/// A quiescence check in flight: its request, whether Claude answered it, and the
+/// outcome once known.
+struct Quiesce {
+    id: String,
+    answered: bool,
+    result: Option<Result<(), String>>,
 }
 
 pub struct QueuedMessage {
@@ -244,6 +255,23 @@ pub struct ClaudeDriver {
     provider_version: Option<String>,
     helper_init_confirmed: bool,
     refused: bool,
+    /// Counts everything Claude or the user did in this process, apart from keep-alives
+    /// and the replies a quiescence check expects. Idle eviction is valid only for the
+    /// count it was proven at.
+    activity: u64,
+    /// The last `session_state_changed` state, or the state a quiescence check's answer
+    /// reported.
+    session_state: Option<String>,
+    /// How many background tasks the conversation's own last `background_tasks_changed`
+    /// listed, ambient ones included; `None` until a valid one arrives in this process.
+    tasks: Option<usize>,
+    /// Hooks that reported `hook_started` and not yet `hook_response`.
+    hooks: HashSet<String>,
+    /// A safety frame Keystone could not read, or a task list it could not attribute
+    /// to this conversation, such as a subagent's. Only a passed quiescence check
+    /// clears it.
+    vetoed: bool,
+    quiesce: Option<Quiesce>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -310,6 +338,12 @@ impl ClaudeDriver {
             provider_version: None,
             helper_init_confirmed: false,
             refused: false,
+            activity: 0,
+            session_state: None,
+            tasks: None,
+            hooks: HashSet::new(),
+            vetoed: false,
+            quiesce: None,
             unknown: 0,
         };
         let line = driver.request(json!({"subtype": "initialize"}), Request::Initialize);
@@ -359,6 +393,8 @@ impl ClaudeDriver {
         if self.steer_unsupported().is_some() {
             return Err("busy: Claude Code cannot safely steer this turn yet");
         }
+        // A refused steer changes nothing, so only a written one is activity.
+        self.activity += 1;
         self.write(
             QueuedMessage {
                 text,
@@ -417,6 +453,7 @@ impl ClaudeDriver {
 
     /// Continues a turn carried over from a replaced process. Its start was reported.
     pub fn carry(&mut self, messages: Vec<QueuedMessage>, out: &mut Outputs) {
+        self.activity += 1;
         if messages.is_empty() || self.turn.is_some() {
             return;
         }
@@ -474,6 +511,7 @@ impl ClaudeDriver {
     }
 
     pub fn command(&mut self, command: Command, out: &mut Outputs) {
+        self.activity += 1;
         match command {
             // The process is started with the directory and `--resume`.
             Command::Open { .. } => {}
@@ -537,8 +575,16 @@ impl ClaudeDriver {
         }
         let Ok(envelope) = serde_json::from_slice::<Envelope>(line) else {
             self.unknown += 1;
+            self.activity += 1;
             return;
         };
+        if !self.passive(&envelope, line) {
+            self.activity += 1;
+        }
+        // Before the subagent filter: a task or hook a subagent runs is still work.
+        if envelope.kind == "system" {
+            self.track_safety(&envelope, line);
+        }
         // Subagent traffic is shown through the tool call that started it.
         if envelope.parent_tool_use_id.is_some() {
             return;
@@ -602,6 +648,213 @@ impl ClaudeDriver {
         self.untrusted || self.refused
     }
 
+    /// The conversation Claude reported, once `system/init` named it.
+    pub fn conversation(&self) -> Option<&str> {
+        self.conversation.as_deref()
+    }
+
+    /// How much has happened in this process; see the `activity` field. Anything that
+    /// changes it invalidates an idle proof made before.
+    pub fn activity(&self) -> u64 {
+        self.activity
+    }
+
+    /// Why this process is not idle by what Keystone itself observed, if it is not.
+    /// `None` is not a proof of idle: that also needs [`ClaudeDriver::check_quiescence`]
+    /// to succeed at the same [`ClaudeDriver::activity`].
+    pub fn idle_blocker(&self) -> Option<&'static str> {
+        self.check_blocker().or(self
+            .vetoed
+            .then_some("Claude Code sent activity Keystone could not read or attribute"))
+    }
+
+    /// Why a quiescence check cannot be asked yet. Activity Keystone could not read or
+    /// attribute does not stop one: the check is the refresh that can clear it.
+    pub fn check_blocker(&self) -> Option<&'static str> {
+        let requests = self
+            .requests
+            .values()
+            .any(|request| !matches!(request, Request::Quiesce));
+        [
+            (self.launch != Launch::Chat, "it is the layout helper"),
+            (self.untrusted || self.refused, "it must be replaced"),
+            (!self.initialized, "it has not finished starting"),
+            (requests, "a control request is unanswered"),
+            (!self.mcp_ready, "Keystone tools are being configured"),
+            (self.turn.is_some(), "a turn is running"),
+            (!self.approvals.is_empty(), "an approval is waiting"),
+            (!self.tools.is_empty(), "a tool call is running"),
+            (!self.hooks.is_empty(), "a hook is running"),
+            (
+                self.session_state.as_deref().is_some_and(|s| s != "idle"),
+                "Claude Code reports it is not idle",
+            ),
+            (
+                self.tasks.is_some_and(|tasks| tasks > 0),
+                "a background task is running",
+            ),
+            (self.conversation.is_none(), "it has no conversation ID yet"),
+        ]
+        .into_iter()
+        .find_map(|(blocked, reason)| blocked.then_some(reason))
+    }
+
+    /// Asks Claude whether this process is quiescent, with a repeated `initialize`.
+    /// It succeeds only on a successful answer reporting the session idle with empty
+    /// pending-approval and pending-dialog lists, followed by the conversation's own
+    /// empty background-task snapshot. The SDK declares the lists and the snapshot for a
+    /// repeated `initialize`, but not `session_state`, and nothing establishes that the
+    /// request changes nothing in a live session; see `docs/design/providers.md`. The outcome
+    /// arrives through [`ClaudeDriver::take_quiescence`]. Anything else observed in
+    /// between counts as activity, which the caller compares.
+    pub fn check_quiescence(&mut self, out: &mut Outputs) {
+        self.abandon_quiescence();
+        let line = self.request(json!({"subtype": "initialize"}), Request::Quiesce);
+        self.quiesce = Some(Quiesce {
+            id: format!("keystone-{}", self.next_request),
+            answered: false,
+            result: None,
+        });
+        out.writes.push(line);
+    }
+
+    /// The outcome of the quiescence check, once known.
+    pub fn take_quiescence(&mut self) -> Option<Result<(), String>> {
+        let result = self.quiesce.as_mut()?.result.take()?;
+        self.quiesce = None;
+        Some(result)
+    }
+
+    /// Forgets the quiescence check in flight, so a late answer matches nothing.
+    pub fn abandon_quiescence(&mut self) {
+        if let Some(check) = self.quiesce.take() {
+            self.requests.remove(&check.id);
+        }
+    }
+
+    fn on_quiescence(&mut self, response: ControlResult) {
+        if self.quiesce.is_none() {
+            return;
+        }
+        let empty = |list: &Option<Vec<Value>>, what: &str| match list {
+            Some(list) if list.is_empty() => Ok(()),
+            Some(_) => Err(format!("Claude Code has {what} pending")),
+            None => Err(format!("Claude Code did not report its pending {what}")),
+        };
+        let checked = if response.subtype != "success" {
+            Err(format!(
+                "Claude Code refused the quiescence check: {}",
+                response.error.unwrap_or_else(|| "no reason given".into())
+            ))
+        } else {
+            empty(&response.pending_permission_requests, "approvals")
+                .and_then(|()| empty(&response.pending_user_dialog_requests, "dialogs"))
+                .and_then(|()| match response.session_state.as_deref() {
+                    Some("idle") => Ok(()),
+                    Some(state) => Err(format!("Claude Code reports the session {state}")),
+                    None => Err("Claude Code did not report the session state".into()),
+                })
+        };
+        if checked.is_ok() {
+            self.session_state = Some("idle".into());
+        }
+        if let Some(check) = &mut self.quiesce {
+            match checked {
+                Ok(()) => check.answered = true,
+                Err(reason) => check.result = Some(Err(reason)),
+            }
+        }
+    }
+
+    /// Whether a line is one a quiescence check expects, or a keep-alive, rather than
+    /// activity.
+    fn passive(&self, envelope: &Envelope, line: &[u8]) -> bool {
+        match (&*envelope.kind, envelope.subtype.as_deref()) {
+            ("keep_alive" | "rate_limit_event", _) => true,
+            ("control_response", _) => {
+                let check = self.quiesce.as_ref();
+                serde_json::from_slice::<ControlResponse>(line).is_ok_and(|control| {
+                    check.is_some_and(|check| {
+                        !check.answered && control.response.request_id == check.id.as_str()
+                    })
+                })
+            }
+            ("system", Some("background_tasks_changed")) => {
+                self.quiesce
+                    .as_ref()
+                    .is_some_and(|check| check.answered && check.result.is_none())
+                    && self.own_tasks(envelope, line).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// How many tasks a `background_tasks_changed` frame lists, if it is readable and
+    /// this conversation's own. Only such a frame replaces the task set or completes a
+    /// quiescence check.
+    fn own_tasks(&self, envelope: &Envelope, line: &[u8]) -> Option<usize> {
+        let frame = serde_json::from_slice::<TasksChanged>(line).ok()?;
+        self.owns(envelope, frame.session_id.as_deref())
+            .then_some(frame.tasks.len())
+    }
+
+    /// Whether a safety frame names this conversation itself: no parent tool call and
+    /// this session ID.
+    fn owns(&self, envelope: &Envelope, session: Option<&str>) -> bool {
+        envelope.parent_tool_use_id.is_none()
+            && session.is_some()
+            && session == self.conversation.as_deref()
+    }
+
+    /// Updates what Claude reported of its own work: its session state, background
+    /// tasks (each snapshot of its own replaces the last) and running hooks. A frame
+    /// Keystone cannot read, or a task list it cannot attribute to this conversation,
+    /// leaves the process resident until a quiescence check passes.
+    fn track_safety(&mut self, envelope: &Envelope, line: &[u8]) {
+        match envelope.subtype.as_deref() {
+            Some("session_state_changed") => match serde_json::from_slice::<SessionState>(line) {
+                Ok(frame) if self.owns(envelope, frame.session_id.as_deref()) => {
+                    self.session_state = Some(frame.state)
+                }
+                _ => self.vetoed = true,
+            },
+            Some("background_tasks_changed") => {
+                let Some(tasks) = self.own_tasks(envelope, line) else {
+                    self.vetoed = true;
+                    return;
+                };
+                self.tasks = Some(tasks);
+                if let Some(check) = &mut self.quiesce
+                    && check.answered
+                    && check.result.is_none()
+                {
+                    check.result = Some(match tasks {
+                        0 => Ok(()),
+                        n => Err(format!("{n} background task(s) are running")),
+                    });
+                    // A passed check supersedes activity Keystone could not read or
+                    // attribute before.
+                    if tasks == 0 {
+                        self.vetoed = false;
+                    }
+                }
+            }
+            Some("hook_started") => match serde_json::from_slice::<Hook>(line) {
+                Ok(hook) => {
+                    self.hooks.insert(hook.hook_id);
+                }
+                Err(_) => self.vetoed = true,
+            },
+            Some("hook_response") => match serde_json::from_slice::<Hook>(line) {
+                Ok(hook) => {
+                    self.hooks.remove(&hook.hook_id);
+                }
+                Err(_) => self.vetoed = true,
+            },
+            _ => {}
+        }
+    }
+
     /// Keystone's ID for one of Claude's requests. Claude's IDs are only unique within
     /// its process, so the seed keeps an answer meant for an earlier process from
     /// matching a request in this one.
@@ -634,6 +887,7 @@ impl ClaudeDriver {
     }
 
     fn enqueue(&mut self, message: QueuedMessage, out: &mut Outputs) {
+        self.activity += 1;
         match &mut self.turn {
             Some(turn) => turn.held.push(message),
             None => {
@@ -1352,6 +1606,7 @@ impl ClaudeDriver {
             Request::SetMode { version, target } => {
                 return self.on_mode_set(response, version, target, out);
             }
+            Request::Quiesce => return self.on_quiescence(response),
             Request::Initialize if response.subtype != "error" => {
                 if self.launch == Launch::LayoutHelper {
                     let answer = response.response.as_ref();
@@ -1615,6 +1870,33 @@ struct Init {
 }
 
 #[derive(Deserialize)]
+struct SessionState {
+    state: String,
+    session_id: Option<String>,
+}
+
+/// A `background_tasks_changed` frame. Each entry must name its task and type, or the
+/// frame is unreadable.
+#[derive(Deserialize)]
+struct TasksChanged {
+    tasks: Vec<TaskEntry>,
+    session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TaskEntry {
+    #[serde(rename = "task_id")]
+    _task_id: String,
+    #[serde(rename = "task_type")]
+    _task_type: String,
+}
+
+#[derive(Deserialize)]
+struct Hook {
+    hook_id: String,
+}
+
+#[derive(Deserialize)]
 struct Status {
     #[serde(rename = "permissionMode")]
     permission_mode: Option<String>,
@@ -1734,6 +2016,9 @@ struct ControlResult {
     request_id: Value,
     error: Option<String>,
     response: Option<ModeSet>,
+    pending_permission_requests: Option<Vec<Value>>,
+    pending_user_dialog_requests: Option<Vec<Value>>,
+    session_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1906,6 +2191,294 @@ mod tests {
                     .any(|line| line.contains(r#""type":"user""#))
             );
         }
+    }
+
+    /// A driver past `initialize` and one completed turn, so nothing Keystone itself
+    /// sees keeps it busy.
+    fn idle_driver() -> (ClaudeDriver, Outputs) {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(1, false, 7, ApprovalMode::Provider, &mut out);
+        for line in [
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-1","response":{}}}"#,
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "hi".into(),
+            },
+            &mut out,
+        );
+        for line in [
+            r#"{"type":"system","subtype":"init","session_id":"s1","capabilities":["msg_lifecycle_v1"]}"#,
+            r#"{"type":"command_lifecycle","command_uuid":"00000000-0000-4000-8007-000000000001","state":"started"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+            r#"{"type":"command_lifecycle","command_uuid":"00000000-0000-4000-8007-000000000001","state":"completed"}"#,
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        assert!(!driver.is_running());
+        (driver, out)
+    }
+
+    const QUIET: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{},"pending_permission_requests":[],"pending_user_dialog_requests":[],"session_state":"idle"}}"#;
+    const UNATTRIBUTED: &str = "Claude Code sent activity Keystone could not read or attribute";
+    const NO_TASKS: &str =
+        r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[]}"#;
+
+    fn check(driver: &mut ClaudeDriver, lines: &[&str]) -> Option<Result<(), String>> {
+        let mut out = Outputs::default();
+        driver.check_quiescence(&mut out);
+        assert!(
+            out.writes[0].contains(r#""request_id":"keystone-2""#),
+            "{:?}",
+            out.writes
+        );
+        for line in lines {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        driver.take_quiescence()
+    }
+
+    /// The regression the naive predicate misses: the turn's `result` is in, so
+    /// `is_running` is false, while a background task it started still runs.
+    #[test]
+    fn a_task_still_running_after_the_result_blocks_eviction() {
+        let (mut driver, mut out) = idle_driver();
+        assert_eq!(driver.idle_blocker(), None);
+        driver.on_line(
+            br#"{"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[{"task_id":"t1","run_id":"r1","task_type":"local_bash","description":"build"}]}"#,
+            &mut out,
+        );
+        assert!(!driver.is_running());
+        assert_eq!(driver.idle_blocker(), Some("a background task is running"));
+        // An ambient task counts too, whatever the SDK says about activity indicators.
+        driver.on_line(
+            br#"{"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[{"task_id":"t2","task_type":"monitor","description":"watch","ambient":true}]}"#,
+            &mut out,
+        );
+        assert_eq!(driver.idle_blocker(), Some("a background task is running"));
+        // A completion edge clears nothing: only a snapshot replaces the set.
+        driver.on_line(
+            br#"{"type":"system","subtype":"task_notification","task_id":"t2","status":"completed"}"#,
+            &mut out,
+        );
+        assert_eq!(driver.idle_blocker(), Some("a background task is running"));
+        driver.on_line(NO_TASKS.as_bytes(), &mut out);
+        assert_eq!(driver.idle_blocker(), None);
+    }
+
+    #[test]
+    fn subagent_tasks_hooks_and_session_state_block_and_count_as_activity() {
+        let (mut driver, mut out) = idle_driver();
+        let before = driver.activity();
+        // A subagent's frames are not shown, but its work is still work.
+        driver.on_line(
+            br#"{"type":"system","subtype":"background_tasks_changed","parent_tool_use_id":"toolu_1","tasks":[{"task_id":"a1","task_type":"local_agent","description":"sub"}]}"#,
+            &mut out,
+        );
+        assert!(driver.activity() > before);
+        assert_eq!(driver.idle_blocker(), Some(UNATTRIBUTED));
+        assert_eq!(check(&mut driver, &[QUIET, NO_TASKS]), Some(Ok(())));
+        assert_eq!(driver.idle_blocker(), None);
+        driver.on_line(
+            br#"{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"Stop","hook_event":"Stop"}"#,
+            &mut out,
+        );
+        assert_eq!(driver.idle_blocker(), Some("a hook is running"));
+        // A response for another hook leaves the first one running.
+        driver.on_line(
+            br#"{"type":"system","subtype":"hook_response","hook_id":"h0","outcome":"success"}"#,
+            &mut out,
+        );
+        assert_eq!(driver.idle_blocker(), Some("a hook is running"));
+        driver.on_line(
+            br#"{"type":"system","subtype":"hook_response","hook_id":"h1","outcome":"success"}"#,
+            &mut out,
+        );
+        assert_eq!(driver.idle_blocker(), None);
+        driver.on_line(
+            br#"{"type":"system","subtype":"session_state_changed","session_id":"s1","state":"requires_action"}"#,
+            &mut out,
+        );
+        assert_eq!(
+            driver.idle_blocker(),
+            Some("Claude Code reports it is not idle")
+        );
+        driver.on_line(
+            br#"{"type":"system","subtype":"session_state_changed","session_id":"s1","state":"idle"}"#,
+            &mut out,
+        );
+        assert_eq!(driver.idle_blocker(), None);
+        // Keep-alives are not activity; anything unrecognized is.
+        let quiet = driver.activity();
+        driver.on_line(br#"{"type":"keep_alive"}"#, &mut out);
+        assert_eq!(driver.activity(), quiet);
+        driver.on_line(br#"{"type":"system","subtype":"cron_fired"}"#, &mut out);
+        assert!(driver.activity() > quiet);
+    }
+
+    #[test]
+    fn an_unreadable_safety_frame_vetoes_until_a_passed_check() {
+        let (mut driver, mut out) = idle_driver();
+        driver.on_line(
+            br#"{"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[{"description":"no id"}]}"#,
+            &mut out,
+        );
+        assert_eq!(driver.idle_blocker(), Some(UNATTRIBUTED));
+        assert_eq!(driver.check_blocker(), None, "the check is the refresh");
+        assert_eq!(check(&mut driver, &[QUIET, NO_TASKS]), Some(Ok(())));
+        assert_eq!(driver.idle_blocker(), None);
+    }
+
+    /// Only the conversation's own session state counts. A subagent's, another
+    /// session's or an unnamed `idle` lowers nothing and holds the process until a
+    /// check passes.
+    #[test]
+    fn only_the_conversations_own_session_state_counts() {
+        for foreign in [
+            r#"{"type":"system","subtype":"session_state_changed","parent_tool_use_id":"toolu_1","session_id":"s1","state":"idle"}"#,
+            r#"{"type":"system","subtype":"session_state_changed","session_id":"s2","state":"idle"}"#,
+            r#"{"type":"system","subtype":"session_state_changed","state":"idle"}"#,
+        ] {
+            let (mut driver, mut out) = idle_driver();
+            driver.on_line(
+                br#"{"type":"system","subtype":"session_state_changed","session_id":"s1","state":"running"}"#,
+                &mut out,
+            );
+            driver.on_line(foreign.as_bytes(), &mut out);
+            assert_eq!(
+                driver.idle_blocker(),
+                Some("Claude Code reports it is not idle"),
+                "{foreign}"
+            );
+            driver.on_line(
+                br#"{"type":"system","subtype":"session_state_changed","session_id":"s1","state":"idle"}"#,
+                &mut out,
+            );
+            assert_eq!(driver.idle_blocker(), Some(UNATTRIBUTED), "{foreign}");
+            assert_eq!(
+                check(&mut driver, &[QUIET, NO_TASKS]),
+                Some(Ok(())),
+                "{foreign}"
+            );
+            assert_eq!(driver.idle_blocker(), None, "{foreign}");
+        }
+    }
+
+    /// Only the conversation's own snapshot proves it quiescent. A subagent's, another
+    /// session's or an unnamed one is activity and proves nothing, even when empty.
+    #[test]
+    fn only_the_conversations_own_task_list_completes_a_check() {
+        for foreign in [
+            r#"{"type":"system","subtype":"background_tasks_changed","parent_tool_use_id":"toolu_1","session_id":"s1","tasks":[]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","parent_tool_use_id":"toolu_1","session_id":"s2","tasks":[]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s2","tasks":[]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+        ] {
+            let (mut driver, _) = idle_driver();
+            let activity = driver.activity();
+            assert_eq!(check(&mut driver, &[QUIET, foreign]), None, "{foreign}");
+            assert_eq!(driver.activity(), activity + 1, "{foreign}");
+            assert_eq!(driver.idle_blocker(), Some(UNATTRIBUTED), "{foreign}");
+            let mut out = Outputs::default();
+            driver.on_line(NO_TASKS.as_bytes(), &mut out);
+            assert_eq!(driver.take_quiescence(), Some(Ok(())), "{foreign}");
+            assert_eq!(driver.idle_blocker(), None, "{foreign}");
+        }
+    }
+
+    #[test]
+    fn a_check_passes_only_on_its_own_answer_then_an_empty_snapshot() {
+        let (mut driver, _) = idle_driver();
+        let activity = driver.activity();
+        // A snapshot before the answer is stale: it completes nothing.
+        assert_eq!(check(&mut driver, &[NO_TASKS]), None);
+        let mut out = Outputs::default();
+        driver.on_line(QUIET.as_bytes(), &mut out);
+        assert_eq!(driver.take_quiescence(), None, "waits for the snapshot");
+        driver.on_line(NO_TASKS.as_bytes(), &mut out);
+        assert_eq!(driver.take_quiescence(), Some(Ok(())));
+        // The stale snapshot was activity; the answer and its snapshot were not.
+        assert_eq!(driver.activity(), activity + 1);
+
+        let (mut driver, _) = idle_driver();
+        let activity = driver.activity();
+        assert_eq!(check(&mut driver, &[QUIET, NO_TASKS]), Some(Ok(())));
+        assert_eq!(
+            driver.activity(),
+            activity,
+            "a passed check is not activity"
+        );
+
+        for (answer, snapshot, reason) in [
+            (
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{}}}"#,
+                NO_TASKS,
+                "did not report its pending approvals",
+            ),
+            (
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}"#,
+                NO_TASKS,
+                "did not report the session state",
+            ),
+            (
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{},"pending_permission_requests":[{"request_id":"p"}],"pending_user_dialog_requests":[],"session_state":"requires_action"}}"#,
+                NO_TASKS,
+                "approvals pending",
+            ),
+            (
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{},"pending_permission_requests":[],"pending_user_dialog_requests":[],"session_state":"running"}}"#,
+                NO_TASKS,
+                "reports the session running",
+            ),
+            (
+                QUIET,
+                r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[{"task_id":"t","task_type":"local_bash","description":"d"}]}"#,
+                "1 background task(s) are running",
+            ),
+            (
+                r#"{"type":"control_response","response":{"subtype":"error","request_id":"keystone-2","error":"nope"}}"#,
+                NO_TASKS,
+                "refused",
+            ),
+        ] {
+            let (mut driver, _) = idle_driver();
+            let result = check(&mut driver, &[answer, snapshot]);
+            assert!(
+                matches!(&result, Some(Err(message)) if message.contains(reason)),
+                "{reason}: {result:?}"
+            );
+        }
+    }
+
+    /// An agent's steer refused because nothing runs leaves the idle proof standing:
+    /// the connection returns the refusal without revisiting idle state.
+    #[test]
+    fn a_refused_steer_is_not_activity() {
+        let (mut driver, mut out) = idle_driver();
+        let activity = driver.activity();
+        assert!(driver.steer("nudge".into(), &mut out).is_err());
+        assert_eq!(driver.activity(), activity);
+        assert!(out.writes.iter().all(|line| !line.contains("nudge")));
+    }
+
+    #[test]
+    fn an_abandoned_check_ignores_its_late_answer() {
+        let (mut driver, _) = idle_driver();
+        assert_eq!(check(&mut driver, &[]), None);
+        driver.abandon_quiescence();
+        let activity = driver.activity();
+        let mut out = Outputs::default();
+        driver.on_line(QUIET.as_bytes(), &mut out);
+        driver.on_line(NO_TASKS.as_bytes(), &mut out);
+        assert_eq!(driver.take_quiescence(), None);
+        assert!(
+            driver.activity() > activity,
+            "a late answer is not expected"
+        );
+        assert_eq!(driver.idle_blocker(), None);
     }
 
     #[test]
