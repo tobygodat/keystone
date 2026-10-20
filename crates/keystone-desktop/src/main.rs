@@ -1551,7 +1551,10 @@ impl Keystone {
         let Some(conversation) = self.conversations.get_mut(&session) else {
             return;
         };
-        self.logs.append(session, conversation.take_writes());
+        if let Err(error) = self.logs.append(session, conversation.take_writes()) {
+            conversation.save_error =
+                Some(format!("This conversation is not being saved. {error}"));
+        }
         let changed = conversation.take_changes();
         if self.store.workspace().selected() == Some(session) {
             let now = self.clock.now();
@@ -1847,7 +1850,14 @@ impl Keystone {
                 break;
             }
         }
-        self.logs.flush();
+        let result = self.logs.flush();
+        self.receive(self.logs.drain(), Vec::new(), cx);
+        if let Err(error) = result {
+            self.error = Some(format!(
+                "Could not save conversation logs before closing. {error}"
+            ));
+            cx.notify();
+        }
     }
 
     fn composer_draft(&self, cx: &App) -> Option<ComposerDraft> {
@@ -3875,6 +3885,51 @@ mod tests {
             !keystone_agent::log::read(&sessions, 1).unwrap().is_empty(),
             "written once saving works"
         );
+    }
+
+    #[gpui::test]
+    fn final_log_failure_is_visible_and_retry_saves_without_another_send(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        let sessions = dir.path().join("sessions");
+        std::fs::write(&sessions, "blocked").unwrap();
+        cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |view| !view.conversations[&1].is_loading());
+        view.update(cx, |this, cx| {
+            this.conversation(1)
+                .push_local("retained while storage fails");
+            this.commit(1);
+            this.flush_logs(cx);
+            assert!(
+                this.error
+                    .as_ref()
+                    .unwrap()
+                    .contains("Could not save conversation logs")
+            );
+            assert!(this.conversations[&1].save_error.is_some());
+        });
+        assert!(cx.debug_bounds("transcript-status").is_some());
+        std::fs::remove_file(&sessions).unwrap();
+        view.update(cx, |this, cx| {
+            this.flush_logs(cx);
+            assert!(this.conversations[&1].save_error.is_none());
+        });
+        let entries = keystone_agent::log::read(&sessions, 1).unwrap();
+        let texts = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                keystone_agent::log::Entry::Item { item, .. } => Some(item.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["retained while storage fails"]);
     }
 
     #[gpui::test]

@@ -3,12 +3,22 @@
 //! Nothing is written per streamed chunk. Each completed item is appended once, and
 //! the file is synced when a turn ends and after each approval decision. [`Logs`] does
 //! the reading and writing off the UI thread.
+//!
+//! Failed writes are retained in memory up to [`MAX_PENDING_BYTES`]. This supports
+//! repair and retry within the running app, not exactly-once recovery after a crash.
+//!
+//! Recovery means the append, tail repair and requested sync syscalls succeeded.
+//! It cannot guarantee durability after a kernel/filesystem writeback failure:
+//! some filesystems discard failed dirty pages and a later sync can succeed without
+//! rewriting them. A cleared save error is not proof against that storage failure.
+//! Open handles are retained to preserve append/sync checkpoints; a stale network
+//! or FUSE handle may require restarting, which loses the in-memory retry queue.
 
 use crate::connection::Wake;
 use crate::item::{Item, TurnStatus};
 use crate::worker::Worker;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
@@ -65,6 +75,8 @@ pub struct Write {
 
 pub struct SessionLog {
     file: File,
+    #[cfg(test)]
+    faults: VecDeque<Fault>,
 }
 
 pub fn path(dir: &Path, session: u64) -> PathBuf {
@@ -90,7 +102,11 @@ impl SessionLog {
                 file.write_all(b"\n")?;
             }
         }
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            #[cfg(test)]
+            faults: VecDeque::new(),
+        })
     }
 
     pub fn append(&mut self, entry: &Entry) -> io::Result<()> {
@@ -100,7 +116,32 @@ impl SessionLog {
     }
 
     pub fn sync(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if matches!(self.faults.front(), Some(Fault::Sync)) {
+            self.faults.pop_front();
+            return Err(io::Error::other("injected sync failure"));
+        }
         self.file.sync_data()
+    }
+
+    fn append_line(&mut self, line: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(Fault::Append(bytes)) = self.faults.front() {
+            let bytes = *bytes;
+            self.faults.pop_front();
+            self.file.write_all(&line[..bytes.min(line.len())])?;
+            return Err(io::Error::other("injected append failure"));
+        }
+        self.file.write_all(line)
+    }
+
+    fn rollback(&mut self, len: u64) -> io::Result<()> {
+        #[cfg(test)]
+        if matches!(self.faults.front(), Some(Fault::Rollback)) {
+            self.faults.pop_front();
+            return Err(io::Error::other("injected tail repair failure"));
+        }
+        self.file.set_len(len)
     }
 }
 
@@ -148,6 +189,7 @@ pub struct Logs {
     dir: PathBuf,
     read: Reader,
     files: Arc<Mutex<Files>>,
+    budget: Arc<Mutex<Budget>>,
     reports: Arc<Mutex<Vec<Report>>>,
     /// How many loads have not reported yet.
     loading: Arc<(Mutex<usize>, Condvar)>,
@@ -156,9 +198,73 @@ pub struct Logs {
 
 struct Files {
     dir: PathBuf,
-    open: HashMap<u64, SessionLog>,
-    /// Sessions whose last write failed. A success clears the error once.
-    failing: HashSet<u64>,
+    sessions: BTreeMap<u64, PendingSession>,
+    failing: BTreeMap<u64, String>,
+}
+
+/// Maximum serialized bytes retained across the worker mailbox and failed writes.
+/// Once exceeded, that session rejects further batches and flush stays failed for
+/// the lifetime of these Logs, even if earlier entries recover. Rejected entries
+/// are not retained: callers must surface the append error. This fail-closed limit
+/// prevents later entries from masking a gap. Queue metadata is additional memory.
+pub const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Default)]
+struct Budget {
+    bytes: usize,
+    rejected: BTreeSet<u64>,
+}
+
+fn limit_error(session: u64) -> String {
+    format!(
+        "Session {session}: the 16 MiB log retry buffer limit was exceeded. Entries were rejected and are not saved; further writes are disabled for this session until restart."
+    )
+}
+
+struct PendingWrite {
+    line: Vec<u8>,
+    sync: bool,
+}
+
+#[derive(Default)]
+struct PendingSession {
+    log: Option<SessionLog>,
+    writes: VecDeque<PendingWrite>,
+    progress: Progress,
+}
+
+#[derive(Default)]
+enum Progress {
+    #[default]
+    Append,
+    Rollback(u64),
+    Sync,
+}
+
+struct LimitedLine {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl io::Write for LimitedLine {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(io::Error::other("log retry buffer limit exceeded"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+enum Fault {
+    Append(usize),
+    Sync,
+    Rollback,
 }
 
 impl Logs {
@@ -172,9 +278,10 @@ impl Logs {
             writer: Worker::new("session-logs"),
             files: Arc::new(Mutex::new(Files {
                 dir: dir.clone(),
-                open: HashMap::new(),
-                failing: HashSet::new(),
+                sessions: BTreeMap::new(),
+                failing: BTreeMap::new(),
             })),
+            budget: Arc::default(),
             dir,
             read,
             reports: Arc::default(),
@@ -226,40 +333,107 @@ impl Logs {
         true
     }
 
-    /// Appends entries in order. A failure is reported, and the next append reopens the file.
-    pub fn append(&self, session: u64, writes: Vec<Write>) {
+    /// Queues entries in order. I/O failures retain the batch for the next append or
+    /// flush to retry. Admission is bounded by [`MAX_PENDING_BYTES`]; a rejected
+    /// batch returns an error and permanently fails this session's flush result.
+    pub fn append(&self, session: u64, writes: Vec<Write>) -> Result<(), String> {
         if writes.is_empty() {
-            return;
+            return Ok(());
         }
+        let mut admission = self.budget.lock().unwrap();
+        if admission.rejected.contains(&session) {
+            return Err(limit_error(session));
+        }
+        let mut pending = VecDeque::new();
+        let mut bytes = 0;
+        for write in writes {
+            let mut line = LimitedLine {
+                bytes: Vec::new(),
+                limit: MAX_PENDING_BYTES - admission.bytes - bytes,
+            };
+            if serde_json::to_writer(&mut line, &write.entry).is_err()
+                || line.write_all(b"\n").is_err()
+            {
+                admission.rejected.insert(session);
+                let (files, reports, wake) =
+                    (self.files.clone(), self.reports.clone(), self.wake.clone());
+                self.writer.run(move || {
+                    let error = limit_error(session);
+                    files.lock().unwrap().failing.insert(session, error.clone());
+                    reports.lock().unwrap().push(Report::Saved {
+                        session,
+                        error: Some(error),
+                    });
+                    wake();
+                });
+                return Err(limit_error(session));
+            }
+            bytes += line.bytes.len();
+            pending.push_back(PendingWrite {
+                line: line.bytes,
+                sync: write.sync,
+            });
+        }
+        admission.bytes += bytes;
         let (files, reports, wake) = (self.files.clone(), self.reports.clone(), self.wake.clone());
+        let budget = self.budget.clone();
         self.writer.run(move || {
             let mut files = files.lock().unwrap();
-            let report = match files.write(session, &writes) {
-                Ok(()) => files.failing.remove(&session).then_some(Report::Saved {
-                    session,
-                    error: None,
-                }),
-                Err(error) => {
-                    files.open.remove(&session);
-                    files.failing.insert(session);
-                    Some(Report::Saved {
-                        session,
-                        error: Some(error.to_string()),
-                    })
-                }
-            };
+            files
+                .sessions
+                .entry(session)
+                .or_default()
+                .writes
+                .extend(pending);
+            let report = files.retry(session, &budget);
             drop(files);
             if let Some(report) = report {
                 reports.lock().unwrap().push(report);
                 wake();
             }
         });
+        drop(admission);
+        Ok(())
     }
 
-    /// Blocks until everything queued so far is written, such as before quitting. It
-    /// does not wait for loads; see [`Logs::wait_for_loads`].
-    pub fn flush(&self) {
-        self.writer.flush();
+    /// Retries pending appends and requested syncs, then reports every outstanding
+    /// failure. A sync failure retries only sync; a partial append is rolled back
+    /// before replay. Does not wait for loads; see [`Logs::wait_for_loads`].
+    pub fn flush(&self) -> Result<(), String> {
+        let (files, budget, reports, wake) = (
+            self.files.clone(),
+            self.budget.clone(),
+            self.reports.clone(),
+            self.wake.clone(),
+        );
+        let (done, wait) = std::sync::mpsc::channel();
+        self.writer.run(move || {
+            let mut files = files.lock().unwrap();
+            let sessions: Vec<_> = files.sessions.keys().copied().collect();
+            let mut recovered = Vec::new();
+            for session in sessions {
+                if let Some(report) = files.retry(session, &budget) {
+                    recovered.push(report);
+                }
+            }
+            let mut errors = files.failing.clone();
+            for session in &budget.lock().unwrap().rejected {
+                errors.insert(*session, limit_error(*session));
+            }
+            drop(files);
+            if !recovered.is_empty() {
+                reports.lock().unwrap().extend(recovered);
+                wake();
+            }
+            let result = if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.into_values().collect::<Vec<_>>().join("; "))
+            };
+            let _ = done.send(result);
+        });
+        wait.recv()
+            .unwrap_or_else(|_| Err("The log writer stopped before saving completed".into()))
     }
 
     /// Takes every report since the last call.
@@ -269,18 +443,60 @@ impl Logs {
 }
 
 impl Files {
-    fn write(&mut self, session: u64, writes: &[Write]) -> io::Result<()> {
-        if !self.open.contains_key(&session) {
-            let log = SessionLog::open(&self.dir, session)?;
-            self.open.insert(session, log);
+    fn retry(&mut self, session: u64, budget: &Mutex<Budget>) -> Option<Report> {
+        let pending = self.sessions.get_mut(&session).expect("queued above");
+        let result = pending.retry(&self.dir, session, budget);
+        let error = if budget.lock().unwrap().rejected.contains(&session) {
+            Some(limit_error(session))
+        } else {
+            result
+                .err()
+                .map(|error| format!("Session {session}: {error}"))
+        };
+        match error {
+            Some(error) => {
+                if self.failing.get(&session) == Some(&error) {
+                    return None;
+                }
+                self.failing.insert(session, error.clone());
+                Some(Report::Saved {
+                    session,
+                    error: Some(error),
+                })
+            }
+            None => self.failing.remove(&session).map(|_| Report::Saved {
+                session,
+                error: None,
+            }),
         }
-        let log = self.open.get_mut(&session).expect("opened above");
-        for write in writes {
-            log.append(&write.entry)?;
+    }
+}
+
+impl PendingSession {
+    fn retry(&mut self, dir: &Path, session: u64, budget: &Mutex<Budget>) -> io::Result<()> {
+        while let Some(write) = self.writes.front() {
+            if self.log.is_none() {
+                self.log = Some(SessionLog::open(dir, session)?);
+            }
+            let log = self.log.as_mut().expect("opened above");
+            if let Progress::Rollback(len) = self.progress {
+                log.rollback(len)?;
+                self.progress = Progress::Append;
+            }
+            if matches!(self.progress, Progress::Append) {
+                let len = log.file.metadata()?.len();
+                self.progress = Progress::Rollback(len);
+                log.append_line(&write.line)?;
+                self.progress = Progress::Sync;
+            }
             if write.sync {
                 log.sync()?;
             }
+            budget.lock().unwrap().bytes -= write.line.len();
+            self.writes.pop_front();
+            self.progress = Progress::Append;
         }
+        self.writes = VecDeque::new();
         Ok(())
     }
 }
@@ -349,9 +565,9 @@ mod tests {
     fn writes_land_in_order_and_a_load_reports_them() {
         let (logs, wake, dir) = logs();
         for n in 0..50 {
-            logs.append(1, vec![entry(n)]);
+            logs.append(1, vec![entry(n)]).unwrap();
         }
-        logs.flush();
+        logs.flush().unwrap();
         let sessions = dir.path().join("sessions");
         assert_eq!(
             seqs(&read(&sessions, 1).unwrap()),
@@ -390,8 +606,8 @@ mod tests {
         thread::spawn(move || {
             logs.load(1);
             logs.load(3);
-            logs.append(2, vec![entry(0)]);
-            logs.flush();
+            logs.append(2, vec![entry(0)]).unwrap();
+            logs.flush().unwrap();
             // Session 3's load reports although session 1's never does.
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut reports = Vec::new();
@@ -437,7 +653,7 @@ mod tests {
                 sync: true,
             }]
         };
-        logs.append(2, write());
+        logs.append(2, write()).unwrap();
         wake.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         assert!(matches!(
@@ -448,7 +664,7 @@ mod tests {
             }]
         ));
         std::fs::remove_file(&sessions).unwrap();
-        logs.append(2, write());
+        logs.append(2, write()).unwrap();
         wake.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         assert_eq!(
@@ -459,10 +675,208 @@ mod tests {
             }]
         );
         // Further successes report nothing.
-        logs.append(2, write());
-        logs.flush();
+        logs.append(2, write()).unwrap();
+        logs.flush().unwrap();
         assert!(logs.drain().is_empty());
-        assert_eq!(read(&sessions, 2).unwrap().len(), 2);
+        assert_eq!(read(&sessions, 2).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn failed_batches_retry_without_a_new_message_in_original_order() {
+        let (logs, _, dir) = logs();
+        let sessions = dir.path().join("sessions");
+        fs::write(&sessions, "blocked").unwrap();
+        logs.append(1, vec![entry(0), entry(1)]).unwrap();
+        logs.append(1, vec![entry(2)]).unwrap();
+        logs.append(2, vec![entry(3)]).unwrap();
+        let error = logs.flush().unwrap_err();
+        assert!(error.contains("Session 1") && error.contains("Session 2"));
+        assert!(logs.budget.lock().unwrap().bytes > 0);
+        logs.drain();
+        fs::remove_file(&sessions).unwrap();
+        logs.flush().unwrap();
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0, 1, 2]);
+        assert_eq!(seqs(&read(&sessions, 2).unwrap()), [3]);
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+        assert_eq!(
+            logs.drain(),
+            vec![
+                Report::Saved {
+                    session: 1,
+                    error: None
+                },
+                Report::Saved {
+                    session: 2,
+                    error: None
+                },
+            ]
+        );
+        logs.flush().unwrap();
+        assert!(logs.drain().is_empty());
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0, 1, 2]);
+    }
+
+    fn inject(logs: &Logs, session: u64, faults: VecDeque<Fault>) {
+        let mut files = logs.files.lock().unwrap();
+        let log = SessionLog::open(&files.dir, session).unwrap();
+        let pending = files.sessions.entry(session).or_default();
+        pending.log = Some(log);
+        pending.log.as_mut().unwrap().faults = faults;
+    }
+
+    #[test]
+    fn partial_append_and_failed_tail_repair_block_later_entries_until_retry() {
+        let (logs, _, dir) = logs();
+        inject(
+            &logs,
+            1,
+            VecDeque::from([Fault::Append(13), Fault::Rollback, Fault::Rollback]),
+        );
+        logs.append(1, vec![entry(0), entry(1)]).unwrap();
+        logs.writer.flush();
+        let sessions = dir.path().join("sessions");
+        let partial = fs::read(path(&sessions, 1)).unwrap();
+        assert_eq!(partial.len(), 13);
+        assert!(logs.flush().unwrap_err().contains("tail repair"));
+        logs.append(1, vec![entry(2)]).unwrap();
+        logs.writer.flush();
+        assert_eq!(fs::read(path(&sessions, 1)).unwrap(), partial);
+        logs.flush().unwrap();
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0, 1, 2]);
+        assert_eq!(
+            fs::read(path(&sessions, 1))
+                .unwrap()
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count(),
+            3
+        );
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn sync_retry_does_not_append_the_entry_twice_or_clear_failure_early() {
+        let (logs, _, dir) = logs();
+        inject(
+            &logs,
+            1,
+            VecDeque::from([Fault::Sync, Fault::Sync, Fault::Sync]),
+        );
+        logs.append(1, vec![entry(0), entry(1)]).unwrap();
+        logs.writer.flush();
+        let sessions = dir.path().join("sessions");
+        let before = fs::read(path(&sessions, 1)).unwrap();
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0]);
+        assert!(logs.flush().unwrap_err().contains("sync failure"));
+        logs.append(2, vec![entry(5)]).unwrap();
+        logs.writer.flush();
+        assert_eq!(fs::read(path(&sessions, 1)).unwrap(), before);
+        assert!(logs.flush().is_err());
+        assert!(!logs.drain().iter().any(|report| matches!(
+            report,
+            Report::Saved {
+                session: 1,
+                error: None
+            }
+        )));
+        logs.flush().unwrap();
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0, 1]);
+        assert_eq!(seqs(&read(&sessions, 2).unwrap()), [5]);
+        assert_eq!(
+            logs.drain(),
+            vec![Report::Saved {
+                session: 1,
+                error: None
+            }]
+        );
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn zero_byte_append_failure_preserves_the_successful_prefix() {
+        let (logs, _, dir) = logs();
+        logs.append(1, vec![entry(1)]).unwrap();
+        logs.flush().unwrap();
+        logs.files
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut(&1)
+            .unwrap()
+            .log
+            .as_mut()
+            .unwrap()
+            .faults
+            .push_back(Fault::Append(0));
+        logs.append(1, vec![entry(2), entry(3)]).unwrap();
+        logs.writer.flush();
+        let sessions = dir.path().join("sessions");
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [1]);
+        logs.flush().unwrap();
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [1, 2, 3]);
+    }
+
+    #[test]
+    fn buffer_limit_rejection_is_sticky_after_the_retained_prefix_recovers() {
+        let (logs, _, dir) = logs();
+        let sessions = dir.path().join("sessions");
+        fs::write(&sessions, "blocked").unwrap();
+        let mut first = entry(0);
+        if let Entry::Item { item, .. } = &mut first.entry {
+            item.text = "a".repeat(MAX_PENDING_BYTES / 2);
+        }
+        logs.append(1, vec![first.clone()]).unwrap();
+        let before = logs.budget.lock().unwrap().bytes;
+        assert!(logs.append(1, vec![first]).unwrap_err().contains("limit"));
+        assert_eq!(logs.budget.lock().unwrap().bytes, before);
+        assert!(logs.append(1, vec![entry(2)]).is_err());
+        assert!(logs.flush().is_err());
+        fs::remove_file(&sessions).unwrap();
+        assert!(logs.flush().unwrap_err().contains("rejected"));
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0]);
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+        assert!(!logs.drain().iter().any(|report| matches!(
+            report,
+            Report::Saved {
+                session: 1,
+                error: None
+            }
+        )));
+        logs.append(2, vec![entry(3)]).unwrap();
+        assert!(logs.flush().is_err());
+        assert_eq!(seqs(&read(&sessions, 2).unwrap()), [3]);
+        let mut oversized = entry(4);
+        if let Entry::Item { item, .. } = &mut oversized.entry {
+            item.text = "a".repeat(MAX_PENDING_BYTES);
+        }
+        assert!(logs.append(3, vec![oversized]).is_err());
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn rejection_report_follows_any_already_queued_recovery() {
+        let (logs, _, dir) = logs();
+        let sessions = dir.path().join("sessions");
+        fs::write(&sessions, "blocked").unwrap();
+        logs.append(1, vec![entry(0)]).unwrap();
+        assert!(logs.flush().is_err());
+        logs.drain();
+        fs::remove_file(&sessions).unwrap();
+        logs.flush().unwrap();
+        let mut oversized = entry(1);
+        if let Entry::Item { item, .. } = &mut oversized.entry {
+            item.text = "a".repeat(MAX_PENDING_BYTES);
+        }
+        assert!(logs.append(1, vec![oversized]).is_err());
+        logs.writer.flush();
+        let reports = logs.drain();
+        assert!(matches!(
+            reports.first(),
+            Some(Report::Saved { error: None, .. })
+        ));
+        assert!(
+            matches!(reports.last(), Some(Report::Saved { error: Some(error), .. }) if error.contains("rejected"))
+        );
     }
 
     #[test]
