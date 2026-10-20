@@ -2,6 +2,13 @@
 
 Keystone includes code adapted from the projects below.
 
+## Pele
+
+`crates/keystone-ui/vendor/pele/pele.global.js` embeds Pele 1.6.0 by Obsidian
+under the MIT license, including Lucide icon data under ISC. The full upstream
+licenses and exact bundle provenance are in
+[`crates/keystone-ui/vendor/pele`](crates/keystone-ui/vendor/pele/README.md).
+
 ## Zeron
 
 `crates/keystone-ui/src/markdown/incremental.rs` and `crates/keystone-ui/src/markdown/mend.rs` adapt the incremental Markdown parser and the inline-marker mending from [Zeron](https://github.com/zeronsh/zeron) (`crates/markdown/src/parser.rs` and `crates/markdown/src/mend.rs`).

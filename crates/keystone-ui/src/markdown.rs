@@ -62,6 +62,10 @@ pub enum Block {
         language: Option<SharedString>,
         code: SharedString,
     },
+    Diagram {
+        source: SharedString,
+        closed: bool,
+    },
     /// `start` is the first number of an ordered list, or `None` for bullets.
     List {
         start: Option<u64>,
@@ -112,6 +116,9 @@ const OPTIONS: Options = Options::ENABLE_TABLES.union(Options::ENABLE_STRIKETHRO
 fn parse_at(source: &str, offset: usize) -> Vec<Arc<TopBlock>> {
     let mut builder = Builder::default();
     let mut depth = 0usize;
+    let mut diagram_start = 0;
+    let mut diagram_tail = 0;
+    let mut diagram_in_container = false;
     for (event, range) in Parser::new_ext(source, OPTIONS).into_offset_iter() {
         if depth == 0 {
             builder.top = range.start + offset..range.end + offset;
@@ -121,9 +128,96 @@ fn parse_at(source: &str, offset: usize) -> Vec<Arc<TopBlock>> {
             Event::End(_) => depth -= 1,
             _ => {}
         }
-        builder.event(event);
+        if let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = &event
+            && info.split_whitespace().next() == Some("mermaid")
+        {
+            builder.diagram_closed = Some(closed_fence(&source[range.clone()]));
+            diagram_start = range.start;
+            diagram_tail = source[range.clone()]
+                .find('\n')
+                .map_or(range.end, |line| range.start + line + 1);
+            let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+            diagram_in_container = line_start != range.start;
+        }
+        if let Event::Text(text) = &event
+            && builder.diagram_closed.is_some()
+        {
+            if let Some((_, code)) = &mut builder.code {
+                append_code_text(code, source, text, range.clone());
+            }
+            diagram_tail = range.end;
+        } else {
+            if matches!(event, Event::End(TagEnd::CodeBlock))
+                && builder.diagram_closed == Some(true)
+                && diagram_tail == range.end
+            {
+                builder.diagram_closed = Some(false);
+            }
+            if matches!(event, Event::End(TagEnd::CodeBlock))
+                && builder.diagram_closed == Some(false)
+            {
+                let tail = &source[diagram_tail..range.end];
+                if !tail.is_empty() && diagram_in_container && range.end == source.len() {
+                    if let Some(verbatim) = unclosed_code_source(source, diagram_start, range.end)
+                        && let Some((_, code)) = &mut builder.code
+                    {
+                        *code = verbatim;
+                    }
+                } else {
+                    builder.text(tail, builder.style);
+                }
+            }
+            builder.event(event);
+        }
     }
     builder.finish()
+}
+
+fn append_code_text(code: &mut String, source: &str, text: &str, range: Range<usize>) {
+    if range.is_empty() {
+        code.push_str(text);
+        return;
+    }
+    if source[range.clone()].starts_with('\n')
+        && range.start > 0
+        && source.as_bytes()[range.start - 1] == b'\r'
+    {
+        code.push('\r');
+    }
+    code.push_str(&source[range]);
+}
+
+/// One EOF-only probe lets CommonMark resolve partial container prefixes and retain
+/// whitespace that it otherwise omits at EOF. This adds at most one parse per document.
+fn unclosed_code_source(source: &str, start: usize, end: usize) -> Option<String> {
+    let probe = format!("{}x", &source[..end]);
+    let tail_start = source[..end].rfind('\n').map_or(0, |i| i + 1);
+    let mut active = false;
+    let mut code = String::new();
+    for (event, range) in Parser::new_ext(&probe, OPTIONS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) if range.start == start => active = true,
+            Event::Text(text) if active => {
+                if !range.is_empty() || range.start < tail_start {
+                    append_code_text(&mut code, &probe, &text, range);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) if active => break,
+            _ => {}
+        }
+    }
+    code.strip_suffix('x').map(str::to_owned)
+}
+
+fn closed_fence(block: &str) -> bool {
+    let Some((opening, rest)) = block.split_once('\n') else {
+        return false;
+    };
+    let marker = opening.as_bytes()[0];
+    let count = opening.bytes().take_while(|&b| b == marker).count();
+    let closing = rest.rsplit('\n').next().unwrap_or_default().trim();
+    let closing = closing.trim_start_matches([' ', '\t', '>']);
+    closing.len() >= count && closing.bytes().all(|b| b == marker)
 }
 
 /// An open container while parsing.
@@ -158,6 +252,7 @@ struct Builder {
     stack: Vec<Frame>,
     inline: Option<(Target, InlineBuilder)>,
     code: Option<(Option<SharedString>, String)>,
+    diagram_closed: Option<bool>,
     style: Style,
     /// Nesting depth of each inline style, so `**a *b* c**` keeps bold after the inner end.
     depth: [u32; 4],
@@ -402,6 +497,13 @@ impl Builder {
             TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::TableCell => self.flush_inline(),
             TagEnd::CodeBlock => {
                 if let Some((language, mut code)) = self.code.take() {
+                    if let Some(closed) = self.diagram_closed.take() {
+                        self.push_block(Block::Diagram {
+                            source: code.into(),
+                            closed,
+                        });
+                        return;
+                    }
                     if code.ends_with('\n') {
                         code.pop();
                     }
@@ -619,6 +721,15 @@ fn render_block(block: &Block, ctx: &mut Ctx, window: &mut Window, cx: &mut App)
         }
         Block::Code { language, code } => {
             code_block(language.clone(), code.clone(), ctx, window, cx)
+        }
+        Block::Diagram { source, closed } => {
+            ctx.code_blocks += 1;
+            crate::diagram::Diagram::new(
+                format!("{}-diagram-{}", ctx.id, ctx.code_blocks),
+                source.clone(),
+                *closed,
+            )
+            .into_any_element()
         }
         Block::List { start, items } => {
             let mut list = v_flex().min_w_0().gap_1();
@@ -1029,7 +1140,7 @@ mod tests {
                 Block::Table { header, rows, .. } => {
                     header.iter().chain(rows.iter().flatten()).for_each(check)
                 }
-                Block::Code { .. } | Block::Rule => {}
+                Block::Code { .. } | Block::Diagram { .. } | Block::Rule => {}
             }
         }
     }
@@ -1056,6 +1167,7 @@ mod tests {
                     out.push(i.text.to_string())
                 }
                 Block::Code { code, .. } => out.push(code.to_string()),
+                Block::Diagram { source, .. } => out.push(source.to_string()),
                 Block::List { items, .. } => items.iter().for_each(|b| texts(b, out)),
                 Block::Quote(b) => texts(b, out),
                 Block::Table { .. } | Block::Rule => {}
@@ -1156,5 +1268,187 @@ mod tests {
         assert!(!is_openable("file:///etc/passwd"));
         assert!(!is_openable("javascript:alert(1)"));
         assert!(!is_openable("/usr/bin/xdg-open"));
+    }
+
+    #[test]
+    fn mermaid_preserves_source_and_requires_a_real_closing_fence() {
+        for (source, expected, closed) in [
+            (
+                "```mermaid\nflowchart TD\n  A[é] --> B  \n```\n",
+                "flowchart TD\n  A[é] --> B  \n",
+                true,
+            ),
+            (
+                "```mermaid\r\nflowchart TD\r\n  A --> B  \r\n```\r\n",
+                "flowchart TD\r\n  A --> B  \r\n",
+                true,
+            ),
+            (
+                "```mermaid\nflowchart TD\nA-->B\n",
+                "flowchart TD\nA-->B\n",
+                false,
+            ),
+            (
+                "```mermaid\nflowchart TD\nA-->B",
+                "flowchart TD\nA-->B",
+                false,
+            ),
+            (
+                "~~~~mermaid\nflowchart TD\nA-->B\n~~~~  ",
+                "flowchart TD\nA-->B\n",
+                true,
+            ),
+            (
+                "````mermaid\nflowchart TD\n```\n",
+                "flowchart TD\n```\n",
+                false,
+            ),
+            (
+                "```mermaid\nflowchart TD\n``` trailing",
+                "flowchart TD\n``` trailing",
+                false,
+            ),
+            ("```mermaid", "", false),
+            ("```mermaid\n```", "", true),
+            (
+                "```mermaid\nflowchart TD\n    ```",
+                "flowchart TD\n    ```",
+                false,
+            ),
+            (
+                "```mermaid\nflowchart TD\n> ```",
+                "flowchart TD\n> ```",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                Document::parse(source).blocks[0].block,
+                Block::Diagram {
+                    source: expected.to_owned().into(),
+                    closed,
+                },
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_mermaid_preserves_logical_source_line_endings() {
+        let doc = Document::parse("> ```mermaid\r\n> flowchart TD\r\n>   A --> B  \r\n> ```\r\n");
+        let Block::Quote(blocks) = &doc.blocks[0].block else {
+            panic!("{doc:?}");
+        };
+        assert_eq!(
+            blocks[0],
+            Block::Diagram {
+                source: "flowchart TD\r\n  A --> B  \r\n".into(),
+                closed: true,
+            }
+        );
+    }
+
+    #[test]
+    fn every_mermaid_stream_prefix_matches_a_whole_parse() {
+        let source = "Intro\n\n```mermaid\r\nflowchart TD\r\n  A[é] --> B  \r\n```\r\n\nAfter";
+        let mut parser = IncrementalParser::new();
+        for end in (0..=source.len()).filter(|&i| source.is_char_boundary(i)) {
+            parser.set_text(&source[..end]);
+            assert_eq!(*parser.document(), Document::parse(&source[..end]));
+            for block in &parser.display().blocks {
+                if let Block::Diagram {
+                    source: body,
+                    closed,
+                } = &block.block
+                {
+                    assert_eq!(*closed, source[..end].contains("\r\n```"));
+                    let expected = if *closed {
+                        "flowchart TD\r\n  A[é] --> B  \r\n"
+                    } else {
+                        source
+                            .get(source.find("flowchart").unwrap()..end)
+                            .unwrap_or("")
+                    };
+                    assert_eq!(body.as_ref(), expected, "prefix ending at {end}");
+                }
+            }
+        }
+        assert_eq!(*parser.finish(source), Document::parse(source));
+    }
+
+    #[test]
+    fn quoted_mermaid_prefixes_never_copy_container_markers() {
+        let source = "> ```mermaid\n> flowchart TD\n>   A[é] --> B  \n> ```\n";
+        let body_start = source.find("flowchart").unwrap() - 2;
+        let mut parser = IncrementalParser::new();
+        for end in (0..=source.len()).filter(|&i| source.is_char_boundary(i)) {
+            let prefix = &source[..end];
+            parser.set_text(prefix);
+            assert_eq!(*parser.document(), Document::parse(prefix));
+            let Some(top) = parser.document().blocks.first().cloned() else {
+                continue;
+            };
+            let Block::Quote(blocks) = &top.block else {
+                continue;
+            };
+            let Some(Block::Diagram {
+                source: body,
+                closed,
+            }) = blocks.first()
+            else {
+                continue;
+            };
+            let expected = if *closed {
+                "flowchart TD\n  A[é] --> B  \n".to_owned()
+            } else {
+                prefix
+                    .get(body_start..)
+                    .unwrap_or("")
+                    .split_inclusive('\n')
+                    .map(|line| line.strip_prefix('>').unwrap_or(line))
+                    .map(|line| line.strip_prefix(' ').unwrap_or(line))
+                    .collect()
+            };
+            assert_eq!(body.as_ref(), expected, "quoted prefix ending at {end}");
+        }
+        for (source, expected) in [
+            ("> ```mermaid\n> flowchart TD\n>", "flowchart TD\n"),
+            ("> ```mermaid\n> flowchart TD\n>\t ", "flowchart TD\n "),
+            ("- ```mermaid\n  flowchart TD\n   ", "flowchart TD\n "),
+        ] {
+            let doc = Document::parse(source);
+            let mut out = Vec::new();
+            texts(&top(&doc), &mut out);
+            assert_eq!(out, [expected]);
+        }
+    }
+
+    #[test]
+    fn mermaid_container_tabs_keep_synthesized_indentation() {
+        for (source, expected) in [
+            (
+                "- ```mermaid\n  mindmap\n  Root\n\tChild\n  ```\n",
+                "mindmap\nRoot\n  Child\n",
+            ),
+            (
+                "- > ```mermaid\n  > mindmap\n  > Root\n\t>\tChild\n  > ```\n",
+                "mindmap\nRoot\n  Child\n",
+            ),
+            (
+                ">   ```mermaid\r\n>   mindmap\r\n>   Root\r\n>\t\tChild\r\n>   ```\r\n",
+                "mindmap\r\nRoot\r\n\tChild\r\n",
+            ),
+            ("> ```mermaid\n> a\n>\t\tb\n> ```", "a\n  \tb\n"),
+            ("> ```mermaid\n> a\n>\t\tb\n>\t", "a\n  \tb\n"),
+        ] {
+            let doc = Document::parse(source);
+            let mut out = Vec::new();
+            texts(&top(&doc), &mut out);
+            assert_eq!(out, [expected], "{source:?}");
+            let mut parser = IncrementalParser::new();
+            for end in (0..=source.len()).filter(|&i| source.is_char_boundary(i)) {
+                parser.set_text(&source[..end]);
+                assert_eq!(*parser.document(), Document::parse(&source[..end]));
+            }
+        }
     }
 }

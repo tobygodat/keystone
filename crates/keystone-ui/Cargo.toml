@@ -10,6 +10,12 @@ anyhow = "1"
 smallvec = "1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 unicode-segmentation = "1.13.3"
+rquickjs = { version = "0.9", default-features = false }
+roxmltree = "0.21"
+fontdb = "0.23"
+ttf-parser = "0.25"
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 [features]
 ui-tests = ["gpui/test-support"]
@@ -18,7 +24,12 @@ ui-tests = ["gpui/test-support"]
 name = "components"
 required-features = ["ui-tests"]
 
+[[test]]
+name = "diagrams"
+required-features = ["ui-tests"]
+
 [dev-dependencies]
+resvg = "0.46"
 gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "766668f691fa78b37460b1dda3b162e9bb80a3ad", features = ["wayland", "x11"] }
 
 [[test]]

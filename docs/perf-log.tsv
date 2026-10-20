@@ -14,3 +14,6 @@ date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_
 2026-10-16T04:37:31Z	90dba01	1.34	1.63	272	0.80	2.12	merge main into claude-provider	0.82	0.72
 2026-10-16T04:58:28Z	322295b	0.66	0.92	277	0.58	0.77	merge main into markdown-approval-mode	0.78	0.72
 2026-10-16T06:34:14Z	54fd532	1.10	1.21	273	0.71	1.93	sccache + mold	0.76	0.69
+2026-10-19T04:56:11Z	3fe5ff6+dirty	1.79	2.62	350	1.34	1.58	TOB-34 bounded Pele renderer; final prefix restoration; cloud simulated draw metrics	1.80	1.72
+2026-10-19T05:33:16Z	3c1aaa1	1.96	2.73	350	1.36	1.90	TOB-34 repaired concrete UI/mono fonts, async completion and atlas cleanup; simulated cloud baseline, not device or diagram timing	1.85	1.65
+2026-10-19T05:41:47Z	f59ff97	1.88	2.52	350	1.33	1.76	TOB-34 final source-font override repair; simulated cloud baseline, not device or diagram timing	1.84	1.77

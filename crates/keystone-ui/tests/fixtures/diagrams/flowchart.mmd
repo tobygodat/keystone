@@ -1,0 +1,6 @@
+flowchart LR
+    A[Read request] --> B{Safe to proceed?}
+    B -->|Yes| C[Render diagram]
+    B -->|No| D[Ask first]
+    C --> E[Show result]
+    D --> E

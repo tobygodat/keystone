@@ -15,10 +15,13 @@ enum Page {
     Controls,
     Tree,
     Palette,
+    Diagrams,
 }
 
 #[path = "gallery/controls.rs"]
 mod controls;
+#[path = "gallery/diagrams.rs"]
+mod diagrams;
 #[path = "gallery/palette.rs"]
 mod palette;
 #[path = "gallery/tabs.rs"]
@@ -27,6 +30,7 @@ mod tabs;
 mod tree;
 
 struct Gallery {
+    focus: gpui::FocusHandle,
     page: Page,
     menu_open: bool,
     dialog: Option<DialogFocus>,
@@ -39,6 +43,7 @@ struct Gallery {
     palette: Entity<palette::PalettePage>,
     controls: Entity<controls::ControlsPage>,
     tree: Entity<tree::TreePage>,
+    diagrams: Entity<diagrams::DiagramsPage>,
 }
 
 const MARKDOWN: &str = "## Heading\n\nA paragraph with **strong**, *emphasis*, `inline code`, ~~struck~~, and a [link](https://example.com).\n\n- A bullet\n  1. A nested number\n- Another bullet\n\n> A quoted line.\n\n| Left | Center | Right |\n| :-- | :-: | --: |\n| `a` | b | 1 |\n| c | d | 22 |\n\n```rust\nfn main() {\n    println!(\"A long line that scrolls sideways instead of wrapping, as in an editor, so code keeps its shape.\");\n}\n```\n\n---\n";
@@ -414,6 +419,7 @@ impl Render for Gallery {
             (Page::Palette, "Palette", "gallery-page-palette"),
             (Page::Controls, "Controls", "gallery-page-controls"),
             (Page::Tree, "Tree", "gallery-page-tree"),
+            (Page::Diagrams, "Diagrams", "gallery-page-diagrams"),
         ]
         .map(|(target, name, id)| {
             Button::new(id, name)
@@ -431,10 +437,14 @@ impl Render for Gallery {
                     if target == Page::Tree {
                         window.focus(&this.tree.focus_handle(cx), cx);
                     }
+                    if target == Page::Diagrams {
+                        window.focus(&this.focus, cx);
+                    }
                     cx.notify();
                 }))
         });
         let header = h_flex()
+            .flex_wrap()
             .gap_3()
             .p_6()
             .child(Label::new("keystone-ui").size(TextSize::Title))
@@ -513,6 +523,19 @@ impl Render for Gallery {
             .font_family(ui_font)
             .text_color(text)
             .text_size(TextSize::Base.px())
+            .track_focus(&self.focus)
+            .on_key_down(|event, window, cx| {
+                if event.keystroke.key == "tab" {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "q" && event.keystroke.modifiers.control {
+                    cx.quit();
+                }
+            })
             .when(automation::enabled(), |d| {
                 d.child(automation::frame_writer())
             })
@@ -523,6 +546,7 @@ impl Render for Gallery {
                 Page::Palette => d.child(self.palette.clone()),
                 Page::Controls => d.child(self.controls.clone()),
                 Page::Tree => d.child(self.tree.clone()),
+                Page::Diagrams => d.child(self.diagrams.clone()),
             })
             .when_some(self.split.as_ref(), |d, page| {
                 d.child(self.split_page(page, cx))
@@ -556,22 +580,28 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_, cx| {
-                    cx.new(|cx| Gallery {
-                        page: Page::Components,
-                        menu_open: true,
-                        dialog: None,
-                        selected_row: 0,
-                        markdown: std::sync::Arc::new(keystone_ui::markdown::Document::parse(
-                            MARKDOWN,
-                        )),
-                        split: None,
-                        tabs: cx.new(|_| tabs::TabsPage::new()),
-                        list: cx.new(|cx| VirtualListState::new(50_000, cx)),
-                        confirmed: None,
-                        palette: cx.new(|_| palette::PalettePage::new()),
-                        controls: cx.new(controls::ControlsPage::new),
-                        tree: cx.new(tree::TreePage::new),
+                |window, cx| {
+                    cx.new(|cx| {
+                        let focus = cx.focus_handle();
+                        window.focus(&focus, cx);
+                        Gallery {
+                            focus,
+                            page: Page::Components,
+                            menu_open: true,
+                            dialog: None,
+                            selected_row: 0,
+                            markdown: std::sync::Arc::new(keystone_ui::markdown::Document::parse(
+                                MARKDOWN,
+                            )),
+                            split: None,
+                            tabs: cx.new(|_| tabs::TabsPage::new()),
+                            list: cx.new(|cx| VirtualListState::new(50_000, cx)),
+                            confirmed: None,
+                            palette: cx.new(|_| palette::PalettePage::new()),
+                            controls: cx.new(controls::ControlsPage::new),
+                            tree: cx.new(tree::TreePage::new),
+                            diagrams: cx.new(diagrams::DiagramsPage::new),
+                        }
                     })
                 },
             )

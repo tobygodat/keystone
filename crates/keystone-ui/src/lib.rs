@@ -6,6 +6,7 @@ pub mod automation;
 mod button;
 mod color;
 pub mod command_palette;
+pub mod diagram;
 mod dialog;
 pub mod fuzzy;
 mod icon;

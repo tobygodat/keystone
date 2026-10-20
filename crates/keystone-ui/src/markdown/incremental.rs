@@ -420,7 +420,7 @@ mod tests {
                 }
                 Block::List { items, .. } => items.iter().flatten().for_each(|b| walk(b, out)),
                 Block::Quote(blocks) => blocks.iter().for_each(|b| walk(b, out)),
-                Block::Code { .. } | Block::Rule => {}
+                Block::Code { .. } | Block::Diagram { .. } | Block::Rule => {}
             }
         }
         let mut out = Vec::new();

@@ -1,0 +1,8 @@
+sequenceDiagram
+    participant User
+    participant Keystone
+    participant Worker
+    User->>Keystone: Close Mermaid fence
+    Keystone->>Worker: Render source
+    Worker-->>Keystone: Safe SVG
+    Keystone-->>User: Diagram
