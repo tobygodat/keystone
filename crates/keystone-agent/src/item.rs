@@ -130,6 +130,9 @@ pub enum Event {
     Warning {
         message: String,
     },
+    ProviderNotice {
+        message: Option<String>,
+    },
 }
 
 /// Bytes kept from each end of long tool output.

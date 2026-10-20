@@ -179,6 +179,7 @@ struct Pending {
 }
 
 pub struct ClaudeDriver {
+    cancel_queued: bool,
     session: u64,
     resume: bool,
     seed: u64,
@@ -258,6 +259,7 @@ impl ClaudeDriver {
         out: &mut Outputs,
     ) -> Self {
         let mut driver = Self {
+            cancel_queued: true,
             session,
             resume,
             seed,
@@ -296,6 +298,18 @@ impl ClaudeDriver {
 
     pub fn is_running(&self) -> bool {
         self.turn.is_some()
+    }
+
+    pub(crate) fn set_cancel_queued(&mut self, enabled: bool) {
+        self.cancel_queued = enabled;
+    }
+
+    fn interrupt_request(&self) -> Value {
+        let mut request = json!({"subtype": "interrupt"});
+        if self.cancel_queued {
+            request["cancel_queued"] = json!(true);
+        }
+        request
     }
 
     /// Whether a message in the selected approval mode needs a new process. A running
@@ -375,7 +389,10 @@ impl ClaudeDriver {
     /// Why this process could not take a steer even once a turn runs, if it could not.
     pub fn steer_unsupported(&self) -> Option<&'static str> {
         match self.lifecycle {
-            Some(true) => None,
+            Some(true) if self.cancel_queued => None,
+            Some(true) => Some(
+                "This Claude Code version does not report queued-message cancellation (interrupt_cancel_queued_v1), so Keystone cannot safely steer a running turn. Wait for the turn to end or stop it, then send again.",
+            ),
             None => Some(STEER_NOT_YET),
             Some(false) => Some(
                 "This Claude Code version does not report message progress (msg_lifecycle_v1), so Keystone cannot steer a running turn. Wait for the turn to end or stop it, then send again.",
@@ -410,10 +427,7 @@ impl ClaudeDriver {
                     // Held steers never reach Claude, and `cancel_queued` drops those it
                     // has not started, so Stop ends all of the turn.
                     turn.held.clear();
-                    let line = self.request(
-                        json!({"subtype": "interrupt", "cancel_queued": true}),
-                        Request::Interrupt,
-                    );
+                    let line = self.request(self.interrupt_request(), Request::Interrupt);
                     out.writes.push(line);
                 }
             }
@@ -768,10 +782,7 @@ impl ClaudeDriver {
             }
         );
         if written {
-            let line = self.request(
-                json!({"subtype": "interrupt", "cancel_queued": true}),
-                Request::Interrupt,
-            );
+            let line = self.request(self.interrupt_request(), Request::Interrupt);
             out.writes.push(line);
         }
         match self.turn {

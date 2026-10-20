@@ -119,6 +119,12 @@ struct Shared {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--version") {
+        let version =
+            std::env::var("KEYSTONE_FAKE_CLAUDE_VERSION").unwrap_or_else(|_| VERSION.into());
+        println!("{version} (Claude Code)");
+        return;
+    }
     let resume = args
         .iter()
         .position(|a| a == "--resume")
@@ -316,6 +322,9 @@ fn main() {
                         }
                     }
                     Some("interrupt") => {
+                        if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CLAUDE_INTERRUPT_LOG") {
+                            let _ = std::fs::write(path, message["request"].to_string());
+                        }
                         let mut state = shared.state.lock().unwrap();
                         let cancelled: Vec<String> =
                             state.queue.drain(..).map(|q| q.uuid).collect();
@@ -476,7 +485,12 @@ fn work(
         };
         turn += 1;
         lifecycle(out, shared, session, &next.uuid, "started");
-        let capabilities: &[&str] = if shared.lifecycle {
+        let capabilities: &[&str] = if shared.lifecycle
+            && std::env::var("KEYSTONE_FAKE_CLAUDE_NO_CANCEL_QUEUED")
+                .is_ok_and(|value| value == "1")
+        {
+            &["msg_lifecycle_v1"]
+        } else if shared.lifecycle {
             &["msg_lifecycle_v1", "interrupt_cancel_queued_v1"]
         } else {
             &[]
@@ -491,6 +505,12 @@ fn work(
         }
         if !skip_init {
             emit(out, init);
+        }
+        if std::env::var("KEYSTONE_FAKE_CLAUDE_SUBAGENT_INIT").is_ok_and(|value| value == "1") {
+            emit(
+                out,
+                json!({"type":"system", "subtype":"init", "parent_tool_use_id":"scripted-subagent", "capabilities":[]}),
+            );
         }
         emit(
             out,

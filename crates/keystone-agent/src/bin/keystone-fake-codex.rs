@@ -50,6 +50,12 @@ struct Turn {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--version") {
+        let version =
+            std::env::var("KEYSTONE_FAKE_CODEX_VERSION").unwrap_or_else(|_| "0.162.1".into());
+        println!("codex-cli {version}");
+        return;
+    }
     let delay = Duration::from_millis(
         std::env::var("KEYSTONE_FAKE_CODEX_DELAY_MS")
             .ok()
@@ -92,7 +98,22 @@ fn main() {
         };
         let reply = |result: Value| emit(&out, json!({"id": id, "result": result}));
         match method {
-            "initialize" => reply(json!({"userAgent": "keystone-fake-codex"})),
+            "initialize" => {
+                if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CODEX_INITIALIZE_LOG") {
+                    let _ = std::fs::write(path, params.to_string());
+                }
+                if params.get("capabilities").is_some()
+                    && std::env::var("KEYSTONE_FAKE_CODEX_NO_NOTIFICATION_FILTER")
+                        .is_ok_and(|value| value == "1")
+                {
+                    emit(
+                        &out,
+                        json!({"id": id, "error": {"code": -32602, "message": "optOutNotificationMethods is not supported"}}),
+                    );
+                    continue;
+                }
+                reply(json!({"userAgent": "keystone-fake-codex"}));
+            }
             "initialized" => {}
             "thread/start" => {
                 let n = next.fetch_add(1, Ordering::Relaxed);

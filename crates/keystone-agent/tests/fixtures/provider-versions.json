@@ -1,0 +1,12 @@
+[
+  {"provider":"claude","version":"2.1.300","outcome":"tested","range":"2.1.300–2.1.301"},
+  {"provider":"claude","version":"2.1.301","outcome":"tested","range":"2.1.300–2.1.301"},
+  {"provider":"claude","version":"2.1.302","outcome":"untested","range":"2.1.300–2.1.301"},
+  {"provider":"claude","version":"development-build","outcome":"unparseable","range":"2.1.300–2.1.301"},
+  {"provider":"claude","version":"0.2.9","outcome":"incompatible","range":"2.1.300–2.1.301"},
+  {"provider":"codex","version":"0.162.1","outcome":"tested","range":"0.162.1–0.163.0"},
+  {"provider":"codex","version":"0.163.0","outcome":"tested","range":"0.162.1–0.163.0"},
+  {"provider":"codex","version":"0.163.1","outcome":"untested","range":"0.162.1–0.163.0"},
+  {"provider":"codex","version":"development-build","outcome":"unparseable","range":"0.162.1–0.163.0"},
+  {"provider":"codex","version":"0.20.0","outcome":"incompatible","range":"0.162.1–0.163.0"}
+]

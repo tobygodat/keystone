@@ -160,6 +160,8 @@ struct Session {
 }
 
 pub struct CodexDriver {
+    initialize_params: Value,
+    initialization_error: Option<String>,
     next_id: u64,
     ready: bool,
     before_ready: Vec<String>,
@@ -175,7 +177,10 @@ pub struct CodexDriver {
 impl CodexDriver {
     /// Starts the handshake. Write `out.writes` before anything else.
     pub fn new(client_version: &str, out: &mut Outputs) -> Self {
+        let params = json!({"clientInfo": {"name": "keystone", "title": "Keystone", "version": client_version}, "capabilities": {"optOutNotificationMethods": OPT_OUT}});
         let mut driver = Self {
+            initialize_params: params.clone(),
+            initialization_error: None,
             next_id: 0,
             ready: false,
             before_ready: Vec::new(),
@@ -185,14 +190,7 @@ impl CodexDriver {
             baselines: HashMap::new(),
             unknown: 0,
         };
-        let line = driver.request(
-            "initialize",
-            json!({
-                "clientInfo": {"name": "keystone", "title": "Keystone", "version": client_version},
-                "capabilities": {"optOutNotificationMethods": OPT_OUT},
-            }),
-            Pending::Initialize,
-        );
+        let line = driver.request("initialize", params, Pending::Initialize);
         out.writes.push(line);
         driver
     }
@@ -211,6 +209,18 @@ impl CodexDriver {
     }
 
     pub fn command(&mut self, command: Command, out: &mut Outputs) {
+        if let Some(message) = &self.initialization_error {
+            match command {
+                Command::Open { session, .. } | Command::Send { session, .. } => out.event(
+                    session,
+                    Event::Failed {
+                        message: message.clone(),
+                    },
+                ),
+                _ => {}
+            }
+            return;
+        }
         match command {
             Command::Open {
                 session,
@@ -285,6 +295,10 @@ impl CodexDriver {
     /// Asks for the models Codex offers, following `nextCursor` through every page up
     /// to [`CATALOG_PAGES`]. The answer arrives as [`Event::Catalog`] for `session`.
     pub fn request_catalog(&mut self, session: u64, out: &mut Outputs) {
+        if let Some(message) = &self.initialization_error {
+            out.event(session, Event::Catalog(Catalog::Failed(message.clone())));
+            return;
+        }
         self.request_catalog_page(session, Vec::new(), 1, None, out);
     }
 
@@ -543,6 +557,33 @@ impl CodexDriver {
         };
         match pending {
             Pending::Initialize => {
+                if let Some(error) = error {
+                    if self.initialize_params.get("capabilities").is_some()
+                        && (error.code == Some(-32602)
+                            || error.message.contains("optOutNotificationMethods")
+                            || error.message.contains("capabilities"))
+                    {
+                        self.initialize_params
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("capabilities");
+                        let line = self.request(
+                            "initialize",
+                            self.initialize_params.clone(),
+                            Pending::Initialize,
+                        );
+                        out.writes.push(line);
+                    } else {
+                        let message = format!(
+                            "Codex could not initialize: {}. Check the CLI version and restart Keystone to reconnect. No message was sent.",
+                            error.message
+                        );
+                        self.before_ready.clear();
+                        self.on_exit(&message, out);
+                        self.initialization_error = Some(message);
+                    }
+                    return;
+                }
                 self.ready = true;
                 out.writes.push(r#"{"method":"initialized"}"#.to_owned());
                 out.writes.append(&mut self.before_ready);
@@ -912,6 +953,8 @@ struct Envelope<'a> {
 #[derive(Deserialize)]
 struct RpcError {
     message: String,
+    #[serde(default)]
+    code: Option<i64>,
 }
 
 #[derive(Deserialize)]

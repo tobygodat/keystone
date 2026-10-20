@@ -1,0 +1,16 @@
+{
+  "observed_at": "2026-10-19T05:22:49Z",
+  "scope": "No user messages or inference; redacted connect-only probes on desk. Turn recordings remain Claude 2.1.300 and Codex 0.162.1.",
+  "claude": {
+    "version_stdout": "2.1.301 (Claude Code)",
+    "frames": [
+      {"type":"system","subtype":"hook_started","hook_event":"SessionStart"},
+      {"type":"system","subtype":"hook_response","hook_event":"SessionStart"},
+      {"type":"control_response","response":{"subtype":"success","request_id":"REQUEST_ID","response":{"claude_code_version":"2.1.301","capabilities":["ui_surface_v1","mcp_call_result_not_for_model_v1"],"current_permission_mode":"default","session_state":"idle"}}}
+    ]
+  },
+  "codex": {
+    "version_stdout": "codex-cli 0.163.0",
+    "initialize_with_notification_opt_out": {"id":1,"result":{"userAgent":"keystone/0.163.0 (Arch Linux Rolling Release; x86_64) dumb (keystone; probe)","platformFamily":"unix","platformOs":"linux"}}
+  }
+}

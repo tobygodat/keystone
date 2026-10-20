@@ -674,7 +674,7 @@ fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\npwd >> '{}'\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" != --version ]; then pwd >> '{}'; fi\nexec '{}' \"$@\"\n",
             log.display(),
             fake.display()
         ),
@@ -725,6 +725,57 @@ fn started_in(log: &Path) -> Vec<std::path::PathBuf> {
 
 fn canonical(path: std::path::PathBuf) -> std::path::PathBuf {
     path.canonicalize().unwrap()
+}
+
+#[gpui::test]
+fn changing_provider_clears_a_completed_catalog_notice(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    let (claude, _) = logged_claude(dir.path());
+    let body = std::fs::read_to_string(&claude).unwrap().replace(
+        "#!/bin/sh",
+        "#!/bin/sh\nexport KEYSTONE_FAKE_CLAUDE_VERSION=development-build",
+    );
+    std::fs::write(&claude, body).unwrap();
+    view.update(cx, |this, cx| {
+        claude_from(this, claude);
+        this.request_catalog(2, Provider::Claude, cx);
+    });
+    listed(&view, cx, 2, Provider::Claude);
+    view.update_in(cx, |this, window, cx| {
+        this.conversation(2).restore(Ok(Vec::new()));
+        assert!(
+            this.conversation(2)
+                .provider_notice
+                .as_deref()
+                .unwrap()
+                .contains("Claude Code")
+        );
+        this.choose_provider(2, Provider::Codex, window, cx);
+        assert!(this.conversation(2).provider_notice.is_none());
+    });
+}
+
+#[gpui::test]
+fn a_late_catalog_notice_cannot_cross_provider_selection(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    let (claude, _) = logged_claude(dir.path());
+    let body = std::fs::read_to_string(&claude).unwrap().replace(
+        "#!/bin/sh",
+        "#!/bin/sh\nexport KEYSTONE_FAKE_CLAUDE_VERSION=development-build",
+    );
+    std::fs::write(&claude, body).unwrap();
+    view.update_in(cx, |this, window, cx| {
+        claude_from(this, claude);
+        this.request_catalog(2, Provider::Claude, cx);
+        this.choose_provider(2, Provider::Codex, window, cx);
+    });
+    listed(&view, cx, 2, Provider::Claude);
+    view.update_in(cx, |this, window, cx| {
+        let _ = window;
+        this.pump(cx);
+        this.conversation(2).restore(Ok(Vec::new()));
+        assert!(this.conversation(2).provider_notice.is_none());
+    });
 }
 
 #[gpui::test]

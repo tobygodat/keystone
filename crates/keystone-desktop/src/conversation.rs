@@ -39,6 +39,7 @@ pub struct Conversation {
     /// Approval requests waiting for an answer, oldest first.
     pub approvals: Vec<Approval>,
     pub error: Option<String>,
+    pub provider_notice: Option<String>,
     /// The model the provider last said this session runs on, in this run of the app.
     /// Cleared when the process or conversation that reported it is gone, so a stale
     /// report is never shown as current. A failed turn keeps it: the provider is still
@@ -87,6 +88,13 @@ enum Pending {
 }
 
 impl Conversation {
+    pub fn clear_provider_notice(&mut self) {
+        self.provider_notice = None;
+        if let Some(pending) = &mut self.pending {
+            pending.retain(|entry| !matches!(entry, Pending::Event(Event::ProviderNotice { .. })));
+        }
+    }
+
     /// A conversation whose saved history has been requested but not restored yet.
     pub fn loading() -> Self {
         Self {
@@ -251,7 +259,11 @@ impl Conversation {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty() && !self.running && self.error.is_none() && self.load_error.is_none()
+        self.rows.is_empty()
+            && !self.running
+            && self.error.is_none()
+            && self.load_error.is_none()
+            && self.provider_notice.is_none()
     }
 
     /// Applies one provider event. Returns the thread ID when the provider opened one.
@@ -326,6 +338,7 @@ impl Conversation {
                 self.turn_start = self.rows.len();
             }
             Event::Warning { message } => self.error = Some(message),
+            Event::ProviderNotice { message } => self.provider_notice = message,
         }
         None
     }
@@ -453,6 +466,24 @@ pub fn visible(row: &Row) -> bool {
 // Changes are compared as lists of ranges.
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
+    #[test]
+    fn provider_notice_survives_turn_events_and_clears_only_when_rechecked() {
+        let mut conversation = super::Conversation::default();
+        conversation.apply(keystone_agent::Event::ProviderNotice {
+            message: Some("Untested CLI; tested range: 2.1.300–2.1.300".into()),
+        });
+        conversation.apply(keystone_agent::Event::TurnStarted);
+        conversation.apply(keystone_agent::Event::TurnCompleted {
+            status: keystone_agent::TurnStatus::Completed,
+            error: None,
+            stopped: false,
+        });
+        assert!(conversation.provider_notice.is_some());
+        assert!(conversation.error.is_none());
+        conversation.apply(keystone_agent::Event::ProviderNotice { message: None });
+        assert!(conversation.provider_notice.is_none());
+    }
+
     use super::*;
 
     fn message(id: &str, text: &str, status: ItemStatus) -> Item {

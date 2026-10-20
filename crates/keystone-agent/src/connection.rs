@@ -6,6 +6,7 @@ use crate::codex::CodexDriver;
 use crate::driver::{ApprovalState, Command, Outputs};
 use crate::host::{Exit, Process};
 use crate::item::{Catalog, Event};
+use crate::version::{self, Provider};
 use crate::worker::Worker;
 use keystone_core::ApprovalMode;
 use std::collections::HashMap;
@@ -19,6 +20,18 @@ use std::time::Duration;
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
 type Inbox = Arc<Mutex<Vec<(u64, Event)>>>;
+
+#[derive(serde::Deserialize)]
+struct ClaudeCapabilityFrame {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    subtype: Option<String>,
+    #[serde(default)]
+    parent_tool_use_id: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
 
 /// Runs just before a provider process is looked up and started, with the session
 /// that needs it. Tests use it to hold a start.
@@ -121,6 +134,8 @@ pub struct CodexConnection {
 
 #[derive(Default)]
 struct Shared {
+    notice: Option<String>,
+    notices: version::Notices,
     /// The `codex` program, found on first use when not given.
     program: Option<PathBuf>,
     /// Present from when a process begins starting until it exits.
@@ -320,11 +335,9 @@ impl Starter {
         if shared.process.is_none() {
             shared.generation += 1;
             let generation = shared.generation;
-            let mut out = Outputs::default();
-            shared.driver = Some(CodexDriver::new(&self.client_version, &mut out));
+            shared.driver = None;
             shared.starting = true;
             shared.exited = None;
-            deliver(&mut shared, &self.inbox, out);
             let program = shared.program.clone();
             let hook = shared.before_start.clone();
             drop(shared);
@@ -362,6 +375,10 @@ impl Starter {
             self.started.notify_all();
         }
         let mut out = Outputs::default();
+        let notice = shared.notice.clone();
+        if let Some(message) = shared.notices.update(session, notice) {
+            out.event(session, Event::ProviderNotice { message });
+        }
         let mut driver = shared
             .driver
             .take()
@@ -401,6 +418,17 @@ impl Starter {
                 found
             }
         };
+        let cwd = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+        let compatibility = version::detect(Provider::Codex, &program, &cwd)?;
+        {
+            let mut shared = self.shared.lock().unwrap();
+            if !shared.closed && shared.generation == generation {
+                let mut out = Outputs::default();
+                shared.driver = Some(CodexDriver::new(&self.client_version, &mut out));
+                shared.notice = compatibility.notice;
+                deliver(&mut shared, &self.inbox, out);
+            }
+        }
         let on_line = {
             let shared = self.shared.clone();
             let inbox = self.inbox.clone();
@@ -450,7 +478,6 @@ impl Starter {
                 wake();
             }
         };
-        let cwd = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
         Process::spawn(&program, &["app-server"], &cwd, on_line, on_exit)
             .map_err(|e| format!("Could not start Codex at {}. {e}", program.display()))
     }
@@ -565,6 +592,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Default)]
 struct ClaudeShared {
+    notices: version::Notices,
     /// The `claude` program, found on first use when not given.
     program: Option<PathBuf>,
     live: HashMap<u64, Live>,
@@ -1082,6 +1110,17 @@ impl ClaudeStarter {
             hook(session);
         }
         let program = self.find_program(program)?;
+        let compatibility = version::detect(Provider::Claude, &program, cwd)?;
+        {
+            let mut shared = self.shared.lock().unwrap();
+            match shared.live.get_mut(&session) {
+                Some(live) if live.generation == generation => {
+                    live.driver.set_cancel_queued(compatibility.cancel_queued)
+                }
+                _ => {}
+            }
+        }
+        self.report_compatibility(session, compatibility.notice);
         let baseline = if probe {
             Some(self.probe_permission_mode(session, generation, &program, cwd, launch)?)
         } else {
@@ -1100,6 +1139,17 @@ impl ClaudeStarter {
                 let mut out = Outputs::default();
                 match guard.live.get_mut(&session) {
                     Some(live) if live.generation == generation => {
+                        if let Ok(init) = serde_json::from_slice::<ClaudeCapabilityFrame>(line)
+                            && init.kind == "system"
+                            && init.subtype.as_deref() == Some("init")
+                            && init.parent_tool_use_id.is_none()
+                        {
+                            live.driver.set_cancel_queued(
+                                init.capabilities
+                                    .iter()
+                                    .any(|capability| capability == "interrupt_cancel_queued_v1"),
+                            );
+                        }
                         live.driver.on_line(line, &mut out)
                     }
                     // Output from a replaced process is not for the new driver.
@@ -1161,15 +1211,36 @@ impl ClaudeStarter {
         let program = self.shared.lock().unwrap().program.clone();
         let catalog = match self.find_program(program) {
             Err(message) => Some(Catalog::Failed(message)),
-            Ok(program) => self.read_catalog(&program, cwd),
+            Ok(program) => self.read_catalog(session, &program, cwd),
         };
         if let Some(catalog) = catalog {
             push(&self.inbox, &self.wake, session, Event::Catalog(catalog));
         }
     }
 
+    fn report_compatibility(&self, session: u64, notice: Option<String>) {
+        let mut shared = self.shared.lock().unwrap();
+        if shared.closed {
+            return;
+        }
+        let changed = shared.notices.update(session, notice);
+        drop(shared);
+        if let Some(message) = changed {
+            push(
+                &self.inbox,
+                &self.wake,
+                session,
+                Event::ProviderNotice { message },
+            );
+        }
+    }
+
     /// Runs the catalog probe; `None` when the connection was dropped meanwhile.
-    fn read_catalog(&self, program: &Path, cwd: &Path) -> Option<Catalog> {
+    fn read_catalog(&self, session: u64, program: &Path, cwd: &Path) -> Option<Catalog> {
+        let compatibility = match version::detect(Provider::Claude, program, cwd) {
+            Err(message) => return Some(Catalog::Failed(message)),
+            Ok(compatibility) => compatibility,
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         let exited = tx.clone();
         let on_line = move |line: &[u8]| {
@@ -1218,7 +1289,7 @@ impl ClaudeStarter {
         if closed {
             return None;
         }
-        Some(match answer {
+        let catalog = match answer {
             Ok(Some(catalog)) => catalog,
             Ok(None) => Catalog::Failed("Claude Code did not report its models.".into()),
             Err(RecvTimeoutError::Timeout) => {
@@ -1227,7 +1298,11 @@ impl ClaudeStarter {
             Err(RecvTimeoutError::Disconnected) => {
                 Catalog::Failed("Claude Code stopped before answering.".into())
             }
-        })
+        };
+        if matches!(catalog, Catalog::Ready { .. }) {
+            self.report_compatibility(session, compatibility.notice);
+        }
+        Some(catalog)
     }
 
     /// The permission mode the user's own settings give a new conversation in `cwd`,

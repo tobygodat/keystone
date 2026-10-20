@@ -1280,6 +1280,7 @@ impl Keystone {
         }
         match self.store.set_provider(session, provider) {
             Ok(applied) => {
+                self.conversation(session).clear_provider_notice();
                 self.error = durability_warning(applied.durability);
                 self.request_catalog(session, provider, cx);
             }
@@ -1701,6 +1702,7 @@ impl Keystone {
                         self.catalogs.apply(provider, session, catalog);
                         cx.notify();
                     }
+                    Event::ProviderNotice { .. } if self.provider(session) != Some(provider) => {}
                     event => events.push((session, event)),
                 }
             }
@@ -2189,18 +2191,21 @@ impl Keystone {
                     ),
             );
         }
-        for error in conversation
+        for (error, color) in conversation
             .load_error
             .iter()
             .chain(&conversation.error)
             .chain(&conversation.save_error)
+            .map(|error| (error, Color::Danger))
+            .chain(
+                conversation
+                    .provider_notice
+                    .iter()
+                    .map(|notice| (notice, Color::Muted)),
+            )
         {
             empty = false;
-            view = view.child(
-                Label::new(error.clone())
-                    .size(TextSize::Ui)
-                    .color(Color::Danger),
-            );
+            view = view.child(Label::new(error.clone()).size(TextSize::Ui).color(color));
         }
         (!empty).then(|| view.into_any_element())
     }
