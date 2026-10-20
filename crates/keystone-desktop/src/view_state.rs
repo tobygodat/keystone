@@ -1,6 +1,6 @@
 use gpui::{App, FocusHandle, ListAlignment, ListOffset, ListState, Window, px};
 use keystone_core::ViewId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -19,11 +19,14 @@ struct Transcript {
     keyboard: Option<TranscriptKeyboard>,
     visible_rows: Option<Range<usize>>,
     fully_visible_rows: Option<Range<usize>>,
+    visible_anchor: Option<ListOffset>,
+    collapsed_activity: HashSet<usize>,
 }
 
 pub struct TranscriptKeyboard {
     pub row: Option<usize>,
     pub action: Option<CopyTarget>,
+    pub selection_from_pointer: bool,
     pub action_focus: FocusHandle,
     pub jump_focus: FocusHandle,
 }
@@ -33,6 +36,8 @@ pub enum CopyTarget {
     Row,
     Code(usize),
     DiagramToggle(usize),
+    ActivityToggle,
+    TextSelection,
 }
 
 #[derive(Default)]
@@ -67,6 +72,8 @@ impl ViewStates {
                 keyboard: None,
                 visible_rows: None,
                 fully_visible_rows: None,
+                visible_anchor: None,
+                collapsed_activity: HashSet::new(),
             })
             .list
             .clone()
@@ -95,6 +102,7 @@ impl ViewStates {
             .get_or_insert_with(|| TranscriptKeyboard {
                 row: None,
                 action: None,
+                selection_from_pointer: false,
                 action_focus: cx.focus_handle(),
                 jump_focus: cx.focus_handle(),
             })
@@ -108,10 +116,23 @@ impl ViewStates {
         let t = self.transcripts.get_mut(&key).unwrap();
         t.visible_rows = None;
         t.fully_visible_rows = None;
+        t.visible_anchor = None;
     }
 
-    pub fn note_visible_row(&mut self, key: ViewKey, row: usize, fully: bool) {
+    pub fn note_visible_row(
+        &mut self,
+        key: ViewKey,
+        row: usize,
+        fully: bool,
+        offset: gpui::Pixels,
+    ) {
         if let Some(t) = self.transcripts.get_mut(&key) {
+            if t.visible_anchor.is_none_or(|top| row < top.item_ix) {
+                t.visible_anchor = Some(ListOffset {
+                    item_ix: row,
+                    offset_in_item: offset,
+                });
+            }
             t.visible_rows = Some(t.visible_rows.as_ref().map_or(row..row + 1, |rows| {
                 rows.start.min(row)..rows.end.max(row + 1)
             }));
@@ -122,6 +143,35 @@ impl ViewStates {
                     }));
             }
         }
+    }
+
+    pub fn activity_expanded(&self, key: ViewKey, row: usize) -> bool {
+        self.transcripts
+            .get(&key)
+            .is_none_or(|t| !t.collapsed_activity.contains(&row))
+    }
+
+    pub fn toggle_activity(&mut self, key: ViewKey, row: usize) {
+        let Some(t) = self.transcripts.get_mut(&key) else {
+            return;
+        };
+        let collapsed = t.collapsed_activity.insert(row);
+        if !collapsed {
+            t.collapsed_activity.remove(&row);
+        }
+        let mut top = t.list.logical_scroll_top();
+        if top.item_ix == t.list.item_count() {
+            top = t.visible_anchor.unwrap_or(ListOffset {
+                item_ix: row,
+                offset_in_item: px(0.),
+            });
+        }
+        if collapsed && top.item_ix == row {
+            top.offset_in_item = px(0.);
+        }
+        t.list.splice(row..row + 1, 1);
+        t.list.scroll_to(top);
+        t.revision += 1;
     }
 
     pub fn row_is_visible(&self, key: ViewKey, row: usize, fully: bool) -> bool {
@@ -255,6 +305,7 @@ impl ViewStates {
             if let Some(keyboard) = &mut transcript.keyboard {
                 keyboard.row = None;
                 keyboard.action = None;
+                keyboard.selection_from_pointer = false;
             }
             transcript.list.scroll_to(ListOffset {
                 item_ix: transcript.list.item_count(),

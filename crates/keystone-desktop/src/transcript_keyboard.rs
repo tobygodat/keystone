@@ -1,7 +1,7 @@
 use crate::Keystone;
 use crate::conversation::{self, Row};
 use crate::view_state::{CopyTarget, ViewKey};
-use gpui::{App, ClipboardItem, Context, Window};
+use gpui::{App, ClipboardItem, Context, FocusHandle, Window};
 use keystone_agent::{ItemKind, ItemStatus};
 use keystone_ui::markdown::{Block, Document};
 
@@ -66,6 +66,9 @@ fn copy_actions<'a>(row: &'a Row, document: Option<&'a Document>) -> Vec<(CopyTa
                 for top in &document.blocks {
                     code_actions(&top.block, &mut actions, &mut n);
                 }
+                if document.has_selectable_text() {
+                    actions.push((CopyTarget::TextSelection, item.text.as_str()));
+                }
             }
         }
         ItemKind::Command { command, .. } => {
@@ -81,10 +84,82 @@ fn copy_actions<'a>(row: &'a Row, document: Option<&'a Document>) -> Vec<(CopyTa
         }
         _ => {}
     }
+    if crate::transcript::activity_name(item).is_some() {
+        let text = if let ItemKind::Command { command, .. } = &item.kind {
+            if item.text.trim_end().is_empty() {
+                command.as_str()
+            } else {
+                item.text.trim_end()
+            }
+        } else {
+            item.text.as_str()
+        };
+        actions.push((CopyTarget::ActivityToggle, text));
+    }
     actions
 }
 
 impl Keystone {
+    pub(crate) fn begin_text_selection(
+        &mut self,
+        key: ViewKey,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<FocusHandle> {
+        if self.state.read(cx).store().workspace().selected() != Some(key.session)
+            || !self
+                .presentation
+                .current
+                .arrangement
+                .visible
+                .contains(&key.view)
+        {
+            return None;
+        }
+        let Some(Row::Item(item)) = self
+            .state
+            .read(cx)
+            .conversations()
+            .get(&key.session)
+            .and_then(|c| c.rows.get(index))
+        else {
+            return None;
+        };
+        if item.kind != ItemKind::AgentMessage {
+            return None;
+        }
+        let keyboard = self.presentation.current.views.keyboard(key, cx);
+        keyboard.row = Some(index);
+        keyboard.action = Some(CopyTarget::TextSelection);
+        keyboard.selection_from_pointer = true;
+        let focus = keyboard.action_focus.clone();
+        focus.focus(window, cx);
+        self.presentation.current.views.activate(key);
+        cx.notify();
+        Some(focus)
+    }
+    pub(crate) fn toggle_activity(
+        &mut self,
+        key: ViewKey,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.read(cx).store().workspace().selected() != Some(key.session)
+            || !self.presentation.current.arrangement.visible.contains(&key.view)
+            || !self.state.read(cx).conversations().get(&key.session).and_then(|c| c.rows.get(index)).is_some_and(|row| matches!(row, Row::Item(item) if crate::transcript::activity_name(item).is_some())) {
+            return;
+        }
+        let keyboard = self.presentation.current.views.keyboard(key, cx);
+        keyboard.row = Some(index);
+        keyboard.action = Some(CopyTarget::ActivityToggle);
+        keyboard.selection_from_pointer = false;
+        keyboard.action_focus.focus(window, cx);
+        self.presentation.current.views.toggle_activity(key, index);
+        self.presentation.current.views.activate(key);
+        cx.notify();
+    }
     pub(crate) fn leave_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.filter_menu
             || self.new_menu
@@ -209,6 +284,7 @@ impl Keystone {
         };
         keyboard.row = row;
         keyboard.action = None;
+        keyboard.selection_from_pointer = false;
         self.presentation
             .current
             .views
@@ -298,6 +374,7 @@ impl Keystone {
             0
         };
         let count = actions.len() + usize::from(jump) + 1;
+        keyboard.selection_from_pointer = false;
         let next = if backwards {
             (at + count - 1) % count
         } else {
@@ -399,6 +476,7 @@ impl Keystone {
         let keyboard = self.presentation.current.views.keyboard(key, cx);
         keyboard.row = None;
         keyboard.action = None;
+        keyboard.selection_from_pointer = false;
         self.presentation
             .current
             .views
@@ -456,7 +534,9 @@ impl Keystone {
             let hidden_jump = keyboard.jump_focus.is_focused(window)
                 && !self.presentation.current.views.scrolled_up(key);
             if invalid_action || hidden_jump {
-                self.presentation.current.views.keyboard(key, cx).action = None;
+                let keyboard = self.presentation.current.views.keyboard(key, cx);
+                keyboard.action = None;
+                keyboard.selection_from_pointer = false;
                 self.presentation
                     .current
                     .views

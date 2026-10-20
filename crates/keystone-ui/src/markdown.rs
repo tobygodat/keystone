@@ -19,17 +19,19 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, TextSize};
 use crate::tooltip::Tooltip;
 use gpui::{
-    AnyElement, App, ClipboardItem, ElementId, FocusHandle, FontStyle, FontWeight, HighlightStyle,
-    InteractiveText, IntoElement, RenderOnce, SharedString, StrikethroughStyle, StyledText,
+    AnyElement, App, ClipboardItem, ElementId, Entity, FocusHandle, FontStyle, FontWeight,
+    HighlightStyle, InteractiveText, IntoElement, RenderOnce, SharedString, StrikethroughStyle,
     TextStyle, UnderlineStyle, Window, div, prelude::*, px,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 mod incremental;
 mod mend;
+mod selection;
 
 pub use incremental::IncrementalParser;
 
@@ -106,6 +108,12 @@ impl Document {
 
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+
+    /// Whether this document has rendered text that supports range selection.
+    /// Mermaid diagrams and rules keep their own interaction surfaces.
+    pub fn has_selectable_text(&self) -> bool {
+        selection::has_selectable_text(self)
     }
 }
 
@@ -621,6 +629,8 @@ pub fn is_openable(url: &str) -> bool {
 
 /// Renders a [`Document`] with theme colors. Body text inherits the surrounding text size
 /// and line height. Code blocks have a copy button, and web links open in the browser.
+/// Text ranges stay inside this Markdown instance; copying joins selected text runs with
+/// newlines, without Markdown syntax, list markers, or Mermaid diagrams.
 #[derive(IntoElement)]
 pub struct Markdown {
     id: SharedString,
@@ -628,6 +638,8 @@ pub struct Markdown {
     copy_focus: Option<(usize, FocusHandle)>,
     diagram_toggle_focus: Option<(usize, FocusHandle)>,
     managed_focus: bool,
+    selection_focus: Option<FocusHandle>,
+    on_selection_start: Option<selection::StartHandler>,
 }
 
 impl Markdown {
@@ -640,6 +652,8 @@ impl Markdown {
             copy_focus: None,
             diagram_toggle_focus: None,
             managed_focus: false,
+            selection_focus: None,
+            on_selection_start: None,
         }
     }
 
@@ -663,6 +677,24 @@ impl Markdown {
         self.managed_focus = true;
         self
     }
+
+    /// Gives a host a keyboard entry point for text selection. Managed Markdown
+    /// tracks this handle only while the host's text-selection action is active.
+    pub fn selection_focus(mut self, focus: &FocusHandle) -> Self {
+        self.selection_focus = Some(focus.clone());
+        self
+    }
+
+    /// Activates the host's text-selection action on a pointer press and returns
+    /// its reusable focus handle, or rejects a stale press with `None`.
+    /// Managed Markdown allocates no private handle.
+    pub fn on_selection_start(
+        mut self,
+        handler: impl Fn(&mut Window, &mut App) -> Option<FocusHandle> + 'static,
+    ) -> Self {
+        self.on_selection_start = Some(Rc::new(handler));
+        self
+    }
 }
 
 /// Per-render state: the base text style and counters for unique child IDs. Code blocks
@@ -675,10 +707,19 @@ struct Ctx {
     copy_focus: Option<(usize, FocusHandle)>,
     diagram_toggle_focus: Option<(usize, FocusHandle)>,
     managed_focus: bool,
+    selection: Entity<selection::Selection>,
 }
 
 impl RenderOnce for Markdown {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let selection = selection::Selection::prepare(
+            &self.id,
+            &self.document,
+            self.selection_focus,
+            self.managed_focus,
+            window,
+            cx,
+        );
         let theme = cx.theme();
         let base = TextStyle {
             color: theme.colors.text,
@@ -693,6 +734,7 @@ impl RenderOnce for Markdown {
             copy_focus: self.copy_focus,
             diagram_toggle_focus: self.diagram_toggle_focus,
             managed_focus: self.managed_focus,
+            selection: selection.clone(),
         };
         let blocks: Vec<_> = self
             .document
@@ -700,12 +742,13 @@ impl RenderOnce for Markdown {
             .iter()
             .map(|top| render_block(&top.block, &mut ctx, window, cx))
             .collect();
-        v_flex()
-            .id(ElementId::Name(self.id))
+        let blocks = v_flex()
+            .id(ElementId::Name(self.id.clone()))
             .w_full()
             .min_w_0()
             .gap_3()
-            .children(blocks)
+            .children(blocks);
+        selection::surface(self.id, blocks, selection, self.on_selection_start, cx)
     }
 }
 
@@ -884,6 +927,20 @@ fn code_block(
     let n = ctx.code_blocks;
     let colors = cx.theme().colors;
     let mono = cx.theme().fonts.mono.clone();
+    let code_style = TextStyle {
+        font_family: mono.clone(),
+        color: colors.code_text,
+        ..ctx.base.clone()
+    };
+    let code_text = inline_text(
+        &Inline {
+            text: code.clone(),
+            ..Default::default()
+        },
+        &code_style,
+        ctx,
+        cx,
+    );
     // Shows a check for a moment after copying. Kept per block while it stays on screen.
     let copied = window.use_keyed_state(
         ElementId::NamedInteger(format!("{}-copied", ctx.id).into(), n as u64),
@@ -966,7 +1023,7 @@ fn code_block(
                         .text_size(TextSize::Ui.px())
                         .line_height(px(18.))
                         .text_color(colors.code_text)
-                        .child(code),
+                        .child(code_text),
                 ),
         )
         .into_any_element()
@@ -1014,22 +1071,22 @@ fn inline_text(inline: &Inline, base: &TextStyle, ctx: &mut Ctx, cx: &App) -> An
     if at < inline.text.len() {
         runs.push(base.to_run(inline.text.len() - at));
     }
-    let text = StyledText::new(inline.text.clone()).with_runs(runs);
-    if inline.links.is_empty() {
-        return text.into_any_element();
-    }
+    let index = ctx.texts;
     ctx.texts += 1;
     let n = ctx.texts;
-    let ranges: Vec<Range<usize>> = inline.links.iter().map(|(r, _)| r.clone()).collect();
-    let urls: Vec<SharedString> = inline.links.iter().map(|(_, url)| url.clone()).collect();
-    let tips = urls.clone();
-    let tip_ranges = ranges.clone();
-    InteractiveText::new(ElementId::NamedInteger("text".into(), n as u64), text)
-        .on_click(ranges, move |index, _, cx| {
-            if let Some(url) = urls.get(index).filter(|url| is_openable(url)) {
-                cx.open_url(url);
-            }
-        })
+    let text = selection::text(inline.text.clone(), runs, index, &ctx.selection, cx);
+    let layout = text.layout().clone();
+    if inline.links.is_empty() {
+        return selection::track(
+            text.into_any_element(),
+            layout,
+            index,
+            ctx.selection.clone(),
+        );
+    }
+    let tips: Vec<SharedString> = inline.links.iter().map(|(_, url)| url.clone()).collect();
+    let tip_ranges: Vec<Range<usize>> = inline.links.iter().map(|(r, _)| r.clone()).collect();
+    let text = InteractiveText::new(ElementId::NamedInteger("text".into(), n as u64), text)
         .tooltip(move |at, _, cx| {
             let index = tip_ranges.iter().position(|r| r.contains(&at))?;
             let tip = match tips[index].as_ref() {
@@ -1038,7 +1095,8 @@ fn inline_text(inline: &Inline, base: &TextStyle, ctx: &mut Ctx, cx: &App) -> An
             };
             Some(cx.new(|_| Tooltip::text(tip)).into())
         })
-        .into_any_element()
+        .into_any_element();
+    selection::track(text, layout, index, ctx.selection.clone())
 }
 
 #[cfg(test)]

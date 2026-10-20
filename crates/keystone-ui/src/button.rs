@@ -55,6 +55,7 @@ struct Common {
     reveal_on_focus: bool,
     reserve_focus_ring: bool,
     aria_label: Option<SharedString>,
+    aria_expanded: Option<bool>,
 }
 
 impl Common {
@@ -72,6 +73,7 @@ impl Common {
             reveal_on_focus: false,
             reserve_focus_ring: false,
             aria_label: None,
+            aria_expanded: None,
         }
     }
 
@@ -107,6 +109,9 @@ impl Common {
         }
         if let Some(label) = self.aria_label {
             el = el.role(gpui::Role::Button).aria_label(label);
+        }
+        if let Some(expanded) = self.aria_expanded {
+            el = el.aria_expanded(expanded);
         }
         if self.disabled {
             return el.opacity(0.4).cursor_not_allowed();
@@ -209,6 +214,11 @@ macro_rules! common_builders {
         /// name, role, click action and focus all sit on the same element.
         pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
             self.common.aria_label = Some(label.into());
+            self
+        }
+
+        pub fn aria_expanded(mut self, expanded: bool) -> Self {
+            self.common.aria_expanded = Some(expanded);
             self
         }
     };

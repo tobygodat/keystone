@@ -1154,6 +1154,7 @@ impl Keystone {
                                 let keyboard = this.presentation.current.views.keyboard(key, cx);
                                 keyboard.row = None;
                                 keyboard.action = None;
+                                keyboard.selection_from_pointer = false;
                                 this.presentation
                                     .current
                                     .views
@@ -1196,6 +1197,21 @@ impl Keystone {
                                                 let _ = app.update(cx, |this, cx| {
                                                     if !this.presentation.matches(activation) {
                                                         return;
+                                                    }
+                                                    let hidden_selection = this.state.read(cx).store().workspace().selected() == Some(key.session)
+                                                        && this.presentation.current.arrangement.visible.contains(&key.view)
+                                                        && this.presentation.current.views.keyboard_state(key).is_some_and(|keyboard| {
+                                                            keyboard.action == Some(crate::view_state::CopyTarget::TextSelection)
+                                                                && keyboard.action_focus.is_focused(window)
+                                                                && keyboard.row.is_some_and(|row| !this.presentation.current.views.row_is_visible(key, row, false))
+                                                        });
+                                                    if hidden_selection {
+                                                        let keyboard = this.presentation.current.views.keyboard(key, cx);
+                                                        keyboard.row = None;
+                                                        keyboard.action = None;
+                                                        keyboard.selection_from_pointer = false;
+                                                        this.presentation.current.views.focus(key, cx).focus(window, cx);
+                                                        cx.notify();
                                                     }
                                                     this.observe_conversation(
                                                         key, revision, window, cx,
@@ -1531,6 +1547,7 @@ impl Keystone {
             .current
             .views
             .keyboard_state(key)
+            .filter(|k| !k.selection_from_pointer)
             .and_then(|k| k.row)
             .is_some_and(|row| {
                 self.state

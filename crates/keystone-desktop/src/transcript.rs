@@ -7,11 +7,99 @@ use gpui::{
     AnyElement, App, ClipboardItem, ElementId, FocusHandle, SharedString, Window, div, prelude::*,
     px,
 };
-use keystone_agent::{ItemKind, ItemStatus, TurnStatus};
+use keystone_agent::{Item, ItemKind, ItemStatus, TurnStatus};
 use keystone_ui::markdown::Document;
 use keystone_ui::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub struct ActivityControl {
+    pub expanded: bool,
+    pub selector: String,
+    pub body_selector: String,
+    pub on_toggle: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+}
+
+#[derive(Default)]
+pub struct RowControls {
+    pub action: Option<(CopyTarget, FocusHandle)>,
+    pub selected: bool,
+    pub activity: Option<ActivityControl>,
+    pub selection_start: Option<Box<dyn Fn(&mut Window, &mut App) -> Option<FocusHandle>>>,
+}
+
+pub fn activity_name(item: &Item) -> Option<String> {
+    match &item.kind {
+        ItemKind::Reasoning => Some("reasoning".into()),
+        ItemKind::Command { .. } => Some("command output".into()),
+        ItemKind::Tool { name } => Some(format!("tool {name}")),
+        ItemKind::Other { name }
+            if !item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX) =>
+        {
+            Some(format!("activity {name}"))
+        }
+        _ => None,
+    }
+}
+
+fn activity_toggle(
+    index: usize,
+    name: String,
+    action: &Option<(CopyTarget, FocusHandle)>,
+    control: ActivityControl,
+    compact: bool,
+) -> AnyElement {
+    let label = format!(
+        "{} {name}",
+        if control.expanded {
+            "Collapse"
+        } else {
+            "Expand"
+        }
+    );
+    if compact {
+        return IconButton::new(
+            ("activity-toggle", index),
+            if control.expanded {
+                IconName::Chevron
+            } else {
+                IconName::Right
+            },
+        )
+        .size(ButtonSize::Compact)
+        .reserve_focus_ring()
+        .aria_label(label.clone())
+        .aria_expanded(control.expanded)
+        .tooltip(Tooltip::text(label))
+        .debug_selector(move || control.selector)
+        .when_some(
+            action
+                .as_ref()
+                .filter(|(target, _)| *target == CopyTarget::ActivityToggle),
+            |button, (_, focus)| button.track_focus(focus).reveal_on_focus(),
+        )
+        .on_click(move |event, window, cx| (control.on_toggle)(event, window, cx))
+        .into_any_element();
+    }
+    h_flex()
+        .items_start()
+        .child(
+            Button::new(("activity-toggle", index), label.clone())
+                .size(ButtonSize::Compact)
+                .reserve_focus_ring()
+                .aria_label(label)
+                .aria_expanded(control.expanded)
+                .debug_selector(move || control.selector)
+                .when_some(
+                    action
+                        .as_ref()
+                        .filter(|(target, _)| *target == CopyTarget::ActivityToggle),
+                    |button, (_, focus)| button.track_focus(focus).reveal_on_focus(),
+                )
+                .on_click(move |event, window, cx| (control.on_toggle)(event, window, cx)),
+        )
+        .into_any_element()
+}
 
 /// The content of a row that [`crate::conversation::visible`] accepts. `index` is the
 /// row's place in the conversation, and `reply` the parsed Markdown of a reply row.
@@ -19,10 +107,15 @@ pub fn row(
     row: &Row,
     index: usize,
     reply: Option<Arc<Document>>,
-    action: Option<(CopyTarget, FocusHandle)>,
-    selected: bool,
+    controls: RowControls,
     cx: &App,
 ) -> AnyElement {
+    let RowControls {
+        action,
+        selected,
+        activity,
+        selection_start,
+    } = controls;
     let colors = cx.theme().colors;
     let mono = cx.theme().fonts.mono.clone();
     match row {
@@ -66,12 +159,16 @@ pub fn row(
                 let row_copy = item.status != ItemStatus::InProgress;
                 let markdown =
                     Markdown::new(SharedString::from(format!("reply-{index}")), document)
-                        .managed_focus();
+                        .managed_focus()
+                        .when_some(selection_start, |markdown, start| {
+                            markdown.on_selection_start(start)
+                        });
                 let markdown = match &action {
                     Some((CopyTarget::Code(n), focus)) => markdown.copy_focus(*n, focus),
                     Some((CopyTarget::DiagramToggle(n), focus)) => {
                         markdown.diagram_toggle_focus(*n, focus)
                     }
+                    Some((CopyTarget::TextSelection, focus)) => markdown.selection_focus(focus),
                     _ => markdown,
                 };
                 v_flex()
@@ -96,11 +193,30 @@ pub fn row(
                     )
                     .into_any_element()
             }
-            ItemKind::Reasoning => div()
-                .text_size(TextSize::Ui.px())
-                .text_color(colors.text_muted)
-                .child(item.text.clone())
-                .into_any_element(),
+            ItemKind::Reasoning => {
+                let control = activity.expect("reasoning disclosure");
+                let expanded = control.expanded;
+                let body_selector = control.body_selector.clone();
+                v_flex()
+                    .gap_1()
+                    .child(activity_toggle(
+                        index,
+                        "reasoning".into(),
+                        &action,
+                        control,
+                        false,
+                    ))
+                    .when(expanded, |d| {
+                        d.child(
+                            div()
+                                .automation_id(body_selector)
+                                .text_size(TextSize::Ui.px())
+                                .text_color(colors.text_muted)
+                                .child(item.text.clone()),
+                        )
+                    })
+                    .into_any_element()
+            }
             ItemKind::Command { command, exit_code } => {
                 let (status, color) = match (item.status, exit_code) {
                     (ItemStatus::InProgress, _) => ("Running".to_owned(), Color::Muted),
@@ -111,6 +227,9 @@ pub fn row(
                     (_, None) => (String::new(), Color::Muted),
                 };
                 let output = item.text.trim_end();
+                let control = activity.expect("command disclosure");
+                let expanded = control.expanded;
+                let body_selector = control.body_selector.clone();
                 let copy = if output.is_empty() {
                     CopyButton::new(("copy-command", index), "Copy command", command.clone())
                 } else {
@@ -138,11 +257,19 @@ pub fn row(
                                         .filter(|(n, _)| *n == CopyTarget::Row)
                                         .map(|(_, f)| f),
                                 ),
-                            ),
+                            )
+                            .child(activity_toggle(
+                                index,
+                                "command output".into(),
+                                &action,
+                                control,
+                                true,
+                            )),
                     )
-                    .when(!output.is_empty(), |d| {
+                    .when(expanded && !output.is_empty(), |d| {
                         d.child(
                             div()
+                                .automation_id(body_selector)
                                 .px_3()
                                 .py_2()
                                 .font_family(mono)
@@ -170,11 +297,50 @@ pub fn row(
                     )
                     .into_any_element()
             }
-            ItemKind::Tool { name } | ItemKind::Other { name } => div()
-                .text_size(TextSize::Ui.px())
-                .text_color(colors.text_muted)
-                .child(format!("Used {name}"))
-                .into_any_element(),
+            ItemKind::Tool { .. } | ItemKind::Other { .. } => {
+                let control = activity.expect("tool disclosure");
+                let expanded = control.expanded;
+                let body_selector = control.body_selector.clone();
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(activity_toggle(
+                                index,
+                                activity_name(item).unwrap(),
+                                &action,
+                                control,
+                                false,
+                            ))
+                            .child(
+                                div()
+                                    .automation_id(format!("activity-status-{index}"))
+                                    .child(
+                                        Label::new(match item.status {
+                                            ItemStatus::InProgress => "Running",
+                                            ItemStatus::Completed => "Completed",
+                                            ItemStatus::Failed => "Failed",
+                                            ItemStatus::Declined => "Declined",
+                                        })
+                                        .size(TextSize::Sm)
+                                        .color(Color::Muted),
+                                    ),
+                            ),
+                    )
+                    .when(expanded, |d| {
+                        d.child(
+                            div()
+                                .automation_id(body_selector)
+                                .text_size(TextSize::Ui.px())
+                                .text_color(colors.text_muted)
+                                .when(!item.text.is_empty(), |d| {
+                                    d.child(div().child(item.text.clone()))
+                                }),
+                        )
+                    })
+                    .into_any_element()
+            }
         },
         Row::TurnEnded { status, error } => {
             let (text, color) = match status {

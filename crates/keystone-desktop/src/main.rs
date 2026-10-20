@@ -1808,8 +1808,17 @@ impl Keystone {
         state.set_scroll_handler(move |_, window, cx| {
             let _ = app_scroll.update(cx, |this, cx| {
                 let keyboard = this.presentation.current.views.keyboard(key, cx);
+                if keyboard.action == Some(view_state::CopyTarget::TextSelection)
+                    && keyboard.action_focus.is_focused(window)
+                    && window.context_stack().iter().any(|context| {
+                        context.contains("MarkdownText") && context.contains("selection")
+                    })
+                {
+                    return;
+                }
                 keyboard.row = None;
                 keyboard.action = None;
+                keyboard.selection_from_pointer = false;
                 if keyboard.action_focus.is_focused(window) {
                     keyboard.action = None;
                     this.presentation
@@ -1896,7 +1905,68 @@ impl Keystone {
                     }
                     _ => None,
                 };
-                Some(transcript::row(row, index, reply, action, focused, cx))
+                let activity = match row {
+                    Row::Item(item) if transcript::activity_name(item).is_some() => {
+                        let expanded = self
+                            .presentation
+                            .current
+                            .views
+                            .activity_expanded(key, index);
+                        Some(transcript::ActivityControl {
+                            expanded,
+                            selector: arrangement::selector(
+                                &format!(
+                                    "activity-{}-{index}",
+                                    if expanded { "expanded" } else { "collapsed" }
+                                ),
+                                key.view,
+                            )
+                            .to_string(),
+                            body_selector: arrangement::selector(
+                                &format!("activity-body-{index}"),
+                                key.view,
+                            )
+                            .to_string(),
+                            on_toggle: Box::new(self.scoped_listener(
+                                cx,
+                                move |this, _, window, cx| {
+                                    this.toggle_activity(key, index, window, cx)
+                                },
+                            )),
+                        })
+                    }
+                    _ => None,
+                };
+                let selection_start = if reply.is_some() {
+                    let activation = self.presentation.activation();
+                    let entity = cx.weak_entity();
+                    Some(Box::new(move |window: &mut Window, cx: &mut App| {
+                        entity
+                            .update(cx, |this, cx| {
+                                if !this.presentation.matches(activation) {
+                                    return None;
+                                }
+                                this.begin_text_selection(key, index, window, cx)
+                            })
+                            .ok()
+                            .flatten()
+                    })
+                        as Box<dyn Fn(&mut Window, &mut App) -> Option<FocusHandle>>)
+                } else {
+                    None
+                };
+                Some(transcript::row(
+                    row,
+                    index,
+                    reply,
+                    transcript::RowControls {
+                        action,
+                        selected: focused,
+                        activity,
+                        selection_start,
+                    },
+                    cx,
+                ))
             }
             Some(_) => None,
             None => self.transcript_status(key, conversation, cx),
@@ -1927,6 +1997,7 @@ impl Keystone {
                                         key,
                                         index,
                                         visible.size.height >= bounds.size.height,
+                                        (visible.top() - bounds.top()).max(px(0.)),
                                     );
                                 }
                             });
@@ -2749,6 +2820,565 @@ mod feedback_tests;
 
 #[cfg(all(test, feature = "ui-tests"))]
 mod tests {
+    #[gpui::test]
+    fn transcript_selection_survives_wheel_until_its_row_is_hidden(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                conversation.apply(Event::ItemCompleted(Item {
+                    id: "wheel-selection".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: format!(
+                        "Plain **bold** words here.\n\n{}",
+                        "More text.\n\n".repeat(60)
+                    ),
+                    status: ItemStatus::Completed,
+                }));
+                for n in 0..30 {
+                    conversation.push_local(&format!("Later message {n}"));
+                }
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(1000.), px(500.)));
+        for pointer in [true, false] {
+            activity_keys(cx, "ctrl-shift-t home");
+            if pointer {
+                let bounds = cx.debug_bounds("reply-0-selection-surface").unwrap();
+                let from = bounds.origin + point(px(1.), px(8.));
+                let to = from + point(px(300.), px(0.));
+                cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::none());
+                cx.simulate_mouse_move(to, MouseButton::Left, gpui::Modifiers::none());
+                cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::none());
+            } else {
+                activity_keys(cx, "tab tab ctrl-a left shift-end");
+            }
+            cx.update(|_, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()))
+            });
+            let over = cx.debug_bounds("conversation").unwrap().center();
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: over,
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-20.))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            activity_keys(cx, "ctrl-c");
+            assert_eq!(
+                cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                    .as_deref(),
+                Some("Plain bold words here."),
+                "pointer={pointer}"
+            );
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: over,
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-10000.))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            view.update_in(cx, |v, window, cx| {
+                assert!(v.presentation.current.views.focused_region(MAIN_1, window));
+                assert_eq!(
+                    v.presentation.current.views.keyboard(MAIN_1, cx).action,
+                    None
+                );
+            });
+            activity_keys(cx, "ctrl-shift-t home tab tab");
+            cx.update(|_, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()))
+            });
+            activity_keys(cx, "ctrl-c");
+            assert_eq!(
+                cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                    .as_deref(),
+                Some("sentinel")
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn collapsed_tool_preserves_its_lifecycle_status(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        for status in [
+            ItemStatus::InProgress,
+            ItemStatus::Failed,
+            ItemStatus::Declined,
+        ] {
+            view.update(cx, |v, cx| {
+                v.state.update(cx, |state, _| {
+                    state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                        id: "tool-status".into(),
+                        kind: ItemKind::Tool {
+                            name: "Read".into(),
+                        },
+                        text: "Read src/main.rs".into(),
+                        status,
+                    }));
+                });
+                v.commit(1, cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            if cx.debug_bounds("activity-expanded-0").is_some() {
+                click(cx, "activity-expanded-0");
+            }
+            assert!(cx.debug_bounds("activity-collapsed-0").is_some());
+            assert!(cx.debug_bounds("activity-body-0").is_none());
+            assert!(cx.debug_bounds("activity-status-0").is_some(), "{status:?}");
+        }
+    }
+
+    #[gpui::test]
+    fn transcript_command_disclosure_fits_minimum_width(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "narrow-command".into(),
+                    kind: ItemKind::Command {
+                        command: "cargo test --workspace --all-targets".into(),
+                        exit_code: Some(0),
+                    },
+                    text: "one output line".into(),
+                    status: ItemStatus::Completed,
+                }));
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        for width in [400., 360., 330.] {
+            cx.simulate_resize(size(px(width), px(700.)));
+            cx.run_until_parked();
+            let row = cx.debug_bounds("transcript-row-0").unwrap();
+            let copy = cx.debug_bounds("copy-command-0").unwrap();
+            let toggle = cx.debug_bounds("activity-expanded-0").unwrap();
+            assert!(row.size.height < px(140.), "{width}px: {row:?}");
+            assert!(copy.right() <= row.right() && toggle.right() <= row.right());
+            assert!(
+                copy.left() < toggle.left(),
+                "visual order follows Copy-first keyboard order"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn transcript_selection_does_not_cross_keyboard_created_sessions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _env = codex_env();
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "session-one".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Plain **bold** words here.".into(),
+                    status: ItemStatus::Completed,
+                }));
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        activity_keys(cx, "ctrl-shift-t end tab tab ctrl-a ctrl-c ctrl-shift-n");
+        wait_until(cx, &view, |v, cx| {
+            v.state.read(cx).store().workspace().selected() == Some(2)
+                && v.state
+                    .read(cx)
+                    .conversations()
+                    .get(&2)
+                    .is_some_and(|c| !c.is_loading())
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                state.test_conversation(2).apply(Event::ItemCompleted(Item {
+                    id: "session-two".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Plain **bold** words here. appended".into(),
+                    status: ItemStatus::Completed,
+                }));
+            });
+            v.commit(2, cx);
+            cx.notify();
+        });
+        activity_keys(cx, "ctrl-shift-t end tab tab");
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()))
+        });
+        activity_keys(cx, "ctrl-c");
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some("sentinel")
+        );
+        activity_keys(cx, "ctrl-a ctrl-c");
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some("Plain bold words here. appended")
+        );
+    }
+
+    fn activity_keys(cx: &mut gpui::VisualTestContext, strokes: &str) {
+        for stroke in strokes.split_whitespace() {
+            cx.simulate_keystrokes(stroke);
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(stroke).unwrap(),
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    fn activity_top(list: &gpui::ListState) -> (usize, Pixels) {
+        let top = list.logical_scroll_top();
+        (top.item_ix, top.offset_in_item)
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_selection_reveals_its_moving_head(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "tall-selection".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: format!(
+                        "First **styled** paragraph.\n\n{}\n\n```rust\nlast code\n```",
+                        "More paragraph.\n\n".repeat(120)
+                    ),
+                    status: ItemStatus::Completed,
+                }));
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(1000.), px(500.)));
+        activity_keys(cx, "ctrl-shift-t end tab tab");
+        let before = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        activity_keys(cx, "tab ctrl-a");
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                keyboard_scroll_top(v),
+                before,
+                "selection entry and Select All retain the viewport"
+            )
+        });
+        activity_keys(cx, "left shift-end ctrl-c");
+        let surface = cx.debug_bounds("reply-0-selection-surface").unwrap();
+        let viewport = cx.debug_bounds("conversation").unwrap();
+        assert!(
+            surface.top() >= viewport.top(),
+            "the moving selection head must be visible: {surface:?} in {viewport:?}"
+        );
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some("First styled paragraph.")
+        );
+    }
+
+    #[gpui::test]
+    fn transcript_pointer_selection_keeps_text_focus_in_the_host(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "pointer-reply".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Plain **bold** and [link](https://example.com) é.".into(),
+                    status: ItemStatus::Completed,
+                }));
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()))
+        });
+        let bounds = cx.debug_bounds("reply-0-selection-surface").unwrap();
+        let from = bounds.origin + point(px(1.), px(8.));
+        let to = from + point(px(300.), px(0.));
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(to, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::none());
+        activity_keys(cx, "ctrl-c");
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some("Plain bold and link é.")
+        );
+        view.update_in(cx, |v, window, cx| {
+            let keyboard = v.presentation.current.views.keyboard(MAIN_1, cx);
+            assert_eq!(keyboard.row, Some(0));
+            assert_eq!(keyboard.action, Some(view_state::CopyTarget::TextSelection));
+            assert!(keyboard.action_focus.is_focused(window));
+        });
+        assert_eq!(cx.opened_url(), None);
+    }
+
+    #[gpui::test]
+    fn transcript_text_selection_is_a_bounded_action_and_keeps_row_keys(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                conversation.push_local("Question");
+                conversation.apply(Event::ItemCompleted(Item {
+                    id: "selection-reply".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Plain **bold** and [link](https://example.com) é.\n\nNext `code`."
+                        .into(),
+                    status: ItemStatus::Completed,
+                }));
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        activity_keys(cx, "ctrl-shift-t end tab tab ctrl-a ctrl-c");
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some("Plain bold and link é.\nNext code.")
+        );
+        activity_keys(cx, "ctrl-a left shift-right shift-right ctrl-c");
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some("Pl")
+        );
+        activity_keys(cx, "escape up");
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.presentation
+                    .current
+                    .views
+                    .keyboard_state(MAIN_1)
+                    .unwrap()
+                    .row,
+                Some(0)
+            )
+        });
+        activity_keys(cx, "ctrl-l");
+        cx.simulate_input("composer still owns text");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.composer.read(cx).value(), "composer still owns text")
+        });
+    }
+    #[gpui::test]
+    fn activity_disclosure_preserves_header_and_independent_stream_anchors(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                for n in 0..3 {
+                    conversation.apply(Event::ItemStarted(Item {
+                        id: format!("activity-{n}"),
+                        kind: ItemKind::Reasoning,
+                        text: "Long reasoning line.\n".repeat(100),
+                        status: ItemStatus::InProgress,
+                    }));
+                }
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(1000.), px(500.)));
+        activity_keys(cx, "ctrl-shift-t home");
+        cx.run_until_parked();
+        let before = cx.debug_bounds("activity-expanded-0").unwrap().top();
+        click(cx, "activity-expanded-0");
+        assert_eq!(
+            cx.debug_bounds("activity-collapsed-0").unwrap().top(),
+            before
+        );
+        click(cx, "activity-collapsed-0");
+        assert_eq!(
+            cx.debug_bounds("activity-expanded-0").unwrap().top(),
+            before
+        );
+        let other = ViewKey {
+            view: ViewId(919),
+            session: 1,
+        };
+        view.update(cx, |v, cx| {
+            let views = &mut v.presentation.current.views;
+            let list = views.get(MAIN_1).unwrap().clone();
+            list.scroll_to(ListOffset {
+                item_ix: 2,
+                offset_in_item: px(70.),
+            });
+            views.list(other, 3).scroll_to(ListOffset {
+                item_ix: 1,
+                offset_in_item: px(30.),
+            });
+            views.toggle_activity(MAIN_1, 0);
+            assert_eq!(activity_top(&list), (2, px(70.)));
+            assert!(views.activity_expanded(other, 0));
+            assert!(!views.activity_expanded(MAIN_1, 0));
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "activity-0".into(),
+                    kind: ItemKind::Reasoning,
+                    text: "New streamed reasoning.\n".repeat(120),
+                    status: ItemStatus::Completed,
+                }));
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            let views = &mut v.presentation.current.views;
+            assert_eq!(activity_top(views.get(MAIN_1).unwrap()), (2, px(70.)));
+            assert_eq!(activity_top(views.get(other).unwrap()), (1, px(30.)));
+            assert!(!views.activity_expanded(MAIN_1, 0));
+            let list = views.get(MAIN_1).unwrap().clone();
+            list.scroll_to(ListOffset {
+                item_ix: 1,
+                offset_in_item: px(400.),
+            });
+            views.toggle_activity(MAIN_1, 1);
+            assert_eq!(activity_top(&list), (1, px(0.)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("activity-collapsed-1").is_some());
+    }
+
+    #[gpui::test]
+    fn activity_controls_keep_keyboard_copy_and_stream_position(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                for (id, kind, text) in [
+                    (
+                        "reason",
+                        ItemKind::Reasoning,
+                        "Thinking through **details**",
+                    ),
+                    (
+                        "tool",
+                        ItemKind::Tool {
+                            name: "Read".into(),
+                        },
+                        "Read src/main.rs",
+                    ),
+                    (
+                        "cmd",
+                        ItemKind::Command {
+                            command: "cargo test".into(),
+                            exit_code: None,
+                        },
+                        "command output",
+                    ),
+                ] {
+                    conversation.apply(Event::ItemStarted(Item {
+                        id: id.into(),
+                        kind,
+                        text: text.into(),
+                        status: ItemStatus::InProgress,
+                    }));
+                }
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("activity-expanded-0").is_some(),
+            "reasoning needs a named disclosure"
+        );
+        assert!(cx.debug_bounds("activity-body-0").is_some());
+        activity_keys(cx, "ctrl-shift-t home tab enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("activity-collapsed-0").is_some());
+        assert!(cx.debug_bounds("activity-body-0").is_none());
+        activity_keys(cx, "space");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("activity-body-0").is_some());
+        activity_keys(cx, "down tab enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("activity-collapsed-1").is_some());
+        activity_keys(cx, "down tab enter");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some("command output")
+        );
+        activity_keys(cx, "tab enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("activity-collapsed-2").is_some());
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "cmd".into(),
+                    kind: ItemKind::Command {
+                        command: "cargo test".into(),
+                        exit_code: Some(0),
+                    },
+                    text: "streamed command output".into(),
+                    status: ItemStatus::Completed,
+                }));
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("activity-collapsed-2").is_some());
+        cx.simulate_keystrokes("ctrl-shift-c");
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some("streamed command output")
+        );
+        click(cx, "activity-collapsed-2");
+        assert!(cx.debug_bounds("activity-body-2").is_some());
+    }
+
     use super::*;
     use conversation::Row;
     use keystone_agent::{Event, Item, ItemKind, ItemStatus, TurnStatus};

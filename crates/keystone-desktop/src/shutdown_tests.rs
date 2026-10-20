@@ -8,7 +8,21 @@ struct RestoredRow(Row);
 
 impl Render for RestoredRow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        transcript::row(&self.0, 0, None, None, false, cx)
+        transcript::row(
+            &self.0,
+            0,
+            None,
+            transcript::RowControls {
+                activity: Some(transcript::ActivityControl {
+                    expanded: true,
+                    selector: "activity-expanded-0".into(),
+                    body_selector: "activity-body-0".into(),
+                    on_toggle: Box::new(|_, _, _| {}),
+                }),
+                ..Default::default()
+            },
+            cx,
+        )
     }
 }
 
