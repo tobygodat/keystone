@@ -128,6 +128,11 @@ def workspace_projection(connection):
             'SELECT payload FROM workspace WHERE singleton=1').fetchone()[0])
         snapshot['workspace']['sessions'] = [json.loads(row[0]) for row in connection.execute(
             'SELECT payload FROM sessions ORDER BY position')]
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'").fetchone():
+            accounts = [json.loads(row[0]) for row in connection.execute(
+                'SELECT payload FROM accounts ORDER BY position')]
+            if accounts:
+                snapshot['workspace']['accounts'] = accounts
         return snapshot
     finally:
         connection.rollback()

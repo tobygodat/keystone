@@ -261,6 +261,19 @@ Claude has no equivalent. Anthropic does not allow third-party apps to offer cla
 
 Recommendation: ship with the existing CLI logins, and add Sign in with ChatGPT as an optional Codex account choice once the core works. It is also the sanctioned path if Keystone is ever distributed.
 
+## Accounts
+
+A provider can have several accounts, for example two Claude Max subscriptions. Each added account is a folder that holds that provider's own config: Keystone starts every process for the account (the CLI, its `--version` check, and model and permission probes) with `CLAUDE_CONFIG_DIR` or `CODEX_HOME` set to it. It never changes `HOME`, so the provider's native tools, skills and other config stay where they are. For an added account Keystone also removes that provider's inherited credential variables (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` for Claude; `OPENAI_API_KEY` and `CODEX_API_KEY` for Codex), so one account can never run on another's key. Claude accounts also drop `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_USE_FOUNDRY`, which would route them to a cloud provider's credentials instead; `ANTHROPIC_BASE_URL` is kept as routing configuration. The default account is the inherited environment, unchanged, and every session saved before accounts existed uses it.
+
+Each Codex account gets its own `codex app-server`; Claude sessions already run one process each. Model catalogs are kept per account. A session's account is chosen in the composer's model menu, which lists accounts only once one has been added for that provider, and is fixed at the first send, like its provider and model. Moving a conversation to another account is a later handoff feature.
+
+Keystone never signs anyone in. Settings → Accounts shows the command to run in a terminal, such as `CLAUDE_CONFIG_DIR='/home/me/.claude-work' claude auth login` or `CODEX_HOME='/home/me/.codex-work' codex login`. Adding an account creates its folder with mode 0700; a folder that already exists keeps its permissions. Folders are compared after resolving symlinks and saved as their real path. Account folders may not overlap each other or the default homes, and an account in use by a session cannot be removed; removing one keeps its folder.
+
+Probes on 2026-10-19 with Claude Code 2.1.301 and Codex 0.163.0:
+- Claude creates a missing `CLAUDE_CONFIG_DIR`; Codex exits when `CODEX_HOME` does not exist, so Keystone creates the folder when the account is added.
+- With the variable set on every spawn, neither CLI wrote under `$HOME`.
+- Signed out, Claude's `initialize` reports `account: {tokenSource: "none", apiProvider: "firstParty"}`, and Codex's `account/read` returns `{account: null, requiresOpenaiAuth: true}`. Signed in, Claude reports email, organization and `subscriptionType` (for example "Claude Max"); Codex reports email and `planType`. Keystone never shows email or organization; a plan name is acceptable as a label.
+
 ## Terms
 
 Keystone runs the user's own unmodified `claude` binary and never handles their credentials. That matches Anthropic's allowance for "an end user … signing in to the unmodified Claude Code binary with their own Claude subscription". The product name must not include "Claude". OpenAI says local and open-source apps can keep using app-server authentication, but it has "never been permitted for commercial or hosted services". Revisit both before any commercial release.

@@ -370,6 +370,36 @@ fn signed_out_claude_reports_an_error_and_no_reply() {
 }
 
 #[test]
+fn a_signed_out_account_names_its_home_and_sign_in_command() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    let profile = keystone_agent::LaunchProfile::account(
+        keystone_core::Provider::Claude,
+        "Work",
+        std::path::Path::new("/accounts/claude-work"),
+    );
+    driver.set_sign_in(profile.sign_in());
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    driver.command(send(1), &mut out);
+    for line in [
+        r#"{"type":"system","subtype":"init","session_id":"4adbc14b-a833-445f-8c45-dd16939b8e9b","capabilities":[]}"#,
+        r#"{"type":"assistant","message":{"id":"f64cb87e","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"parent_tool_use_id":null,"error":"authentication_failed","is_api_error_message":true}"#,
+        r#"{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"Not logged in · Please run /login"}"#,
+    ] {
+        driver.on_line(line.as_bytes(), &mut out);
+    }
+    let Some((_, Event::TurnCompleted { error, .. })) = out.events.last() else {
+        panic!("expected the turn to end, got {:?}", out.events);
+    };
+    assert_eq!(
+        error.as_deref(),
+        Some(
+            "Claude Code is not signed in (Not logged in · Please run /login). The account \u{201c}Work\u{201d} uses /accounts/claude-work. Sign it in from a terminal with `CLAUDE_CONFIG_DIR=/accounts/claude-work claude auth login`, then send again."
+        )
+    );
+}
+
+#[test]
 fn unknown_control_requests_are_refused() {
     let mut out = Outputs::default();
     let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);

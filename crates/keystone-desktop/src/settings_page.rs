@@ -38,13 +38,14 @@ enum Field {
 enum Section {
     Appearance,
     Fonts,
+    Accounts,
 }
 
 /// A section's rows, each a label and its control.
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 2] = [
+const SECTIONS: [(Section, &str, &str, Rows); 3] = [
     (
         Section::Appearance,
         "Appearance",
@@ -64,6 +65,12 @@ const SECTIONS: [(Section, &str, &str, Rows); 2] = [
             ("Code font", Field::MonoFont),
         ],
     ),
+    (
+        Section::Accounts,
+        "Accounts",
+        "settings-section-accounts",
+        &[],
+    ),
 ];
 
 /// The open settings page: the section it shows and a focus handle per tab stop. Only
@@ -77,6 +84,7 @@ pub(crate) struct SettingsPage {
     mono_font: FocusHandle,
     density: [FocusHandle; DENSITIES.len()],
     text_size: FocusHandle,
+    pub(crate) accounts: crate::settings_accounts::AccountsPage,
 }
 
 impl SettingsPage {
@@ -91,6 +99,7 @@ impl SettingsPage {
             mono_font: stop(),
             density: std::array::from_fn(|_| stop()),
             text_size: stop(),
+            accounts: crate::settings_accounts::AccountsPage::new(cx),
         }
     }
 
@@ -231,6 +240,9 @@ impl Keystone {
                         ),
                     )
                     .children(rows)
+                    .when(page.section == Section::Accounts, |d| {
+                        d.child(self.accounts_section(page, cx))
+                    })
                     .children(self.error_line(cx).map(|error| {
                         div()
                             .pt(spacing::MD)
@@ -616,6 +628,289 @@ mod tests {
         );
     }
 
+    fn accounts(path: &Path) -> Vec<(String, String, std::path::PathBuf)> {
+        Store::open(path)
+            .unwrap()
+            .workspace()
+            .accounts()
+            .iter()
+            .map(|a| {
+                (
+                    a.id().to_string(),
+                    a.label().to_owned(),
+                    a.home().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn settings_accounts_add_copy_rename_and_remove_without_credentials(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        seeded(&path);
+        let (view, cx) = open_window(&path, cx);
+        keys(cx, "ctrl-,");
+        click(cx, "settings-section-accounts");
+        assert!(shown(cx, "settings-accounts"));
+        assert!(shown(cx, "account-row-claude-default"));
+        assert!(shown(cx, "account-row-codex-default"));
+        assert!(
+            !shown(cx, "account-remove-claude-default"),
+            "the default stays"
+        );
+
+        click(cx, "account-copy-claude-default");
+        let clipboard = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        };
+        assert_eq!(
+            clipboard(cx),
+            Some(keystone_agent::default_sign_in_command(
+                keystone_core::Provider::Claude
+            ))
+        );
+
+        let folder = dir.path().join("claude work");
+        click(cx, "account-name");
+        cx.simulate_input("Work");
+        click(cx, "account-folder");
+        cx.simulate_input(folder.to_str().unwrap());
+        click(cx, "account-add");
+        assert_eq!(
+            accounts(&path),
+            [("claude-work".into(), "Work".into(), folder.clone())]
+        );
+        assert!(folder.is_dir());
+        assert!(shown(cx, "account-row-claude-work"));
+        click(cx, "account-copy-claude-work");
+        assert_eq!(
+            clipboard(cx),
+            Some(format!(
+                "CLAUDE_CONFIG_DIR='{}' claude auth login",
+                folder.display()
+            ))
+        );
+
+        click(cx, "account-rename-claude-work");
+        keys(cx, "ctrl-a");
+        cx.simulate_input("Max two");
+        keys(cx, "enter");
+        assert_eq!(accounts(&path)[0].1, "Max two");
+
+        click(cx, "account-name");
+        cx.simulate_input("Again");
+        click(cx, "account-folder");
+        cx.simulate_input(folder.join("inner").to_str().unwrap());
+        click(cx, "account-add");
+        view.read_with(cx, |view, _| {
+            let error = view.error.as_deref().unwrap();
+            assert!(error.starts_with("Account not added."), "{error}");
+        });
+        assert!(shown(cx, "settings-error"));
+        assert_eq!(accounts(&path).len(), 1);
+
+        click(cx, "account-remove-claude-work");
+        assert!(accounts(&path).is_empty());
+        assert!(folder.is_dir(), "the folder stays on disk");
+    }
+
+    #[gpui::test]
+    fn the_composer_offers_accounts_only_once_one_is_added_and_fixes_it_at_send(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        {
+            let mut store = Store::open(&path).unwrap();
+            let directory = keystone_core::WorkingDirectory::new(dir.path()).unwrap();
+            store
+                .create(keystone_core::Provider::Claude, &directory, 1)
+                .unwrap();
+        }
+        let (view, cx) = open_window(&path, cx);
+        click(cx, "model-selector");
+        assert!(shown(cx, "provider-claude"));
+        assert!(
+            !shown(cx, "account-claude-default"),
+            "one account is never named"
+        );
+        keys(cx, "escape");
+
+        let home = dir.path().join("claude-work");
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, cx| {
+                state
+                    .add_account(
+                        keystone_core::Provider::Claude,
+                        "Work",
+                        home.to_str().unwrap(),
+                        cx,
+                    )
+                    .unwrap();
+            })
+        });
+        click(cx, "model-selector");
+        assert!(shown(cx, "account-claude-default"));
+        assert!(
+            !shown(cx, "account-codex-default"),
+            "Codex has no account added"
+        );
+        click(cx, "account-claude-work");
+        let saved_account = || {
+            Store::open(&path).unwrap().workspace().sessions()[0]
+                .account()
+                .map(|a| a.to_string())
+        };
+        assert_eq!(saved_account().as_deref(), Some("claude-work"));
+        view.read_with(cx, |view, cx| {
+            let selection = view.model_selection(1, keystone_core::Provider::Claude, cx);
+            assert_eq!(selection.account.map(|a| a.as_str()), Some("claude-work"));
+        });
+
+        view.update(cx, |view, cx| {
+            view.state
+                .update(cx, |state, cx| state.lock_model(1, cx).unwrap());
+        });
+        view.update(cx, |view, cx| {
+            let refused = view
+                .state
+                .update(cx, |state, cx| {
+                    state.set_provider_account(1, keystone_core::Provider::Claude, None, cx)
+                })
+                .unwrap_err();
+            assert!(refused.to_string().contains("fixed once"), "{refused}");
+        });
+        assert_eq!(saved_account().as_deref(), Some("claude-work"));
+    }
+
+    #[gpui::test]
+    fn the_add_account_controls_never_overlap_at_any_width(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        seeded(&path);
+        let (_view, cx) = open_window(&path, cx);
+        for width in [1280., 900., 640., 480.] {
+            cx.simulate_resize(gpui::size(px(width), px(900.)));
+            keys(cx, "ctrl-,");
+            click(cx, "settings-section-accounts");
+            let bounds = |cx: &mut VisualTestContext, id: &'static str| {
+                cx.debug_bounds(id)
+                    .unwrap_or_else(|| panic!("{id} not rendered at {width}px"))
+            };
+            let provider = bounds(cx, "account-provider");
+            let name = bounds(cx, "account-name");
+            let folder = bounds(cx, "account-folder");
+            let add = bounds(cx, "account-add");
+            let form = bounds(cx, "settings-accounts");
+            let apart = |a: gpui::Bounds<gpui::Pixels>, b: gpui::Bounds<gpui::Pixels>| {
+                a.right() <= b.origin.x
+                    || b.right() <= a.origin.x
+                    || a.bottom() <= b.origin.y
+                    || b.bottom() <= a.origin.y
+            };
+            let controls = [provider, name, folder, add];
+            for (i, a) in controls.iter().enumerate() {
+                for b in &controls[i + 1..] {
+                    assert!(apart(*a, *b), "{width}px: {a:?} overlaps {b:?}");
+                }
+            }
+            for control in controls {
+                assert!(
+                    control.origin.x >= form.origin.x && control.right() <= form.right(),
+                    "{width}px: {control:?} leaves {form:?}"
+                );
+            }
+            assert!(
+                name.size.width >= px(120.) && folder.size.width >= px(120.),
+                "{width}px: name {name:?} folder {folder:?} form {form:?}"
+            );
+            keys(cx, "escape");
+        }
+    }
+
+    #[gpui::test]
+    fn a_long_account_list_scrolls_inside_the_menu(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        {
+            let mut store = Store::open(&path).unwrap();
+            let directory = keystone_core::WorkingDirectory::new(dir.path()).unwrap();
+            for n in 0..30 {
+                store
+                    .add_account(
+                        keystone_core::Provider::Claude,
+                        &format!("Account {n}"),
+                        dir.path().join(format!("claude-{n}")),
+                        &[],
+                    )
+                    .unwrap();
+            }
+            store
+                .create(keystone_core::Provider::Claude, &directory, 1)
+                .unwrap();
+        }
+        let (_view, cx) = open_window(&path, cx);
+        cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+        cx.run_until_parked();
+        click(cx, "model-selector");
+        let list = cx.debug_bounds("provider-list").unwrap();
+        assert!(list.size.height <= px(360.), "{list:?}");
+        assert!(
+            list.origin.y >= px(0.) && list.bottom() <= px(900.),
+            "the menu stays in the window: {list:?}"
+        );
+        let codex = cx.debug_bounds("provider-codex").unwrap();
+        assert!(
+            codex.origin.y > list.bottom(),
+            "Codex starts below the fold"
+        );
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: list.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-5000.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let codex = cx.debug_bounds("provider-codex").unwrap();
+        assert!(
+            codex.origin.y >= list.origin.y && codex.bottom() <= list.bottom(),
+            "scrolling reaches Codex: {codex:?} in {list:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn the_sidebar_names_only_accounts_other_than_the_default(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        {
+            let mut store = Store::open(&path).unwrap();
+            let directory = keystone_core::WorkingDirectory::new(dir.path()).unwrap();
+            let work = store
+                .add_account(
+                    keystone_core::Provider::Claude,
+                    "Work",
+                    dir.path().join("claude-work"),
+                    &[],
+                )
+                .unwrap()
+                .value;
+            for account in [None, Some(work)] {
+                let id = store
+                    .create(keystone_core::Provider::Claude, &directory, 1)
+                    .unwrap()
+                    .value;
+                store.set_account(id, account).unwrap();
+            }
+        }
+        let (_view, cx) = open_window(&path, cx);
+        cx.run_until_parked();
+        assert!(
+            !shown(cx, "session-account-1"),
+            "a default-account row looks as it did before accounts"
+        );
+        assert!(shown(cx, "session-account-2"));
+    }
+
     #[gpui::test]
     fn settings_changes_persist_preferences(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -701,8 +996,8 @@ mod tests {
         keys(cx, "up");
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
-        // Appearance's row holds focus; next come Fonts, Theme, then Compact.
-        keys(cx, "tab tab tab");
+        // Appearance's row holds focus; next come Fonts, Accounts, Theme, then Compact.
+        keys(cx, "tab tab tab tab");
         press(cx, "space");
         assert_eq!(saved(&path).density, Density::Compact);
         keys(cx, "right");
@@ -716,8 +1011,11 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, Theme, Fonts, and Appearance to Back.
-        keys(cx, "shift-tab shift-tab shift-tab shift-tab shift-tab");
+        // From Default back past Compact, Theme, Accounts, Fonts, and Appearance to Back.
+        keys(
+            cx,
+            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
+        );
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
         assert!(composer_focused(&view, cx));
@@ -729,7 +1027,8 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-, down tab down");
+        // Fonts' row holds focus; Accounts' row comes before the first font menu.
+        keys(cx, "ctrl-, down tab tab down");
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");

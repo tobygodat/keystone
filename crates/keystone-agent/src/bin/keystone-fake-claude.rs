@@ -47,6 +47,8 @@
 //! each process's arguments as a JSON array per line, and a `.fake-claude-messages`
 //! file each user message it reads.
 //!
+//! `KEYSTONE_FAKE_ENV_RECEIPT` names a file each process appends its environment to.
+//!
 //! `init` lists tools unless launched with `--tools ""`, and no MCP servers, slash
 //! commands or skills. `init-tools` and `init-commands` settings replace the JSON of
 //! `init`'s `tools` and the `initialize` answer's `commands`; `missing` leaves the
@@ -121,7 +123,47 @@ struct Shared {
     release_file: Option<PathBuf>,
 }
 
+/// With `KEYSTONE_FAKE_ENV_RECEIPT` naming a file, appends one JSON line per process:
+/// its ID, its arguments, and the account environment it was started with. Credential
+/// variables are listed by name only when present, never with their values.
+fn write_env_receipt(provider: &str) {
+    let Some(path) = std::env::var_os("KEYSTONE_FAKE_ENV_RECEIPT") else {
+        return;
+    };
+    let var = |name: &str| std::env::var(name).ok();
+    let credentials: Vec<&str> = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ]
+    .into_iter()
+    .filter(|name| std::env::var_os(name).is_some())
+    .collect();
+    let line = json!({
+        "provider": provider,
+        "pid": std::process::id(),
+        "argv": std::env::args().skip(1).collect::<Vec<_>>(),
+        "CLAUDE_CONFIG_DIR": var("CLAUDE_CONFIG_DIR"),
+        "CODEX_HOME": var("CODEX_HOME"),
+        "HOME": var("HOME"),
+        "credentials": credentials,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(format!("{line}\n").as_bytes());
+    }
+}
+
 fn main() {
+    write_env_receipt("claude");
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--version") {
         let version =

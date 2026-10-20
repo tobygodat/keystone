@@ -49,15 +49,14 @@ fn setup(directory: &Path, provider: Provider, cx: &mut gpui::TestAppContext) ->
     cx.executor().allow_parking();
     cx.new(|cx| {
         let mut state = AppState::new(store, cx);
-        state.codex = Some(CodexConnection::new(
-            Some(scripted(Provider::Codex)),
-            "test",
-            state.wake.clone(),
-        ));
-        state.claude = Some(ClaudeConnection::new(
-            Some(scripted(Provider::Claude)),
-            state.wake.clone(),
-        ));
+        state.codex.insert(
+            None,
+            CodexConnection::new(Some(scripted(Provider::Codex)), "test", state.wake.clone()),
+        );
+        state.claude.insert(
+            None,
+            ClaudeConnection::new(Some(scripted(Provider::Claude)), state.wake.clone()),
+        );
         state
     })
 }
@@ -135,7 +134,7 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
         ))
     });
     wait_until(&state, cx, |state| {
-        state.started(provider).is_some_and(|c| c.is_running(1))
+        state.started(1).is_some_and(|c| c.is_running(1))
     });
     state.update(cx, |state, cx| {
         let refusal = state.orchestrate(
@@ -321,7 +320,7 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
         state.stop_turn(1, cx);
     });
     wait_until(&state, cx, |state| {
-        !state.started(provider).is_some_and(|c| c.is_running(1))
+        !state.started(1).is_some_and(|c| c.is_running(1))
     });
     state.update(cx, |state, cx| state.teardown(cx));
 }
@@ -334,4 +333,37 @@ fn claude_agent_launches_and_reads_codex(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn codex_agent_launches_and_reads_claude(cx: &mut gpui::TestAppContext) {
     cross_provider_scenario(Provider::Codex, cx);
+}
+
+#[test]
+fn a_launch_account_is_default_or_one_of_that_providers_added_accounts() {
+    let mut store = Store::in_memory().unwrap();
+    let work = store
+        .add_account(
+            Provider::Claude,
+            "Work",
+            "/accounts/claude-work".into(),
+            &[],
+        )
+        .unwrap()
+        .value;
+    store
+        .add_account(Provider::Codex, "Work", "/accounts/codex-work".into(), &[])
+        .unwrap();
+    for named in [None, Some("default")] {
+        assert_eq!(launch_account(&store, Provider::Claude, named), Ok(None));
+    }
+    assert_eq!(
+        launch_account(&store, Provider::Claude, Some("claude-work")),
+        Ok(Some(work))
+    );
+    for (provider, named) in [
+        (Provider::Codex, "claude-work"),
+        (Provider::Claude, "codex-work"),
+        (Provider::Claude, "claude-missing"),
+        (Provider::Claude, "Default"),
+    ] {
+        let refused = launch_account(&store, provider, Some(named)).unwrap_err();
+        assert!(refused.contains("Unknown"), "{named}: {refused}");
+    }
 }

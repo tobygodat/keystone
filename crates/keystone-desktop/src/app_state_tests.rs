@@ -68,12 +68,14 @@ fn connect(
     let codex = wrapper(dir, Provider::Codex, delay_ms, descendants);
     let claude = wrapper(dir, Provider::Claude, delay_ms, descendants);
     state.update(cx, |state, _| {
-        state.codex = Some(CodexConnection::new(
-            Some(codex),
-            "test",
-            state.wake.clone(),
-        ));
-        state.claude = Some(ClaudeConnection::new(Some(claude), state.wake.clone()));
+        state.codex.insert(
+            None,
+            CodexConnection::new(Some(codex), "test", state.wake.clone()),
+        );
+        state.claude.insert(
+            None,
+            ClaudeConnection::new(Some(claude), state.wake.clone()),
+        );
     });
 }
 
@@ -402,8 +404,8 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
     });
     let pids = state.read_with(cx, |state, _| {
         [
-            state.codex.as_ref().unwrap().pid().unwrap(),
-            state.claude.as_ref().unwrap().pid(2).unwrap(),
+            state.codex[&None].pid().unwrap(),
+            state.claude[&None].pid(2).unwrap(),
         ]
     });
     window
@@ -505,11 +507,7 @@ fn owned_processes(
     .unwrap();
     std::fs::write(probe_directory.join(".fake-claude-pids"), "").unwrap();
     state.update(cx, |state, _| {
-        state
-            .claude
-            .as_ref()
-            .unwrap()
-            .request_catalog(2, probe_directory.to_str().unwrap());
+        state.claude[&None].request_catalog(2, probe_directory.to_str().unwrap());
     });
     wait_until(cx, state, |_| {
         tracked(dir, "codex").len() == 1
@@ -521,11 +519,11 @@ fn owned_processes(
     state.read_with(cx, |state, _| {
         assert_eq!(
             tracked(dir, "codex")[0].0,
-            state.codex.as_ref().unwrap().pid().unwrap()
+            state.codex[&None].pid().unwrap()
         );
         assert_eq!(
             tracked(dir, "claude")[0].0,
-            state.claude.as_ref().unwrap().pid(2).unwrap()
+            state.claude[&None].pid(2).unwrap()
         );
     });
     let pids: Vec<_> = tracked(dir, "codex")
@@ -574,7 +572,7 @@ fn explicit_teardown_ends_only_owned_providers_descendants_and_catalog_probe(
         state.save(None, cx).unwrap();
         state.teardown(cx);
         assert_eq!(state.phase, Phase::Exiting);
-        assert!(state.codex.is_none() && state.claude.is_none());
+        assert!(state.codex.is_empty() && state.claude.is_empty());
         for id in [1, 2] {
             assert!(!state.send_message(
                 ComposerDraft {
@@ -705,4 +703,414 @@ fn recovered_provider_metadata_invalidates_the_cached_sidebar(cx: &mut gpui::Tes
         seen.borrow().iter().any(|sidebar| *sidebar),
         "metadata replay changed the saved title but never invalidated the cached sidebar"
     );
+}
+
+/// A scripted provider that keeps the environment Keystone gave it, so its env receipt
+/// shows the account home it ran under.
+fn account_wrapper(dir: &Path, name: &str) -> PathBuf {
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("keystone-fake-{name}"));
+    let environment = serde_json::json!({
+        "KEYSTONE_FAKE_ENV_RECEIPT": dir.join("receipts.jsonl").to_str().unwrap(),
+        "KEYSTONE_FAKE_CODEX_DELAY_MS": "5",
+        "KEYSTONE_FAKE_CLAUDE_DELAY_MS": "5",
+        "KEYSTONE_FAKE_CLAUDE_LOG_DIR": dir.to_str().unwrap(),
+    });
+    let script = dir.join(format!("{name}-account-wrapper"));
+    std::fs::write(
+        &script,
+        format!(
+            "#!/usr/bin/python3\nimport os, sys\nos.environ.update({environment})\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
+            serde_json::to_string(&binary).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+fn receipts(dir: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("receipts.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[gpui::test]
+fn each_session_runs_on_its_own_accounts_home_and_codex_accounts_get_one_server_each(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let mut store = Store::open(dir.join("workspace.json")).unwrap();
+    let directory = WorkingDirectory::new(dir).unwrap();
+    let (claude_home, codex_home) = (dir.join("claude-work"), dir.join("codex-work"));
+    std::fs::create_dir(&codex_home).unwrap();
+    let claude_work = store
+        .add_account(Provider::Claude, "Work", claude_home.clone(), &[])
+        .unwrap()
+        .value;
+    let codex_work = store
+        .add_account(Provider::Codex, "Work", codex_home.clone(), &[])
+        .unwrap()
+        .value;
+    for (provider, account) in [
+        (Provider::Claude, None),
+        (Provider::Claude, Some(&claude_work)),
+        (Provider::Codex, None),
+        (Provider::Codex, Some(&codex_work)),
+        (Provider::Codex, Some(&codex_work)),
+    ] {
+        let id = store.create(provider, &directory, 1).unwrap().value;
+        store.set_account(id, account.cloned()).unwrap();
+    }
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    state.update(cx, |state, cx| {
+        state.test_programs = Some((
+            account_wrapper(dir, "codex"),
+            account_wrapper(dir, "claude"),
+        ));
+        for id in 1..=5 {
+            assert!(state.send_message(
+                ComposerDraft {
+                    session: id,
+                    text: format!("hello {id}")
+                },
+                cx
+            ));
+        }
+    });
+    wait_until(cx, &state, |state| (1..=5).all(|id| completed(state, id)));
+    let inherited = |name| std::env::var(name).ok();
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            state.test_claude_accounts(),
+            [None, Some(claude_work.clone())]
+        );
+        assert_eq!(
+            state.test_codex_accounts(),
+            [None, Some(codex_work.clone())]
+        );
+        let receipts = receipts(dir);
+        let home_of = |provider: &str, pid: u32| {
+            let receipt = receipts
+                .iter()
+                .find(|r| r["provider"] == provider && r["pid"] == pid)
+                .unwrap_or_else(|| panic!("no receipt for {provider} {pid}: {receipts:#?}"));
+            let variable = if provider == "claude" {
+                "CLAUDE_CONFIG_DIR"
+            } else {
+                "CODEX_HOME"
+            };
+            receipt[variable].as_str().map(str::to_owned)
+        };
+        let claude_default = state.claude[&None].pid(1).unwrap();
+        let claude_on_work = state.claude[&Some(claude_work.clone())].pid(2).unwrap();
+        assert_eq!(
+            home_of("claude", claude_default),
+            inherited("CLAUDE_CONFIG_DIR")
+        );
+        assert_eq!(
+            home_of("claude", claude_on_work).as_deref(),
+            claude_home.to_str()
+        );
+        let codex_default = state.codex[&None].pid().unwrap();
+        let codex_on_work = state.codex[&Some(codex_work.clone())].pid().unwrap();
+        assert_ne!(codex_default, codex_on_work);
+        assert_eq!(home_of("codex", codex_default), inherited("CODEX_HOME"));
+        assert_eq!(
+            home_of("codex", codex_on_work).as_deref(),
+            codex_home.to_str()
+        );
+        let servers = |home: Option<&str>| {
+            receipts
+                .iter()
+                .filter(|r| {
+                    r["provider"] == "codex"
+                        && r["argv"] == serde_json::json!(["app-server"])
+                        && r["CODEX_HOME"].as_str() == home
+                })
+                .count()
+        };
+        assert_eq!(
+            servers(codex_home.to_str()),
+            1,
+            "sessions 4 and 5 share one"
+        );
+        assert!(
+            receipts
+                .iter()
+                .filter(|r| r["CLAUDE_CONFIG_DIR"].as_str() == claude_home.to_str()
+                    || r["CODEX_HOME"].as_str() == codex_home.to_str())
+                .all(|r| r["HOME"].as_str() == inherited("HOME").as_deref()),
+            "HOME is never changed"
+        );
+        for id in 1..=5 {
+            assert!(state.session(id).unwrap().started());
+        }
+    });
+}
+
+#[gpui::test]
+fn catalogs_are_asked_per_account_and_never_shared(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let mut store = Store::open(dir.join("workspace.json")).unwrap();
+    let directory = WorkingDirectory::new(dir).unwrap();
+    let home = dir.join("claude-work");
+    let work = store
+        .add_account(Provider::Claude, "Work", home.clone(), &[])
+        .unwrap()
+        .value;
+    for account in [None, Some(work.clone())] {
+        let id = store.create(Provider::Claude, &directory, 1).unwrap().value;
+        store.set_account(id, account).unwrap();
+    }
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    state.update(cx, |state, cx| {
+        state.test_programs = Some((
+            account_wrapper(dir, "codex"),
+            account_wrapper(dir, "claude"),
+        ));
+        state.request_catalog(1, Provider::Claude, cx);
+    });
+    let ready = |state: &AppState, id: u64| {
+        matches!(
+            state
+                .catalogs
+                .choices(&state.catalog_key(id, Provider::Claude).unwrap()),
+            Choices::Ready(_)
+        )
+    };
+    wait_until(cx, &state, |state| ready(state, 1));
+    state.read_with(cx, |state, _| {
+        assert!(state.catalog_key(1, Provider::Claude) != state.catalog_key(2, Provider::Claude));
+        assert!(
+            !ready(state, 2),
+            "the default account's catalog is not the work account's"
+        );
+    });
+    state.update(cx, |state, cx| {
+        state.request_catalog(2, Provider::Claude, cx)
+    });
+    wait_until(cx, &state, |state| ready(state, 2));
+    let probes: Vec<Option<String>> = receipts(dir)
+        .iter()
+        .filter(|r| r["argv"].to_string().contains("stream-json"))
+        .map(|r| r["CLAUDE_CONFIG_DIR"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(probes.len(), 2, "{probes:?}");
+    assert!(probes.contains(&home.to_str().map(str::to_owned)));
+    assert!(probes.contains(&std::env::var("CLAUDE_CONFIG_DIR").ok()));
+}
+
+#[gpui::test]
+fn adding_an_account_creates_a_private_folder_and_refuses_shared_homes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    let folder = dir.path().join("accounts/claude-work");
+    let added = state
+        .update(cx, |state, cx| {
+            state.add_account(Provider::Claude, "Work", folder.to_str().unwrap(), cx)
+        })
+        .unwrap()
+        .value;
+    let metadata = std::fs::metadata(&folder).unwrap();
+    assert!(metadata.is_dir());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    let inside = folder.join("nested");
+    let refused = state
+        .update(cx, |state, cx| {
+            state.add_account(Provider::Codex, "Inside", inside.to_str().unwrap(), cx)
+        })
+        .unwrap_err();
+    assert!(refused.contains("already used"), "{refused}");
+    assert!(!inside.exists(), "a refused account leaves no new folder");
+    assert!(
+        state
+            .update(cx, |state, cx| state.add_account(
+                Provider::Codex,
+                "Rel",
+                "relative",
+                cx
+            ))
+            .is_err()
+    );
+    state.update(cx, |state, cx| {
+        state
+            .set_provider_account(2, Provider::Claude, Some(added.clone()), cx)
+            .unwrap();
+        assert!(state.remove_account(&added, cx).is_err());
+        state
+            .set_provider_account(2, Provider::Claude, None, cx)
+            .unwrap();
+        state.remove_account(&added, cx).unwrap();
+    });
+    assert!(folder.is_dir(), "removing an account keeps its folder");
+}
+
+#[gpui::test]
+fn a_symlinked_or_refused_folder_is_checked_before_anything_is_created(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    let real = dir.path().join("claude-work");
+    state
+        .update(cx, |state, cx| {
+            state.add_account(Provider::Claude, "Work", real.to_str().unwrap(), cx)
+        })
+        .unwrap();
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let refused = state
+        .update(cx, |state, cx| {
+            state.add_account(Provider::Codex, "Alias", alias.to_str().unwrap(), cx)
+        })
+        .unwrap_err();
+    assert!(refused.contains("already"), "{refused}");
+    let through = alias.join("nested");
+    let refused = state
+        .update(cx, |state, cx| {
+            state.add_account(Provider::Codex, "Through", through.to_str().unwrap(), cx)
+        })
+        .unwrap_err();
+    assert!(refused.contains("already"), "{refused}");
+    assert!(
+        !real.join("nested").exists(),
+        "nothing is created inside another account's folder"
+    );
+    let linked = dir.path().join("linked");
+    std::fs::create_dir(dir.path().join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("elsewhere"), &linked).unwrap();
+    let added = state
+        .update(cx, |state, cx| {
+            state.add_account(Provider::Codex, "Linked", linked.to_str().unwrap(), cx)
+        })
+        .unwrap()
+        .value;
+    state.read_with(cx, |state, _| {
+        let account = state.store().workspace().account(&added).unwrap();
+        assert_eq!(
+            account.home(),
+            std::fs::canonicalize(dir.path().join("elsewhere")).unwrap(),
+            "the real folder is saved"
+        );
+    });
+
+    let nested = dir.path().join("new/a/b");
+    assert!(
+        state
+            .update(cx, |state, cx| state.add_account(
+                Provider::Claude,
+                " ",
+                nested.to_str().unwrap(),
+                cx
+            ))
+            .is_err()
+    );
+    assert!(
+        !dir.path().join("new").exists(),
+        "a refused name creates nothing"
+    );
+}
+
+#[gpui::test]
+fn an_account_on_the_inherited_default_home_never_sends(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    let default = keystone_agent::default_home(Provider::Claude).unwrap();
+    state.update(cx, |state, cx| {
+        let clash = state
+            .store
+            .add_account(Provider::Claude, "Clash", default.clone(), &[])
+            .unwrap()
+            .value;
+        state
+            .set_provider_account(2, Provider::Claude, Some(clash), cx)
+            .unwrap();
+        assert!(!state.send_message(
+            ComposerDraft {
+                session: 2,
+                text: "hello".into()
+            },
+            cx
+        ));
+    });
+    state.read_with(cx, |state, _| {
+        let error = state.conversations[&2].error.clone().unwrap_or_default();
+        assert!(error.contains("overlaps a default home"), "{error}");
+        assert!(state.claude.is_empty(), "no process was started");
+    });
+}
+
+#[gpui::test]
+fn a_parent_step_after_a_symlink_follows_the_filesystem(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(base.join("real/child")).unwrap();
+    std::os::unix::fs::symlink(base.join("real/child"), base.join("alias")).unwrap();
+    let typed = format!("{}/alias/../work", base.display());
+    let added = state
+        .update(cx, |state, cx| {
+            state.add_account(Provider::Claude, "Work", &typed, cx)
+        })
+        .unwrap()
+        .value;
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            state.store().workspace().account(&added).unwrap().home(),
+            base.join("real/work"),
+            "the folder the filesystem reaches, not the text"
+        );
+    });
+    assert!(base.join("real/work").is_dir());
+    assert!(!base.join("work").exists());
+}
+
+#[gpui::test]
+fn an_account_folder_swapped_for_a_link_to_another_never_sends(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    let (work, personal) = (dir.path().join("work"), dir.path().join("personal"));
+    let ids: Vec<AccountId> = state.update(cx, |state, cx| {
+        [("Work", &work), ("Personal", &personal)]
+            .map(|(label, home)| {
+                state
+                    .add_account(Provider::Claude, label, home.to_str().unwrap(), cx)
+                    .unwrap()
+                    .value
+            })
+            .into()
+    });
+    std::fs::remove_dir(&work).unwrap();
+    std::os::unix::fs::symlink(&personal, &work).unwrap();
+    state.update(cx, |state, cx| {
+        state
+            .set_provider_account(2, Provider::Claude, Some(ids[0].clone()), cx)
+            .unwrap();
+        assert!(!state.send_message(
+            ComposerDraft {
+                session: 2,
+                text: "hello".into()
+            },
+            cx
+        ));
+    });
+    state.read_with(cx, |state, _| {
+        let error = state.conversations[&2].error.clone().unwrap_or_default();
+        assert!(error.contains("overlaps the account"), "{error}");
+        assert!(state.claude.is_empty(), "no process was started");
+    });
 }

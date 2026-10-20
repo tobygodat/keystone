@@ -409,6 +409,8 @@ impl Keystone {
         let models = [Provider::Claude, Provider::Codex].map(|provider| {
             let selection = model_selector::Selection {
                 provider,
+                account: None,
+                accounts: &[],
                 model: None,
                 reported_model: None,
                 started: false,

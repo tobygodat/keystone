@@ -7,6 +7,7 @@
 //! ends, so the kernel cannot hand that ID to anyone else. Descendants in other groups
 //! are signalled through pidfds, each re-checked as it is found.
 
+use crate::profile::LaunchProfile;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -58,13 +59,14 @@ impl Life {
 }
 
 impl Process {
-    /// Spawns `program`. `on_line` runs on a reader thread for every stdout line,
+    /// Spawns `program` with `profile`'s environment. `on_line` runs on a reader thread for every stdout line,
     /// without the trailing newline. `on_exit` runs once after the process exits and
     /// its remaining output has been read or abandoned.
     pub fn spawn(
         program: &Path,
         args: &[&str],
         cwd: &Path,
+        profile: &LaunchProfile,
         mut on_line: impl FnMut(&[u8]) + Send + 'static,
         on_exit: impl FnOnce(Exit) + Send + 'static,
     ) -> io::Result<Self> {
@@ -75,6 +77,7 @@ impl Process {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        profile.apply(&mut command);
         // A process group of its own, so teardown reaches the shells it starts.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -602,6 +605,7 @@ mod tests {
                 "read a; echo \"got $a\"; read b; echo \"got $b\"; echo bye >&2; exit 3",
             ],
             Path::new("/"),
+            &LaunchProfile::default(),
             move |line| {
                 lines_tx
                     .send(String::from_utf8_lossy(line).into_owned())
@@ -628,6 +632,7 @@ mod tests {
             Path::new("/bin/sh"),
             &["-c", "sleep 30 & sleep 30; wait"],
             Path::new("/"),
+            &LaunchProfile::default(),
             |_| {},
             move |exit| exit_tx.send(exit.code).unwrap(),
         )
@@ -653,6 +658,7 @@ mod tests {
             // and group of its own, as agents do with the shells they start.
             &["-c", "sh -c 'setsid sleep 30 & echo $!; wait' & wait"],
             Path::new("/"),
+            &LaunchProfile::default(),
             move |line| {
                 let _ = line_tx.send(String::from_utf8_lossy(line).trim().parse::<u32>().unwrap());
             },
@@ -685,6 +691,7 @@ mod tests {
             Path::new("/bin/sh"),
             &["-c", &script],
             Path::new("/"),
+            &LaunchProfile::default(),
             |_| {},
             move |exit| exit_tx.send(exit.code).unwrap(),
         )
@@ -723,6 +730,7 @@ mod tests {
             // The background sleep inherits stdout and stderr and outlives the shell.
             &["-c", "sleep 30 & echo $!; exit 4"],
             Path::new("/"),
+            &LaunchProfile::default(),
             move |line| {
                 let _ = child_tx.send(String::from_utf8_lossy(line).trim().parse::<u32>().unwrap());
             },

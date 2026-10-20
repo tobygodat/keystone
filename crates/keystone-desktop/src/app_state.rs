@@ -1,8 +1,10 @@
 use crate::presentation::ConversationFolder;
 use crate::*;
 use gpui::EventEmitter;
+use keystone_agent::{Catalog, LaunchProfile};
 use keystone_core::SessionContext;
-use keystone_core::{Applied, ProjectId, SavedComposition, WorkingDirectory};
+use keystone_core::{AccountId, Applied, ProjectId, SavedComposition, WorkingDirectory};
+use std::collections::BTreeMap;
 
 #[cfg(all(test, feature = "ui-tests"))]
 #[path = "app_state_tests.rs"]
@@ -42,8 +44,10 @@ pub(crate) struct AppState {
     store: Store,
     pub(crate) error: Option<String>,
     pub(crate) shutdown_error: Option<String>,
-    codex: Option<CodexConnection>,
-    claude: Option<ClaudeConnection>,
+    /// One app-server per Codex account, keyed by account; `None` is the default.
+    codex: BTreeMap<Option<AccountId>, CodexConnection>,
+    /// One connection per Claude account, each with a process per session.
+    claude: BTreeMap<Option<AccountId>, ClaudeConnection>,
     conversations: HashMap<u64, Conversation>,
     catalogs: Catalogs,
     logs: Logs,
@@ -55,6 +59,9 @@ pub(crate) struct AppState {
     orchestrator: Option<orchestrator::Orchestrator>,
     #[cfg(test)]
     pub(crate) save_calls: usize,
+    /// The `codex` and `claude` every new connection runs, in place of the ones found.
+    #[cfg(test)]
+    pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
 }
 impl EventEmitter<RuntimeChanged> for AppState {}
 impl AppState {
@@ -87,21 +94,37 @@ impl AppState {
     pub(crate) fn test_sync_directory(&mut self, sync: fn(&std::fs::File) -> std::io::Result<()>) {
         self.store.sync_directory = sync;
     }
+    /// The default account's connection, else any started one.
     #[cfg(test)]
-    pub(crate) fn test_codex(&self) -> &Option<CodexConnection> {
-        &self.codex
+    pub(crate) fn test_codex(&self) -> Option<&CodexConnection> {
+        self.codex.values().next()
     }
     #[cfg(test)]
     pub(crate) fn test_set_codex(&mut self, value: Option<CodexConnection>) {
-        self.codex = value;
+        match value {
+            Some(value) => self.codex.insert(None, value),
+            None => self.codex.remove(&None),
+        };
     }
     #[cfg(test)]
-    pub(crate) fn test_claude(&self) -> &Option<ClaudeConnection> {
-        &self.claude
+    pub(crate) fn test_codex_accounts(&self) -> Vec<Option<AccountId>> {
+        self.codex.keys().cloned().collect()
+    }
+    /// The default account's connection, else any started one.
+    #[cfg(test)]
+    pub(crate) fn test_claude(&self) -> Option<&ClaudeConnection> {
+        self.claude.values().next()
     }
     #[cfg(test)]
     pub(crate) fn test_set_claude(&mut self, value: Option<ClaudeConnection>) {
-        self.claude = value;
+        match value {
+            Some(value) => self.claude.insert(None, value),
+            None => self.claude.remove(&None),
+        };
+    }
+    #[cfg(test)]
+    pub(crate) fn test_claude_accounts(&self) -> Vec<Option<AccountId>> {
+        self.claude.keys().cloned().collect()
     }
     #[cfg(test)]
     pub(crate) fn test_set_logs(&mut self, value: Logs) {
@@ -182,8 +205,8 @@ impl AppState {
     pub(crate) fn teardown(&mut self, cx: &mut Context<Self>) {
         self.phase = Phase::Exiting;
         drop(self.orchestrator.take());
-        drop(self.codex.take());
-        drop(self.claude.take());
+        self.codex.clear();
+        self.claude.clear();
         self.publish(cx);
     }
 
@@ -270,8 +293,8 @@ impl AppState {
 
         let result = self.store.set_approval_mode(id, mode);
         if result.is_ok()
-            && let Some((provider, approval)) = self.approval(id)
-            && let Some(connection) = self.started(provider)
+            && let Some((_, approval)) = self.approval(id)
+            && let Some(connection) = self.started(id)
         {
             connection.set_approval(id, approval);
         }
@@ -327,6 +350,146 @@ impl AppState {
         }
 
         let result = self.store.set_model(id, model);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Moves the session to `provider` and one of its accounts in one save.
+    pub(crate) fn set_provider_account(
+        &mut self,
+        id: u64,
+        provider: Provider,
+        account: Option<AccountId>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+
+        let result = self.store.set_provider_account(id, provider, account);
+        if result.is_ok() {
+            self.conversation(id).clear_provider_notice();
+            self.commit(id);
+        }
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Adds an account whose CLI uses `folder` as its config home, creating the folder,
+    /// private to the user, when it does not exist yet. Keystone never signs it in: the
+    /// user runs [`keystone_agent::sign_in_command`] in a terminal.
+    pub(crate) fn add_account(
+        &mut self,
+        provider: Provider,
+        label: &str,
+        folder: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<AccountId>, String> {
+        if self.phase == Phase::Exiting {
+            return Err("Keystone is exiting.".into());
+        }
+        let user_home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = real_path(&keystone_core::expand_home(folder, user_home.as_deref())?);
+        if home.parent().is_none() {
+            return Err("The account folder cannot be the filesystem root.".into());
+        }
+        let taken: Vec<PathBuf> = [Provider::Claude, Provider::Codex]
+            .into_iter()
+            .filter_map(keystone_agent::default_home)
+            .chain(
+                self.store
+                    .workspace()
+                    .accounts()
+                    .iter()
+                    .map(|account| account.home().to_owned()),
+            )
+            .flat_map(|home| [real_path(&home), home])
+            .collect();
+        self.store
+            .check_account(provider, label, &real_path(&home), &taken)
+            .map_err(|error| error.to_string())?;
+        let remove_created = |first: &std::path::Path| {
+            for folder in home.ancestors() {
+                let _ = std::fs::remove_dir(folder);
+                if folder == first {
+                    break;
+                }
+            }
+        };
+        let created = match std::fs::metadata(&home) {
+            Ok(metadata) if metadata.is_dir() => None,
+            Ok(_) => return Err(format!("{} is not a folder.", home.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let first = home
+                    .ancestors()
+                    .take_while(|folder| !folder.exists())
+                    .last()
+                    .unwrap_or(&home)
+                    .to_owned();
+                use std::os::unix::fs::DirBuilderExt;
+                if let Err(error) = std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&home)
+                {
+                    remove_created(&first);
+                    return Err(format!("Could not create {}. {error}", home.display()));
+                }
+                Some(first)
+            }
+            Err(error) => return Err(format!("Could not use {}. {error}", home.display())),
+        };
+        let result = std::fs::canonicalize(&home)
+            .map_err(|error| format!("Could not use {}. {error}", home.display()))
+            .and_then(|real| {
+                self.store
+                    .add_account(provider, label, real, &taken)
+                    .map_err(|error| error.to_string())
+            });
+        if let (Err(_), Some(first)) = (&result, &created) {
+            remove_created(first);
+        }
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    pub(crate) fn rename_account(
+        &mut self,
+        id: &AccountId,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+
+        let result = self.store.rename_account(id, label);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Removes an account no session uses, ending any model probe still running on
+    /// it. Its folder stays on disk.
+    pub(crate) fn remove_account(
+        &mut self,
+        id: &AccountId,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+
+        let result = self.store.remove_account(id);
+        if result.is_ok() {
+            let key = Some(id.clone());
+            self.codex.remove(&key);
+            self.claude.remove(&key);
+            self.catalogs.forget_account(id);
+        }
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -510,8 +673,8 @@ impl AppState {
             store,
             error: None,
             shutdown_error: None,
-            codex: None,
-            claude: None,
+            codex: BTreeMap::new(),
+            claude: BTreeMap::new(),
             conversations: HashMap::new(),
             catalogs: Catalogs::default(),
             logs,
@@ -523,6 +686,8 @@ impl AppState {
             orchestrator: None,
             #[cfg(test)]
             save_calls: 0,
+            #[cfg(test)]
+            test_programs: None,
         }
     }
     pub(crate) fn store(&self) -> &Store {
@@ -576,10 +741,20 @@ impl AppState {
         ))
     }
 
+    /// The account a catalog for `provider` is asked from in this session: the
+    /// session's own for its provider, else that provider's default, which a session
+    /// moving to it would start on.
+    fn catalog_account(&self, session: u64, provider: Provider) -> Option<AccountId> {
+        self.session(session)
+            .filter(|s| s.provider() == provider)
+            .and_then(|s| s.account().cloned())
+    }
+
     pub(crate) fn catalog_key(&self, session: u64, provider: Provider) -> Option<CatalogKey> {
         match self.conversation_folder(session)? {
             presentation::ConversationFolder::Recorded(directory) => Some(CatalogKey {
                 provider,
+                account: self.catalog_account(session, provider),
                 directory,
             }),
             _ => None,
@@ -596,6 +771,7 @@ impl AppState {
             Some(presentation::ConversationFolder::Recorded(directory)) => {
                 self.catalogs.choices(&CatalogKey {
                     provider,
+                    account: self.catalog_account(session, provider),
                     directory,
                 })
             }
@@ -608,6 +784,10 @@ impl AppState {
         };
         model_selector::Selection {
             provider,
+            account: saved
+                .filter(|s| s.provider() == provider)
+                .and_then(|s| s.account()),
+            accounts: self.store.workspace().accounts(),
             model: saved.and_then(|s| s.model()),
             reported_model: self
                 .conversations
@@ -631,9 +811,19 @@ impl AppState {
             return;
         };
         let directory = key.directory.clone();
+        let account = key.account.clone();
         if self.catalogs.ask(key, session) {
-            self.connection(provider)
-                .request_catalog(session, directory.as_str());
+            let refused = match self.connection(provider, account.as_ref()) {
+                Ok(connection) => {
+                    connection.request_catalog(session, directory.as_str());
+                    None
+                }
+                Err(error) => Some(error),
+            };
+            if let Some(error) = refused {
+                self.catalogs
+                    .apply(provider, account, session, Catalog::Failed(error));
+            }
             self.publish(cx);
         }
     }
@@ -703,27 +893,27 @@ impl AppState {
         }
         let reports = self.logs.drain();
         let mut events = Vec::new();
-        // A catalog belongs to the connection it came from, whatever provider the
-        // asking session has since moved to.
-        for (provider, connection) in [
-            (
-                Provider::Codex,
-                self.codex.as_ref().map(|c| c as &dyn Connection),
-            ),
-            (
-                Provider::Claude,
-                self.claude.as_ref().map(|c| c as &dyn Connection),
-            ),
-        ] {
-            let Some(connection) = connection else {
-                continue;
-            };
-            for (session, event) in connection.drain() {
+        // A catalog belongs to the connection it came from, whatever provider or
+        // account the asking session has since moved to.
+        let drained: Vec<_> = self
+            .codex
+            .iter()
+            .map(|(account, c)| (Provider::Codex, account.clone(), c.drain()))
+            .chain(
+                self.claude
+                    .iter()
+                    .map(|(account, c)| (Provider::Claude, account.clone(), c.drain())),
+            )
+            .collect();
+        for (provider, account, batch) in drained {
+            for (session, event) in batch {
                 match event {
                     Event::Catalog(catalog) => {
-                        self.catalogs.apply(provider, session, catalog);
+                        self.catalogs
+                            .apply(provider, account.clone(), session, catalog);
                     }
-                    Event::ProviderNotice { .. } if self.provider(session) != Some(provider) => {}
+                    Event::ProviderNotice { .. }
+                        if self.route(session) != Some((provider, account.clone())) => {}
                     event => events.push((session, event)),
                 }
             }
@@ -809,33 +999,105 @@ impl AppState {
         }
     }
 
-    fn connection(&mut self, provider: Provider) -> &dyn Connection {
+    /// The provider and account a session runs on; `None` as the account is the
+    /// provider's default.
+    fn route(&self, session: u64) -> Option<(Provider, Option<AccountId>)> {
+        self.session(session)
+            .map(|s| (s.provider(), s.account().cloned()))
+    }
+
+    /// How `provider`'s CLI is launched for `account`. An account this workspace no
+    /// longer has, or one of another provider, is refused rather than run as some
+    /// other account.
+    fn profile(
+        &self,
+        provider: Provider,
+        account: Option<&AccountId>,
+    ) -> Result<LaunchProfile, String> {
+        let Some(id) = account else {
+            return Ok(LaunchProfile::inherited());
+        };
+        match self.store.workspace().account(id) {
+            Some(account) if account.provider() == provider => {
+                let home = real_path(account.home());
+                if let Some(other) = self
+                    .store
+                    .workspace()
+                    .accounts()
+                    .iter()
+                    .filter(|other| other.id() != account.id())
+                    .find(|other| keystone_core::homes_overlap(&real_path(other.home()), &home))
+                {
+                    return Err(format!(
+                        "The account \u{201c}{}\u{201d} now resolves to {}, which overlaps the account \u{201c}{}\u{201d}, so nothing was sent. Give each account a folder of its own.",
+                        account.label(),
+                        home.display(),
+                        other.label()
+                    ));
+                }
+                if let Some(default) = [Provider::Claude, Provider::Codex]
+                    .into_iter()
+                    .filter_map(keystone_agent::default_home)
+                    .find(|default| keystone_core::homes_overlap(&real_path(default), &home))
+                {
+                    return Err(format!(
+                        "The account \u{201c}{}\u{201d} uses {}, which overlaps a default home Keystone was started with ({}), so nothing was sent. Start Keystone without that setting, or start a new session.",
+                        account.label(),
+                        account.home().display(),
+                        default.display()
+                    ));
+                }
+                Ok(LaunchProfile::account(
+                    provider,
+                    account.label(),
+                    account.home(),
+                ))
+            }
+            _ => Err(format!(
+                "This session's {provider} account \u{201c}{id}\u{201d} is not set up in Keystone, so nothing was sent. Add it again in Settings \u{2192} Accounts, or start a new session."
+            )),
+        }
+    }
+
+    /// The account's connection, started on first use.
+    fn connection(
+        &mut self,
+        provider: Provider,
+        account: Option<&AccountId>,
+    ) -> Result<&dyn Connection, String> {
+        let profile = self.profile(provider, account)?;
         let wake = self.wake.clone();
+        let key = account.cloned();
+        #[allow(unused_mut)]
+        let (mut codex, mut claude) = (
+            std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
+            std::env::var_os("KEYSTONE_CLAUDE_PATH").map(PathBuf::from),
+        );
+        #[cfg(test)]
+        if let Some((test_codex, test_claude)) = &self.test_programs {
+            (codex, claude) = (Some(test_codex.clone()), Some(test_claude.clone()));
+        }
         let connection: &dyn Connection = match provider {
-            Provider::Codex => self.codex.get_or_insert_with(|| {
-                CodexConnection::new(
-                    std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
-                    env!("CARGO_PKG_VERSION"),
-                    wake,
-                )
+            Provider::Codex => self.codex.entry(key).or_insert_with(|| {
+                CodexConnection::with_profile(codex, env!("CARGO_PKG_VERSION"), profile, wake)
             }),
-            Provider::Claude => self.claude.get_or_insert_with(|| {
-                ClaudeConnection::new(
-                    std::env::var_os("KEYSTONE_CLAUDE_PATH").map(PathBuf::from),
-                    wake,
-                )
-            }),
+            Provider::Claude => self
+                .claude
+                .entry(key)
+                .or_insert_with(|| ClaudeConnection::with_profile(claude, profile, wake)),
         };
         if let Some(orchestrator) = &self.orchestrator {
             connection.set_mcp(orchestrator.server.issuer());
         }
-        connection
+        Ok(connection)
     }
 
-    fn started(&self, provider: Provider) -> Option<&dyn Connection> {
+    /// The connection a session's account already has, if any.
+    fn started(&self, session: u64) -> Option<&dyn Connection> {
+        let (provider, account) = self.route(session)?;
         match provider {
-            Provider::Codex => self.codex.as_ref().map(|c| c as &dyn Connection),
-            Provider::Claude => self.claude.as_ref().map(|c| c as &dyn Connection),
+            Provider::Codex => self.codex.get(&account).map(|c| c as &dyn Connection),
+            Provider::Claude => self.claude.get(&account).map(|c| c as &dyn Connection),
         }
     }
 
@@ -904,6 +1166,13 @@ impl AppState {
         let Some(directory) = self.dispatch_directory(id, cx) else {
             return false;
         };
+        // A session whose account is gone keeps its draft and stays unstarted.
+        if let Err(error) = self.profile(session.provider(), session.account()) {
+            self.conversation(id).error = Some(error);
+            self.commit(id);
+            self.publish(cx);
+            return false;
+        }
         let cwd = directory.as_str();
         // Read after pumping: the pump may have just saved a newer thread ID.
         let resume = self
@@ -949,6 +1218,7 @@ impl AppState {
             self.publish(cx);
             return false;
         }
+        let account = session.account().cloned();
         // A failure to start the provider arrives later as an error in this
         // conversation. A refusal comes now, and the text stays in the composer.
         if let Err(error) = self.store.sync_pending() {
@@ -959,29 +1229,32 @@ impl AppState {
             self.refresh(cx);
             return false;
         }
-        let connection = self.connection(provider);
-        let sent = match caller {
-            Some(caller) => connection.send_from(
-                id,
-                cwd,
-                resume.as_deref(),
-                session.model(),
-                approval,
-                text.clone(),
-                caller,
-            ),
-            None => connection.send(
-                id,
-                cwd,
-                resume.as_deref(),
-                session.model(),
-                approval,
-                text.clone(),
-            ),
+        let sent = match self.connection(provider, account.as_ref()) {
+            Ok(connection) => match caller {
+                Some(caller) => connection.send_from(
+                    id,
+                    cwd,
+                    resume.as_deref(),
+                    session.model(),
+                    approval,
+                    text.clone(),
+                    caller,
+                ),
+                None => connection.send(
+                    id,
+                    cwd,
+                    resume.as_deref(),
+                    session.model(),
+                    approval,
+                    text.clone(),
+                ),
+            }
+            .map_err(str::to_owned),
+            Err(error) => Err(error),
         };
         if let Err(reason) = sent {
             // Shown in the session's transcript, where a draft save cannot clear it.
-            self.conversation(id).error = Some(reason.to_owned());
+            self.conversation(id).error = Some(reason);
             self.commit(id);
             self.publish(cx);
             return false;
@@ -1007,7 +1280,7 @@ impl AppState {
         if self.phase != Phase::Running {
             return Err("Keystone is shutting down".into());
         }
-        if let Some(connection) = self.provider(id).and_then(|p| self.started(p)) {
+        if let Some(connection) = self.started(id) {
             match caller {
                 Some(caller) => connection
                     .interrupt_from(id, caller)
@@ -1034,7 +1307,7 @@ impl AppState {
             return;
         };
         self.commit(id);
-        if let Some(connection) = self.provider(id).and_then(|p| self.started(p)) {
+        if let Some(connection) = self.started(id) {
             connection.command(Command::Answer {
                 session: id,
                 request: approval.request,
@@ -1102,4 +1375,20 @@ impl AppState {
         self.commit(session);
         self.refresh(cx);
     }
+}
+
+/// `path` with every symlink in its existing part resolved, and `..` in the rest
+/// resolved lexically, so two spellings of one folder compare equal before it exists.
+fn real_path(path: &std::path::Path) -> PathBuf {
+    let Some((ancestor, real)) = path
+        .ancestors()
+        .find_map(|ancestor| Some((ancestor, std::fs::canonicalize(ancestor).ok()?)))
+    else {
+        return path.to_owned();
+    };
+    let joined = real.join(
+        path.strip_prefix(ancestor)
+            .unwrap_or(std::path::Path::new("")),
+    );
+    keystone_core::lexical(&joined)
 }

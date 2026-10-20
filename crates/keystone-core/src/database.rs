@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 const SCHEMA: &str = "
 CREATE TABLE events (
@@ -41,6 +41,15 @@ CREATE TABLE log_entries (
 CREATE INDEX log_entries_session ON log_entries(session_id, sequence);
 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
+/// Forward migrations, one per schema version after 1, each run in the opening
+/// IMMEDIATE transaction that also records the new `user_version`.
+const MIGRATIONS: [&str; 1] = ["
+CREATE TABLE accounts (
+    id TEXT PRIMARY KEY,
+    position INTEGER NOT NULL,
+    payload TEXT NOT NULL CHECK(json_valid(payload))
+);
+"];
 
 #[derive(Clone)]
 pub struct Database {
@@ -263,14 +272,20 @@ impl Database {
         let version: u32 = tx
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(sql_error)?;
-        if version == 0 {
-            tx.execute_batch(SCHEMA).map_err(sql_error)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-                .map_err(sql_error)?;
-        } else if version > SCHEMA_VERSION {
+        if version > SCHEMA_VERSION {
             return Err(invalid(format!(
                 "unsupported SQLite schema version {version}"
             )));
+        }
+        if version == 0 {
+            tx.execute_batch(SCHEMA).map_err(sql_error)?;
+        }
+        for migration in &MIGRATIONS[version.saturating_sub(1) as usize..] {
+            tx.execute_batch(migration).map_err(sql_error)?;
+        }
+        if version != SCHEMA_VERSION {
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(sql_error)?;
         }
         let imported: bool = tx
             .query_one(
@@ -377,6 +392,18 @@ impl Database {
                 snapshot
                     .workspace
                     .sessions
+                    .push(serde_json::from_str(&row.map_err(sql_error)?)?);
+            }
+            let mut statement = tx
+                .prepare("SELECT payload FROM accounts ORDER BY position")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?;
+            for row in rows {
+                snapshot
+                    .workspace
+                    .accounts
                     .push(serde_json::from_str(&row.map_err(sql_error)?)?);
             }
             validate(&snapshot).map_err(|error| invalid(error.to_string()))?;
@@ -517,6 +544,34 @@ fn write_projection(
         .map_err(sql_error)?;
         tx.execute("INSERT INTO sessions(id, position, payload) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET position=excluded.position, payload=excluded.payload", params![id, position as i64, payload]).map_err(sql_error)?;
     }
+    let accounts = &snapshot.workspace.accounts;
+    for removed in previous
+        .into_iter()
+        .flat_map(|workspace| &workspace.accounts)
+        .filter(|old| !accounts.iter().any(|account| account.id() == old.id()))
+    {
+        let id = removed.id().as_str();
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('account.removed', ?1, ?2)",
+            params![id, serde_json::to_string(removed)?],
+        )
+        .map_err(sql_error)?;
+        tx.execute("DELETE FROM accounts WHERE id=?1", [id])
+            .map_err(sql_error)?;
+    }
+    for (position, account) in accounts.iter().enumerate() {
+        if previous.is_some_and(|workspace| workspace.accounts.get(position) == Some(account)) {
+            continue;
+        }
+        let payload = serde_json::to_string(account)?;
+        let id = account.id().as_str();
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('account.upserted', ?1, ?2)",
+            params![id, payload],
+        )
+        .map_err(sql_error)?;
+        tx.execute("INSERT INTO accounts(id, position, payload) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET position=excluded.position, payload=excluded.payload", params![id, position as i64, payload]).map_err(sql_error)?;
+    }
     let mut metadata = Snapshot {
         version: snapshot.version,
         next_id: snapshot.next_id,
@@ -524,6 +579,7 @@ fn write_projection(
         unknown: snapshot.unknown.clone(),
     };
     metadata.workspace.sessions.clear();
+    metadata.workspace.accounts.clear();
     let payload = serde_json::to_string(&metadata)?;
     let previous: Option<String> = tx
         .query_row(

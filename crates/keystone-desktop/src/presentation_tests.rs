@@ -1096,6 +1096,7 @@ fn the_model_menu_fits_a_400px_window_and_keeps_its_columns_when_wide(cx: &mut T
         view.update(cx, |this, cx| {
             let key = CatalogKey {
                 provider: Provider::Codex,
+                account: None,
                 directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
             };
             this.state
@@ -1105,6 +1106,7 @@ fn the_model_menu_fits_a_400px_window_and_keeps_its_columns_when_wide(cx: &mut T
             this.state.update(cx, |state, _cx| {
                 state.test_catalogs_mut().apply(
                     Provider::Codex,
+                    None,
                     1,
                     keystone_agent::Catalog::Failed(
                         "Codex stopped before it listed its models, with a long reason.".into(),
@@ -1204,6 +1206,7 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
     view.update(cx, |this, cx| {
         let key = CatalogKey {
             provider: Provider::Claude,
+            account: None,
             directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
         };
         this.state
@@ -1211,6 +1214,7 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
         this.state.update(cx, |state, _cx| {
             state.test_catalogs_mut().apply(
                 Provider::Claude,
+                None,
                 2,
                 keystone_agent::Catalog::Ready {
                     models: vec![keystone_agent::ModelInfo {

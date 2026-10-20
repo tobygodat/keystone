@@ -7,7 +7,7 @@ use gpui::{
     Stateful, Styled, Window, div, prelude::*, px,
 };
 use keystone_agent::{Catalog, ModelInfo};
-use keystone_core::{Provider, WorkingDirectory};
+use keystone_core::{Account, AccountId, Provider, WorkingDirectory};
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -26,10 +26,13 @@ pub enum CatalogState {
     Failed(String),
 }
 
-/// A provider's catalog as it answers in one conversation folder.
+/// A provider account's catalog as it answers in one conversation folder. Accounts
+/// may offer different models, so no catalog is shared between them.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CatalogKey {
     pub provider: Provider,
+    /// `None` is the provider's default account.
+    pub account: Option<AccountId>,
     pub directory: WorkingDirectory,
 }
 
@@ -37,7 +40,7 @@ pub struct CatalogKey {
 #[derive(Default)]
 pub struct Catalogs {
     states: HashMap<CatalogKey, CatalogState>,
-    asked: HashMap<(Provider, u64), WorkingDirectory>,
+    asked: HashMap<(Provider, Option<AccountId>, u64), WorkingDirectory>,
 }
 
 impl Catalogs {
@@ -53,14 +56,22 @@ impl Catalogs {
         if self.states.contains_key(&key) {
             return false;
         }
-        self.asked
-            .insert((key.provider, session), key.directory.clone());
+        self.asked.insert(
+            (key.provider, key.account.clone(), session),
+            key.directory.clone(),
+        );
         self.states.insert(key, CatalogState::Loading);
         true
     }
 
-    pub fn apply(&mut self, provider: Provider, session: u64, catalog: Catalog) {
-        let Some(directory) = self.asked.remove(&(provider, session)) else {
+    pub fn apply(
+        &mut self,
+        provider: Provider,
+        account: Option<AccountId>,
+        session: u64,
+        catalog: Catalog,
+    ) {
+        let Some(directory) = self.asked.remove(&(provider, account.clone(), session)) else {
             return;
         };
         let state = match catalog {
@@ -71,6 +82,7 @@ impl Catalogs {
         self.states.insert(
             CatalogKey {
                 provider,
+                account,
                 directory,
             },
             state,
@@ -79,6 +91,14 @@ impl Catalogs {
 
     pub fn clear(&mut self, key: &CatalogKey) {
         self.states.remove(key);
+    }
+
+    /// Drops everything asked of a removed account, so an account added later under
+    /// the same ID asks again.
+    pub fn forget_account(&mut self, account: &AccountId) {
+        let gone = |id: &Option<AccountId>| id.as_ref() == Some(account);
+        self.states.retain(|key, _| !gone(&key.account));
+        self.asked.retain(|(_, id, _), _| !gone(id));
     }
 }
 
@@ -113,6 +133,10 @@ impl Choices<'_> {
 #[derive(Clone, Copy)]
 pub struct Selection<'a> {
     pub provider: Provider,
+    /// The session's account; `None` is the provider's default.
+    pub account: Option<&'a AccountId>,
+    /// Every account the user added, of either provider.
+    pub accounts: &'a [Account],
     /// The provider-native model the session asked for; `None` is the provider's default.
     pub model: Option<&'a str>,
     /// The model the provider has reported for this session, in this run of the app.
@@ -128,6 +152,8 @@ type Listener<T> = Rc<dyn Fn(&T, &mut Window, &mut App) + 'static>;
 pub struct Handlers {
     pub open_change: Listener<bool>,
     pub choose_provider: Listener<Provider>,
+    /// An account of the named provider; `None` chooses its default account.
+    pub choose_account: Listener<(Provider, Option<AccountId>)>,
     /// A model from the named provider's catalog; `None` chooses that provider's
     /// default.
     pub choose_model: Listener<(Provider, Option<String>)>,
@@ -163,8 +189,40 @@ pub fn provider_icon_color(provider: Provider, cx: &App) -> Color {
     }
 }
 
-const FIXED: &str =
-    "Model is fixed once a session has sent. Start a new session to choose another.";
+const FIXED: &str = "Provider, account and model are fixed once a session has sent. Start a new session to choose others.";
+
+/// How a session on `provider` names its account: `None` while the user has added no
+/// account for that provider, so a single account is never mentioned.
+pub fn account_label(
+    provider: Provider,
+    account: Option<&AccountId>,
+    accounts: &[Account],
+) -> Option<String> {
+    if !accounts.iter().any(|a| a.provider() == provider) {
+        return None;
+    }
+    Some(match account {
+        None => "Default".to_owned(),
+        Some(id) => accounts
+            .iter()
+            .find(|a| a.id() == id)
+            .map_or_else(|| id.to_string(), |a| a.label().to_owned()),
+    })
+}
+
+/// `provider`'s accounts after its default, or none when the user added none, so a
+/// single-account provider shows no account at all.
+fn accounts_of(provider: Provider, accounts: &[Account]) -> Vec<(Option<&AccountId>, &str)> {
+    let added: Vec<_> = accounts
+        .iter()
+        .filter(|account| account.provider() == provider)
+        .map(|account| (Some(account.id()), account.label()))
+        .collect();
+    if added.is_empty() {
+        return added;
+    }
+    std::iter::once((None, "Default")).chain(added).collect()
+}
 
 /// The selector for one session: the button, and the menu while `open`, which fits
 /// within `window_width`.
@@ -183,6 +241,8 @@ pub fn render(
     let colors = cx.theme().colors;
     let Selection {
         provider,
+        account,
+        accounts,
         model,
         choices,
         ..
@@ -200,7 +260,7 @@ pub fn render(
                         .flex()
                         .flex_row()
                         .max_w(window_width - MENU_INSET)
-                        .child(provider_column(provider, &on, cx))
+                        .child(provider_column(provider, account, accounts, &on, cx))
                         .child(div().flex_none().w_px().ml(px(7.)).bg(colors.border))
                         .child(model_column(provider, model, choices, &on, cx)),
                 ),
@@ -211,13 +271,18 @@ pub fn render(
 pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, String) {
     let Selection {
         provider,
+        account,
+        accounts,
         model,
         reported_model,
         started,
         choices,
     } = selection;
     let colors = cx.theme().colors;
-    let name = provider_name(provider);
+    let name = match account_label(provider, account, accounts) {
+        Some(label) => format!("{} · {label}", provider_name(provider)),
+        None => provider_name(provider).to_owned(),
+    };
     let requested = model.map_or_else(
         || "Provider default".to_owned(),
         |model| choices.label(model),
@@ -237,8 +302,9 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
             (requested, Color::Muted, tooltip)
         }
         (false, _) => {
-            let tooltip =
-                format!("{name} · {requested}. Choose the provider and model for this session");
+            let tooltip = format!(
+                "{name} · {requested}. Choose the provider, account and model for this session"
+            );
             (requested, Color::Default, tooltip)
         }
     };
@@ -278,31 +344,71 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
     (trigger, tooltip)
 }
 
-fn provider_column(current: Provider, on: &Handlers, cx: &App) -> impl IntoElement {
+/// Each provider, followed by its accounts when the user added any.
+fn provider_column(
+    current: Provider,
+    account: Option<&AccountId>,
+    accounts: &[Account],
+    on: &Handlers,
+    cx: &App,
+) -> impl IntoElement {
     v_flex()
         .flex_none()
         .w(px(152.))
         .child(MenuHeader::new("Provider"))
-        .children([Provider::Claude, Provider::Codex].map(|provider| {
-            let choose = on.choose_provider.clone();
-            choice_row(
-                ("provider", provider as usize),
-                format!("provider-{}", slug(provider)),
-                Some(
-                    Icon::new(provider_icon(provider))
-                        .size(px(16.))
-                        .color(provider_icon_color(provider, cx)),
-                ),
-                provider_name(provider),
-                provider == current,
-                true,
-                cx,
-            )
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                choose(&provider, window, cx)
-            })
-        }))
+        .child(
+            v_flex()
+                .id("provider-list")
+                .debug_selector(|| "provider-list".into())
+                .max_h(px(360.))
+                .overflow_y_scroll()
+                .children([Provider::Claude, Provider::Codex].map(|provider| {
+                    let choose = on.choose_provider.clone();
+                    let row = choice_row(
+                        ("provider", provider as usize),
+                        format!("provider-{}", slug(provider)),
+                        Some(
+                            Icon::new(provider_icon(provider))
+                                .size(px(16.))
+                                .color(provider_icon_color(provider, cx)),
+                        ),
+                        provider_name(provider),
+                        provider == current,
+                        true,
+                        cx,
+                    )
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        choose(&provider, window, cx)
+                    });
+                    let rows = accounts_of(provider, accounts).into_iter().enumerate().map(
+                        |(at, (id, label))| {
+                            let choose = on.choose_account.clone();
+                            let chosen = (provider, id.cloned());
+                            let selector = match id {
+                                Some(id) => format!("account-{id}"),
+                                None => format!("account-{}-default", slug(provider)),
+                            };
+                            div().pl(px(24.)).child(
+                                choice_row(
+                                    ("account", provider as usize * 1000 + at),
+                                    selector,
+                                    None,
+                                    label.to_owned(),
+                                    provider == current && id == account,
+                                    false,
+                                    cx,
+                                )
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    choose(&chosen, window, cx)
+                                }),
+                            )
+                        },
+                    );
+                    v_flex().child(row).children(rows)
+                })),
+        )
 }
 
 fn model_column(

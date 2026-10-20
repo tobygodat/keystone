@@ -212,6 +212,8 @@ pub struct ClaudeDriver {
     approvals: HashMap<RequestId, Pending>,
     /// An API error Claude reported as a synthetic assistant message, for the result.
     api_error: Option<String>,
+    /// How to sign this process's account in, when it is not the default account.
+    sign_in: Option<String>,
     /// The approval mode the process was launched with.
     launched: ApprovalMode,
     /// The approval mode the user selected last, and its version, which counts every
@@ -260,6 +262,11 @@ impl ClaudeDriver {
         Self::launched(session, resume, seed, mode, Launch::Chat, out)
     }
 
+    /// Names the account and how to sign it in, for a signed-out error.
+    pub fn set_sign_in(&mut self, sign_in: Option<&str>) {
+        self.sign_in = sign_in.map(str::to_owned);
+    }
+
     pub(crate) fn launched(
         session: u64,
         resume: bool,
@@ -286,6 +293,7 @@ impl ClaudeDriver {
             denied: HashSet::new(),
             approvals: HashMap::new(),
             api_error: None,
+            sign_in: None,
             launched: mode,
             mode,
             version: 0,
@@ -1044,9 +1052,14 @@ impl ClaudeDriver {
             // Claude's own words about an API failure, not a reply. The result reports it.
             let text = join_text(&assistant.message.content);
             self.api_error = Some(match assistant.error.as_deref() {
-                Some("authentication_failed") => format!(
-                    "Claude Code is not signed in ({text}). Run `claude` in a terminal to sign in, then send again."
-                ),
+                Some("authentication_failed") => match &self.sign_in {
+                    Some(sign_in) => format!(
+                        "Claude Code is not signed in ({text}). {sign_in}, then send again."
+                    ),
+                    None => format!(
+                        "Claude Code is not signed in ({text}). Run `claude` in a terminal to sign in, then send again."
+                    ),
+                },
                 _ => text,
             });
             return;

@@ -15,7 +15,7 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{TextSize, radius};
 use crate::virtual_list::{VirtualList, VirtualListState};
 use gpui::{
-    App, Entity, EntityId, FocusHandle, Focusable, IntoElement, KeyBinding, RenderOnce,
+    App, Entity, EntityId, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, RenderOnce,
     SharedString, Window, div, prelude::*, px,
 };
 use std::rc::Rc;
@@ -59,6 +59,7 @@ pub struct Select {
     selected: Option<usize>,
     placeholder: SharedString,
     disabled: bool,
+    width: Pixels,
     focus: Option<FocusHandle>,
     on_change: Option<ChangeHandler>,
 }
@@ -75,6 +76,7 @@ impl Select {
             selected,
             placeholder: "Choose…".into(),
             disabled: false,
+            width: px(220.),
             focus: None,
             on_change: None,
         }
@@ -88,6 +90,12 @@ impl Select {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// The trigger's width, 220 px unless set.
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = width;
         self
     }
 
@@ -178,7 +186,7 @@ impl RenderOnce for Select {
         let ring = colors.border_focused;
         let trigger = h_flex()
             .id(self.id.clone())
-            .w(px(220.))
+            .w(self.width)
             .h(theme.density.control(px(28.)))
             .px(px(8.))
             .gap_2()

@@ -1,4 +1,5 @@
 use crate::host::{Exit, Process};
+use crate::profile::LaunchProfile;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
@@ -127,6 +128,7 @@ pub(crate) fn detect(
     provider: Provider,
     program: &Path,
     cwd: &Path,
+    profile: &LaunchProfile,
 ) -> Result<Compatibility, String> {
     let output = Arc::new(Mutex::new(String::new()));
     let captured = output.clone();
@@ -135,6 +137,7 @@ pub(crate) fn detect(
         program,
         &["--version"],
         cwd,
+        profile,
         move |line| {
             let mut text = captured.lock().unwrap();
             if text.len() < 512 {

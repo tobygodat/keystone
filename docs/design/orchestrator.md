@@ -16,8 +16,8 @@ access is provided.
 
 | Tool | Behavior |
 | --- | --- |
-| `capabilities {}` | Lists both providers, their currently loaded model catalogs and the single `default` account. A loading catalog can be queried again. |
-| `session_launch {provider, account?, model?, mode?, cwd?, message, client_request_id}` | Creates and starts a session in the caller's project. `provider` is `claude` or `codex`; the account defaults to `default`. An omitted mode inherits the caller's mode. |
+| `capabilities {}` | Lists both providers, their currently loaded model catalogs (for the caller's account on its own provider, otherwise the default account) and their accounts: `default` plus each added account's ID and name. A loading catalog can be queried again. |
+| `session_launch {provider, account?, model?, mode?, cwd?, message, client_request_id}` | Creates and starts a session in the caller's project. `provider` is `claude` or `codex`; `account` is `default` (the default, the inherited environment) or an added account's ID such as `claude-work`; an unknown ID or another provider's account is refused. An omitted mode inherits the caller's mode. |
 | `session_send {session, message, client_request_id}` | Steers an already running target immediately, or returns busy. It never starts an idle target or queues a follow-up. |
 | `session_read {session, after?, limit?}` | Reads transcript rows, with zero-based positions. `after` is exclusive; `limit` defaults to 50 and is bounded to 1–200. `next` does not advance past a streaming row, so polling does not miss its completion. |
 | `session_wait {session, timeout?}` | Waits for the target's current work to end. The timeout defaults to 50 seconds and is capped at 50 seconds; `timed_out` distinguishes the cutoff from completion. Call again to keep waiting. |

@@ -83,6 +83,18 @@ class PersistenceTest(unittest.TestCase):
             with self.assertRaisesRegex(sqlite3.OperationalError, 'readonly'):
                 connection.execute('DELETE FROM sessions')
 
+    def test_projection_reads_accounts_in_order_when_the_table_exists(self):
+        self.assertNotIn('accounts', driver.read_workspace(self.state)['workspace'])
+        self.writer.execute('CREATE TABLE accounts(id TEXT, position INTEGER, payload TEXT)')
+        self.writer.commit()
+        self.assertNotIn('accounts', driver.read_workspace(self.state)['workspace'])
+        self.writer.executemany('INSERT INTO accounts VALUES(?, ?, ?)', [
+            ('codex-b', 1, json.dumps({'id': 'codex-b', 'label': 'B'})),
+            ('claude-a', 0, json.dumps({'id': 'claude-a', 'label': 'A'}))])
+        self.writer.commit()
+        self.assertEqual([a['id'] for a in driver.read_workspace(self.state)['workspace']['accounts']],
+                         ['claude-a', 'codex-b'])
+
     def test_projection_uses_one_consistent_read_transaction(self):
         with driver.closing(driver.open_database(self.database)) as connection:
             writer = self.writer

@@ -7,6 +7,7 @@ use crate::driver::{ApprovalState, Command, Outputs};
 use crate::host::{Exit, Process};
 use crate::item::{Catalog, Event};
 use crate::mcp::{Caller, Issuer, Lease};
+use crate::profile::LaunchProfile;
 use crate::version::{self, Provider};
 use crate::worker::Worker;
 use keystone_core::ApprovalMode;
@@ -125,9 +126,6 @@ fn catalog_failed(message: String) -> Event {
     Event::Catalog(Catalog::Failed(message))
 }
 
-const CLAUDE_NOT_INSTALLED: &str =
-    "Claude Code is not installed. Install the claude CLI and run `claude` once to sign in.";
-
 fn command_session(command: &Command) -> u64 {
     match command {
         Command::Open { session, .. }
@@ -152,6 +150,7 @@ const START_WAIT: Duration = Duration::from_secs(2);
 /// no lock, so a stuck start delays only the commands that need the process.
 pub struct CodexConnection {
     client_version: String,
+    profile: Arc<LaunchProfile>,
     wake: Wake,
     shared: Arc<Mutex<Shared>>,
     /// Signalled when a start finishes.
@@ -220,9 +219,22 @@ impl Shared {
 
 impl CodexConnection {
     /// `program` is the `codex` binary to run, or `None` to look for it on first use.
+    /// It runs as the default account, with the environment Keystone inherited.
     pub fn new(program: Option<PathBuf>, client_version: &str, wake: Wake) -> Self {
+        Self::with_profile(program, client_version, LaunchProfile::inherited(), wake)
+    }
+
+    /// One account's app-server: every process this connection starts, its version
+    /// check included, runs with `profile`'s environment.
+    pub fn with_profile(
+        program: Option<PathBuf>,
+        client_version: &str,
+        profile: LaunchProfile,
+        wake: Wake,
+    ) -> Self {
         Self {
             client_version: client_version.to_owned(),
+            profile: Arc::new(profile),
             wake,
             shared: Arc::new(Mutex::new(Shared {
                 program,
@@ -431,6 +443,7 @@ impl CodexConnection {
     fn starter(&self) -> Starter {
         Starter {
             client_version: self.client_version.clone(),
+            profile: self.profile.clone(),
             wake: self.wake.clone(),
             shared: self.shared.clone(),
             started: self.started.clone(),
@@ -442,6 +455,7 @@ impl CodexConnection {
 /// What the worker needs to start the app-server.
 struct Starter {
     client_version: String,
+    profile: Arc<LaunchProfile>,
     wake: Wake,
     shared: Arc<Mutex<Shared>>,
     started: Arc<Condvar>,
@@ -540,15 +554,14 @@ impl Starter {
         let program = match program {
             Some(program) => program,
             None => {
-                let found = crate::find::program("codex").ok_or(
-                    "Codex is not installed. Install the codex CLI and run `codex login`.",
-                )?;
+                let found = crate::find::program("codex")
+                    .ok_or_else(|| self.profile.not_installed(keystone_core::Provider::Codex))?;
                 self.shared.lock().unwrap().program = Some(found.clone());
                 found
             }
         };
         let cwd = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-        let compatibility = version::detect(Provider::Codex, &program, &cwd)?;
+        let compatibility = version::detect(Provider::Codex, &program, &cwd, &self.profile)?;
         {
             let mut shared = self.shared.lock().unwrap();
             if !shared.closed && shared.generation == generation {
@@ -609,8 +622,15 @@ impl Starter {
                 wake();
             }
         };
-        Process::spawn(&program, &["app-server"], &cwd, on_line, on_exit)
-            .map_err(|e| format!("Could not start Codex at {}. {e}", program.display()))
+        Process::spawn(
+            &program,
+            &["app-server"],
+            &cwd,
+            &self.profile,
+            on_line,
+            on_exit,
+        )
+        .map_err(|e| format!("Could not start Codex at {}. {e}", program.display()))
     }
 }
 
@@ -927,8 +947,15 @@ enum Job {
 
 impl ClaudeConnection {
     /// `program` is the `claude` binary to run, or `None` to look for it on first use.
+    /// It runs as the default account, with the environment Keystone inherited.
     pub fn new(program: Option<PathBuf>, wake: Wake) -> Self {
-        Self::launching(program, wake, Launch::Chat)
+        Self::launching(program, LaunchProfile::inherited(), wake, Launch::Chat)
+    }
+
+    /// One account's sessions: every process this connection starts, version checks
+    /// and model and permission probes included, runs with `profile`'s environment.
+    pub fn with_profile(program: Option<PathBuf>, profile: LaunchProfile, wake: Wake) -> Self {
+        Self::launching(program, profile, wake, Launch::Chat)
     }
 
     /// A connection for the sidebar layout helper, whose reply is text Keystone parses.
@@ -939,12 +966,23 @@ impl ClaudeConnection {
     /// The turn fails if reported capabilities contradict these restrictions or cannot
     /// be confirmed. These checks cannot undo startup actions; managed settings may apply.
     pub fn for_layout_helper(program: Option<PathBuf>, wake: Wake) -> Self {
-        Self::launching(program, wake, Launch::LayoutHelper)
+        Self::launching(
+            program,
+            LaunchProfile::inherited(),
+            wake,
+            Launch::LayoutHelper,
+        )
     }
 
-    fn launching(program: Option<PathBuf>, wake: Wake, launch: Launch) -> Self {
+    fn launching(
+        program: Option<PathBuf>,
+        profile: LaunchProfile,
+        wake: Wake,
+        launch: Launch,
+    ) -> Self {
         Self {
             starter: ClaudeStarter {
+                profile: Arc::new(profile),
                 wake,
                 shared: Arc::new(Mutex::new(ClaudeShared {
                     program,
@@ -1102,6 +1140,7 @@ impl ClaudeConnection {
 /// What a session's worker, its process's reader, and its timers share.
 #[derive(Clone)]
 struct ClaudeStarter {
+    profile: Arc<LaunchProfile>,
     wake: Wake,
     shared: Arc<Mutex<ClaudeShared>>,
     /// Signalled when a start finishes.
@@ -1303,6 +1342,7 @@ impl ClaudeStarter {
             launch,
             &mut pending,
         );
+        driver.set_sign_in(self.profile.sign_in());
         let mut lease = None;
         if launch == Launch::Chat
             && let Some(issuer) = &shared.mcp
@@ -1436,7 +1476,7 @@ impl ClaudeStarter {
             hook(session);
         }
         let program = self.find_program(program)?;
-        let compatibility = version::detect(Provider::Claude, &program, cwd)?;
+        let compatibility = version::detect(Provider::Claude, &program, cwd, &self.profile)?;
         {
             let mut shared = self.shared.lock().unwrap();
             match shared.live.get_mut(&session) {
@@ -1513,7 +1553,7 @@ impl ClaudeStarter {
                 wake();
             }
         };
-        Process::spawn(&program, &args, cwd, on_line, on_exit)
+        Process::spawn(&program, &args, cwd, &self.profile, on_line, on_exit)
             .map_err(|e| format!("Could not start Claude Code at {}. {e}", program.display()))
     }
 
@@ -1522,7 +1562,8 @@ impl ClaudeStarter {
         match program {
             Some(program) => Ok(program),
             None => {
-                let found = crate::find::program("claude").ok_or(CLAUDE_NOT_INSTALLED)?;
+                let found = crate::find::program("claude")
+                    .ok_or_else(|| self.profile.not_installed(keystone_core::Provider::Claude))?;
                 self.shared.lock().unwrap().program = Some(found.clone());
                 Ok(found)
             }
@@ -1565,7 +1606,7 @@ impl ClaudeStarter {
 
     /// Runs the catalog probe; `None` when the connection was dropped meanwhile.
     fn read_catalog(&self, session: u64, program: &Path, cwd: &Path) -> Option<Catalog> {
-        let compatibility = match version::detect(Provider::Claude, program, cwd) {
+        let compatibility = match version::detect(Provider::Claude, program, cwd, &self.profile) {
             Err(message) => return Some(Catalog::Failed(message)),
             Ok(compatibility) => compatibility,
         };
@@ -1588,15 +1629,16 @@ impl ClaudeStarter {
                 false,
             ))));
         };
-        let process = match Process::spawn(program, &claude::ARGS, cwd, on_line, on_exit) {
-            Ok(process) => process,
-            Err(e) => {
-                return Some(Catalog::Failed(format!(
-                    "Could not start Claude Code at {}. {e}",
-                    program.display()
-                )));
-            }
-        };
+        let process =
+            match Process::spawn(program, &claude::ARGS, cwd, &self.profile, on_line, on_exit) {
+                Ok(process) => process,
+                Err(e) => {
+                    return Some(Catalog::Failed(format!(
+                        "Could not start Claude Code at {}. {e}",
+                        program.display()
+                    )));
+                }
+            };
         process.send(
             serde_json::json!({"type": "control_request", "request_id": "keystone-catalog",
                 "request": {"subtype": "initialize"}})
@@ -1671,7 +1713,7 @@ impl ClaudeStarter {
         if launch == Launch::LayoutHelper {
             return Err(failed("the layout helper never reads them"));
         }
-        let process = Process::spawn(program, &claude::ARGS, cwd, on_line, |_| {})
+        let process = Process::spawn(program, &claude::ARGS, cwd, &self.profile, on_line, |_| {})
             .map_err(|e| failed(&e.to_string()))?;
         process.send(
             serde_json::json!({"type": "control_request", "request_id": "keystone-probe",

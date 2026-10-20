@@ -12,6 +12,7 @@ mod presentation;
 mod relative_time;
 mod reveal;
 mod settings;
+mod settings_accounts;
 mod settings_page;
 mod transcript;
 mod transcript_keyboard;
@@ -35,7 +36,8 @@ use keystone_core::ViewId;
 #[cfg(test)]
 use keystone_core::WorkingDirectory;
 use keystone_core::{
-    Appearance, ApprovalMode, Attention, Durability, Provider, Revision, SidebarSide, Store,
+    AccountId, Appearance, ApprovalMode, Attention, Durability, Provider, Revision, SidebarSide,
+    Store,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
@@ -1444,6 +1446,11 @@ impl Keystone {
             choose_provider: Rc::new(cx.listener(move |this, provider: &Provider, window, cx| {
                 this.choose_provider(session, *provider, window, cx)
             })),
+            choose_account: Rc::new(cx.listener(
+                move |this, (provider, account): &(Provider, Option<AccountId>), window, cx| {
+                    this.choose_account(session, *provider, account.clone(), window, cx)
+                },
+            )),
             choose_model: Rc::new(cx.listener(
                 move |this, (provider, model): &(Provider, Option<String>), window, cx| {
                     this.choose_model(session, *provider, model.clone(), window, cx)
@@ -1484,6 +1491,36 @@ impl Keystone {
             Err(error) => self.error = Some(format!("Provider not changed. {error}")),
         }
         // The sidebar shows the new placeholder title.
+        self.refresh(cx);
+    }
+
+    /// An account chosen in the model menu, on the session's provider or another one.
+    /// The menu stays open on the account's model catalog, since accounts may offer
+    /// different models; choosing the current account just closes it.
+    fn choose_account(
+        &mut self,
+        session: u64,
+        provider: Provider,
+        account: Option<AccountId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self.session(session, cx).filter(|s| !s.started()) else {
+            return self.close_model_menu(window, cx);
+        };
+        if current.provider() == provider && current.account() == account.as_ref() {
+            return self.close_model_menu(window, cx);
+        }
+        let result = self.state.update(cx, |state, cx| {
+            state.set_provider_account(session, provider, account, cx)
+        });
+        match result {
+            Ok(applied) => {
+                self.error = durability_warning(applied.durability);
+                self.request_catalog(session, provider, cx);
+            }
+            Err(error) => self.error = Some(format!("Account not changed. {error}")),
+        }
         self.refresh(cx);
     }
 
@@ -2205,6 +2242,8 @@ struct SessionRow {
     title: String,
     excerpt: String,
     provider: Provider,
+    /// The session's account, named only when it is not the provider's default.
+    account: Option<String>,
     settled: bool,
     selected: bool,
     attention: Option<Attention>,
@@ -2313,6 +2352,7 @@ impl SessionSidebar {
             title,
             excerpt,
             provider,
+            account,
             settled,
             selected,
             attention,
@@ -2339,6 +2379,18 @@ impl SessionSidebar {
                         .size(px(14.))
                         .color(provider_icon_color(provider, cx)),
                 )
+                .children(account.map(|account| {
+                    div()
+                        .flex_none()
+                        .max_w(px(96.))
+                        .debug_selector(move || format!("session-account-{id}"))
+                        .child(
+                            Label::new(account)
+                                .size(TextSize::Sm)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                }))
                 .child(
                     Label::new(excerpt)
                         .size(TextSize::Sm)
@@ -2488,18 +2540,37 @@ impl SessionSidebar {
         let provider_filter = this.provider_filter;
         let now = LocalTime::at(now_ms());
         let mut sections: [Vec<SessionRow>; 3] = Default::default();
-        for session in workspace.sessions().iter().filter(|s| {
-            provider_filter.is_none_or(|p| s.provider() == p)
-                && format!("{} {}", s.title(), s.provider())
+        let accounts = workspace.accounts();
+        for (session, account) in workspace
+            .sessions()
+            .iter()
+            .map(|s| {
+                let account = s.account().and(model_selector::account_label(
+                    s.provider(),
+                    s.account(),
+                    accounts,
+                ));
+                (s, account)
+            })
+            .filter(|(s, account)| {
+                provider_filter.is_none_or(|p| s.provider() == p)
+                    && format!(
+                        "{} {} {}",
+                        s.title(),
+                        s.provider(),
+                        account.as_deref().unwrap_or_default()
+                    )
                     .to_lowercase()
                     .contains(&query)
-        }) {
+            })
+        {
             let live = this.state.read(cx).conversations().get(&session.id());
             let row = SessionRow {
                 id: session.id(),
                 title: session.title().to_owned(),
                 excerpt: excerpt(session.draft(), session.provider()),
                 provider: session.provider(),
+                account,
                 settled: session.settled(),
                 selected: Some(session.id()) == workspace.selected(),
                 attention: session.attention(
@@ -5485,13 +5556,7 @@ mod tests {
             assert!(error.starts_with("Not sent"), "{error}");
             assert_eq!(view.composer.read(cx).value(), "hello");
             assert!(
-                !view
-                    .state
-                    .read(cx)
-                    .test_codex()
-                    .as_ref()
-                    .unwrap()
-                    .is_open(1),
+                !view.state.read(cx).test_codex().unwrap().is_open(1),
                 "nothing reached Codex"
             );
         });
@@ -5588,26 +5653,14 @@ mod tests {
 
         choose_mode(cx, ApprovalMode::ReadOnly);
         let pid = view.read_with(cx, |view, cx| {
-            view.state
-                .read(cx)
-                .test_codex()
-                .as_ref()
-                .unwrap()
-                .pid()
-                .unwrap()
+            view.state.read(cx).test_codex().unwrap().pid().unwrap()
         });
         std::process::Command::new("kill")
             .arg(pid.to_string())
             .status()
             .unwrap();
         wait_until(cx, &view, |view, cx| {
-            view.state
-                .read(cx)
-                .test_codex()
-                .as_ref()
-                .unwrap()
-                .pid()
-                .is_none()
+            view.state.read(cx).test_codex().unwrap().pid().is_none()
         });
         send_text(&view, cx, "second");
         assert_eq!(
@@ -5683,12 +5736,7 @@ mod tests {
         );
         let connection = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
             view.read_with(cx, |view, cx| {
-                view.state
-                    .read(cx)
-                    .test_codex()
-                    .as_ref()
-                    .unwrap()
-                    .approval(1)
+                view.state.read(cx).test_codex().unwrap().approval(1)
             })
         };
         let auto = Some(ApprovalState {
@@ -5798,12 +5846,7 @@ mod tests {
         view.read_with(cx, |view, cx| {
             assert!(view.state.read(cx).store().workspace().sessions()[0].approval_overridden());
             assert_eq!(
-                view.state
-                    .read(cx)
-                    .test_codex()
-                    .as_ref()
-                    .unwrap()
-                    .approval(1),
+                view.state.read(cx).test_codex().unwrap().approval(1),
                 Some(ApprovalState {
                     mode: full,
                     overridden: true
@@ -5870,7 +5913,7 @@ mod tests {
         });
         let pid = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
             view.read_with(cx, |view, cx| {
-                view.state.read(cx).test_claude().as_ref().unwrap().pid(1)
+                view.state.read(cx).test_claude().unwrap().pid(1)
             })
         };
         click(cx, "welcome-claude");
@@ -5923,7 +5966,7 @@ mod tests {
         });
         let pid = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
             view.read_with(cx, |view, cx| {
-                view.state.read(cx).test_claude().as_ref().unwrap().pid(1)
+                view.state.read(cx).test_claude().unwrap().pid(1)
             })
         };
         click(cx, "welcome-claude");
@@ -6259,7 +6302,6 @@ mod tests {
             view.state
                 .read(cx)
                 .test_claude()
-                .as_ref()
                 .unwrap()
                 .send(
                     1,

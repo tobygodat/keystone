@@ -154,12 +154,11 @@ impl AppState {
         }))
         .map_err(|error| format!("Could not start the local orchestrator: {error}"))?;
         let issuer = server.issuer();
-        for connection in [
-            self.codex.as_ref().map(|c| c as &dyn Connection),
-            self.claude.as_ref().map(|c| c as &dyn Connection),
-        ]
-        .into_iter()
-        .flatten()
+        for connection in self
+            .codex
+            .values()
+            .map(|c| c as &dyn Connection)
+            .chain(self.claude.values().map(|c| c as &dyn Connection))
         {
             connection.set_mcp(issuer.clone());
         }
@@ -208,7 +207,7 @@ impl AppState {
         }
         let session = self.session(caller.session).ok_or("Unknown caller")?;
         if !self
-            .started(session.provider())
+            .started(caller.session)
             .is_some_and(|connection| connection.is_running(caller.session))
         {
             return Err("Caller must have a running turn".into());
@@ -293,6 +292,7 @@ impl AppState {
                         self.request_catalog(caller.session, provider, cx);
                         let (models, status) = match self.catalogs.choices(&CatalogKey {
                             provider,
+                            account: self.catalog_account(caller.session, provider),
                             directory: project.clone(),
                         }) {
                             Choices::Ready(models) => (
@@ -302,8 +302,18 @@ impl AppState {
                             Choices::Failed(_) => (Vec::new(), "unavailable"),
                             _ => (Vec::new(), "loading"),
                         };
+                        let accounts: Vec<_> = std::iter::once(json!({"id":AccountId::DEFAULT,"label":"Default"}))
+                            .chain(
+                                self.store
+                                    .workspace()
+                                    .accounts()
+                                    .iter()
+                                    .filter(|a| a.provider() == provider)
+                                    .map(|a| json!({"id":a.id().as_str(),"label":a.label()})),
+                            )
+                            .collect();
                         json!({"provider": match provider {Provider::Claude=>"claude", Provider::Codex=>"codex"},
-                            "accounts":[{"id":"default","label":"Default account"}], "models":models,"catalog":status})
+                            "accounts":accounts, "models":models,"catalog":status})
                     })
                     .collect();
                 Ok(
@@ -315,14 +325,12 @@ impl AppState {
             "session_launch" => {
                 let launch: Launch = decode(arguments)?;
                 message(&launch.message)?;
-                if launch.account.as_deref().is_some_and(|a| a != "default") {
-                    return Err("Only the default account is available in this version".into());
-                }
                 let provider = match launch.provider.as_str() {
                     "claude" => Provider::Claude,
                     "codex" => Provider::Codex,
                     _ => return Err("Unknown provider".into()),
                 };
+                let account = launch_account(&self.store, provider, launch.account.as_deref())?;
                 let selected_mode = launch
                     .mode
                     .as_deref()
@@ -358,6 +366,8 @@ impl AppState {
                     if let Some(selected) = selected {
                         self.select(selected, cx).map_err(|e| e.to_string())?;
                     }
+                    self.set_provider_account(id, provider, account, cx)
+                        .map_err(|e| e.to_string())?;
                     self.set_approval_mode(id, selected_mode, cx)
                         .map_err(|e| e.to_string())?;
                     self.set_model(id, launch.model, cx)
@@ -386,8 +396,8 @@ impl AppState {
                 if !mode_allowed(target_mode, ceiling) {
                     return Err("Target approval mode exceeds the caller's ceiling".into());
                 }
-                let provider = self.provider(send.session).ok_or("Unknown target")?;
-                let connection = self.started(provider).ok_or("busy: target is idle")?;
+                self.provider(send.session).ok_or("Unknown target")?;
+                let connection = self.started(send.session).ok_or("busy: target is idle")?;
                 connection
                     .steer_from(send.session, send.message.clone(), caller)
                     .map_err(str::to_owned)?;
@@ -480,13 +490,13 @@ impl AppState {
                     return Err("timeout must be nonnegative seconds".into());
                 }
                 self.target(wait.session, project)?;
-                let provider = self.provider(wait.session).ok_or("Unknown target")?;
+                self.provider(wait.session).ok_or("Unknown target")?;
                 let running = self
                     .conversations
                     .get(&wait.session)
                     .is_some_and(|c| c.running)
                     || self
-                        .started(provider)
+                        .started(wait.session)
                         .is_some_and(|c| c.is_running(wait.session));
                 let error = self
                     .conversations
@@ -532,3 +542,22 @@ mod tests {
 #[cfg(all(test, feature = "ui-tests"))]
 #[path = "orchestrator_tests.rs"]
 mod integration_tests;
+
+/// The account a launch names: `"default"` or none for the provider's default, else
+/// the ID of one of that provider's added accounts, such as `claude-work`.
+fn launch_account(
+    store: &Store,
+    provider: Provider,
+    account: Option<&str>,
+) -> Result<Option<AccountId>, String> {
+    match account {
+        None | Some(AccountId::DEFAULT) => Ok(None),
+        Some(id) => store
+            .workspace()
+            .accounts()
+            .iter()
+            .find(|a| a.provider() == provider && a.id().as_str() == id)
+            .map(|a| Some(a.id().clone()))
+            .ok_or_else(|| format!("Unknown {provider} account {id}; capabilities lists them")),
+    }
+}

@@ -14,6 +14,7 @@ pub mod host;
 mod item;
 pub mod log;
 pub mod mcp;
+mod profile;
 mod version;
 pub mod worker;
 
@@ -23,3 +24,4 @@ pub use item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, OUTPUT_CAP, RequestId,
     TurnStatus, cap_output,
 };
+pub use profile::{LaunchProfile, default_home, default_sign_in_command, sign_in_command};

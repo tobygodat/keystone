@@ -8,12 +8,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use unicode_segmentation::UnicodeSegmentation;
 
+mod account;
+#[cfg(test)]
+#[path = "account_tests.rs"]
+mod account_tests;
 mod composition;
 mod database;
 mod layout;
 mod project;
 mod session_context;
 
+pub use account::{Account, AccountId, expand_home, homes_overlap, lexical};
 pub use composition::{
     Axis, Child, Component, Composition, Edit, Node, NodePath, Place, Problem, SavedComposition,
     Size, ViewId,
@@ -166,6 +171,11 @@ pub struct Session {
     /// model stay fixed even if nothing else of that send was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_locked: Option<bool>,
+    /// The provider account the session runs under. `None` is the provider's default
+    /// account, which every session saved before accounts existed uses. Fixed, with
+    /// the provider and model, once the session has started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<AccountId>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -271,6 +281,11 @@ impl Session {
 
     pub fn model_locked(&self) -> Option<bool> {
         self.model_locked
+    }
+
+    /// The account the session runs under, or `None` for its provider's default.
+    pub fn account(&self) -> Option<&AccountId> {
+        self.account.as_ref()
     }
 
     /// Whether the session has sent anything to its provider. The provider and model
@@ -403,6 +418,10 @@ pub struct Workspace {
     selected: Option<u64>,
     #[serde(default)]
     preferences: Preferences,
+    /// Accounts the user added, in the order they were added. Saved in their own
+    /// projection, never in the workspace payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    accounts: Vec<Account>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -418,6 +437,14 @@ impl Workspace {
 
     pub fn preferences(&self) -> &Preferences {
         &self.preferences
+    }
+
+    pub fn accounts(&self) -> &[Account] {
+        &self.accounts
+    }
+
+    pub fn account(&self, id: &AccountId) -> Option<&Account> {
+        self.accounts.iter().find(|account| account.id() == id)
     }
 }
 
@@ -523,6 +550,7 @@ impl Store {
             approval_overridden: false,
             model: None,
             model_locked: Some(false),
+            account: None,
             unknown: Map::new(),
         });
         next.selected = Some(id);
@@ -665,11 +693,14 @@ impl Store {
         self.update_unstarted(id, |session| session.model = model)
     }
 
-    /// Changes the session's provider. The model returns to the provider's default,
-    /// and a placeholder title names the new provider. Refused once the session has
-    /// started.
+    /// Changes the session's provider. The model and account return to the provider's
+    /// defaults, and a placeholder title names the new provider. Refused once the
+    /// session has started.
     pub fn set_provider(&mut self, id: u64, provider: Provider) -> StoreResult<Applied<()>> {
         self.update_unstarted(id, |session| {
+            if session.provider != provider {
+                session.account = None;
+            }
             session.provider = provider;
             session.model = None;
             if session.title_source == TitleSource::Placeholder {
@@ -678,8 +709,206 @@ impl Store {
         })
     }
 
-    /// Fixes the session's provider and model, for just before its first message is
-    /// sent. A send whose later saves fail still leaves them fixed.
+    /// Chooses the account the session runs under: one of its provider's accounts, or
+    /// `None` (or [`AccountId::DEFAULT`]) for the provider's default. A different
+    /// account returns the model to the provider's default, since accounts may offer
+    /// different models. Refused once the session has started, so a conversation
+    /// never moves between accounts.
+    pub fn set_account(&mut self, id: u64, account: Option<AccountId>) -> StoreResult<Applied<()>> {
+        let provider = self.session_provider(id)?;
+        self.set_provider_account(id, provider, account)
+    }
+
+    /// Moves the session to `provider` and one of its accounts in one save, as
+    /// [`Store::set_provider`] then [`Store::set_account`] would.
+    pub fn set_provider_account(
+        &mut self,
+        id: u64,
+        provider: Provider,
+        account: Option<AccountId>,
+    ) -> StoreResult<Applied<()>> {
+        let account = account.filter(|account| account.as_str() != AccountId::DEFAULT);
+        self.session_provider(id)?;
+        if let Some(account) = &account {
+            match self.workspace.account(account) {
+                Some(found) if found.provider() == provider => {}
+                Some(_) => {
+                    return Err(
+                        invalid(format!("account {account} is not a {provider} account")).into(),
+                    );
+                }
+                None => return Err(invalid(format!("unknown account {account}")).into()),
+            }
+        }
+        self.update_unstarted(id, |session| {
+            if session.provider != provider {
+                session.provider = provider;
+                if session.title_source == TitleSource::Placeholder {
+                    session.title = format!("New {provider} session");
+                }
+                session.model = None;
+            }
+            if session.account != account {
+                session.account = account;
+                session.model = None;
+            }
+        })
+    }
+
+    fn session_provider(&self, id: u64) -> StoreResult<Provider> {
+        Ok(self
+            .workspace
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .ok_or_else(|| invalid(format!("unknown session ID {id}")))?
+            .provider)
+    }
+
+    /// Adds an account for `provider` whose CLI runs with `home` as its config home.
+    /// `home` must be absolute (see [`expand_home`]) and must not overlap another
+    /// account's home or any of `reserved`, such as each provider's default home, so no
+    /// two accounts share sign-in or transcripts. Returns the new account's ID.
+    pub fn add_account(
+        &mut self,
+        provider: Provider,
+        label: &str,
+        home: PathBuf,
+        reserved: &[PathBuf],
+    ) -> StoreResult<Applied<AccountId>> {
+        let label = self.check_account(provider, label, &home, reserved)?;
+        let taken: Vec<AccountId> = self
+            .workspace
+            .accounts
+            .iter()
+            .map(|a| a.id().clone())
+            .collect();
+        let id = account::slug(provider, &label, &taken);
+        let mut next = self.workspace.clone();
+        next.accounts
+            .push(Account::new(id.clone(), provider, label, home));
+        let applied = self.commit(next, self.next_id)?;
+        Ok(Applied {
+            value: id,
+            durability: applied.durability,
+            revision: applied.revision,
+        })
+    }
+
+    /// Gives an account a new label. Its ID and home never change.
+    pub fn rename_account(&mut self, id: &AccountId, label: &str) -> StoreResult<Applied<()>> {
+        let provider = self
+            .workspace
+            .account(id)
+            .ok_or_else(|| invalid(format!("unknown account {id}")))?
+            .provider();
+        let label = self.account_label(provider, label, Some(id))?;
+        let mut next = self.workspace.clone();
+        if let Some(account) = next.accounts.iter_mut().find(|account| account.id() == id) {
+            account.set_label(label);
+        }
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
+    }
+
+    /// Removes an account Keystone no longer offers. Refused while any session uses
+    /// it, so no session is ever moved to another account behind the user's back.
+    /// Its home folder and everything in it stay on disk.
+    pub fn remove_account(&mut self, id: &AccountId) -> StoreResult<Applied<()>> {
+        if self.workspace.account(id).is_none() {
+            return Err(invalid(format!("unknown account {id}")).into());
+        }
+        let users = self
+            .workspace
+            .sessions
+            .iter()
+            .filter(|session| session.account.as_ref() == Some(id))
+            .count();
+        if users > 0 {
+            return Err(invalid(format!(
+                "{users} session{} use{} this account; it stays until no session does",
+                if users == 1 { "" } else { "s" },
+                if users == 1 { "s" } else { "" },
+            ))
+            .into());
+        }
+        let mut next = self.workspace.clone();
+        next.accounts.retain(|account| account.id() != id);
+        self.commit(next, self.next_id)
+    }
+
+    /// `label` on one line, refused when blank or already naming another of
+    /// `provider`'s accounts.
+    /// The account name [`Store::add_account`] would save for `label`, or why it would
+    /// refuse `label` and `home`, without saving anything.
+    pub fn check_account(
+        &self,
+        provider: Provider,
+        label: &str,
+        home: &Path,
+        reserved: &[PathBuf],
+    ) -> StoreResult<String> {
+        let label = self.account_label(provider, label, None)?;
+        if !home.is_absolute() || account::lexical(home) != home {
+            return Err(
+                invalid("an account home must be an absolute path without `.` or `..`").into(),
+            );
+        }
+        if let Some(other) = self
+            .workspace
+            .accounts
+            .iter()
+            .find(|account| homes_overlap(account.home(), home))
+        {
+            return Err(invalid(format!(
+                "{} is already used by the account \u{201c}{}\u{201d}; each account needs a folder of its own",
+                home.display(),
+                other.label()
+            ))
+            .into());
+        }
+        if let Some(taken) = reserved.iter().find(|taken| homes_overlap(taken, home)) {
+            return Err(invalid(format!(
+                "{} overlaps {}, which a provider's own setup or another account uses; choose a separate folder",
+                home.display(),
+                taken.display()
+            ))
+            .into());
+        }
+        Ok(label)
+    }
+
+    fn account_label(
+        &self,
+        provider: Provider,
+        label: &str,
+        except: Option<&AccountId>,
+    ) -> StoreResult<String> {
+        let label = one_line(label).ok_or_else(|| invalid("an account name cannot be blank"))?;
+        if label.eq_ignore_ascii_case(AccountId::DEFAULT) {
+            return Err(invalid(
+                "\u{201c}Default\u{201d} names each provider's own setup; choose another name",
+            )
+            .into());
+        }
+        let taken = self.workspace.accounts.iter().any(|account| {
+            account.provider() == provider
+                && Some(account.id()) != except
+                && account.label().to_lowercase() == label.to_lowercase()
+        });
+        if taken {
+            return Err(invalid(format!(
+                "another {provider} account is already called \u{201c}{label}\u{201d}"
+            ))
+            .into());
+        }
+        Ok(label)
+    }
+
+    /// Fixes the session's provider, account and model, for just before its first
+    /// message is sent. A send whose later saves fail still leaves them fixed.
     pub fn lock_model(&mut self, id: u64) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.model_locked = Some(true))
     }
@@ -730,7 +959,10 @@ impl Store {
             .ok_or_else(|| invalid(format!("unknown session ID {id}")))?
             .started();
         if started {
-            return Err(invalid("the provider and model are fixed once a session has sent").into());
+            return Err(invalid(
+                "the provider, account and model are fixed once a session has sent",
+            )
+            .into());
         }
         self.update_session(id, change)
     }
@@ -843,6 +1075,15 @@ fn validate(snapshot: &Snapshot) -> StoreResult<()> {
         .is_some_and(|selected| !ids.contains(&selected))
     {
         return Err(invalid("selected session does not exist").into());
+    }
+    let mut accounts = HashSet::new();
+    for account in &snapshot.workspace.accounts {
+        if account.id().as_str() == AccountId::DEFAULT
+            || account.id().as_str().is_empty()
+            || !accounts.insert(account.id())
+        {
+            return Err(invalid("invalid or duplicate account ID").into());
+        }
     }
     Ok(())
 }

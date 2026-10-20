@@ -19,6 +19,8 @@
 //! `KEYSTONE_FAKE_CODEX_NO_CATALOG=1` every `model/list` is a JSON-RPC error. `thread/start`
 //! and `thread/resume` reply with the thread's model: the `model` they were given, else
 //! `fake-default`, remembered per thread for the process. Each reply ends with it.
+//! `KEYSTONE_FAKE_ENV_RECEIPT` names a file each process appends its environment to, and
+//! a `CODEX_HOME` that is not a directory fails the start, as the real CLI does.
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -52,12 +54,62 @@ struct Turn {
     answers: Mutex<Option<Sender<String>>>,
 }
 
+/// With `KEYSTONE_FAKE_ENV_RECEIPT` naming a file, appends one JSON line per process:
+/// its ID, its arguments, and the account environment it was started with. Credential
+/// variables are listed by name only when present, never with their values.
+fn write_env_receipt(provider: &str) {
+    let Some(path) = std::env::var_os("KEYSTONE_FAKE_ENV_RECEIPT") else {
+        return;
+    };
+    let var = |name: &str| std::env::var(name).ok();
+    let credentials: Vec<&str> = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ]
+    .into_iter()
+    .filter(|name| std::env::var_os(name).is_some())
+    .collect();
+    let line = json!({
+        "provider": provider,
+        "pid": std::process::id(),
+        "argv": std::env::args().skip(1).collect::<Vec<_>>(),
+        "CLAUDE_CONFIG_DIR": var("CLAUDE_CONFIG_DIR"),
+        "CODEX_HOME": var("CODEX_HOME"),
+        "HOME": var("HOME"),
+        "credentials": credentials,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(format!("{line}\n").as_bytes());
+    }
+}
+
 fn main() {
+    write_env_receipt("codex");
     if std::env::args().any(|arg| arg == "--version") {
         let version =
             std::env::var("KEYSTONE_FAKE_CODEX_VERSION").unwrap_or_else(|_| "0.162.1".into());
         println!("codex-cli {version}");
         return;
+    }
+    // As codex 0.163.0 does, refuse a CODEX_HOME that does not exist.
+    if let Some(home) = std::env::var_os("CODEX_HOME")
+        && !std::path::Path::new(&home).is_dir()
+    {
+        eprintln!(
+            "Error: CODEX_HOME points to {:?}, but that path does not exist",
+            std::path::Path::new(&home)
+        );
+        std::process::exit(1);
     }
     let delay = Duration::from_millis(
         std::env::var("KEYSTONE_FAKE_CODEX_DELAY_MS")
