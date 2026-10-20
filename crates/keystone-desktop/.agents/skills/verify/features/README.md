@@ -21,6 +21,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools only obser
 - [Settings](settings.md) covers the settings page: opening, sections, theme, fonts, density, text size, and restart.
 - [Files](files.md) covers the sidebar's Sessions and Files toggle, lazy folder listing that respects `.gitignore`, opening files in an external editor, Copy path, and the spawn error row.
 - [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, choosing the provider and model before the first Send, and restoring a conversation.
+- [Keyboard transcript actions](transcript-keyboard.md) covers virtual row/action navigation, exact copy bytes, occurrence-scoped Jump and hidden-focus transitions.
 - [Command palette](palette.md) covers opening with Ctrl+K or Ctrl+Shift+P, filtering, running a command, dismissing with focus restored, and dialog blocking.
 
 ## Coverage rules

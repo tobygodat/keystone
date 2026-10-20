@@ -301,6 +301,15 @@ impl Keystone {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.shown_composition().component(view) == Some(Component::Conversation) {
+            return self.store.workspace().selected().is_some_and(|session| {
+                self.presentation.current.views.contains_focus(
+                    ViewKey { view, session },
+                    window,
+                    cx,
+                )
+            });
+        }
         let handle = match self.shown_composition().component(view) {
             Some(Component::Files) => self
                 .files_root()
@@ -1058,9 +1067,73 @@ impl Keystone {
                         .focus(move |d| d.border_color(colors.border_focused))
                         .tab_index(0)
                         .key_context("Conversation")
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this,
+                                  _: &crate::transcript_keyboard::LeaveTranscript,
+                                  window,
+                                  cx| this.leave_transcript(window, cx),
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::transcript_keyboard::PreviousRow, window, cx| {
+                                this.transcript_row(key, -1, window, cx)
+                            },
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::transcript_keyboard::NextRow, window, cx| {
+                                this.transcript_row(key, 1, window, cx)
+                            },
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::transcript_keyboard::FirstRow, window, cx| {
+                                this.transcript_row(key, -2, window, cx)
+                            },
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::transcript_keyboard::LastRow, window, cx| {
+                                this.transcript_row(key, 2, window, cx)
+                            },
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::transcript_keyboard::NextAction, window, cx| {
+                                this.transcript_action(key, false, window, cx)
+                            },
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this,
+                                  _: &crate::transcript_keyboard::PreviousAction,
+                                  window,
+                                  cx| {
+                                this.transcript_action(key, true, window, cx)
+                            },
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this,
+                                  _: &crate::transcript_keyboard::CopyTranscript,
+                                  window,
+                                  cx| {
+                                this.copy_transcript(key, window, cx)
+                            },
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::transcript_keyboard::FocusLatest, window, cx| {
+                                this.focus_latest(key, window, cx)
+                            },
+                        ))
                         .on_mouse_down(
                             MouseButton::Left,
                             self.scoped_listener(cx, move |this, _, window, cx| {
+                                let keyboard = this.presentation.current.views.keyboard(key, cx);
+                                keyboard.row = None;
+                                keyboard.action = None;
                                 this.presentation
                                     .current
                                     .views
@@ -1431,6 +1504,25 @@ impl Keystone {
             return;
         }
         self.presentation.current.views.note_focus(key);
+        if self
+            .presentation
+            .current
+            .views
+            .keyboard_state(key)
+            .and_then(|k| k.row)
+            .is_some_and(|row| {
+                self.conversations.get(&key.session).is_some_and(|c| {
+                    c.rows
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, r)| crate::conversation::visible(r))
+                        .is_some_and(|(last, _)| row < last)
+                })
+            })
+        {
+            return;
+        }
         if self.presentation.current.views.scrolled_up(key) || self.replies.borrow().pacing() {
             return;
         }

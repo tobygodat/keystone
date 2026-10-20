@@ -510,6 +510,106 @@ fn switching_tabs_moves_focus_to_the_shown_conversation(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn keyboard_actions_follow_occurrences_and_release_hidden_focus(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    click(cx, "conversation");
+    cx.simulate_keystrokes("ctrl-shift-t home down tab");
+    let first = ViewKey {
+        view: ViewId::MAIN,
+        session: 1,
+    };
+    let second = ViewKey {
+        view: ViewId(3),
+        session: 1,
+    };
+    cx.simulate_keystrokes("f6 home down down tab");
+    view.update_in(cx, |v, window, cx| {
+        assert_eq!(
+            v.presentation
+                .current
+                .views
+                .keyboard_state(first)
+                .unwrap()
+                .row,
+            Some(1)
+        );
+        assert_eq!(
+            v.presentation
+                .current
+                .views
+                .keyboard_state(second)
+                .unwrap()
+                .row,
+            Some(2)
+        );
+        assert!(
+            v.presentation
+                .current
+                .views
+                .contains_focus(second, window, cx)
+        );
+        assert_eq!(
+            v.presentation
+                .current
+                .views
+                .send_target(&v.presentation.current.arrangement.visible, 1),
+            Some(second)
+        );
+    });
+    cx.simulate_keystrokes("shift-f6");
+    view.read_with(cx, |v, _| {
+        assert_eq!(
+            v.presentation
+                .current
+                .views
+                .keyboard_state(first)
+                .unwrap()
+                .row,
+            Some(1)
+        )
+    });
+    use_layout(&view, cx, tabbed(0));
+    cx.simulate_keystrokes("ctrl-shift-t home tab");
+    click(cx, "surface-tabs-0-tab-1");
+    view.update_in(cx, |v, window, cx| {
+        assert!(
+            !v.presentation
+                .current
+                .views
+                .keyboard_state(first)
+                .unwrap()
+                .action_focus
+                .is_focused(window)
+        );
+        assert!(
+            v.presentation
+                .current
+                .views
+                .contains_focus(second, window, cx)
+        );
+    });
+    cx.simulate_keystrokes("home tab");
+    cx.simulate_resize(gpui::size(px(400.), px(900.)));
+    cx.run_until_parked();
+    click(cx, "fitted-tab-0");
+    cx.simulate_resize(gpui::size(px(1200.), px(900.)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-, ctrl-shift-t home ctrl-shift-c");
+    assert!(cx.debug_bounds("settings-page").is_none());
+    let text = cx
+        .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        .unwrap();
+    assert!(text.starts_with("Reply 0."));
+    cx.simulate_keystrokes("ctrl-l");
+    cx.simulate_input("still a draft");
+    view.read_with(cx, |v, cx| {
+        assert_eq!(v.composer.read(cx).value(), "still a draft")
+    });
+}
+
+#[gpui::test]
 fn widening_from_a_fitted_tab_restores_focus_to_the_displayed_conversation(
     cx: &mut TestAppContext,
 ) {

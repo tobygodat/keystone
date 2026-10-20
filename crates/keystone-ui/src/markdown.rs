@@ -19,7 +19,7 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, TextSize};
 use crate::tooltip::Tooltip;
 use gpui::{
-    AnyElement, App, ClipboardItem, ElementId, FontStyle, FontWeight, HighlightStyle,
+    AnyElement, App, ClipboardItem, ElementId, FocusHandle, FontStyle, FontWeight, HighlightStyle,
     InteractiveText, IntoElement, RenderOnce, SharedString, StrikethroughStyle, StyledText,
     TextStyle, UnderlineStyle, Window, div, prelude::*, px,
 };
@@ -625,6 +625,7 @@ pub fn is_openable(url: &str) -> bool {
 pub struct Markdown {
     id: SharedString,
     document: Arc<Document>,
+    copy_focus: Option<(usize, FocusHandle)>,
 }
 
 impl Markdown {
@@ -634,6 +635,7 @@ impl Markdown {
         Self {
             id: id.into(),
             document,
+            copy_focus: None,
         }
     }
 
@@ -641,6 +643,11 @@ impl Markdown {
     /// use [`Markdown::new`].
     pub fn from_source(id: impl Into<SharedString>, source: &str) -> Self {
         Self::new(id, Arc::new(Document::parse(source)))
+    }
+
+    pub fn copy_focus(mut self, block: usize, focus: &FocusHandle) -> Self {
+        self.copy_focus = Some((block, focus.clone()));
+        self
     }
 }
 
@@ -651,6 +658,7 @@ struct Ctx {
     base: TextStyle,
     texts: usize,
     code_blocks: usize,
+    copy_focus: Option<(usize, FocusHandle)>,
 }
 
 impl RenderOnce for Markdown {
@@ -666,6 +674,7 @@ impl RenderOnce for Markdown {
             base,
             texts: 0,
             code_blocks: 0,
+            copy_focus: self.copy_focus,
         };
         let blocks: Vec<_> = self
             .document
@@ -858,6 +867,10 @@ fn code_block(
         } else {
             IconName::Copy
         },
+    )
+    .when_some(
+        ctx.copy_focus.as_ref().filter(|(block, _)| *block == n),
+        |button, (_, focus)| button.track_focus(focus).reveal_on_focus(),
     )
     .debug_selector({
         let id = ctx.id.clone();

@@ -140,6 +140,11 @@ impl Keystone {
             .capture_action(self.leave_settings::<NewCodex>(cx))
             .capture_action(self.leave_settings::<FocusSearch>(cx))
             .capture_action(self.leave_settings::<FocusComposer>(cx))
+            .capture_action(self.leave_settings::<crate::transcript_keyboard::FocusTranscript>(cx))
+            .capture_action(self.leave_settings::<crate::transcript_keyboard::NextTranscript>(cx))
+            .capture_action(
+                self.leave_settings::<crate::transcript_keyboard::PreviousTranscript>(cx),
+            )
             .capture_action(self.leave_settings::<RenameSession>(cx))
             .capture_action(self.leave_settings::<ToggleSettle>(cx))
             .capture_action(self.leave_settings::<ToggleSidebar>(cx))

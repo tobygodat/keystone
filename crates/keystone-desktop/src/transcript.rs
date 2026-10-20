@@ -2,7 +2,11 @@
 //! virtualizes them; this module only decides a row's content.
 
 use crate::conversation::Row;
-use gpui::{AnyElement, App, ClipboardItem, ElementId, SharedString, Window, div, prelude::*, px};
+use crate::view_state::CopyTarget;
+use gpui::{
+    AnyElement, App, ClipboardItem, ElementId, FocusHandle, SharedString, Window, div, prelude::*,
+    px,
+};
 use keystone_agent::{ItemKind, ItemStatus, TurnStatus};
 use keystone_ui::markdown::Document;
 use keystone_ui::prelude::*;
@@ -11,7 +15,14 @@ use std::time::Duration;
 
 /// The content of a row that [`crate::conversation::visible`] accepts. `index` is the
 /// row's place in the conversation, and `reply` the parsed Markdown of a reply row.
-pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> AnyElement {
+pub fn row(
+    row: &Row,
+    index: usize,
+    reply: Option<Arc<Document>>,
+    action: Option<(CopyTarget, FocusHandle)>,
+    selected: bool,
+    cx: &App,
+) -> AnyElement {
     let colors = cx.theme().colors;
     let mono = cx.theme().fonts.mono.clone();
     match row {
@@ -23,13 +34,21 @@ pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> A
                 .gap_1()
                 .child(
                     div()
-                        .invisible()
+                        .when(!selected, |d| d.invisible())
                         .group_hover("user-message", |s| s.visible())
-                        .child(CopyButton::new(
-                            ("copy-message", index),
-                            "Copy message",
-                            item.text.clone(),
-                        )),
+                        .child(
+                            CopyButton::new(
+                                ("copy-message", index),
+                                "Copy message",
+                                item.text.clone(),
+                            )
+                            .keyboard(
+                                action
+                                    .as_ref()
+                                    .filter(|(n, _)| *n == CopyTarget::Row)
+                                    .map(|(_, f)| f),
+                            ),
+                        ),
                 )
                 .child(
                     div()
@@ -44,20 +63,32 @@ pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> A
                 .into_any_element(),
             ItemKind::AgentMessage => {
                 let document = reply.unwrap_or_else(|| Arc::new(Document::parse(&item.text)));
+                let row_copy = item.status != ItemStatus::InProgress;
+                let markdown =
+                    Markdown::new(SharedString::from(format!("reply-{index}")), document);
+                let markdown = match &action {
+                    Some((CopyTarget::Code(n), focus)) => markdown.copy_focus(*n, focus),
+                    _ => markdown,
+                };
                 v_flex()
                     .gap_1()
-                    .child(Markdown::new(
-                        SharedString::from(format!("reply-{index}")),
-                        document,
-                    ))
+                    .child(markdown)
                     .child(
                         div()
                             .when(item.status == ItemStatus::InProgress, |d| d.invisible())
-                            .child(CopyButton::new(
-                                ("copy-reply", index),
-                                "Copy reply",
-                                item.text.clone(),
-                            )),
+                            .child(
+                                CopyButton::new(
+                                    ("copy-reply", index),
+                                    "Copy reply",
+                                    item.text.clone(),
+                                )
+                                .keyboard(
+                                    action
+                                        .as_ref()
+                                        .filter(|(n, _)| *n == CopyTarget::Row && row_copy)
+                                        .map(|(_, f)| f),
+                                ),
+                            ),
                     )
                     .into_any_element()
             }
@@ -96,7 +127,14 @@ pub fn row(row: &Row, index: usize, reply: Option<Arc<Document>>, cx: &App) -> A
                             .text_size(TextSize::Ui.px())
                             .child(div().flex_1().min_w_0().child(format!("$ {command}")))
                             .child(Label::new(status).size(TextSize::Sm).color(color))
-                            .child(copy),
+                            .child(
+                                copy.keyboard(
+                                    action
+                                        .as_ref()
+                                        .filter(|(n, _)| *n == CopyTarget::Row)
+                                        .map(|(_, f)| f),
+                                ),
+                            ),
                     )
                     .when(!output.is_empty(), |d| {
                         d.child(
@@ -152,6 +190,7 @@ struct CopyButton {
     id: ElementId,
     label: &'static str,
     text: String,
+    focus: Option<FocusHandle>,
 }
 
 impl CopyButton {
@@ -160,7 +199,13 @@ impl CopyButton {
             id: id.into(),
             label,
             text,
+            focus: None,
         }
+    }
+
+    fn keyboard(mut self, focus: Option<&FocusHandle>) -> Self {
+        self.focus = focus.cloned();
+        self
     }
 }
 
@@ -182,6 +227,9 @@ impl RenderOnce for CopyButton {
             },
         )
         .size(ButtonSize::Compact)
+        .when_some(self.focus, |button, focus| {
+            button.track_focus(&focus).reveal_on_focus()
+        })
         .debug_selector(move || selector)
         .tooltip(Tooltip::text(if is_copied { "Copied" } else { self.label }))
         .on_click(move |_, _, cx| {

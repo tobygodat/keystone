@@ -1,4 +1,4 @@
-use gpui::{App, FocusHandle, ListAlignment, ListOffset, ListState, px};
+use gpui::{App, FocusHandle, ListAlignment, ListOffset, ListState, Window, px};
 use keystone_core::ViewId;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -16,6 +16,22 @@ struct Transcript {
     focused_at: u64,
     revision: u64,
     observation_attempt: Option<u64>,
+    keyboard: Option<TranscriptKeyboard>,
+    visible_rows: Option<Range<usize>>,
+    fully_visible_rows: Option<Range<usize>>,
+}
+
+pub struct TranscriptKeyboard {
+    pub row: Option<usize>,
+    pub action: Option<CopyTarget>,
+    pub action_focus: FocusHandle,
+    pub jump_focus: FocusHandle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyTarget {
+    Row,
+    Code(usize),
 }
 
 #[derive(Default)]
@@ -47,6 +63,9 @@ impl ViewStates {
                 focused_at: 0,
                 revision: 0,
                 observation_attempt: None,
+                keyboard: None,
+                visible_rows: None,
+                fully_visible_rows: None,
             })
             .list
             .clone()
@@ -64,6 +83,71 @@ impl ViewStates {
 
     pub fn revision(&self, key: ViewKey) -> u64 {
         self.transcripts.get(&key).map_or(0, |t| t.revision)
+    }
+
+    pub fn keyboard(&mut self, key: ViewKey, cx: &mut App) -> &mut TranscriptKeyboard {
+        self.list(key, 0);
+        self.transcripts
+            .get_mut(&key)
+            .unwrap()
+            .keyboard
+            .get_or_insert_with(|| TranscriptKeyboard {
+                row: None,
+                action: None,
+                action_focus: cx.focus_handle(),
+                jump_focus: cx.focus_handle(),
+            })
+    }
+
+    pub fn keyboard_state(&self, key: ViewKey) -> Option<&TranscriptKeyboard> {
+        self.transcripts.get(&key)?.keyboard.as_ref()
+    }
+
+    pub fn begin_frame(&mut self, key: ViewKey) {
+        let t = self.transcripts.get_mut(&key).unwrap();
+        t.visible_rows = None;
+        t.fully_visible_rows = None;
+    }
+
+    pub fn note_visible_row(&mut self, key: ViewKey, row: usize, fully: bool) {
+        if let Some(t) = self.transcripts.get_mut(&key) {
+            t.visible_rows = Some(t.visible_rows.as_ref().map_or(row..row + 1, |rows| {
+                rows.start.min(row)..rows.end.max(row + 1)
+            }));
+            if fully {
+                t.fully_visible_rows =
+                    Some(t.fully_visible_rows.as_ref().map_or(row..row + 1, |rows| {
+                        rows.start.min(row)..rows.end.max(row + 1)
+                    }));
+            }
+        }
+    }
+
+    pub fn row_is_visible(&self, key: ViewKey, row: usize, fully: bool) -> bool {
+        self.transcripts
+            .get(&key)
+            .and_then(|t| {
+                if fully {
+                    t.fully_visible_rows.as_ref()
+                } else {
+                    t.visible_rows.as_ref()
+                }
+            })
+            .is_some_and(|rows| rows.contains(&row))
+    }
+
+    pub fn contains_focus(&mut self, key: ViewKey, window: &Window, cx: &mut App) -> bool {
+        self.focus(key, cx).contains_focused(window, cx)
+            || self.keyboard_state(key).is_some_and(|k| {
+                k.action_focus.is_focused(window) || k.jump_focus.is_focused(window)
+            })
+    }
+
+    pub fn focused_region(&self, key: ViewKey, window: &Window) -> bool {
+        self.transcripts
+            .get(&key)
+            .and_then(|t| t.focus.as_ref())
+            .is_some_and(|f| f.is_focused(window))
     }
 
     pub fn activate(&mut self, key: ViewKey) {
@@ -165,10 +249,14 @@ impl ViewStates {
 
     /// Scrolls the view to its latest row. It then follows new rows until the reader
     /// scrolls up.
-    pub fn scroll_to_end(&self, key: ViewKey) {
-        if let Some(list) = self.get(key) {
-            list.scroll_to(ListOffset {
-                item_ix: list.item_count(),
+    pub fn scroll_to_end(&mut self, key: ViewKey) {
+        if let Some(transcript) = self.transcripts.get_mut(&key) {
+            if let Some(keyboard) = &mut transcript.keyboard {
+                keyboard.row = None;
+                keyboard.action = None;
+            }
+            transcript.list.scroll_to(ListOffset {
+                item_ix: transcript.list.item_count(),
                 offset_in_item: px(0.),
             });
         }

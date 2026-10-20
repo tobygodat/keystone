@@ -12,8 +12,8 @@ mod reveal;
 mod settings;
 mod settings_page;
 mod transcript;
+mod transcript_keyboard;
 mod view_state;
-
 use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
@@ -1659,7 +1659,7 @@ impl Keystone {
         let start = top.item_ix;
         while top.item_ix < list.item_count() {
             let height = self
-                .transcript_entry(key, top.item_ix, cx)
+                .transcript_entry(key, top.item_ix, window, cx)
                 .layout_as_root(space, window, cx)
                 .height;
             if top.offset_in_item < height {
@@ -2020,16 +2020,41 @@ impl Keystone {
             .get(&key.session)
             .map_or(0, |c| c.rows.len());
         let state = self.presentation.current.views.list(key, rows);
+        self.presentation.current.views.begin_frame(key);
         let app = cx.weak_entity();
-        list(state, move |index, _, cx| {
-            app.update(cx, |this, cx| this.transcript_entry(key, index, cx))
+        let app_scroll = app.clone();
+        state.set_scroll_handler(move |_, window, cx| {
+            let _ = app_scroll.update(cx, |this, cx| {
+                let keyboard = this.presentation.current.views.keyboard(key, cx);
+                keyboard.row = None;
+                keyboard.action = None;
+                if keyboard.action_focus.is_focused(window) {
+                    keyboard.action = None;
+                    this.presentation
+                        .current
+                        .views
+                        .focus(key, cx)
+                        .focus(window, cx);
+                    cx.notify();
+                }
+            });
+        });
+        list(state, move |index, window, cx| {
+            app.update(cx, |this, cx| this.transcript_entry(key, index, window, cx))
                 .unwrap_or_else(|_| div().into_any_element())
         })
         .size_full()
         .py_6()
     }
 
-    fn jump_to_latest(&self, key: ViewKey, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn jump_to_latest(&mut self, key: ViewKey, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let focus = self
+            .presentation
+            .current
+            .views
+            .keyboard(key, cx)
+            .jump_focus
+            .clone();
         self.presentation.current.views.scrolled_up(key).then(|| {
             h_flex()
                 .absolute()
@@ -2037,39 +2062,50 @@ impl Keystone {
                 .left_0()
                 .w_full()
                 .justify_center()
-                .child(
-                    Button::new(
-                        arrangement::selector("jump-to-latest", key.view),
-                        "Jump to latest",
-                    )
-                    .style(ButtonStyle::Filled)
-                    .icon(IconName::Chevron)
-                    .debug_selector(move || {
-                        arrangement::selector("jump-to-latest", key.view).to_string()
-                    })
-                    .on_click(self.scoped_listener(
-                        cx,
-                        move |this, _, window, cx| {
-                            this.presentation
-                                .current
-                                .views
-                                .focus(key, cx)
-                                .focus(window, cx);
-                            this.presentation.current.views.scroll_to_end(key);
-                            cx.notify();
-                        },
-                    )),
-                )
+                .child(gpui::deferred(
+                    div().occlude().child(
+                        Button::new(
+                            arrangement::selector("jump-to-latest", key.view),
+                            "Jump to latest",
+                        )
+                        .style(ButtonStyle::Filled)
+                        .track_focus(&focus)
+                        .icon(IconName::Chevron)
+                        .debug_selector(move || {
+                            arrangement::selector("jump-to-latest", key.view).to_string()
+                        })
+                        .on_click(self.scoped_listener(
+                            cx,
+                            move |this, _, window, cx| {
+                                this.activate_latest(key, window, cx);
+                            },
+                        )),
+                    ),
+                ))
         })
     }
 
     /// One list entry: a row, or after the last row, the turn's status. Each entry is
     /// laid out on its own, so it carries the transcript's width and text style.
-    fn transcript_entry(&self, key: ViewKey, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn transcript_entry(
+        &self,
+        key: ViewKey,
+        index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let session = key.session;
         let Some(conversation) = self.conversations.get(&session) else {
             return div().into_any_element();
         };
+        let keyboard = self.presentation.current.views.keyboard_state(key);
+        let selected = keyboard.is_some_and(|k| k.row == Some(index));
+        let action = keyboard
+            .filter(|_| selected)
+            .and_then(|k| k.action.map(|action| (action, k.action_focus.clone())));
+        let focused = selected
+            && (keyboard.is_some_and(|k| k.action_focus.is_focused(window))
+                || self.presentation.current.views.focused_region(key, window));
         let content = match conversation.rows.get(index) {
             Some(row) if conversation::visible(row) => {
                 let reply = match row {
@@ -2078,7 +2114,7 @@ impl Keystone {
                     }
                     _ => None,
                 };
-                Some(transcript::row(row, index, reply, cx))
+                Some(transcript::row(row, index, reply, action, focused, cx))
             }
             Some(_) => None,
             None => self.transcript_status(key, conversation, cx),
@@ -2091,14 +2127,59 @@ impl Keystone {
             count if index < count => format!("transcript-row-{index}"),
             _ => "transcript-status".to_owned(),
         };
+        let app = cx.weak_entity();
+        let activation = self.presentation.activation();
         h_flex()
             .automation_id(arrangement::selector(&name, key.view))
+            .relative()
             .w_full()
             .justify_center()
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let visible = bounds.intersect(&window.content_mask().bounds);
+                        if visible.size.width > px(0.) && visible.size.height > px(0.) {
+                            let _ = app.update(cx, |this, _| {
+                                if this.presentation.matches(activation) {
+                                    this.presentation.current.views.note_visible_row(
+                                        key,
+                                        index,
+                                        visible.size.height >= bounds.size.height,
+                                    );
+                                }
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(
                 div()
                     .w_full()
                     .max_w(px(CONTENT_WIDTH))
+                    .when(focused, |d| {
+                        d.relative()
+                            .automation_id(arrangement::selector(
+                                &format!("transcript-keyboard-row-{index}"),
+                                key.view,
+                            ))
+                            .child(
+                                canvas(
+                                    |_, _, _| {},
+                                    |bounds, _, window, cx| {
+                                        window.paint_quad(gpui::outline(
+                                            bounds,
+                                            cx.theme().colors.border_focused,
+                                            gpui::BorderStyle::Solid,
+                                        ));
+                                    },
+                                )
+                                .absolute()
+                                .size_full(),
+                            )
+                    })
                     .when(index > 0, |d| d.pt_4())
                     .text_size(TextSize::Body.px())
                     .line_height(px(22.))
@@ -2644,6 +2725,7 @@ impl Render for Keystone {
             self.conversation(id);
         }
         self.update_arrangement_fitting(window, cx);
+        self.reconcile_transcript_keyboard(window, cx);
         let main = match self.settings_page(cx) {
             Some(page) => page,
             None => self.arrangement_body(window, cx),
@@ -2789,6 +2871,24 @@ impl Render for Keystone {
                     this.focus_composer(window, cx)
                 }),
             )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &transcript_keyboard::FocusTranscript, window, cx| {
+                    this.focus_transcript(window, cx)
+                },
+            ))
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &transcript_keyboard::NextTranscript, window, cx| {
+                    this.cycle_transcript(false, window, cx)
+                },
+            ))
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &transcript_keyboard::PreviousTranscript, window, cx| {
+                    this.cycle_transcript(true, window, cx)
+                },
+            ))
             .on_action(
                 self.scoped_listener(cx, |this, _: &SendMessage, window, cx| {
                     if let Some(draft) = this.composer_draft(cx) {
@@ -2853,6 +2953,272 @@ mod tests {
         view: ViewId::MAIN,
         session: 1,
     };
+
+    fn keyboard_scroll_top(view: &Keystone) -> (usize, Pixels) {
+        let top = view
+            .presentation
+            .current
+            .views
+            .get(MAIN_1)
+            .unwrap()
+            .logical_scroll_top();
+        (top.item_ix, top.offset_in_item)
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_copies_virtual_rows_and_code_without_sending(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use keystone_agent::log::{Entry, SessionLog};
+        fn keys(cx: &mut gpui::VisualTestContext, strokes: &str) {
+            for key in strokes.split_whitespace() {
+                cx.simulate_keystrokes(key);
+                cx.simulate_event(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                });
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 200);
+        let reply = "A reply\n\n```rust\nlet value = 7;\n```\n\n> ```text\n> nested\n> ```\n";
+        let mut log = SessionLog::open(&dir.path().join("sessions"), 1).unwrap();
+        for (id, kind, text) in [
+            (
+                "empty-command",
+                ItemKind::Command {
+                    command: "printf test".into(),
+                    exit_code: Some(0),
+                },
+                "",
+            ),
+            ("code-reply", ItemKind::AgentMessage, reply),
+        ] {
+            log.append(&Entry::Item {
+                item: Item {
+                    id: id.into(),
+                    kind,
+                    text: text.into(),
+                    status: ItemStatus::Completed,
+                },
+                seq: None,
+                run: None,
+            })
+            .unwrap();
+        }
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        wait_until(cx, &view, |v| {
+            v.conversations.get(&1).is_some_and(|c| c.rows.len() == 602)
+        });
+        let clipboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        };
+        view.update_in(cx, |v, window, cx| v.focus.focus(window, cx));
+        keys(cx, "ctrl-shift-t");
+        keys(cx, "home");
+        keys(cx, "ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("Question 0"));
+        assert!(cx.debug_bounds("transcript-row-0").is_some());
+        assert!(cx.debug_bounds("transcript-row-599").is_none());
+        keys(cx, "tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some("Question 0"));
+        keys(cx, "down tab space");
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("running 12 tests\ntest result: ok")
+        );
+        keys(cx, "end tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some(reply));
+        keys(cx, "tab space");
+        assert_eq!(clipboard(cx).as_deref(), Some("let value = 7;"));
+        keys(cx, "tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some("nested"));
+        keys(cx, "shift-tab ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("let value = 7;"));
+        keys(cx, "up tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some("printf test"));
+        keys(cx, "ctrl-l");
+        cx.simulate_input("draft stays");
+        keys(cx, "ctrl-shift-c");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.composer.read(cx).value(), "draft stays");
+            assert!(!v.conversations[&1].running);
+            assert_eq!(v.conversations[&1].rows.len(), 602);
+        });
+        keys(cx, "ctrl-shift-t home alt-end enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("jump-to-latest").is_none());
+        assert!(cx.debug_bounds("transcript-row-601").is_some());
+    }
+
+    #[gpui::test]
+    fn transcript_escape_dismisses_customize_and_menus_before_leaving(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        cx.simulate_keystrokes("ctrl-shift-l f6 escape");
+        view.read_with(cx, |v, _| {
+            assert!(!v.presentation.current.customization.is_open())
+        });
+        click(cx, "filter");
+        cx.simulate_keystrokes("f6 escape");
+        view.read_with(cx, |v, _| assert!(!v.filter_menu));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_input("plain Escape leaves after dismissing overlays");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(
+                v.composer.read(cx).value(),
+                "plain Escape leaves after dismissing overlays"
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_copy_after_pointer_focus_and_escape(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 40);
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v| v.conversations[&1].rows.len() == 120);
+        cx.simulate_keystrokes("ctrl-shift-t home");
+        click(cx, "conversation");
+        cx.simulate_keystrokes("ctrl-shift-c");
+        let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(text.as_deref(), Some("Question 0"));
+        cx.simulate_keystrokes("escape");
+        cx.simulate_input("exit kept the draft");
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.composer.read(cx).value(), "exit kept the draft")
+        });
+        cx.simulate_keystrokes("ctrl-shift-t home");
+        let over = cx.debug_bounds("conversation").unwrap().center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-150.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v).0);
+        cx.simulate_keystrokes("down");
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.presentation
+                    .current
+                    .views
+                    .keyboard_state(MAIN_1)
+                    .unwrap()
+                    .row,
+                Some(top)
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_reveals_a_partially_clipped_destination(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 10);
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v| v.conversations[&1].rows.len() == 30);
+        cx.simulate_resize(size(px(1000.), px(500.)));
+        cx.simulate_keystrokes("ctrl-shift-t home down");
+        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        cx.simulate_keystrokes("down");
+        view.read_with(cx, |v, _| assert_ne!(keyboard_scroll_top(v), top));
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_entry_preserves_latest_and_visible_row_offsets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 10);
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v| v.conversations[&1].rows.len() == 30);
+        view.update(cx, |v, cx| {
+            v.conversation(1).apply(Event::ItemCompleted(Item {
+                id: "tall".into(),
+                kind: ItemKind::AgentMessage,
+                text: (0..120).map(|n| format!("Paragraph {n}.\n\n")).collect(),
+                status: ItemStatus::Completed,
+            }));
+            v.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        cx.simulate_keystrokes("ctrl-shift-t");
+        view.read_with(cx, |v, _| assert_eq!(keyboard_scroll_top(v), top));
+        assert!(cx.debug_bounds("jump-to-latest").is_none());
+        cx.simulate_keystrokes("home");
+        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        cx.simulate_keystrokes("down");
+        view.read_with(cx, |v, _| assert_eq!(keyboard_scroll_top(v), top));
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_reentry_after_send_stays_at_latest(cx: &mut gpui::TestAppContext) {
+        let _env = codex_env();
+        let dir = tempfile::tempdir().unwrap();
+        seed_long_session(&dir.path().join("sessions"), 1, 40);
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v| v.conversations[&1].rows.len() == 120);
+        cx.simulate_keystrokes("ctrl-shift-t home down ctrl-l");
+        send_text(&view, cx, "hello");
+        wait_until(cx, &view, |v| {
+            !v.conversations[&1].running && reply_with(v, "You wrote: hello").is_some()
+        });
+        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        cx.simulate_keystrokes("ctrl-shift-t");
+        view.read_with(cx, |v, _| {
+            assert!(!v.presentation.current.views.scrolled_up(MAIN_1));
+            assert_eq!(keyboard_scroll_top(v), top);
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_replaces_a_streamed_row_that_becomes_hidden(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v| !v.conversations[&1].is_loading());
+        view.update(cx, |v, cx| {
+            v.conversation(1).push_local("visible user row");
+            v.conversation(1).apply(Event::ItemStarted(Item {
+                id: "reasoning".into(),
+                kind: ItemKind::Reasoning,
+                text: "Thinking".into(),
+                status: ItemStatus::InProgress,
+            }));
+            v.commit(1);
+            cx.notify();
+        });
+        cx.simulate_keystrokes("ctrl-shift-t end");
+        assert!(cx.debug_bounds("transcript-keyboard-row-1").is_some());
+        view.update(cx, |v, cx| {
+            v.conversation(1).apply(Event::ItemCompleted(Item {
+                id: "reasoning".into(),
+                kind: ItemKind::Reasoning,
+                text: String::new(),
+                status: ItemStatus::Completed,
+            }));
+            v.commit(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("transcript-keyboard-row-0").is_some());
+        cx.simulate_keystrokes("ctrl-shift-t ctrl-shift-c");
+        let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(text.as_deref(), Some("visible user row"));
+    }
 
     #[gpui::test]
     fn welcome_action_focuses_composer_and_preserves_draft_on_session_switch(
@@ -3015,6 +3381,24 @@ mod tests {
         }
         eprintln!(
             "PERF transcript_draw_ms={:.2}",
+            total.as_secs_f64() * 1000. / frames as f64
+        );
+
+        view.update_in(cx, |this, window, cx| {
+            this.transcript_row(MAIN_1, 2, window, cx);
+            this.transcript_action(MAIN_1, false, window, cx);
+        });
+        let mut total = std::time::Duration::ZERO;
+        for _ in 0..frames {
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let start = std::time::Instant::now();
+                window.draw(cx).clear(cx);
+                total += start.elapsed();
+            });
+        }
+        eprintln!(
+            "PERF transcript_action_draw_ms={:.2}",
             total.as_secs_f64() * 1000. / frames as f64
         );
 

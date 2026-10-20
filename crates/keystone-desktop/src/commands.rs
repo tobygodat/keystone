@@ -3,6 +3,7 @@
 
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
+use crate::transcript_keyboard::*;
 use crate::{
     FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, OpenSettings, Quit, RenameSession,
     ToggleSettle, ToggleSidebar,
@@ -26,6 +27,7 @@ pub(crate) struct Command {
 /// While the palette is open its shortcuts stay inert, so focus cannot leave it
 /// behind an open overlay.
 const APP: &str = "!Dialog && !CommandPalette";
+const TRANSCRIPT: &str = "Conversation && !Dialog && !CommandPalette";
 
 pub(crate) const COMMANDS: &[Command] = &[
     Command {
@@ -104,6 +106,90 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-q"],
         context: None,
         action: || Box::new(Quit),
+    },
+    Command {
+        id: "focus-transcript",
+        label: "Focus transcript",
+        keys: &["ctrl-shift-t"],
+        context: Some(APP),
+        action: || Box::new(FocusTranscript),
+    },
+    Command {
+        id: "next-transcript",
+        label: "Focus next transcript",
+        keys: &["f6"],
+        context: Some(APP),
+        action: || Box::new(NextTranscript),
+    },
+    Command {
+        id: "previous-transcript",
+        label: "Focus previous transcript",
+        keys: &["shift-f6"],
+        context: Some(APP),
+        action: || Box::new(PreviousTranscript),
+    },
+    Command {
+        id: "transcript-previous-row",
+        label: "Transcript: previous row",
+        keys: &["up"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(PreviousRow),
+    },
+    Command {
+        id: "transcript-next-row",
+        label: "Transcript: next row",
+        keys: &["down"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(NextRow),
+    },
+    Command {
+        id: "transcript-first-row",
+        label: "Transcript: first row",
+        keys: &["home"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(FirstRow),
+    },
+    Command {
+        id: "transcript-last-row",
+        label: "Transcript: last row",
+        keys: &["end"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(LastRow),
+    },
+    Command {
+        id: "transcript-next-action",
+        label: "Transcript: next action",
+        keys: &["tab"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(NextAction),
+    },
+    Command {
+        id: "transcript-previous-action",
+        label: "Transcript: previous action",
+        keys: &["shift-tab"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(PreviousAction),
+    },
+    Command {
+        id: "transcript-copy",
+        label: "Transcript: copy focused content",
+        keys: &["ctrl-shift-c"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(CopyTranscript),
+    },
+    Command {
+        id: "transcript-focus-latest",
+        label: "Transcript: focus Jump to latest",
+        keys: &["alt-end"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(FocusLatest),
+    },
+    Command {
+        id: "transcript-leave",
+        label: "Leave transcript for composer",
+        keys: &["escape"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(LeaveTranscript),
     },
 ];
 

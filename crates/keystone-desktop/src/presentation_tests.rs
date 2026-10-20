@@ -60,6 +60,42 @@ fn key() -> ViewKey {
 }
 
 #[gpui::test]
+fn project_switch_releases_a_transcript_copy_action_and_restores_its_row(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    cx.update(|_, cx| crate::bind_keys(cx));
+    view.update(cx, |this, cx| {
+        let mut conversation = crate::Conversation::default();
+        conversation.push_local("project-local keyboard row");
+        this.conversations.insert(1, conversation);
+        cx.notify();
+    });
+    cx.simulate_keystrokes("ctrl-shift-t home tab");
+    let old_focus = view.update_in(cx, |this, window, _| {
+        let focus = this
+            .presentation
+            .current
+            .views
+            .keyboard_state(key())
+            .unwrap()
+            .action_focus
+            .clone();
+        assert!(focus.is_focused(window));
+        focus
+    });
+    pick(&view, cx, &dir.path().join("b"));
+    cx.update(|window, _| assert!(!old_focus.is_focused(window)));
+    cx.simulate_keystrokes("ctrl-l");
+    cx.simulate_input("draft after project switch");
+    pick(&view, cx, &dir.path().join("a"));
+    cx.simulate_keystrokes("ctrl-shift-t ctrl-shift-c");
+    let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(text.as_deref(), Some("project-local keyboard row"));
+    view.read_with(cx, |this, cx| {
+        assert_eq!(this.composer.read(cx).value(), "draft after project switch")
+    });
+}
+
+#[gpui::test]
 fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
     cx: &mut TestAppContext,
 ) {
