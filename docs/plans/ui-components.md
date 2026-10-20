@@ -1019,7 +1019,7 @@ Both prototypes are throwaway scratch crates outside git, so they have no branch
 
 ## Appendix D. Links and reading list
 
-- `docs/scope.md` lines 9, 13, and 17 for the product requirements.
+- The project navigation, file browsing, and notifications paragraphs under [Initial product](../scope.md#initial-product) for the product requirements.
 - `docs/design-system.md` for the component rules and the Sources section.
 - `docs/issues.md` for KS-009, KS-012, and KS-013.
 - `docs/performance.md` and `scripts/perf.py` for the perf method and the 20 percent noise floor.
