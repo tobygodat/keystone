@@ -23,6 +23,9 @@ pub struct Diagram {
     id: SharedString,
     source: SharedString,
     closed: bool,
+    copy_focus: Option<FocusHandle>,
+    toggle_focus: Option<FocusHandle>,
+    managed_focus: bool,
 }
 
 impl Diagram {
@@ -31,7 +34,25 @@ impl Diagram {
             id: id.into(),
             source: source.into(),
             closed,
+            copy_focus: None,
+            toggle_focus: None,
+            managed_focus: false,
         }
+    }
+
+    pub fn copy_focus(mut self, focus: &FocusHandle) -> Self {
+        self.copy_focus = Some(focus.clone());
+        self
+    }
+
+    pub fn toggle_focus(mut self, focus: &FocusHandle) -> Self {
+        self.toggle_focus = Some(focus.clone());
+        self
+    }
+
+    pub fn managed_focus(mut self) -> Self {
+        self.managed_focus = true;
+        self
     }
 }
 
@@ -49,6 +70,9 @@ struct DiagramState {
     copy_timer: Option<Task<()>>,
     source_focus: FocusHandle,
     copy_focus: FocusHandle,
+    copy_override: Option<FocusHandle>,
+    toggle_override: Option<FocusHandle>,
+    managed_focus: bool,
 }
 
 impl Drop for DiagramState {
@@ -69,6 +93,9 @@ impl RenderOnce for Diagram {
             )
         });
         state.update(cx, |state, cx| {
+            state.copy_override = self.copy_focus;
+            state.toggle_override = self.toggle_focus;
+            state.managed_focus = self.managed_focus;
             if state.source != self.source || state.closed != self.closed {
                 state.cancel.store(true, Ordering::Relaxed);
                 state.task = None;
@@ -146,6 +173,9 @@ impl DiagramState {
             copy_timer: None,
             source_focus: cx.focus_handle().tab_stop(true),
             copy_focus: cx.focus_handle().tab_stop(true),
+            copy_override: None,
+            toggle_override: None,
+            managed_focus: false,
         }
     }
 
@@ -391,7 +421,13 @@ impl Render for DiagramState {
                                     "Source"
                                 },
                             )
-                            .track_focus(&self.source_focus)
+                            .reserve_focus_ring()
+                            .when_some(
+                                self.toggle_override.as_ref().or_else(|| {
+                                    (!self.managed_focus).then_some(&self.source_focus)
+                                }),
+                                |button, focus| button.track_focus(focus).reveal_on_focus(),
+                            )
                             .aria_label("Toggle Mermaid source")
                             .debug_selector(|| format!("{}-toggle", self.id))
                             .on_click(cx.listener(
@@ -410,7 +446,13 @@ impl Render for DiagramState {
                     })
                     .child(
                         Button::new("copy", if self.copied { "Copied" } else { "Copy" })
-                            .track_focus(&self.copy_focus)
+                            .reserve_focus_ring()
+                            .when_some(
+                                self.copy_override
+                                    .as_ref()
+                                    .or_else(|| (!self.managed_focus).then_some(&self.copy_focus)),
+                                |button, focus| button.track_focus(focus).reveal_on_focus(),
+                            )
                             .aria_label("Copy Mermaid source")
                             .debug_selector(|| format!("{}-copy", self.id))
                             .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),

@@ -65,9 +65,13 @@ pub fn row(
                 let document = reply.unwrap_or_else(|| Arc::new(Document::parse(&item.text)));
                 let row_copy = item.status != ItemStatus::InProgress;
                 let markdown =
-                    Markdown::new(SharedString::from(format!("reply-{index}")), document);
+                    Markdown::new(SharedString::from(format!("reply-{index}")), document)
+                        .managed_focus();
                 let markdown = match &action {
                     Some((CopyTarget::Code(n), focus)) => markdown.copy_focus(*n, focus),
+                    Some((CopyTarget::DiagramToggle(n), focus)) => {
+                        markdown.diagram_toggle_focus(*n, focus)
+                    }
                     _ => markdown,
                 };
                 v_flex()

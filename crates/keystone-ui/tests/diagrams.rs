@@ -49,6 +49,75 @@ impl Render for Reply {
 }
 
 #[gpui::test]
+fn markdown_copy_focus_reaches_a_diagram_and_moves_without_stale_ownership(
+    cx: &mut TestAppContext,
+) {
+    struct FocusedReply {
+        block: usize,
+        focus: FocusHandle,
+    }
+    impl Render for FocusedReply {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Markdown::from_source(
+                "focus-reply",
+                "```mermaid\nflowchart TD\nA-->B\n```\n\n```text\nafter\n```\n\n```mermaid\npie\n\"A\" : 1\n```\n",
+            )
+            .managed_focus()
+            .copy_focus(self.block, &self.focus)
+        }
+    }
+    cx.executor().allow_parking();
+    cx.update(keystone_ui::init);
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        FocusedReply { block: 1, focus }
+    });
+    cx.run_until_parked();
+    let selectors = [
+        "focus-reply-diagram-1-toggle",
+        "focus-reply-diagram-1-copy",
+        "focus-reply-diagram-3-toggle",
+        "focus-reply-diagram-3-copy",
+    ];
+    let before = selectors.map(|selector| cx.debug_bounds(selector).unwrap());
+    for block in [3, 2, 1] {
+        view.update(cx, |view, cx| {
+            view.block = block;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for (selector, before) in selectors.into_iter().zip(before) {
+            let after = cx.debug_bounds(selector).unwrap();
+            assert_eq!(
+                (before.origin.x, before.size.width),
+                (after.origin.x, after.size.width),
+                "{selector} shifted when focus moved"
+            );
+        }
+    }
+    for (block, source) in [
+        (1, "flowchart TD\nA-->B\n"),
+        (3, "pie\n\"A\" : 1\n"),
+        (2, "after"),
+        (1, "flowchart TD\nA-->B\n"),
+    ] {
+        view.update(cx, |view, cx| {
+            view.block = block;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        press(cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+                .as_deref(),
+            Some(source),
+        );
+    }
+}
+
+#[gpui::test]
 fn streaming_and_closed_diagrams_copy_exact_source_with_keyboard(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     cx.update(keystone_ui::init);

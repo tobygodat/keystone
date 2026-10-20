@@ -626,6 +626,8 @@ pub struct Markdown {
     id: SharedString,
     document: Arc<Document>,
     copy_focus: Option<(usize, FocusHandle)>,
+    diagram_toggle_focus: Option<(usize, FocusHandle)>,
+    managed_focus: bool,
 }
 
 impl Markdown {
@@ -636,6 +638,8 @@ impl Markdown {
             id: id.into(),
             document,
             copy_focus: None,
+            diagram_toggle_focus: None,
+            managed_focus: false,
         }
     }
 
@@ -649,6 +653,16 @@ impl Markdown {
         self.copy_focus = Some((block, focus.clone()));
         self
     }
+
+    pub fn diagram_toggle_focus(mut self, block: usize, focus: &FocusHandle) -> Self {
+        self.diagram_toggle_focus = Some((block, focus.clone()));
+        self
+    }
+
+    pub fn managed_focus(mut self) -> Self {
+        self.managed_focus = true;
+        self
+    }
 }
 
 /// Per-render state: the base text style and counters for unique child IDs. Code blocks
@@ -659,6 +673,8 @@ struct Ctx {
     texts: usize,
     code_blocks: usize,
     copy_focus: Option<(usize, FocusHandle)>,
+    diagram_toggle_focus: Option<(usize, FocusHandle)>,
+    managed_focus: bool,
 }
 
 impl RenderOnce for Markdown {
@@ -675,6 +691,8 @@ impl RenderOnce for Markdown {
             texts: 0,
             code_blocks: 0,
             copy_focus: self.copy_focus,
+            diagram_toggle_focus: self.diagram_toggle_focus,
+            managed_focus: self.managed_focus,
         };
         let blocks: Vec<_> = self
             .document
@@ -737,6 +755,19 @@ fn render_block(block: &Block, ctx: &mut Ctx, window: &mut Window, cx: &mut App)
                 format!("{}-diagram-{}", ctx.id, ctx.code_blocks),
                 source.clone(),
                 *closed,
+            )
+            .when(ctx.managed_focus, |diagram| diagram.managed_focus())
+            .when_some(
+                ctx.copy_focus
+                    .as_ref()
+                    .filter(|(block, _)| *block == ctx.code_blocks),
+                |diagram, (_, focus)| diagram.copy_focus(focus),
+            )
+            .when_some(
+                ctx.diagram_toggle_focus
+                    .as_ref()
+                    .filter(|(block, _)| *block == ctx.code_blocks),
+                |diagram, (_, focus)| diagram.toggle_focus(focus),
             )
             .into_any_element()
         }

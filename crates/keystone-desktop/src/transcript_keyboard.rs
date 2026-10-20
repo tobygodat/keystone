@@ -29,6 +29,13 @@ fn code_actions<'a>(block: &'a Block, actions: &mut Vec<(CopyTarget, &'a str)>, 
             *n += 1;
             actions.push((CopyTarget::Code(*n), code.as_ref()));
         }
+        Block::Diagram { source, closed } => {
+            *n += 1;
+            if *closed {
+                actions.push((CopyTarget::DiagramToggle(*n), source.as_ref()));
+            }
+            actions.push((CopyTarget::Code(*n), source.as_ref()));
+        }
         Block::Quote(blocks) => {
             for block in blocks {
                 code_actions(block, actions, n);

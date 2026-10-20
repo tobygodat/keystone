@@ -3060,6 +3060,173 @@ mod tests {
     }
 
     #[gpui::test]
+    fn transcript_keyboard_diagrams_toggle_copy_and_preserve_code_ordinals(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn image(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            loop {
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                if cx.debug_bounds(selector).is_some() {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "{selector}");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        fn keys(cx: &mut gpui::VisualTestContext, strokes: &str) {
+            for key in strokes.split_whitespace() {
+                cx.simulate_keystrokes(key);
+                cx.simulate_event(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                });
+                cx.run_until_parked();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v| !v.conversations[&1].is_loading());
+        let reply = "```text\nbefore\n```\n\n> ```mermaid\n> flowchart TD\n> A-->B\n> ```\n\n```text\nafter\n```\n\n- ```mermaid\n  pie\n  \"A\" : 1\n  ```\n";
+        view.update(cx, |v, cx| {
+            v.conversation(1).apply(Event::ItemCompleted(Item {
+                id: "diagrams".into(),
+                kind: ItemKind::AgentMessage,
+                text: reply.into(),
+                status: ItemStatus::Completed,
+            }));
+            v.commit(1);
+            cx.notify();
+        });
+        let clipboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        };
+        keys(cx, "ctrl-shift-t end tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some(reply));
+        keys(cx, "tab space");
+        assert_eq!(clipboard(cx).as_deref(), Some("before"));
+        image(cx, "reply-0-diagram-2-image");
+        keys(cx, "tab space");
+        assert!(cx.debug_bounds("reply-0-diagram-2-source").is_some());
+        keys(cx, "ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("flowchart TD\nA-->B\n"));
+        keys(cx, "enter");
+        assert!(cx.debug_bounds("reply-0-diagram-2-source").is_none());
+        keys(cx, "tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some("flowchart TD\nA-->B\n"));
+        keys(cx, "tab space");
+        assert_eq!(clipboard(cx).as_deref(), Some("after"));
+        image(cx, "reply-0-diagram-4-image");
+        keys(cx, "tab enter");
+        assert!(cx.debug_bounds("reply-0-diagram-4-source").is_some());
+        keys(cx, "tab space");
+        assert_eq!(clipboard(cx).as_deref(), Some("pie\n\"A\" : 1\n"));
+        keys(cx, "shift-tab space");
+        assert!(cx.debug_bounds("reply-0-diagram-4-source").is_none());
+        keys(cx, "tab ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("pie\n\"A\" : 1\n"));
+        view.read_with(cx, |v, _| {
+            assert!(!v.conversations[&1].running);
+            assert_eq!(v.conversations[&1].rows.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_streaming_diagram_keeps_copy_identity_when_closed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn keys(cx: &mut gpui::VisualTestContext, strokes: &str) {
+            for key in strokes.split_whitespace() {
+                cx.simulate_keystrokes(key);
+                cx.simulate_event(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                });
+                cx.run_until_parked();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v| !v.conversations[&1].is_loading());
+        let source = "flowchart TD\n  A[é] --> B  \n";
+        view.update(cx, |v, cx| {
+            v.conversation(1).apply(Event::ItemStarted(Item {
+                id: "stream-diagram".into(),
+                kind: ItemKind::AgentMessage,
+                text: format!("```mermaid\n{source}"),
+                status: ItemStatus::InProgress,
+            }));
+            v.commit(1);
+            cx.notify();
+        });
+        let clipboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+        };
+        keys(cx, "ctrl-shift-t end tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some(source));
+        assert!(cx.debug_bounds("reply-0-diagram-1-toggle").is_none());
+        view.update(cx, |v, cx| {
+            v.conversation(1).apply(Event::ItemCompleted(Item {
+                id: "stream-diagram".into(),
+                kind: ItemKind::AgentMessage,
+                text: format!("```mermaid\n{source}```\n\n```text\nafter\n```\n"),
+                status: ItemStatus::Completed,
+            }));
+            v.commit(1);
+            cx.notify();
+        });
+        keys(cx, "space ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some(source));
+        keys(cx, "tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some("after"));
+        keys(cx, "shift-tab enter");
+        assert_eq!(clipboard(cx).as_deref(), Some(source));
+    }
+
+    #[gpui::test]
+    fn transcript_keyboard_diagrams_do_not_expose_untracked_tab_stops(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v| !v.conversations[&1].is_loading());
+        view.update(cx, |v, cx| {
+            v.conversation(1).apply(Event::ItemCompleted(Item {
+                id: "diagram-tab-stops".into(),
+                kind: ItemKind::AgentMessage,
+                text: "intro\n\n```mermaid\nflowchart TD\nA-->B\n```\n".into(),
+                status: ItemStatus::Completed,
+            }));
+            v.commit(1);
+            cx.notify();
+        });
+        for from_composer in [false, true] {
+            view.update_in(cx, |v, window, cx| {
+                if from_composer {
+                    v.focus_composer(window, cx);
+                } else {
+                    v.focus.focus(window, cx);
+                }
+            });
+            for step in 0..64 {
+                cx.simulate_keystrokes(if from_composer { "tab" } else { "shift-tab" });
+                cx.run_until_parked();
+                view.update_in(cx, |v, window, cx| {
+                    let views = &mut v.presentation.current.views;
+                    assert!(
+                        !views.contains_focus(MAIN_1, window, cx)
+                            || views.focused_region(MAIN_1, window)
+                            || views.keyboard_state(MAIN_1).is_some_and(|k| {
+                                k.action_focus.is_focused(window)
+                                    || k.jump_focus.is_focused(window)
+                            }),
+                        "generic Tab entered a diagram outside the transcript focus model at step {step}"
+                    );
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
     fn transcript_escape_dismisses_customize_and_menus_before_leaving(
         cx: &mut gpui::TestAppContext,
     ) {

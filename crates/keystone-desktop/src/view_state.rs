@@ -32,6 +32,7 @@ pub struct TranscriptKeyboard {
 pub enum CopyTarget {
     Row,
     Code(usize),
+    DiagramToggle(usize),
 }
 
 #[derive(Default)]

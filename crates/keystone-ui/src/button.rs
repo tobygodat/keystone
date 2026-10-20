@@ -53,6 +53,7 @@ struct Common {
     debug_selector: Option<String>,
     focus: Option<FocusHandle>,
     reveal_on_focus: bool,
+    reserve_focus_ring: bool,
     aria_label: Option<SharedString>,
 }
 
@@ -69,6 +70,7 @@ impl Common {
             debug_selector: None,
             focus: None,
             reveal_on_focus: false,
+            reserve_focus_ring: false,
             aria_label: None,
         }
     }
@@ -112,10 +114,11 @@ impl Common {
         // The ring is a border that is always there, so focus never changes the size.
         let ring = colors.border_focused;
         let reveal = self.reveal_on_focus;
-        el.when_some(self.focus, |d, focus| {
+        el.when(self.reserve_focus_ring || self.focus.is_some(), |d| {
+            d.border_2().border_color(ring.opacity(0.))
+        })
+        .when_some(self.focus, |d, focus| {
             d.track_focus(&focus)
-                .border_2()
-                .border_color(ring.opacity(0.))
                 .focus(move |s| s.border_color(ring))
                 .when(reveal, |d| {
                     d.relative().child(
@@ -188,6 +191,11 @@ macro_rules! common_builders {
 
         pub fn reveal_on_focus(mut self) -> Self {
             self.common.reveal_on_focus = true;
+            self
+        }
+
+        pub fn reserve_focus_ring(mut self) -> Self {
+            self.common.reserve_focus_ring = true;
             self
         }
 
