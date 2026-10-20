@@ -1,3 +1,5 @@
+mod app_state;
+use app_state::{AppState, RuntimeChanged};
 mod arrangement;
 mod arrangement_editor;
 mod commands;
@@ -165,8 +167,74 @@ struct FolderWarning {
     revision: Revision,
 }
 
+struct DesktopApp {
+    state: Entity<AppState>,
+    root: Option<WeakEntity<Keystone>>,
+}
+
+impl gpui::Global for DesktopApp {}
+
+fn install_app_state(store: Store, cx: &mut App) -> Entity<AppState> {
+    let state = cx.new(|cx| AppState::new(store, cx));
+    cx.set_quit_mode(gpui::QuitMode::Explicit);
+    cx.set_global(DesktopApp {
+        state: state.clone(),
+        root: None,
+    });
+    cx.on_action(|_: &Quit, cx| request_quit(cx));
+    state
+}
+
+fn register_window(root: WeakEntity<Keystone>, window: &Window, cx: &mut App) {
+    cx.global_mut::<DesktopApp>().root = Some(root);
+    window.on_window_should_close(cx, |_, cx| {
+        request_quit(cx);
+        false
+    });
+}
+
+fn request_quit(cx: &mut App) {
+    let Some(app) = cx.try_global::<DesktopApp>() else {
+        return;
+    };
+    let state = app.state.clone();
+    let root = app.root.clone();
+    if !state.update(cx, |state, _| state.reserve_quit()) {
+        return;
+    }
+    cx.defer(move |cx| {
+        let draft = match root.as_ref().and_then(WeakEntity::upgrade) {
+            Some(root) => root
+                .downgrade()
+                .update(cx, |view, cx| {
+                    view.draft_save_task = None;
+                    view.composer_draft(cx)
+                })
+                .map_err(|error| format!("Could not collect the live window's draft. {error}")),
+            None => Ok(None),
+        };
+        let draft = match draft {
+            Ok(draft) => draft,
+            Err(error) => {
+                state.update(cx, |state, cx| state.quit_failed(error, cx));
+                return;
+            }
+        };
+        if state.update(cx, |state, cx| state.save(draft, cx)).is_err() {
+            return;
+        }
+        state.update(cx, |state, cx| state.teardown(cx));
+        if let Some(root) = root {
+            let _ = root.update(cx, |view, _| {
+                view.customize_agent = None;
+            });
+        }
+        cx.quit();
+    });
+}
+
 struct Keystone {
-    store: Store,
+    state: Entity<AppState>,
     error: Option<String>,
     folder_warning: Option<FolderWarning>,
     composer: Entity<TextInput>,
@@ -183,7 +251,6 @@ struct Keystone {
     /// The session whose model menu is open. It closes with that session's first send,
     /// with a new session, and with a selection change, so it never shows for another.
     model_menu: Option<u64>,
-    catalogs: Catalogs,
     /// Full access chosen from the menu for this session, waiting in the confirmation
     /// dialog. Nothing is saved or sent until Confirm.
     confirm_full_access: Option<FullAccessConfirmation>,
@@ -196,14 +263,10 @@ struct Keystone {
     settled_open: bool,
     fixture: bool,
     /// The shared Codex app-server connection, created on the first message.
-    codex: Option<CodexConnection>,
     /// Claude Code processes, one per session, created on the first message.
-    claude: Option<ClaudeConnection>,
-    conversations: HashMap<u64, Conversation>,
     /// Each session's log of completed items, read and written off the UI thread.
-    logs: Logs,
     presentation: Presentation,
-    wake: Wake,
+    customize_wake: Wake,
     /// Scrolls the sample transcript, which is not a list.
     transcript_scroll: ScrollHandle,
     /// Each reply row's Markdown and how much of it is shown. The open session's
@@ -219,14 +282,153 @@ struct Keystone {
 }
 
 impl Keystone {
-    fn new(store: Store, fixture: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn runtime_changed(&mut self, changed: &RuntimeChanged, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let now = self.clock.now();
+        for change in &changed.rows {
+            let Some(conversation) = state.conversations().get(&change.session) else {
+                continue;
+            };
+            self.presentation.invalidate(
+                change.session,
+                conversation.rows.len().max(change.rows),
+                &change.changed,
+                true,
+            );
+            if change.selected && state.store().workspace().selected() == Some(change.session) {
+                if let Some(conversation) = state.conversations().get(&change.session) {
+                    for &(index, bytes, status) in &change.replies {
+                        if let Some(Row::Item(item)) = conversation.rows.get(index)
+                            && item.kind == ItemKind::AgentMessage
+                        {
+                            self.replies.get_mut().observe_text(
+                                (change.session, index),
+                                item.text.get(..bytes).unwrap_or(&item.text),
+                                status,
+                                now,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        self.reveal(cx);
+        if changed.sidebar {
+            self.refresh(cx);
+        } else {
+            cx.notify();
+        }
+    }
+    fn send_message(&mut self, draft: ComposerDraft, window: &mut Window, cx: &mut Context<Self>) {
+        let id = draft.session;
+        let sent = self
+            .state
+            .update(cx, |state, cx| state.send_message(draft, cx));
+        if self.state.read(cx).session(id).is_some_and(|s| s.started()) {
+            self.model_menu = None;
+        }
+        if !sent {
+            return;
+        }
+        self.composer
+            .update(cx, |input, cx| input.set_value(String::new(), cx));
+        self.save_draft(cx);
+        if let Some(key) = self
+            .presentation
+            .current
+            .views
+            .send_target(&self.presentation.current.arrangement.visible, id)
+        {
+            self.presentation.current.views.scroll_to_end(key);
+        }
+        self.composer.focus_handle(cx).focus(window, cx);
+        self.refresh(cx);
+    }
+    fn stop_turn(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.focus_handle(cx).focus(window, cx);
+        self.state.update(cx, |state, cx| state.stop_turn(id, cx));
+    }
+    fn answer(
+        &mut self,
+        id: u64,
+        request: RequestId,
+        allow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer.focus_handle(cx).focus(window, cx);
+        self.state
+            .update(cx, |state, cx| state.answer(id, request, allow, cx));
+    }
+    fn selected_session<'a>(&self, cx: &'a App) -> Option<&'a keystone_core::Session> {
+        self.state.read(cx).selected_session()
+    }
+    fn session<'a>(&self, id: u64, cx: &'a App) -> Option<&'a keystone_core::Session> {
+        self.state.read(cx).session(id)
+    }
+    fn provider(&self, id: u64, cx: &App) -> Option<Provider> {
+        self.state.read(cx).provider(id)
+    }
+    fn model_selection<'a>(
+        &self,
+        id: u64,
+        provider: Provider,
+        cx: &'a App,
+    ) -> model_selector::Selection<'a> {
+        self.state.read(cx).model_selection(id, provider)
+    }
+    fn request_catalog(&mut self, id: u64, provider: Provider, cx: &mut Context<Self>) {
+        self.state
+            .update(cx, |state, cx| state.request_catalog(id, provider, cx));
+    }
+    fn retry_catalog(&mut self, id: u64, provider: Provider, cx: &mut Context<Self>) {
+        self.state
+            .update(cx, |state, cx| state.retry_catalog(id, provider, cx));
+    }
+    fn conversation_folder(&self, id: u64, cx: &App) -> Option<presentation::ConversationFolder> {
+        self.state.read(cx).conversation_folder(id)
+    }
+    fn folder_error(&mut self, id: u64, error: String, cx: &mut Context<Self>) {
+        self.state
+            .update(cx, |state, cx| state.folder_error(id, error, cx));
+    }
+    #[cfg(test)]
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| state.pump(cx));
+    }
+    #[cfg(test)]
+    fn receive(&mut self, reports: Vec<Report>, events: Vec<(u64, Event)>, cx: &mut Context<Self>) {
+        self.state
+            .update(cx, |state, cx| state.receive(reports, events, cx));
+    }
+    #[cfg(test)]
+    fn commit(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.commit(id);
+            state.publish(cx);
+        });
+    }
+    #[cfg(test)]
+    fn flush_logs(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.state.update(cx, |state, cx| state.flush_logs(cx)) {
+            self.error = Some(error);
+            cx.notify();
+        }
+    }
+
+    fn new(
+        state: Entity<AppState>,
+        fixture: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let composer = cx.new(|cx| {
             TextInput::new("Write a draft…", InputMode::Multiline, cx)
                 .text_style(TextSize::Body, Color::Strong)
         });
         let search = cx.new(|cx| TextInput::new("Search", InputMode::SingleLine, cx));
         let rename_input = cx.new(|cx| TextInput::new("Session title", InputMode::SingleLine, cx));
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
                 this.draft_save_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor()
@@ -251,12 +453,17 @@ impl Keystone {
             hovered: None,
             shows_time: false,
         });
-        // Reader threads wake this task when provider events arrive. Each wake-up drains
-        // everything that arrived, so a burst of streamed text costs one update.
         let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
         cx.spawn(async move |this, cx| {
             while wake_rx.next().await.is_some() {
-                if this.update(cx, |this, cx| this.pump(cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.receive_customization() {
+                            this.refresh(cx);
+                        }
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -283,19 +490,20 @@ impl Keystone {
         let wake: Wake = Arc::new(move || {
             let _ = wake_tx.unbounded_send(());
         });
-        let sessions_dir = store
-            .path()
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("sessions");
         let project_dir = std::env::var_os("KEYSTONE_PROJECT_DIR")
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let project = keystone_core::ProjectId::new(&project_dir).map_err(|e| e.to_string());
-        let presentation = Presentation::new(project, store.workspace().preferences(), cx);
+        let preferences = state.read(cx).store().workspace().preferences().clone();
+        let presentation = Presentation::new(project, &preferences, cx);
+        subscriptions.push(
+            cx.subscribe(&state, |this, _, changed: &RuntimeChanged, cx| {
+                this.runtime_changed(changed, cx);
+            }),
+        );
         let mut result = Self {
-            store,
+            state,
             error: None,
             folder_warning: None,
             composer,
@@ -310,19 +518,14 @@ impl Keystone {
             settings: None,
             approval_menu: false,
             model_menu: None,
-            catalogs: Catalogs::default(),
             confirm_full_access: None,
             renaming: None,
             rename_input,
             window_drag: false,
             settled_open: false,
             fixture,
-            codex: None,
-            claude: None,
-            conversations: HashMap::new(),
-            logs: Logs::new(sessions_dir, wake.clone()),
             presentation,
-            wake,
+            customize_wake: wake,
             transcript_scroll: ScrollHandle::new(),
             replies: RefCell::default(),
             reveal_task: None,
@@ -344,7 +547,12 @@ impl Keystone {
     fn apply_theme(&self, window: &Window, cx: &mut App) {
         keystone_ui::set_theme(
             settings::theme_for(
-                self.store.workspace().preferences().appearance(),
+                self.state
+                    .read(cx)
+                    .store()
+                    .workspace()
+                    .preferences()
+                    .appearance(),
                 window,
                 cx,
             ),
@@ -358,9 +566,19 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut appearance = self.store.workspace().preferences().appearance().clone();
+        let mut appearance = self
+            .state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .appearance()
+            .clone();
         change(&mut appearance);
-        self.error = match self.store.set_appearance(appearance) {
+        self.error = match self
+            .state
+            .update(cx, |state, cx| state.set_appearance(appearance, cx))
+        {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(format!("Settings not saved. {error}")),
         };
@@ -377,11 +595,13 @@ impl Keystone {
 
     fn sync_draft(&mut self, cx: &mut Context<Self>) {
         let value = self
-            .store
+            .state
+            .read(cx)
+            .store()
             .workspace()
             .sessions()
             .iter()
-            .find(|s| Some(s.id()) == self.store.workspace().selected())
+            .find(|s| Some(s.id()) == self.state.read(cx).store().workspace().selected())
             .map(|s| s.draft().to_owned())
             .unwrap_or_default();
         self.composer
@@ -389,15 +609,15 @@ impl Keystone {
     }
 
     fn save_draft(&mut self, cx: &mut Context<Self>) -> bool {
-        let session_id = self.store.workspace().selected();
+        let session_id = self.state.read(cx).store().workspace().selected();
         let result = if let Some(id) = session_id {
             let draft = self.composer.read(cx).value().to_owned();
-            self.store
-                .set_draft(id, draft)
+            self.state
+                .update(cx, |state, cx| state.set_draft(id, draft, cx))
                 .map(|applied| applied.durability)
         } else {
-            self.store
-                .sync_pending()
+            self.state
+                .update(cx, |state, cx| state.sync_pending(cx))
                 .map(|()| Durability::Synced)
                 .map_err(Into::into)
         };
@@ -419,15 +639,13 @@ impl Keystone {
 
     /// Returns false, with the error shown, when the draft or the session cannot be
     /// saved, so the app stays open. The logs are written either way.
+    #[cfg(test)]
     fn save_before_exit(&mut self, cx: &mut Context<Self>) -> bool {
-        let saved = self.save_draft(cx);
-        self.flush_logs(cx);
-        if let Err(error) = self.store.sync_pending() {
-            self.error = Some(format!("Could not save before closing. {error}"));
-            cx.notify();
-            return false;
-        }
-        saved
+        self.draft_save_task = None;
+        let draft = self.composer_draft(cx);
+        self.state
+            .update(cx, |state, cx| state.save(draft, cx))
+            .is_ok()
     }
 
     fn create(&mut self, provider: Provider, cx: &mut Context<Self>) {
@@ -442,16 +660,18 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
-        if let Some(left) = self.store.workspace().selected() {
+        if let Some(left) = self.state.read(cx).store().workspace().selected() {
             let rows = self.replies.get_mut().settle(left);
-            self.invalidate(left, ranges(rows), false);
+            self.invalidate(left, ranges(rows), false, cx);
         }
-        let previous = self.store.workspace().selected();
-        self.error = match self.store.create(provider, &directory, now_ms()) {
+        let previous = self.state.read(cx).store().workspace().selected();
+        self.error = match self.state.update(cx, |state, cx| {
+            state.create(provider, &directory, now_ms(), cx)
+        }) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
-        if self.store.workspace().selected() != previous {
+        if self.state.read(cx).store().workspace().selected() != previous {
             self.presentation.selection_changed();
             self.approval_menu = false;
             self.confirm_full_access = None;
@@ -464,11 +684,13 @@ impl Keystone {
 
     fn toggle_settle(&mut self, cx: &mut Context<Self>) {
         let selected = self
-            .store
+            .state
+            .read(cx)
+            .store()
             .workspace()
             .sessions()
             .iter()
-            .find(|s| Some(s.id()) == self.store.workspace().selected())
+            .find(|s| Some(s.id()) == self.state.read(cx).store().workspace().selected())
             .map(|s| (s.id(), s.settled()));
         if let Some((id, settled)) = selected {
             self.settle(id, !settled, cx);
@@ -479,7 +701,9 @@ impl Keystone {
     fn settle(&mut self, id: u64, settled: bool, cx: &mut Context<Self>) {
         if settled
             && self
-                .conversations
+                .state
+                .read(cx)
+                .conversations()
                 .get(&id)
                 .is_some_and(Conversation::awaiting_approval)
         {
@@ -490,7 +714,10 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
-        self.error = match self.store.set_settled(id, settled) {
+        self.error = match self
+            .state
+            .update(cx, |state, cx| state.set_settled(id, settled, cx))
+        {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
@@ -511,21 +738,21 @@ impl Keystone {
     }
 
     fn select(&mut self, id: u64, cx: &mut Context<Self>) {
-        let previous = self.store.workspace().selected();
+        let previous = self.state.read(cx).store().workspace().selected();
         if !self.save_draft(cx) {
             return;
         }
-        if let Some(left) = self.store.workspace().selected() {
+        if let Some(left) = self.state.read(cx).store().workspace().selected() {
             let rows = self.replies.get_mut().settle(left);
-            self.invalidate(left, ranges(rows), false);
+            self.invalidate(left, ranges(rows), false, cx);
         }
         self.replies.get_mut().forget(id);
         self.presentation.current.arrangement.sidebar_overlay = false;
-        self.error = match self.store.select(id) {
+        self.error = match self.state.update(cx, |state, cx| state.select(id, cx)) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
-        if self.store.workspace().selected() != previous {
+        if self.state.read(cx).store().workspace().selected() != previous {
             self.presentation.selection_changed();
             self.approval_menu = false;
             self.model_menu = None;
@@ -538,7 +765,7 @@ impl Keystone {
 
     fn start(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
         self.create(provider, cx);
-        if self.error.is_none() && self.store.workspace().selected().is_some() {
+        if self.error.is_none() && self.state.read(cx).store().workspace().selected().is_some() {
             self.composer.focus_handle(cx).focus(window, cx);
         }
     }
@@ -570,7 +797,8 @@ impl Keystone {
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
         if self.presentation.current.arrangement.fitted {
-            self.presentation.current.arrangement.sidebar_overlay = self.arrangement_has_sidebar()
+            self.presentation.current.arrangement.sidebar_overlay = self
+                .arrangement_has_sidebar(cx)
                 && !self.presentation.current.arrangement.sidebar_overlay;
         } else {
             self.presentation.current.sidebar = !self.presentation.current.sidebar;
@@ -664,11 +892,7 @@ impl Keystone {
                             IconButton::new("close", IconName::Close)
                                 .debug_selector(|| "close".into())
                                 .tooltip(Tooltip::with_key("Close window", "Ctrl+Q"))
-                                .on_click(self.scoped_listener(cx, |this, _, window, cx| {
-                                    if this.save_before_exit(cx) {
-                                        window.remove_window();
-                                    }
-                                })),
+                                .on_click(|_, _, cx| request_quit(cx)),
                         ),
                     cx,
                 ),
@@ -678,7 +902,7 @@ impl Keystone {
 
     /// Opens the rename dialog for the selected session, filled with its title.
     fn open_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.selected_session(cx) else {
             return;
         };
         let (id, title) = (session.id(), session.title().to_owned());
@@ -708,7 +932,10 @@ impl Keystone {
             return;
         };
         let title = self.rename_input.read(cx).value().to_owned();
-        match self.store.rename(id, &title) {
+        match self
+            .state
+            .update(cx, |state, cx| state.rename(id, &title, cx))
+        {
             Ok(applied) => {
                 self.error = durability_warning(applied.durability);
                 self.close_rename(window, cx);
@@ -960,7 +1187,7 @@ impl Keystone {
     /// The welcome screen renders no composer, so focusing it there would strand the
     /// window's shortcuts; the root keeps them working.
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.store.workspace().selected().is_some() {
+        if self.state.read(cx).store().workspace().selected().is_some() {
             self.composer.focus_handle(cx).focus(window, cx);
         } else {
             self.focus.focus(window, cx);
@@ -974,10 +1201,10 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let colors = cx.theme().colors;
-        let conversation = current.and_then(|(id, _)| self.conversations.get(&id));
+        let conversation = current.and_then(|(id, _)| self.state.read(cx).conversations().get(&id));
         let running = conversation.is_some_and(|c| c.running);
         let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
-        let mode = self.selected_session().map(|s| s.approval_mode());
+        let mode = self.selected_session(cx).map(|s| s.approval_mode());
         let can_send = current.is_some() && !self.composer.read(cx).value().trim().is_empty();
         let field = div()
             .id("composer-field")
@@ -1011,7 +1238,7 @@ impl Keystone {
                     "Ctrl+Enter to send · Enter for a new line"
                 };
                 let id = session;
-                let folder = self.conversation_folder(id).unwrap();
+                let folder = self.conversation_folder(id, cx).unwrap();
                 let action = folder.clone();
                 let project = div()
                     .id("conversation-folder")
@@ -1024,7 +1251,7 @@ impl Keystone {
                             .track_focus(&self.presentation.current.folder_focus)
                             .debug_selector(|| "project".into())
                             .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
-                                if this.store.workspace().selected() != Some(id) {
+                                if this.state.read(cx).store().workspace().selected() != Some(id) {
                                     return;
                                 }
                                 match &action {
@@ -1194,12 +1421,6 @@ impl Keystone {
             }))
     }
 
-    fn selected_session(&self) -> Option<&keystone_core::Session> {
-        let workspace = self.store.workspace();
-        let id = workspace.selected()?;
-        workspace.sessions().iter().find(|s| s.id() == id)
-    }
-
     /// The session's provider and model as one button, with the menu that chooses
     /// them while the session has not sent.
     fn model_selector(
@@ -1209,7 +1430,7 @@ impl Keystone {
         window_width: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selection = self.model_selection(session, provider);
+        let selection = self.model_selection(session, provider, cx);
         let handlers = model_selector::Handlers {
             open_change: Rc::new(cx.listener(move |this, open: &bool, _, cx| {
                 this.model_menu = open.then_some(session);
@@ -1234,34 +1455,6 @@ impl Keystone {
         model_selector::render(selection, open, handlers, window_width, cx)
     }
 
-    fn model_selection(&self, session: u64, provider: Provider) -> model_selector::Selection<'_> {
-        let saved = self.session(session);
-        let choices = match self.conversation_folder(session) {
-            Some(presentation::ConversationFolder::Recorded(directory)) => {
-                self.catalogs.choices(&CatalogKey {
-                    provider,
-                    directory,
-                })
-            }
-            Some(presentation::ConversationFolder::LegacyMissing) => {
-                Choices::Unavailable("Choose a conversation folder to load choices.")
-            }
-            Some(presentation::ConversationFolder::Unsupported) | None => Choices::Unavailable(
-                "Choices need this conversation's saved folder, which this version cannot use.",
-            ),
-        };
-        model_selector::Selection {
-            provider,
-            model: saved.and_then(|s| s.model()),
-            reported_model: self
-                .conversations
-                .get(&session)
-                .and_then(|c| c.reported_model.as_deref()),
-            started: saved.is_none_or(|s| s.started()),
-            choices,
-        }
-    }
-
     /// A provider chosen in the model menu. The session's model returns to the
     /// provider's default and the menu stays open on that provider's catalog. The
     /// current provider just closes the menu.
@@ -1272,15 +1465,17 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(current) = self.session(session).filter(|s| !s.started()) else {
+        let Some(current) = self.session(session, cx).filter(|s| !s.started()) else {
             return self.close_model_menu(window, cx);
         };
         if current.provider() == provider {
             return self.close_model_menu(window, cx);
         }
-        match self.store.set_provider(session, provider) {
+        match self
+            .state
+            .update(cx, |state, cx| state.set_provider(session, provider, cx))
+        {
             Ok(applied) => {
-                self.conversation(session).clear_provider_notice();
                 self.error = durability_warning(applied.durability);
                 self.request_catalog(session, provider, cx);
             }
@@ -1302,11 +1497,14 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) {
         if let Some(current) = self
-            .session(session)
+            .session(session, cx)
             .filter(|s| !s.started() && s.provider() == provider)
             && current.model() != model.as_deref()
         {
-            self.error = match self.store.set_model(session, model) {
+            self.error = match self
+                .state
+                .update(cx, |state, cx| state.set_model(session, model, cx))
+            {
                 Ok(applied) => durability_warning(applied.durability),
                 Err(error) => Some(format!("Model not saved. {error}")),
             };
@@ -1320,44 +1518,6 @@ impl Keystone {
         cx.notify();
     }
 
-    fn request_catalog(&mut self, session: u64, provider: Provider, cx: &mut Context<Self>) {
-        let Some(key) = self.catalog_key(session, provider) else {
-            return;
-        };
-        let directory = key.directory.clone();
-        if self.catalogs.ask(key, session) {
-            self.connection(provider)
-                .request_catalog(session, directory.as_str());
-            cx.notify();
-        }
-    }
-
-    /// Forgets a failed catalog and asks again.
-    fn retry_catalog(&mut self, session: u64, provider: Provider, cx: &mut Context<Self>) {
-        if let Some(key) = self.catalog_key(session, provider) {
-            self.catalogs.clear(&key);
-        }
-        self.request_catalog(session, provider, cx);
-    }
-
-    fn catalog_key(&self, session: u64, provider: Provider) -> Option<CatalogKey> {
-        match self.conversation_folder(session)? {
-            presentation::ConversationFolder::Recorded(directory) => Some(CatalogKey {
-                provider,
-                directory,
-            }),
-            _ => None,
-        }
-    }
-
-    fn session(&self, id: u64) -> Option<&keystone_core::Session> {
-        self.store
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| s.id() == id)
-    }
-
     /// The session's approval mode, as a menu of every mode with what it allows. A
     /// `narrow` composer shows only the mode's icon, and names the mode in its tooltip.
     fn approval_menu(
@@ -1367,7 +1527,7 @@ impl Keystone {
         narrow: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let session = self.store.workspace().selected();
+        let session = self.state.read(cx).store().workspace().selected();
         let applies = if running {
             "a change applies from the next turn"
         } else {
@@ -1410,7 +1570,7 @@ impl Keystone {
                     .checked(choice == mode)
                     .debug_selector(|| format!("approval-{}", choice.slug()))
                     .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                        if this.store.workspace().selected() != session {
+                        if this.state.read(cx).store().workspace().selected() != session {
                             return;
                         }
                         this.choose_approval_mode(choice, window, cx)
@@ -1427,7 +1587,7 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) {
         self.approval_menu = false;
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.selected_session(cx) else {
             return;
         };
         let (id, current) = (session.id(), session.approval_mode());
@@ -1449,13 +1609,13 @@ impl Keystone {
     /// The confirmation for Full access, while it is open.
     fn full_access_dialog(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let confirmation = self.confirm_full_access.as_ref()?;
-        let provider = provider_name(self.provider(confirmation.session)?);
+        let provider = provider_name(self.provider(confirmation.session, cx)?);
         let focus = &confirmation.focus;
         let cancel_identity = confirmation.identity.clone();
         let confirm_identity = confirmation.identity.clone();
         let cancel = self.scoped_listener(cx, move |this, _: &(), window, cx| {
             if this
-                .take_full_access_confirmation(&cancel_identity)
+                .take_full_access_confirmation(&cancel_identity, cx)
                 .is_none()
             {
                 return;
@@ -1464,7 +1624,7 @@ impl Keystone {
             cx.notify();
         });
         let confirm = self.scoped_listener(cx, move |this, _: &(), window, cx| {
-            if let Some(id) = this.take_full_access_confirmation(&confirm_identity) {
+            if let Some(id) = this.take_full_access_confirmation(&confirm_identity, cx) {
                 this.set_approval_mode(id, ApprovalMode::FullAccess, window, cx);
             }
         });
@@ -1484,11 +1644,11 @@ impl Keystone {
         )
     }
 
-    fn take_full_access_confirmation(&mut self, identity: &Rc<()>) -> Option<u64> {
+    fn take_full_access_confirmation(&mut self, identity: &Rc<()>, cx: &App) -> Option<u64> {
         let confirmation = self.confirm_full_access.as_ref()?;
         if !Rc::ptr_eq(identity, &confirmation.identity)
             || !self.presentation.matches(confirmation.activation)
-            || self.store.workspace().selected() != Some(confirmation.session)
+            || self.state.read(cx).store().workspace().selected() != Some(confirmation.session)
         {
             return None;
         }
@@ -1506,14 +1666,12 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.store.set_approval_mode(id, mode) {
+        match self
+            .state
+            .update(cx, |state, cx| state.set_approval_mode(id, mode, cx))
+        {
             Ok(applied) => {
                 self.error = durability_warning(applied.durability);
-                if let Some((provider, approval)) = self.approval(id)
-                    && let Some(connection) = self.started(provider)
-                {
-                    connection.set_approval(id, approval);
-                }
             }
             Err(error) => self.error = Some(format!("Approval mode not saved. {error}")),
         }
@@ -1521,58 +1679,8 @@ impl Keystone {
         cx.notify();
     }
 
-    /// The session's provider and its saved approval state.
-    fn approval(&self, session: u64) -> Option<(Provider, ApprovalState)> {
-        let session = self
-            .store
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| s.id() == session)?;
-        Some((
-            session.provider(),
-            ApprovalState {
-                mode: session.approval_mode(),
-                overridden: session.approval_overridden(),
-            },
-        ))
-    }
-
-    /// The session's conversation. The first call starts loading its saved history.
-    fn conversation(&mut self, session: u64) -> &mut Conversation {
-        let logs = &self.logs;
-        self.conversations.entry(session).or_insert_with(|| {
-            logs.load(session);
-            Conversation::loading()
-        })
-    }
-
-    /// Queues what the conversation logged and tells its list which rows changed.
-    fn commit(&mut self, session: u64) {
-        let Some(conversation) = self.conversations.get_mut(&session) else {
-            return;
-        };
-        if let Err(error) = self.logs.append(session, conversation.take_writes()) {
-            conversation.save_error =
-                Some(format!("This conversation is not being saved. {error}"));
-        }
-        let changed = conversation.take_changes();
-        if self.store.workspace().selected() == Some(session) {
-            let now = self.clock.now();
-            let replies = self.replies.get_mut();
-            for index in changed.iter().cloned().flatten() {
-                if let Some(Row::Item(item)) = conversation.rows.get(index)
-                    && item.kind == ItemKind::AgentMessage
-                {
-                    replies.observe((session, index), item, now);
-                }
-            }
-        }
-        self.invalidate(session, changed, true);
-    }
-
-    fn invalidate(&mut self, session: u64, changed: Vec<Range<usize>>, status: bool) {
-        if let Some(conversation) = self.conversations.get(&session) {
+    fn invalidate(&mut self, session: u64, changed: Vec<Range<usize>>, status: bool, cx: &App) {
+        if let Some(conversation) = self.state.read(cx).conversations().get(&session) {
             self.presentation
                 .invalidate(session, conversation.rows.len(), &changed, status);
         }
@@ -1586,7 +1694,7 @@ impl Keystone {
             cx.background_executor().timer(reveal::TICK).await;
             let _ = this.update(cx, |this, cx| {
                 this.reveal_task = None;
-                let conversations = &this.conversations;
+                let conversations = &this.state.read(cx).conversations();
                 let changed = this
                     .replies
                     .get_mut()
@@ -1601,7 +1709,7 @@ impl Keystone {
                     sessions.entry(session).or_default().push(index);
                 }
                 for (session, rows) in sessions {
-                    this.invalidate(session, ranges(rows), false);
+                    this.invalidate(session, ranges(rows), false, cx);
                     cx.notify();
                 }
                 this.reveal(cx);
@@ -1676,339 +1784,11 @@ impl Keystone {
         }
     }
 
-    /// Applies loaded history, save results, and every provider event that arrived
-    /// since the last wake-up.
-    fn pump(&mut self, cx: &mut Context<Self>) {
-        let reports = self.logs.drain();
-        let mut events = Vec::new();
-        // A catalog belongs to the connection it came from, whatever provider the
-        // asking session has since moved to.
-        for (provider, connection) in [
-            (
-                Provider::Codex,
-                self.codex.as_ref().map(|c| c as &dyn Connection),
-            ),
-            (
-                Provider::Claude,
-                self.claude.as_ref().map(|c| c as &dyn Connection),
-            ),
-        ] {
-            let Some(connection) = connection else {
-                continue;
-            };
-            for (session, event) in connection.drain() {
-                match event {
-                    Event::Catalog(catalog) => {
-                        self.catalogs.apply(provider, session, catalog);
-                        cx.notify();
-                    }
-                    Event::ProviderNotice { .. } if self.provider(session) != Some(provider) => {}
-                    event => events.push((session, event)),
-                }
-            }
-        }
-        if self.receive_customization() {
-            self.refresh(cx);
-        }
-        self.receive(reports, events, cx);
-    }
-
-    fn receive(&mut self, reports: Vec<Report>, events: Vec<(u64, Event)>, cx: &mut Context<Self>) {
-        if reports.is_empty() && events.is_empty() {
-            return;
-        }
-        let mut sidebar_changed = false;
-        for report in reports {
-            let session = match report {
-                Report::Loaded { session, entries } => {
-                    if let Some(conversation) = self.conversations.get_mut(&session) {
-                        conversation.restore(entries);
-                    }
-                    // Events held during the load, such as an approval or a turn's
-                    // end, apply only now.
-                    sidebar_changed = true;
-                    session
-                }
-                Report::Saved { session, error } => {
-                    if let Some(conversation) = self.conversations.get_mut(&session) {
-                        conversation.save_error = error
-                            .map(|error| format!("This conversation is not being saved. {error}"));
-                    }
-                    session
-                }
-            };
-            self.commit(session);
-        }
-        for (session, event) in events {
-            let failed = turn_failed(&event);
-            let saved = match (&event, failed) {
-                (Event::TurnStarted, _) => self.store.record_turn_start(session).map(drop),
-                (_, Some(failed)) => self
-                    .store
-                    .record_turn_end(session, failed, now_ms())
-                    .map(drop),
-                _ => Ok(()),
-            };
-            if let Err(error) = saved {
-                self.error = Some(format!("Could not save the session. {error}"));
-            }
-            sidebar_changed |= failed.is_some()
-                || matches!(
-                    event,
-                    Event::ApprovalRequested(_) | Event::ApprovalResolved { .. }
-                );
-            let thread = self.conversation(session).apply(event);
-            self.commit(session);
-            if let Some(thread) = thread {
-                let known = self
-                    .store
-                    .workspace()
-                    .sessions()
-                    .iter()
-                    .any(|s| s.id() == session && s.provider_thread() == Some(thread.as_str()));
-                if !known && let Err(error) = self.store.set_provider_thread(session, thread) {
-                    self.error = Some(format!("Could not save the conversation ID. {error}"));
-                }
-            }
-        }
-        self.reveal(cx);
-        // Streamed text redraws only this view. The sidebar refreshes when a row changes.
-        if sidebar_changed {
-            self.refresh(cx);
-        } else {
-            cx.notify();
-        }
-    }
-
-    /// The provider's connection, created on first use. It finds and starts its
-    /// program on its own thread.
-    fn connection(&mut self, provider: Provider) -> &dyn Connection {
-        let wake = self.wake.clone();
-        match provider {
-            Provider::Codex => self.codex.get_or_insert_with(|| {
-                CodexConnection::new(
-                    std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
-                    env!("CARGO_PKG_VERSION"),
-                    wake,
-                )
-            }),
-            Provider::Claude => self.claude.get_or_insert_with(|| {
-                ClaudeConnection::new(
-                    std::env::var_os("KEYSTONE_CLAUDE_PATH").map(PathBuf::from),
-                    wake,
-                )
-            }),
-        }
-    }
-
-    /// The provider's connection if it has been created.
-    fn started(&self, provider: Provider) -> Option<&dyn Connection> {
-        match provider {
-            Provider::Codex => self.codex.as_ref().map(|c| c as &dyn Connection),
-            Provider::Claude => self.claude.as_ref().map(|c| c as &dyn Connection),
-        }
-    }
-
-    /// The session's provider.
-    fn provider(&self, session: u64) -> Option<Provider> {
-        self.store
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| s.id() == session)
-            .map(|s| s.provider())
-    }
-
-    /// Writes everything queued for the session logs. Used before the app closes.
-    ///
-    /// A conversation still loading its history holds what was sent meanwhile, and
-    /// logs it only once the history is applied. So apply every load first, or those
-    /// messages would be lost. A read can hang, such as on a stalled network disk, so
-    /// the wait for loads is bounded: a conversation whose history has not arrived by
-    /// then goes on without it, which still logs what it holds after the history.
-    fn flush_logs(&mut self, cx: &mut Context<Self>) {
-        let deadline = std::time::Instant::now() + LOAD_WAIT;
-        loop {
-            let all = self.logs.wait_for_loads(deadline);
-            self.pump(cx);
-            // Applying events can start loading another session; finish that too.
-            let loading: Vec<u64> = self
-                .conversations
-                .iter()
-                .filter(|(_, c)| c.is_loading())
-                .map(|(id, _)| *id)
-                .collect();
-            if loading.is_empty() {
-                break;
-            }
-            if !all || std::time::Instant::now() >= deadline {
-                for session in loading {
-                    self.conversations
-                        .get_mut(&session)
-                        .expect("listed above")
-                        .restore(Err("it did not load before Keystone closed".into()));
-                    self.commit(session);
-                }
-                break;
-            }
-        }
-        let result = self.logs.flush();
-        self.receive(self.logs.drain(), Vec::new(), cx);
-        if let Err(error) = result {
-            self.error = Some(format!(
-                "Could not save conversation logs before closing. {error}"
-            ));
-            cx.notify();
-        }
-    }
-
     fn composer_draft(&self, cx: &App) -> Option<ComposerDraft> {
         Some(ComposerDraft {
-            session: self.store.workspace().selected()?,
+            session: self.state.read(cx).store().workspace().selected()?,
             text: self.composer.read(cx).value().to_owned(),
         })
-    }
-
-    fn send_message(&mut self, draft: ComposerDraft, window: &mut Window, cx: &mut Context<Self>) {
-        let id = draft.session;
-        let Some(session) = self
-            .store
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| s.id() == id)
-            .cloned()
-        else {
-            return;
-        };
-        let text = draft.text.trim().to_owned();
-        if text.is_empty() {
-            return;
-        }
-        // Apply anything that already arrived, such as the end of the last turn, so
-        // the message is shown in the right turn.
-        self.pump(cx);
-        let Some(directory) = self.dispatch_directory(id, cx) else {
-            return;
-        };
-        let cwd = directory.as_str();
-        // Read after pumping: the pump may have just saved a newer thread ID.
-        let resume = self
-            .store
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| s.id() == id)
-            .and_then(|s| s.provider_thread().map(str::to_owned));
-        // A mode other than the default can leave an override with the provider, so that
-        // is saved before the message can carry one. Sessions saved by an earlier build
-        // may have a mode without the record.
-        let mode = session.approval_mode();
-        if mode != ApprovalMode::Provider
-            && !session.approval_overridden()
-            && let Err(error) = self.store.set_approval_overridden(id)
-        {
-            self.conversation(id).error = Some(format!(
-                "Not sent: the approval mode could not be saved first. {error}"
-            ));
-            self.commit(id);
-            cx.notify();
-            return;
-        }
-        // The provider and model are fixed from the first message on. Saved before the
-        // message goes, so a crash after this leaves them fixed rather than free.
-        if !session.started() {
-            if let Err(error) = self.store.lock_model(id) {
-                self.conversation(id).error = Some(format!(
-                    "Not sent: the model choice could not be saved first. {error}"
-                ));
-                self.commit(id);
-                cx.notify();
-                return;
-            }
-            self.model_menu = None;
-        }
-        let Some((provider, approval)) = self.approval(id) else {
-            return;
-        };
-        // A failure to start the provider arrives later as an error in this
-        // conversation. A refusal comes now, and the text stays in the composer.
-        if let Err(error) = self.store.sync_pending() {
-            self.conversation(id).error = Some(format!(
-                "Not sent. Could not finish saving changes. Your draft is kept. Send will retry saving. {error}"
-            ));
-            self.commit(id);
-            self.refresh(cx);
-            return;
-        }
-        let sent = self.connection(provider).send(
-            id,
-            cwd,
-            resume.as_deref(),
-            session.model(),
-            approval,
-            text.clone(),
-        );
-        if let Err(reason) = sent {
-            // Shown in the session's transcript, where a draft save cannot clear it.
-            self.conversation(id).error = Some(reason.to_owned());
-            self.commit(id);
-            cx.notify();
-            return;
-        }
-        self.error = None;
-        self.conversation(id).push_local(&text);
-        self.commit(id);
-        if let Err(error) = self.store.record_message(id, &text, now_ms()) {
-            self.error = Some(format!("Could not save the session. {error}"));
-        }
-        self.composer
-            .update(cx, |input, cx| input.set_value(String::new(), cx));
-        self.save_draft(cx);
-        if let Some(key) = self
-            .presentation
-            .current
-            .views
-            .send_target(&self.presentation.current.arrangement.visible, id)
-        {
-            self.presentation.current.views.scroll_to_end(key);
-        }
-        // Clicking Send moves focus off the composer; put it back for the next message.
-        self.composer.focus_handle(cx).focus(window, cx);
-        // The session moves to Working and shows its new time.
-        self.refresh(cx);
-    }
-
-    fn stop_turn(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer.focus_handle(cx).focus(window, cx);
-        if let Some(connection) = self.provider(id).and_then(|p| self.started(p)) {
-            connection.command(Command::Interrupt { session: id });
-        }
-        cx.notify();
-    }
-
-    fn answer(
-        &mut self,
-        id: u64,
-        request: RequestId,
-        allow: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // The buttons take focus from the composer; give it back for the next message.
-        self.composer.focus_handle(cx).focus(window, cx);
-        let Some(approval) = self.conversation(id).decide(&request, allow) else {
-            return;
-        };
-        self.commit(id);
-        if let Some(connection) = self.provider(id).and_then(|p| self.started(p)) {
-            connection.command(Command::Answer {
-                session: id,
-                request: approval.request,
-                allow,
-            });
-        }
-        self.refresh(cx);
     }
 
     /// The session's transcript: a virtualized list, so a long session lays out and
@@ -2016,7 +1796,9 @@ impl Keystone {
     /// unless the user has scrolled up.
     fn transcript_list(&mut self, key: ViewKey, cx: &mut Context<Self>) -> gpui::List {
         let rows = self
-            .conversations
+            .state
+            .read(cx)
+            .conversations()
             .get(&key.session)
             .map_or(0, |c| c.rows.len());
         let state = self.presentation.current.views.list(key, rows);
@@ -2095,7 +1877,7 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let session = key.session;
-        let Some(conversation) = self.conversations.get(&session) else {
+        let Some(conversation) = self.state.read(cx).conversations().get(&session) else {
             return div().into_any_element();
         };
         let keyboard = self.presentation.current.views.keyboard_state(key);
@@ -2139,7 +1921,7 @@ impl Keystone {
                     move |bounds, window, cx| {
                         let visible = bounds.intersect(&window.content_mask().bounds);
                         if visible.size.width > px(0.) && visible.size.height > px(0.) {
-                            let _ = app.update(cx, |this, _| {
+                            let _ = app.update(cx, |this, _cx| {
                                 if this.presentation.matches(activation) {
                                     this.presentation.current.views.note_visible_row(
                                         key,
@@ -2194,7 +1976,7 @@ impl Keystone {
         &self,
         key: ViewKey,
         conversation: &Conversation,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let session = key.session;
         let colors = cx.theme().colors;
@@ -2204,7 +1986,9 @@ impl Keystone {
         if let Some(approval) = conversation.approvals.first() {
             empty = false;
             let (allow, deny) = (approval.request.clone(), approval.request.clone());
-            let name = self.provider(session).map_or("The provider", provider_name);
+            let name = self
+                .provider(session, cx)
+                .map_or("The provider", provider_name);
             view = view.child(
                 v_flex()
                     .id(arrangement::selector("approval", key.view))
@@ -2291,21 +2075,40 @@ impl Keystone {
         (!empty).then(|| view.into_any_element())
     }
 
-    fn error_line(&self) -> Option<impl IntoElement> {
-        self.status_line()
-            .map(|(message, color)| Label::new(message).size(TextSize::Ui).color(color))
+    fn error_line(&self, cx: &App) -> Option<impl IntoElement> {
+        self.status_line(cx).map(|(message, color)| {
+            div()
+                .automation_id(if self.state.read(cx).shutdown_error.is_some() {
+                    "shutdown-error"
+                } else {
+                    "workspace-error"
+                })
+                .child(Label::new(message).size(TextSize::Ui).color(color))
+        })
     }
 
-    fn status_line(&self) -> Option<(String, Color)> {
-        self.error
-            .clone()
-            .map(|error| (error, Color::Danger))
+    fn status_line(&self, cx: &App) -> Option<(String, Color)> {
+        let state = self.state.read(cx);
+        let mut errors: Vec<&str> = Vec::new();
+        for error in state
+            .shutdown_error
+            .iter()
+            .chain(&state.error)
+            .chain(&self.error)
+            .chain(state.log_losses())
+        {
+            if !errors.iter().any(|shown| shown.contains(error.as_str())) {
+                errors.push(error.as_str());
+            }
+        }
+        (!errors.is_empty())
+            .then(|| (errors.join("\n"), Color::Danger))
             .or_else(|| {
                 self.folder_warning
                     .as_ref()
                     .filter(|warning| {
-                        self.store.workspace().selected() == Some(warning.session)
-                            && !self.store.is_durable(warning.revision)
+                        self.state.read(cx).store().workspace().selected() == Some(warning.session)
+                            && !self.state.read(cx).store().is_durable(warning.revision)
                     })
                     .map(|_| (FOLDER_UNCONFIRMED.into(), Color::Warning))
             })
@@ -2607,7 +2410,7 @@ impl SessionSidebar {
     ) -> gpui::Stateful<gpui::Div> {
         let sidebar = cx.entity().downgrade();
         let this = app.read(cx);
-        let workspace = this.store.workspace();
+        let workspace = this.state.read(cx).store().workspace();
         let query = this.search.read(cx).value().to_lowercase();
         let provider_filter = this.provider_filter;
         let now = LocalTime::at(now_ms());
@@ -2618,7 +2421,7 @@ impl SessionSidebar {
                     .to_lowercase()
                     .contains(&query)
         }) {
-            let live = this.conversations.get(&session.id());
+            let live = this.state.read(cx).conversations().get(&session.id());
             let row = SessionRow {
                 id: session.id(),
                 title: session.title().to_owned(),
@@ -2714,15 +2517,19 @@ impl Render for Keystone {
             theme.fonts.ui.clone(),
         );
         let current = self
-            .store
+            .state
+            .read(cx)
+            .store()
             .workspace()
             .sessions()
             .iter()
-            .find(|s| Some(s.id()) == self.store.workspace().selected());
+            .find(|s| Some(s.id()) == self.state.read(cx).store().workspace().selected());
         let session = current.map(|s| (s.title().to_owned(), s.settled()));
         let selected = current.map(|s| s.id());
         if let Some(id) = selected {
-            self.conversation(id);
+            self.state.update(cx, |state, _| {
+                state.ensure_history(id);
+            });
         }
         self.update_arrangement_fitting(window, cx);
         self.reconcile_transcript_keyboard(window, cx);
@@ -2852,11 +2659,6 @@ impl Render for Keystone {
                     this.toggle_settings(window, cx)
                 }),
             )
-            .on_action(self.scoped_listener(cx, |this, _: &Quit, _, cx| {
-                if this.save_before_exit(cx) {
-                    cx.quit();
-                }
-            }))
             .on_action(self.scoped_listener(cx, |this, _: &NewClaude, window, cx| {
                 this.start(Provider::Claude, window, cx)
             }))
@@ -2903,7 +2705,7 @@ impl Render for Keystone {
             )
             .on_action(
                 self.scoped_listener(cx, |this, _: &FocusSearch, window, cx| {
-                    if !this.arrangement_has_sidebar() {
+                    if !this.arrangement_has_sidebar(cx) {
                         this.presentation.current.arrangement.sidebar_overlay = false;
                         return;
                     }
@@ -2938,6 +2740,12 @@ impl Render for Keystone {
         self.on_arrangement_drag(root, cx)
     }
 }
+
+#[cfg(all(test, feature = "ui-tests"))]
+mod shutdown_tests;
+
+#[cfg(all(test, feature = "ui-tests"))]
+mod feedback_tests;
 
 #[cfg(all(test, feature = "ui-tests"))]
 mod tests {
@@ -3014,9 +2822,20 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &view, |v| {
-            v.conversations.get(&1).is_some_and(|c| c.rows.len() == 602)
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        wait_until(cx, &view, |v, cx| {
+            v.state
+                .read(cx)
+                .conversations()
+                .get(&1)
+                .is_some_and(|c| c.rows.len() == 602)
         });
         let clipboard = |cx: &mut gpui::VisualTestContext| {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
@@ -3050,8 +2869,8 @@ mod tests {
         keys(cx, "ctrl-shift-c");
         view.read_with(cx, |v, cx| {
             assert_eq!(v.composer.read(cx).value(), "draft stays");
-            assert!(!v.conversations[&1].running);
-            assert_eq!(v.conversations[&1].rows.len(), 602);
+            assert!(!v.state.read(cx).conversations()[&1].running);
+            assert_eq!(v.state.read(cx).conversations()[&1].rows.len(), 602);
         });
         keys(cx, "ctrl-shift-t home alt-end enter");
         cx.run_until_parked();
@@ -3086,16 +2905,20 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        wait_until(cx, &view, |v| !v.conversations[&1].is_loading());
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
         let reply = "```text\nbefore\n```\n\n> ```mermaid\n> flowchart TD\n> A-->B\n> ```\n\n```text\nafter\n```\n\n- ```mermaid\n  pie\n  \"A\" : 1\n  ```\n";
         view.update(cx, |v, cx| {
-            v.conversation(1).apply(Event::ItemCompleted(Item {
-                id: "diagrams".into(),
-                kind: ItemKind::AgentMessage,
-                text: reply.into(),
-                status: ItemStatus::Completed,
-            }));
-            v.commit(1);
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "diagrams".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: reply.into(),
+                    status: ItemStatus::Completed,
+                }))
+            });
+            v.commit(1, cx);
             cx.notify();
         });
         let clipboard = |cx: &mut gpui::VisualTestContext| {
@@ -3125,9 +2948,9 @@ mod tests {
         assert!(cx.debug_bounds("reply-0-diagram-4-source").is_none());
         keys(cx, "tab ctrl-shift-c");
         assert_eq!(clipboard(cx).as_deref(), Some("pie\n\"A\" : 1\n"));
-        view.read_with(cx, |v, _| {
-            assert!(!v.conversations[&1].running);
-            assert_eq!(v.conversations[&1].rows.len(), 1);
+        view.read_with(cx, |v, cx| {
+            assert!(!v.state.read(cx).conversations()[&1].running);
+            assert_eq!(v.state.read(cx).conversations()[&1].rows.len(), 1);
         });
     }
 
@@ -3146,16 +2969,20 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        wait_until(cx, &view, |v| !v.conversations[&1].is_loading());
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
         let source = "flowchart TD\n  A[é] --> B  \n";
         view.update(cx, |v, cx| {
-            v.conversation(1).apply(Event::ItemStarted(Item {
-                id: "stream-diagram".into(),
-                kind: ItemKind::AgentMessage,
-                text: format!("```mermaid\n{source}"),
-                status: ItemStatus::InProgress,
-            }));
-            v.commit(1);
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemStarted(Item {
+                    id: "stream-diagram".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: format!("```mermaid\n{source}"),
+                    status: ItemStatus::InProgress,
+                }))
+            });
+            v.commit(1, cx);
             cx.notify();
         });
         let clipboard = |cx: &mut gpui::VisualTestContext| {
@@ -3165,13 +2992,15 @@ mod tests {
         assert_eq!(clipboard(cx).as_deref(), Some(source));
         assert!(cx.debug_bounds("reply-0-diagram-1-toggle").is_none());
         view.update(cx, |v, cx| {
-            v.conversation(1).apply(Event::ItemCompleted(Item {
-                id: "stream-diagram".into(),
-                kind: ItemKind::AgentMessage,
-                text: format!("```mermaid\n{source}```\n\n```text\nafter\n```\n"),
-                status: ItemStatus::Completed,
-            }));
-            v.commit(1);
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "stream-diagram".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: format!("```mermaid\n{source}```\n\n```text\nafter\n```\n"),
+                    status: ItemStatus::Completed,
+                }))
+            });
+            v.commit(1, cx);
             cx.notify();
         });
         keys(cx, "space ctrl-shift-c");
@@ -3188,15 +3017,19 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        wait_until(cx, &view, |v| !v.conversations[&1].is_loading());
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
         view.update(cx, |v, cx| {
-            v.conversation(1).apply(Event::ItemCompleted(Item {
-                id: "diagram-tab-stops".into(),
-                kind: ItemKind::AgentMessage,
-                text: "intro\n\n```mermaid\nflowchart TD\nA-->B\n```\n".into(),
-                status: ItemStatus::Completed,
-            }));
-            v.commit(1);
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "diagram-tab-stops".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "intro\n\n```mermaid\nflowchart TD\nA-->B\n```\n".into(),
+                    status: ItemStatus::Completed,
+                }))
+            });
+            v.commit(1, cx);
             cx.notify();
         });
         for from_composer in [false, true] {
@@ -3233,12 +3066,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
         cx.simulate_keystrokes("ctrl-shift-l f6 escape");
-        view.read_with(cx, |v, _| {
+        view.read_with(cx, |v, _cx| {
             assert!(!v.presentation.current.customization.is_open())
         });
         click(cx, "filter");
         cx.simulate_keystrokes("f6 escape");
-        view.read_with(cx, |v, _| assert!(!v.filter_menu));
+        view.read_with(cx, |v, _cx| assert!(!v.filter_menu));
         cx.simulate_keystrokes("escape");
         cx.simulate_input("plain Escape leaves after dismissing overlays");
         view.read_with(cx, |v, cx| {
@@ -3254,7 +3087,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 40);
         let (view, cx) = open_with_session(dir.path(), cx);
-        wait_until(cx, &view, |v| v.conversations[&1].rows.len() == 120);
+        wait_until(cx, &view, |v, cx| {
+            v.state.read(cx).conversations()[&1].rows.len() == 120
+        });
         cx.simulate_keystrokes("ctrl-shift-t home");
         click(cx, "conversation");
         cx.simulate_keystrokes("ctrl-shift-c");
@@ -3273,9 +3108,9 @@ mod tests {
             ..Default::default()
         });
         cx.run_until_parked();
-        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v).0);
+        let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v).0);
         cx.simulate_keystrokes("down");
-        view.read_with(cx, |v, _| {
+        view.read_with(cx, |v, _cx| {
             assert_eq!(
                 v.presentation
                     .current
@@ -3293,12 +3128,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 10);
         let (view, cx) = open_with_session(dir.path(), cx);
-        wait_until(cx, &view, |v| v.conversations[&1].rows.len() == 30);
+        wait_until(cx, &view, |v, cx| {
+            v.state.read(cx).conversations()[&1].rows.len() == 30
+        });
         cx.simulate_resize(size(px(1000.), px(500.)));
         cx.simulate_keystrokes("ctrl-shift-t home down");
-        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v));
         cx.simulate_keystrokes("down");
-        view.read_with(cx, |v, _| assert_ne!(keyboard_scroll_top(v), top));
+        view.read_with(cx, |v, _cx| assert_ne!(keyboard_scroll_top(v), top));
     }
 
     #[gpui::test]
@@ -3308,26 +3145,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 10);
         let (view, cx) = open_with_session(dir.path(), cx);
-        wait_until(cx, &view, |v| v.conversations[&1].rows.len() == 30);
+        wait_until(cx, &view, |v, cx| {
+            v.state.read(cx).conversations()[&1].rows.len() == 30
+        });
         view.update(cx, |v, cx| {
-            v.conversation(1).apply(Event::ItemCompleted(Item {
-                id: "tall".into(),
-                kind: ItemKind::AgentMessage,
-                text: (0..120).map(|n| format!("Paragraph {n}.\n\n")).collect(),
-                status: ItemStatus::Completed,
-            }));
-            v.commit(1);
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "tall".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: (0..120).map(|n| format!("Paragraph {n}.\n\n")).collect(),
+                    status: ItemStatus::Completed,
+                }))
+            });
+            v.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
-        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v));
         cx.simulate_keystrokes("ctrl-shift-t");
-        view.read_with(cx, |v, _| assert_eq!(keyboard_scroll_top(v), top));
+        view.read_with(cx, |v, _cx| assert_eq!(keyboard_scroll_top(v), top));
         assert!(cx.debug_bounds("jump-to-latest").is_none());
         cx.simulate_keystrokes("home");
-        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v));
         cx.simulate_keystrokes("down");
-        view.read_with(cx, |v, _| assert_eq!(keyboard_scroll_top(v), top));
+        view.read_with(cx, |v, _cx| assert_eq!(keyboard_scroll_top(v), top));
     }
 
     #[gpui::test]
@@ -3336,15 +3177,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_long_session(&dir.path().join("sessions"), 1, 40);
         let (view, cx) = open_with_session(dir.path(), cx);
-        wait_until(cx, &view, |v| v.conversations[&1].rows.len() == 120);
+        wait_until(cx, &view, |v, cx| {
+            v.state.read(cx).conversations()[&1].rows.len() == 120
+        });
         cx.simulate_keystrokes("ctrl-shift-t home down ctrl-l");
         send_text(&view, cx, "hello");
-        wait_until(cx, &view, |v| {
-            !v.conversations[&1].running && reply_with(v, "You wrote: hello").is_some()
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].running
+                && reply_with(v, "You wrote: hello", cx).is_some()
         });
-        let top = view.read_with(cx, |v, _| keyboard_scroll_top(v));
+        let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v));
         cx.simulate_keystrokes("ctrl-shift-t");
-        view.read_with(cx, |v, _| {
+        view.read_with(cx, |v, _cx| {
             assert!(!v.presentation.current.views.scrolled_up(MAIN_1));
             assert_eq!(keyboard_scroll_top(v), top);
         });
@@ -3356,28 +3200,36 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        wait_until(cx, &view, |v| !v.conversations[&1].is_loading());
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
         view.update(cx, |v, cx| {
-            v.conversation(1).push_local("visible user row");
-            v.conversation(1).apply(Event::ItemStarted(Item {
-                id: "reasoning".into(),
-                kind: ItemKind::Reasoning,
-                text: "Thinking".into(),
-                status: ItemStatus::InProgress,
-            }));
-            v.commit(1);
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).push_local("visible user row")
+            });
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemStarted(Item {
+                    id: "reasoning".into(),
+                    kind: ItemKind::Reasoning,
+                    text: "Thinking".into(),
+                    status: ItemStatus::InProgress,
+                }))
+            });
+            v.commit(1, cx);
             cx.notify();
         });
         cx.simulate_keystrokes("ctrl-shift-t end");
         assert!(cx.debug_bounds("transcript-keyboard-row-1").is_some());
         view.update(cx, |v, cx| {
-            v.conversation(1).apply(Event::ItemCompleted(Item {
-                id: "reasoning".into(),
-                kind: ItemKind::Reasoning,
-                text: String::new(),
-                status: ItemStatus::Completed,
-            }));
-            v.commit(1);
+            v.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "reasoning".into(),
+                    kind: ItemKind::Reasoning,
+                    text: String::new(),
+                    status: ItemStatus::Completed,
+                }))
+            });
+            v.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3396,7 +3248,14 @@ mod tests {
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         assert!(cx.debug_bounds("welcome-heading").is_some());
         assert!(cx.debug_bounds("welcome-codex").is_some());
 
@@ -3413,7 +3272,7 @@ mod tests {
             cx.run_until_parked();
         }
         view.read_with(cx, |view, cx| {
-            assert_eq!(view.store.workspace().selected(), Some(1));
+            assert_eq!(view.state.read(cx).store().workspace().selected(), Some(1));
             assert_eq!(
                 view.composer.read(cx).value(),
                 "Draft from the welcome composer\n第二行 😀\n"
@@ -3440,7 +3299,14 @@ mod tests {
         }
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         // A composer keystroke notifies only the root view. A session change also
         // invalidates the cached sidebar, so it rebuilds every row.
         for (metric, sidebar_changed) in [("sidebar_draw_ms", false), ("sidebar_refresh_ms", true)]
@@ -3529,9 +3395,18 @@ mod tests {
         seed_long_session(&dir.path().join("sessions"), 1, 1000);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &view, |view| {
-            view.conversations
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        wait_until(cx, &view, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
                 .get(&1)
                 .is_some_and(|c| c.rows.len() == 3000)
         });
@@ -3571,25 +3446,29 @@ mod tests {
 
         // A reply streaming at the end of the same transcript: one delta per frame.
         view.update(cx, |this, cx| {
-            let conversation = this.conversation(1);
-            conversation.apply(Event::TurnStarted);
-            conversation.apply(Event::ItemStarted(Item {
-                id: "live".into(),
-                kind: ItemKind::AgentMessage,
-                text: String::new(),
-                status: ItemStatus::InProgress,
-            }));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                conversation.apply(Event::TurnStarted);
+                conversation.apply(Event::ItemStarted(Item {
+                    id: "live".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: String::new(),
+                    status: ItemStatus::InProgress,
+                }));
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         let mut total = std::time::Duration::ZERO;
         for _ in 0..frames {
             view.update(cx, |this, cx| {
-                this.conversation(1).apply(Event::ItemDelta {
-                    item_id: "live".into(),
-                    text: "More streamed text. ".into(),
+                this.state.update(cx, |state, _| {
+                    state.test_conversation(1).apply(Event::ItemDelta {
+                        item_id: "live".into(),
+                        text: "More streamed text. ".into(),
+                    })
                 });
-                this.commit(1);
+                this.commit(1, cx);
                 cx.notify();
             });
             cx.update(|window, cx| {
@@ -3616,9 +3495,18 @@ mod tests {
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &view, |view| {
-            view.conversations
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        wait_until(cx, &view, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
                 .get(&1)
                 .is_some_and(|c| c.rows.len() == 600)
         });
@@ -3638,8 +3526,10 @@ mod tests {
             })
         };
         view.update(cx, |this, cx| {
-            this.conversation(1).apply(reply("new"));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(reply("new"))
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3677,8 +3567,10 @@ mod tests {
             .debug_bounds("transcript-row-0")
             .expect("first row drawn");
         view.update(cx, |this, cx| {
-            this.conversation(1).apply(reply("later"));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(reply("later"))
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3702,9 +3594,18 @@ mod tests {
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &view, |view| {
-            view.conversations
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        wait_until(cx, &view, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
                 .get(&1)
                 .is_some_and(|c| c.rows.len() == 600)
         });
@@ -3716,14 +3617,16 @@ mod tests {
         };
         // A short item, then a reply taller than the view, both still streaming.
         view.update(cx, |this, cx| {
-            let conversation = this.conversation(1);
-            conversation.apply(Event::TurnStarted);
-            conversation.apply(Event::ItemStarted(message("early", "Thinking".into())));
-            conversation.apply(Event::ItemStarted(message(
-                "long",
-                "Streamed words. ".repeat(600),
-            )));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                conversation.apply(Event::TurnStarted);
+                conversation.apply(Event::ItemStarted(message("early", "Thinking".into())));
+                conversation.apply(Event::ItemStarted(message(
+                    "long",
+                    "Streamed words. ".repeat(600),
+                )));
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3742,11 +3645,13 @@ mod tests {
 
         // More of the reply streams in: the text being read stays where it is.
         view.update(cx, |this, cx| {
-            this.conversation(1).apply(Event::ItemDelta {
-                item_id: "long".into(),
-                text: "More. ".repeat(50),
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemDelta {
+                    item_id: "long".into(),
+                    text: "More. ".repeat(50),
+                })
             });
-            this.commit(1);
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3757,11 +3662,13 @@ mod tests {
 
         // An item above the view completes: still no jump.
         view.update(cx, |this, cx| {
-            this.conversation(1).apply(Event::ItemCompleted(Item {
-                status: ItemStatus::Completed,
-                ..message("early", "Thought for a while. ".repeat(20))
-            }));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    status: ItemStatus::Completed,
+                    ..message("early", "Thought for a while. ".repeat(20))
+                }))
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -3788,9 +3695,18 @@ mod tests {
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &view, |view| {
-            view.conversations
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        wait_until(cx, &view, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
                 .get(&1)
                 .is_some_and(|c| c.rows.len() == 600)
         });
@@ -3800,7 +3716,7 @@ mod tests {
             session: 1,
         };
         let reader = (100, px(40.));
-        view.update(cx, |this, _| {
+        view.update(cx, |this, _cx| {
             this.presentation
                 .current
                 .views
@@ -3809,19 +3725,21 @@ mod tests {
         });
         let stream = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, id: &str| {
             view.update(cx, |this, cx| {
-                this.conversation(1).apply(Event::ItemCompleted(Item {
-                    id: id.into(),
-                    kind: ItemKind::AgentMessage,
-                    text: format!("Reply {id}"),
-                    status: ItemStatus::Completed,
-                }));
-                this.commit(1);
+                this.state.update(cx, |state, _| {
+                    state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                        id: id.into(),
+                        kind: ItemKind::AgentMessage,
+                        text: format!("Reply {id}"),
+                        status: ItemStatus::Completed,
+                    }))
+                });
+                this.commit(1, cx);
                 cx.notify();
             });
             cx.run_until_parked();
         };
         let tops = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
-            view.update(cx, |this, _| {
+            view.update(cx, |this, _cx| {
                 let main = this.presentation.current.views.get(MAIN_1).unwrap();
                 let other = this.presentation.current.views.get(other).unwrap();
                 assert_eq!(main.item_count(), other.item_count());
@@ -3849,7 +3767,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("transcript-row-601").is_some());
         assert_eq!(tops(&view, cx), (true, reader));
-        view.update(cx, |this, _| {
+        view.update(cx, |this, _cx| {
             assert_eq!(
                 this.presentation
                     .current
@@ -3869,18 +3787,20 @@ mod tests {
         });
 
         view.update(cx, |this, cx| {
-            this.conversation(1).apply(Event::ItemCompleted(Item {
-                id: "a".into(),
-                kind: ItemKind::AgentMessage,
-                text: "Short".into(),
-                status: ItemStatus::Completed,
-            }));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemCompleted(Item {
+                    id: "a".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Short".into(),
+                    status: ItemStatus::Completed,
+                }))
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
         assert_eq!(tops(&view, cx), (true, (600, px(40.))));
-        view.update(cx, |this, _| {
+        view.update(cx, |this, _cx| {
             assert_eq!(
                 this.presentation
                     .current
@@ -3946,9 +3866,9 @@ mod tests {
             ],
         );
         assert!(cx.debug_bounds("approve").is_some());
-        view.read_with(cx, |this, _| {
+        view.read_with(cx, |this, cx| {
             assert!(
-                matches!(&this.conversations[&1].rows[600], Row::Item(item) if item.text == reply)
+                matches!(&this.state.read(cx).conversations()[&1].rows[600], Row::Item(item) if item.text == reply)
             );
         });
         let first = height(cx);
@@ -3960,7 +3880,7 @@ mod tests {
         }
         let full = height(cx);
         assert!(full > second);
-        view.read_with(cx, |this, _| {
+        view.read_with(cx, |this, _cx| {
             assert!(this.reveal_task.is_none(), "no timer once caught up")
         });
 
@@ -4037,6 +3957,8 @@ mod tests {
         cx.run_until_parked();
         view.update(cx, |this, cx| {
             this.receive(Vec::new(), vec![delta(&"Visible burst. ".repeat(100))], cx);
+        });
+        view.update(cx, |this, cx| {
             assert!(this.replies.get_mut().pacing());
             this.create(Provider::Codex, cx);
             assert!(
@@ -4073,9 +3995,18 @@ mod tests {
         seed_long_session(&dir.path().join("sessions"), 1, 200);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &view, |view| {
-            view.conversations
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        wait_until(cx, &view, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
                 .get(&1)
                 .is_some_and(|c| c.rows.len() == 600)
         });
@@ -4114,27 +4045,30 @@ mod tests {
         let long = || "Streamed words. ".repeat(600);
         let update = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, event| {
             view.update(cx, |this, cx| {
-                this.conversation(1).apply(event);
-                this.commit(1);
+                this.state
+                    .update(cx, |state, _| state.test_conversation(1).apply(event));
+                this.commit(1, cx);
                 cx.notify();
             });
             cx.run_until_parked();
         };
         view.update(cx, |this, cx| {
-            let conversation = this.conversation(1);
-            conversation.apply(Event::TurnStarted);
-            conversation.apply(Event::ItemStarted(item(
-                "a",
-                ItemKind::AgentMessage,
-                long(),
-            )));
-            conversation.apply(Event::ItemStarted(item("r", ItemKind::Reasoning, long())));
-            conversation.apply(Event::ItemStarted(item(
-                "b",
-                ItemKind::AgentMessage,
-                long(),
-            )));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                conversation.apply(Event::TurnStarted);
+                conversation.apply(Event::ItemStarted(item(
+                    "a",
+                    ItemKind::AgentMessage,
+                    long(),
+                )));
+                conversation.apply(Event::ItemStarted(item("r", ItemKind::Reasoning, long())));
+                conversation.apply(Event::ItemStarted(item(
+                    "b",
+                    ItemKind::AgentMessage,
+                    long(),
+                )));
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -4188,17 +4122,19 @@ mod tests {
         cx.simulate_resize(size(px(width), px(700.)));
         cx.run_until_parked();
         view.update(cx, |this, cx| {
-            let conversation = this.conversation(1);
-            conversation.apply(Event::TurnStarted);
-            for id in ["a", "b", "c"] {
-                conversation.apply(Event::ItemStarted(Item {
-                    id: id.into(),
-                    kind: ItemKind::AgentMessage,
-                    text: "Streamed words. ".repeat(600),
-                    status: ItemStatus::InProgress,
-                }));
-            }
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                conversation.apply(Event::TurnStarted);
+                for id in ["a", "b", "c"] {
+                    conversation.apply(Event::ItemStarted(Item {
+                        id: id.into(),
+                        kind: ItemKind::AgentMessage,
+                        text: "Streamed words. ".repeat(600),
+                        status: ItemStatus::InProgress,
+                    }));
+                }
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -4240,7 +4176,7 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_resize(size(px(900.), px(700.)));
         cx.run_until_parked();
-        view.update(cx, |this, _| {
+        view.update(cx, |this, _cx| {
             let list = this.presentation.current.views.get(MAIN_1).unwrap();
             assert_eq!(list.logical_scroll_top().item_ix, list.item_count());
         });
@@ -4270,15 +4206,17 @@ mod tests {
         let (view, cx, _dir) = long_session(cx);
         // A tall approval card in the status entry.
         view.update(cx, |this, cx| {
-            let conversation = this.conversation(1);
-            conversation.apply(Event::TurnStarted);
-            conversation.apply(Event::ApprovalRequested(keystone_agent::Approval {
-                request: keystone_agent::RequestId("1".into()),
-                item_id: None,
-                action: "cargo test".into(),
-                detail: Some("A long reason to run it. ".repeat(400)),
-            }));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                conversation.apply(Event::TurnStarted);
+                conversation.apply(Event::ApprovalRequested(keystone_agent::Approval {
+                    request: keystone_agent::RequestId("1".into()),
+                    item_id: None,
+                    action: "cargo test".into(),
+                    detail: Some("A long reason to run it. ".repeat(400)),
+                }));
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -4289,13 +4227,15 @@ mod tests {
 
         // A row arrives before the status entry: the card stays where it was read.
         view.update(cx, |this, cx| {
-            this.conversation(1).apply(Event::ItemStarted(Item {
-                id: "m".into(),
-                kind: ItemKind::AgentMessage,
-                text: "Starting.".into(),
-                status: ItemStatus::InProgress,
-            }));
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ItemStarted(Item {
+                    id: "m".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Starting.".into(),
+                    status: ItemStatus::InProgress,
+                }))
+            });
+            this.commit(1, cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -4321,13 +4261,25 @@ mod tests {
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         // Sent and quit before the loaded history is applied.
         view.update(cx, |this, cx| {
-            assert!(!this.conversations.contains_key(&1));
-            assert!(this.conversation(1).is_loading());
-            this.conversation(1).push_local("Sent while loading");
-            this.commit(1);
+            assert!(!this.state.read(cx).conversations().contains_key(&1));
+            assert!(
+                this.state
+                    .update(cx, |state, _| state.test_conversation(1).is_loading())
+            );
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).push_local("Sent while loading")
+            });
+            this.commit(1, cx);
             this.flush_logs(cx);
         });
         let entries = keystone_agent::log::read(&sessions, 1).unwrap();
@@ -4336,6 +4288,27 @@ mod tests {
                 if item.text == "Sent while loading"),
             "the message was saved: {:?}",
             entries.last()
+        );
+    }
+
+    #[gpui::test]
+    fn immediate_close_snapshots_the_exact_dirty_composer_once(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |this, cx| {
+            this.create(Provider::Codex, cx);
+            let before = this.state.read(cx).store().writes();
+            this.composer.update(cx, |input, cx| {
+                input.set_value("  Exact draft\nwith whitespace  ".into(), cx)
+            });
+            assert!(this.save_before_exit(cx));
+            assert_eq!(this.state.read(cx).save_calls, 1);
+            assert_eq!(this.state.read(cx).store().writes(), before + 1);
+        });
+        assert_eq!(
+            Store::open(path).unwrap().workspace().sessions()[0].draft(),
+            "  Exact draft\nwith whitespace  "
         );
     }
 
@@ -4353,9 +4326,16 @@ mod tests {
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         // Session 1's history read never returns, as on a stalled network disk.
-        view.update(cx, |this, _| {
+        view.update(cx, |this, cx| {
             let read: keystone_agent::log::Reader = Arc::new(|dir, session| {
                 if session == 1 {
                     loop {
@@ -4364,18 +4344,36 @@ mod tests {
                 }
                 keystone_agent::log::read(dir, session)
             });
-            this.logs = Logs::with_reader(sessions.clone(), this.wake.clone(), read);
-            this.conversations.clear();
-            this.conversation(2);
+            this.state.update(cx, |state, _| {
+                state.test_set_logs(Logs::with_reader(
+                    sessions.clone(),
+                    state.test_wake().clone(),
+                    read,
+                ));
+            });
+            this.state
+                .update(cx, |state, _| state.test_conversations_mut().clear());
+            this.state.update(cx, |state, _| {
+                state.test_conversation(2);
+            });
         });
-        wait_until(cx, &view, |view| !view.conversations[&2].is_loading());
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&2].is_loading()
+        });
         let started = std::time::Instant::now();
         view.update(cx, |this, cx| {
-            this.conversation(2).push_local("In another session");
-            this.commit(2);
-            assert!(this.conversation(1).is_loading());
-            this.conversation(1).push_local("Sent while loading");
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                state.test_conversation(2).push_local("In another session")
+            });
+            this.commit(2, cx);
+            assert!(
+                this.state
+                    .update(cx, |state, _| state.test_conversation(1).is_loading())
+            );
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).push_local("Sent while loading")
+            });
+            this.commit(1, cx);
             this.flush_logs(cx);
         });
         assert!(
@@ -4415,26 +4413,37 @@ mod tests {
         std::fs::write(&sessions, "").unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let turn = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
             view.update(cx, |this, cx| {
-                let conversation = this.conversation(1);
-                conversation.push_local("hello");
-                conversation.apply(Event::TurnStarted);
-                this.commit(1);
+                this.state.update(cx, |state, _| {
+                    let conversation = state.test_conversation(1);
+                    conversation.push_local("hello");
+                    conversation.apply(Event::TurnStarted);
+                });
+                this.commit(1, cx);
                 cx.notify();
             });
         };
-        wait_until(cx, &view, |view| !view.conversations[&1].is_loading());
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].is_loading()
+        });
         turn(&view, cx);
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].save_error.is_some()
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1].save_error.is_some()
         });
         assert!(cx.debug_bounds("transcript-status").is_some());
         std::fs::remove_file(&sessions).unwrap();
         turn(&view, cx);
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].save_error.is_none()
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1].save_error.is_none()
         });
         view.update(cx, |view, cx| view.flush_logs(cx));
         assert!(
@@ -4456,12 +4465,24 @@ mod tests {
         std::fs::write(&sessions, "blocked").unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &view, |view| !view.conversations[&1].is_loading());
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].is_loading()
+        });
         view.update(cx, |this, cx| {
-            this.conversation(1)
-                .push_local("retained while storage fails");
-            this.commit(1);
+            this.state.update(cx, |state, _| {
+                state
+                    .test_conversation(1)
+                    .push_local("retained while storage fails")
+            });
+            this.commit(1, cx);
             this.flush_logs(cx);
             assert!(
                 this.error
@@ -4469,13 +4490,13 @@ mod tests {
                     .unwrap()
                     .contains("Could not save conversation logs")
             );
-            assert!(this.conversations[&1].save_error.is_some());
+            assert!(this.state.read(cx).conversations()[&1].save_error.is_some());
         });
         assert!(cx.debug_bounds("transcript-status").is_some());
         std::fs::remove_file(&sessions).unwrap();
         view.update(cx, |this, cx| {
             this.flush_logs(cx);
-            assert!(this.conversations[&1].save_error.is_none());
+            assert!(this.state.read(cx).conversations()[&1].save_error.is_none());
         });
         let entries = keystone_agent::log::read(&sessions, 1).unwrap();
         let texts = entries
@@ -4500,7 +4521,14 @@ mod tests {
             .unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         // GPUI 0.2.2 keeps debug bounds for elements that are no longer drawn, so check
         // which row sits at the top of the list instead of which rows exist.
         let top = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("session-1").unwrap().origin;
@@ -4554,7 +4582,14 @@ mod tests {
         store.select(1).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         view.update_in(cx, |this, window, cx| {
             this.focus.focus(window, cx);
             this.settled_open = true;
@@ -4578,19 +4613,21 @@ mod tests {
     fn wait_until(
         cx: &mut gpui::VisualTestContext,
         view: &Entity<Keystone>,
-        done: impl Fn(&Keystone) -> bool,
+        done: impl Fn(&Keystone, &App) -> bool,
     ) {
         cx.executor().allow_parking();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             cx.run_until_parked();
-            if view.read_with(cx, |view, _| done(view)) {
+            if view.read_with(cx, |view, cx| done(view, cx)) {
                 return;
             }
             if std::time::Instant::now() > deadline {
-                view.read_with(cx, |view, _| {
+                view.read_with(cx, |view, cx| {
                     let state: Vec<_> = view
-                        .conversations
+                        .state
+                        .read(cx)
+                        .conversations()
                         .iter()
                         .map(|(id, c)| {
                             (
@@ -4636,7 +4673,7 @@ mod tests {
     }
 
     fn asking(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> bool {
-        view.read_with(cx, |view, _| view.confirm_full_access.is_some())
+        view.read_with(cx, |view, _cx| view.confirm_full_access.is_some())
     }
 
     fn composer_focused(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> bool {
@@ -4649,10 +4686,14 @@ mod tests {
         view: &Entity<Keystone>,
         cx: &mut gpui::VisualTestContext,
     ) -> (ApprovalMode, ApprovalMode, u64) {
-        view.read_with(cx, |view, _| {
+        view.read_with(cx, |view, cx| {
             let mode = |store: &Store| store.workspace().sessions()[0].approval_mode();
-            let on_disk = Store::open(view.store.path()).unwrap();
-            (mode(&view.store), mode(&on_disk), view.store.writes())
+            let on_disk = Store::open(view.state.read(cx).store().path()).unwrap();
+            (
+                mode(&view.state.read(cx).store()),
+                mode(&on_disk),
+                view.state.read(cx).store().writes(),
+            )
         })
     }
 
@@ -4667,8 +4708,8 @@ mod tests {
     }
 
     /// The text of the last completed reply that contains `text`, once the turn ended.
-    fn reply_with(view: &Keystone, text: &str) -> Option<String> {
-        let c = view.conversations.get(&1)?;
+    fn reply_with(view: &Keystone, text: &str, cx: &App) -> Option<String> {
+        let c = view.state.read(cx).conversations().get(&1)?;
         if c.running {
             return None;
         }
@@ -4691,8 +4732,10 @@ mod tests {
         cx: &mut gpui::VisualTestContext,
         text: &'static str,
     ) -> String {
-        wait_until(cx, view, move |view| reply_with(view, text).is_some());
-        let reply = view.read_with(cx, |view, _| reply_with(view, text).unwrap());
+        wait_until(cx, view, move |view, cx| {
+            reply_with(view, text, cx).is_some()
+        });
+        let reply = view.read_with(cx, |view, cx| reply_with(view, text, cx).unwrap());
         let label = ["**Approvals:** `", "**Mode:** `"]
             .into_iter()
             .find(|label| reply.contains(label))
@@ -4725,7 +4768,14 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx))
+        cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        })
     }
 
     /// 2b in review: the record that the provider may hold an override is saved before
@@ -4757,8 +4807,14 @@ mod tests {
             }
         }
         let (view, cx) = open_window(&path, cx);
-        view.update(cx, |view, _| {
-            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex),
+                    "test",
+                    state.test_wake().clone(),
+                )));
+            })
         });
         let saved = |id: u64| {
             Store::open(&path)
@@ -4783,11 +4839,20 @@ mod tests {
         send_text(&view, cx, "hello");
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
-            let error = view.conversations[&1].error.clone().unwrap();
+            let error = view.state.read(cx).conversations()[&1]
+                .error
+                .clone()
+                .unwrap();
             assert!(error.starts_with("Not sent"), "{error}");
             assert_eq!(view.composer.read(cx).value(), "hello");
             assert!(
-                !view.codex.as_ref().unwrap().is_open(1),
+                !view
+                    .state
+                    .read(cx)
+                    .test_codex()
+                    .as_ref()
+                    .unwrap()
+                    .is_open(1),
                 "nothing reached Codex"
             );
         });
@@ -4815,17 +4880,26 @@ mod tests {
             "KEYSTONE_FAKE_CODEX_DELAY_MS=20",
         );
         let (view, cx) = open_window(&path, cx);
-        view.update(cx, |view, _| {
-            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex),
+                    "test",
+                    state.test_wake().clone(),
+                )));
+            })
         });
         click(cx, "welcome-codex");
         choose_mode(cx, ApprovalMode::FullAccess);
         send_text(&view, cx, "end on steer");
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].rows.iter().any(|row| {
-                matches!(row, Row::Item(item)
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1]
+                .rows
+                .iter()
+                .any(|row| {
+                    matches!(row, Row::Item(item)
                     if item.kind == ItemKind::AgentMessage && !item.text.is_empty())
-            })
+                })
         });
         send_text(&view, cx, "late");
         // Codex holds the steer for 300 ms; choose while it waits there.
@@ -4856,12 +4930,14 @@ mod tests {
             ),
         );
         let (view, cx) = open_window(&path, cx);
-        view.update(cx, |view, _| {
-            view.codex = Some(CodexConnection::new(
-                Some(codex.clone()),
-                "test",
-                view.wake.clone(),
-            ))
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex.clone()),
+                    "test",
+                    state.test_wake().clone(),
+                )));
+            })
         });
         click(cx, "welcome-codex");
         choose_mode(cx, ApprovalMode::FullAccess);
@@ -4872,13 +4948,27 @@ mod tests {
         );
 
         choose_mode(cx, ApprovalMode::ReadOnly);
-        let pid = view.read_with(cx, |view, _| view.codex.as_ref().unwrap().pid().unwrap());
+        let pid = view.read_with(cx, |view, cx| {
+            view.state
+                .read(cx)
+                .test_codex()
+                .as_ref()
+                .unwrap()
+                .pid()
+                .unwrap()
+        });
         std::process::Command::new("kill")
             .arg(pid.to_string())
             .status()
             .unwrap();
-        wait_until(cx, &view, |view| {
-            view.codex.as_ref().unwrap().pid().is_none()
+        wait_until(cx, &view, |view, cx| {
+            view.state
+                .read(cx)
+                .test_codex()
+                .as_ref()
+                .unwrap()
+                .pid()
+                .is_none()
         });
         send_text(&view, cx, "second");
         assert_eq!(
@@ -4891,13 +4981,29 @@ mod tests {
         view.update(cx, |view, cx| view.flush_logs(cx));
         let store = Store::open(&path).unwrap();
         cx.executor().allow_parking();
-        let (restored, cx) =
-            cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        restored.update(cx, |view, _| {
-            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        let (restored, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
         });
-        wait_until(cx, &restored, |view| {
-            view.conversations.get(&1).is_some_and(|c| !c.is_loading())
+        restored.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex),
+                    "test",
+                    state.test_wake().clone(),
+                )));
+            })
+        });
+        wait_until(cx, &restored, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
+                .get(&1)
+                .is_some_and(|c| !c.is_loading())
         });
         choose_mode(cx, ApprovalMode::Provider);
         send_text(&restored, cx, "third");
@@ -4920,8 +5026,14 @@ mod tests {
             "KEYSTONE_FAKE_CODEX_DELAY_MS=2",
         );
         let (view, cx) = open_window(&path, cx);
-        view.update(cx, |view, _| {
-            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex),
+                    "test",
+                    state.test_wake().clone(),
+                )));
+            })
         });
         click(cx, "welcome-codex");
         choose_mode(cx, ApprovalMode::Auto);
@@ -4931,7 +5043,14 @@ mod tests {
             "on-request / workspaceWrite"
         );
         let connection = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
-            view.read_with(cx, |view, _| view.codex.as_ref().unwrap().approval(1))
+            view.read_with(cx, |view, cx| {
+                view.state
+                    .read(cx)
+                    .test_codex()
+                    .as_ref()
+                    .unwrap()
+                    .approval(1)
+            })
         };
         let auto = Some(ApprovalState {
             mode: ApprovalMode::Auto,
@@ -4986,17 +5105,26 @@ mod tests {
             "KEYSTONE_FAKE_CODEX_DELAY_MS=20",
         );
         let (view, cx) = open_window(&path, cx);
-        view.update(cx, |view, _| {
-            view.codex = Some(CodexConnection::new(Some(codex), "test", view.wake.clone()))
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex),
+                    "test",
+                    state.test_wake().clone(),
+                )));
+            })
         });
         click(cx, "welcome-codex");
         choose_mode(cx, ApprovalMode::ReadOnly);
         send_text(&view, cx, "end on steer");
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].rows.iter().any(|row| {
-                matches!(row, Row::Item(item)
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1]
+                .rows
+                .iter()
+                .any(|row| {
+                    matches!(row, Row::Item(item)
                     if item.kind == ItemKind::AgentMessage && !item.text.is_empty())
-            })
+                })
         });
         send_text(&view, cx, "late");
         // Codex holds the steer for 300 ms; pick Full access while it waits there.
@@ -5024,10 +5152,15 @@ mod tests {
             (full, full, writes + 1),
             "saved once"
         );
-        view.read_with(cx, |view, _| {
-            assert!(view.store.workspace().sessions()[0].approval_overridden());
+        view.read_with(cx, |view, cx| {
+            assert!(view.state.read(cx).store().workspace().sessions()[0].approval_overridden());
             assert_eq!(
-                view.codex.as_ref().unwrap().approval(1),
+                view.state
+                    .read(cx)
+                    .test_codex()
+                    .as_ref()
+                    .unwrap()
+                    .approval(1),
                 Some(ApprovalState {
                     mode: full,
                     overridden: true
@@ -5084,11 +5217,18 @@ mod tests {
             "KEYSTONE_FAKE_CLAUDE_DELAY_MS=5",
         );
         let (view, cx) = open_window(&path, cx);
-        view.update(cx, |view, _| {
-            view.claude = Some(ClaudeConnection::new(Some(claude), view.wake.clone()))
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(claude),
+                    state.test_wake().clone(),
+                )));
+            })
         });
         let pid = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
-            view.read_with(cx, |view, _| view.claude.as_ref().unwrap().pid(1))
+            view.read_with(cx, |view, cx| {
+                view.state.read(cx).test_claude().as_ref().unwrap().pid(1)
+            })
         };
         click(cx, "welcome-claude");
         choose_mode(cx, ApprovalMode::Auto);
@@ -5130,11 +5270,18 @@ mod tests {
             "KEYSTONE_FAKE_CLAUDE_DELAY_MS=5",
         );
         let (view, cx) = open_window(&path, cx);
-        view.update(cx, |view, _| {
-            view.claude = Some(ClaudeConnection::new(Some(claude), view.wake.clone()))
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(claude),
+                    state.test_wake().clone(),
+                )));
+            })
         });
         let pid = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
-            view.read_with(cx, |view, _| view.claude.as_ref().unwrap().pid(1))
+            view.read_with(cx, |view, cx| {
+                view.state.read(cx).test_claude().as_ref().unwrap().pid(1)
+            })
         };
         click(cx, "welcome-claude");
         choose_mode(cx, ApprovalMode::Auto);
@@ -5147,7 +5294,9 @@ mod tests {
 
         // A change while a turn runs waits for the next turn.
         send_text(&view, cx, "long");
-        wait_until(cx, &view, |view| view.conversations[&1].running);
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1].running
+        });
         choose_mode(cx, ApprovalMode::ReadOnly);
         assert_eq!(
             setting_of_reply(&view, cx, "You wrote: long"),
@@ -5171,10 +5320,10 @@ mod tests {
             setting_of_reply(&view, cx, "You wrote: please run it"),
             "bypassPermissions"
         );
-        view.read_with(cx, |view, _| {
-            assert!(view.conversations[&1].rows.iter().any(|row| matches!(row,
+        view.read_with(cx, |view, cx| {
+            assert!(view.state.read(cx).conversations()[&1].rows.iter().any(|row| matches!(row,
                 Row::Item(item) if matches!(item.kind, ItemKind::Command { exit_code: Some(0), .. }))));
-            assert!(!view.conversations[&1].rows.iter().any(|row| matches!(row, Row::Decision { .. })));
+            assert!(!view.state.read(cx).conversations()[&1].rows.iter().any(|row| matches!(row, Row::Decision { .. })));
         });
         let full = pid(&view, cx);
         assert_ne!(full, own);
@@ -5260,7 +5409,14 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         click(cx, "welcome-codex");
         click(cx, "model-selector");
         assert!(cx.debug_bounds("provider-claude").is_some());
@@ -5269,26 +5425,28 @@ mod tests {
         assert!(cx.debug_bounds("model-fake-hidden").is_none());
         click(cx, "model-fake-fast");
         assert_eq!(saved_session(&path).model(), Some("fake-fast"));
-        assert!(view.read_with(cx, |view, _| view.model_menu.is_none()));
+        assert!(view.read_with(cx, |view, _cx| view.model_menu.is_none()));
         assert!(composer_focused(&view, cx));
 
         send_text(&view, cx, "hello");
-        wait_until(cx, &view, |view| {
-            reply_with(view, "**Model:** `fake-fast`").is_some()
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "**Model:** `fake-fast`", cx).is_some()
         });
         let session = saved_session(&path);
         assert_eq!(session.model_locked(), Some(true));
         assert!(session.started());
-        view.read_with(cx, |view, _| {
+        view.read_with(cx, |view, cx| {
             assert_eq!(
-                view.conversations[&1].reported_model.as_deref(),
+                view.state.read(cx).conversations()[&1]
+                    .reported_model
+                    .as_deref(),
                 Some("fake-fast")
             );
         });
         // Fixed now: the button opens nothing.
         click(cx, "model-selector");
         assert!(cx.debug_bounds("provider-claude").is_none());
-        assert!(view.read_with(cx, |view, _| view.model_menu.is_none()));
+        assert!(view.read_with(cx, |view, _cx| view.model_menu.is_none()));
     }
 
     #[gpui::test]
@@ -5309,7 +5467,14 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         click(cx, "welcome-codex");
         click(cx, "model-selector");
         wait_for(cx, "model-fake-fast");
@@ -5320,7 +5485,7 @@ mod tests {
         assert_eq!(session.provider(), Provider::Claude);
         assert_eq!(session.title(), "New Claude session");
         assert_eq!(session.model(), None);
-        assert!(view.read_with(cx, |view, _| view.model_menu.is_some()));
+        assert!(view.read_with(cx, |view, _cx| view.model_menu.is_some()));
         wait_for(cx, "model-fake-opus");
         let default = cx.debug_bounds("model-default").unwrap();
         let opus = cx.debug_bounds("model-fake-opus").unwrap();
@@ -5333,8 +5498,8 @@ mod tests {
         assert_eq!(saved_session(&path).model(), Some("fake-opus"));
 
         send_text(&view, cx, "hello");
-        wait_until(cx, &view, |view| {
-            reply_with(view, "**Model:** `fake-opus`").is_some()
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "**Model:** `fake-opus`", cx).is_some()
         });
     }
 
@@ -5354,7 +5519,14 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         click(cx, "welcome-codex");
         click(cx, "model-selector");
         wait_for(cx, "model-failed");
@@ -5363,7 +5535,7 @@ mod tests {
         click(cx, "model-retry");
         wait_for(cx, "model-failed");
         click(cx, "model-default");
-        assert!(view.read_with(cx, |view, _| view.model_menu.is_none()));
+        assert!(view.read_with(cx, |view, _cx| view.model_menu.is_none()));
         assert!(composer_focused(&view, cx));
         assert_eq!(saved_session(&path).model(), None);
     }
@@ -5382,7 +5554,7 @@ mod tests {
         click(cx, "welcome-codex");
         click(cx, "model-selector");
         wait_for(cx, "model-fake-fast");
-        assert_eq!(view.read_with(cx, |view, _| view.model_menu), Some(1));
+        assert_eq!(view.read_with(cx, |view, _cx| view.model_menu), Some(1));
         view.update_in(cx, |view, window, cx| {
             view.composer
                 .update(cx, |input, cx| input.set_value("hello".into(), cx));
@@ -5391,18 +5563,23 @@ mod tests {
         cx.simulate_keystrokes("ctrl-enter");
         cx.run_until_parked();
         assert!(saved_session(&path).started(), "the message went");
-        assert_eq!(view.read_with(cx, |view, _| view.model_menu), None);
+        assert_eq!(view.read_with(cx, |view, _cx| view.model_menu), None);
         assert!(cx.debug_bounds("provider-claude").is_none());
 
         cx.simulate_keystrokes("ctrl-shift-n");
         cx.run_until_parked();
         assert_eq!(
-            view.read_with(cx, |view, _| view.store.workspace().selected()),
+            view.read_with(cx, |view, cx| view
+                .state
+                .read(cx)
+                .store()
+                .workspace()
+                .selected()),
             Some(2)
         );
         assert!(cx.debug_bounds("provider-claude").is_none());
         click(cx, "model-selector");
-        assert_eq!(view.read_with(cx, |view, _| view.model_menu), Some(2));
+        assert_eq!(view.read_with(cx, |view, _cx| view.model_menu), Some(2));
         assert!(cx.debug_bounds("provider-claude").is_some());
     }
 
@@ -5417,20 +5594,28 @@ mod tests {
         );
         std::fs::write(dir.path().join(".fake-claude-ignore-initialize"), "all").unwrap();
         let (view, cx) = open_window(&path, cx);
-        view.update(cx, |view, _| {
-            view.claude = Some(ClaudeConnection::new(Some(claude), view.wake.clone()));
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(claude),
+                    state.test_wake().clone(),
+                )));
+            });
             view.presentation.project =
                 keystone_core::ProjectId::new(dir.path()).map_err(|e| e.to_string());
         });
         click(cx, "welcome-claude");
         click(cx, "model-selector");
-        assert_eq!(view.read_with(cx, |view, _| view.model_menu), Some(1));
+        assert_eq!(view.read_with(cx, |view, _cx| view.model_menu), Some(1));
         view.update_in(cx, |view, window, cx| {
-            let Some(presentation::ConversationFolder::Recorded(cwd)) = view.conversation_folder(1)
+            let Some(presentation::ConversationFolder::Recorded(cwd)) =
+                view.conversation_folder(1, cx)
             else {
                 panic!("a new session records its folder");
             };
-            view.claude
+            view.state
+                .read(cx)
+                .test_claude()
                 .as_ref()
                 .unwrap()
                 .send(
@@ -5447,12 +5632,12 @@ mod tests {
             let draft = view.composer_draft(cx).unwrap();
             view.send_message(draft, window, cx);
             assert!(
-                view.conversations[&1]
+                view.state.read(cx).conversations()[&1]
                     .error
                     .as_deref()
                     .is_some_and(|e| e.contains("cannot steer")),
                 "{:?}",
-                view.conversations[&1].error
+                view.state.read(cx).conversations()[&1].error
             );
             assert_eq!(view.model_menu, None);
         });
@@ -5508,7 +5693,14 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let bounds = cx.debug_bounds("welcome-codex").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
@@ -5516,8 +5708,8 @@ mod tests {
         let bounds = cx.debug_bounds("send").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
 
-        let finished = |view: &Keystone| {
-            view.conversations.get(&1).is_some_and(|c| {
+        let finished = |view: &Keystone, cx: &App| {
+            view.state.read(cx).conversations().get(&1).is_some_and(|c| {
                 !c.running
                     && c.rows.iter().any(|row| matches!(row, Row::Item(item)
                         if item.kind == ItemKind::AgentMessage && item.status == ItemStatus::Completed))
@@ -5526,15 +5718,15 @@ mod tests {
         wait_until(cx, &view, finished);
         view.read_with(cx, |view, cx| {
             assert_eq!(view.composer.read(cx).value(), "");
-            let rows = &view.conversations[&1].rows;
+            let rows = &view.state.read(cx).conversations()[&1].rows;
             assert!(matches!(&rows[0], Row::Item(item) if item.kind == ItemKind::UserMessage && item.text == "hello"));
             // No mode chosen: Keystone sent no override, so Codex used its own settings.
             assert!(rows.iter().any(|row| matches!(row, Row::Item(item)
                 if item.text.contains("You wrote: hello") && item.text.contains("`on-request / workspaceWrite`"))));
         });
         // The reply renders as Markdown, with a copy action once it is complete.
-        let reply = view.read_with(cx, |view, _| {
-            view.conversations[&1]
+        let reply = view.read_with(cx, |view, cx| {
+            view.state.read(cx).conversations()[&1]
                 .rows
                 .iter()
                 .position(
@@ -5542,8 +5734,8 @@ mod tests {
                 )
                 .unwrap()
         });
-        view.read_with(cx, |view, _| {
-            let Row::Item(item) = &view.conversations[&1].rows[reply] else {
+        view.read_with(cx, |view, cx| {
+            let Row::Item(item) = &view.state.read(cx).conversations()[&1].rows[reply] else {
                 panic!("a reply row");
             };
             assert!(
@@ -5572,8 +5764,8 @@ mod tests {
         // The shortcut sends too. A command waits for approval.
         cx.simulate_input("please run it");
         cx.simulate_keystrokes("ctrl-enter");
-        wait_until(cx, &view, |view| {
-            !view.conversations[&1].approvals.is_empty()
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].approvals.is_empty()
         });
         let bounds = cx.debug_bounds("approve").expect("approval card rendered");
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -5582,8 +5774,8 @@ mod tests {
         view.read_with(cx, |view, cx| {
             assert_eq!(view.composer.read(cx).value(), "next")
         });
-        wait_until(cx, &view, |view| {
-            let c = &view.conversations[&1];
+        wait_until(cx, &view, |view, cx| {
+            let c = &view.state.read(cx).conversations()[&1];
             !c.running
                 && c.rows.iter().any(|row| {
                     matches!(row, Row::Item(item)
@@ -5595,13 +5787,23 @@ mod tests {
         view.update(cx, |view, cx| view.flush_logs(cx));
         let store = Store::open(&path).unwrap();
         cx.executor().allow_parking();
-        let (restored, cx) =
-            cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &restored, |view| {
-            view.conversations.get(&1).is_some_and(|c| !c.is_loading())
+        let (restored, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
         });
-        restored.read_with(cx, |view, _| {
-            let rows = &view.conversations[&1].rows;
+        wait_until(cx, &restored, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
+                .get(&1)
+                .is_some_and(|c| !c.is_loading())
+        });
+        restored.read_with(cx, |view, cx| {
+            let rows = &view.state.read(cx).conversations()[&1].rows;
             assert!(rows.contains(&Row::Decision { action: "echo scripted".into(), allowed: true }));
             assert!(rows.iter().any(|row| matches!(row, Row::Item(item) if item.text.contains("You wrote: please run it"))));
         });
@@ -5625,7 +5827,14 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let bounds = cx.debug_bounds("welcome-claude").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
@@ -5634,20 +5843,24 @@ mod tests {
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
 
         let replied = |text: &'static str| {
-            move |view: &Keystone| {
-                view.conversations.get(&1).is_some_and(|c| {
-                    !c.running
-                        && c.rows.iter().any(|row| {
-                            matches!(row, Row::Item(item)
+            move |view: &Keystone, cx: &App| {
+                view.state
+                    .read(cx)
+                    .conversations()
+                    .get(&1)
+                    .is_some_and(|c| {
+                        !c.running
+                            && c.rows.iter().any(|row| {
+                                matches!(row, Row::Item(item)
                             if item.kind == ItemKind::AgentMessage && item.text.contains(text))
-                        })
-                })
+                            })
+                    })
             }
         };
         wait_until(cx, &view, replied("You wrote: hello"));
         view.read_with(cx, |view, cx| {
             assert_eq!(view.composer.read(cx).value(), "");
-            let rows = &view.conversations[&1].rows;
+            let rows = &view.state.read(cx).conversations()[&1].rows;
             // The local copy was replaced by Claude's echo, not shown twice.
             let users = rows
                 .iter()
@@ -5666,13 +5879,13 @@ mod tests {
         // A command waits for approval.
         cx.simulate_input("please run it");
         cx.simulate_keystrokes("ctrl-enter");
-        wait_until(cx, &view, |view| {
-            !view.conversations[&1].approvals.is_empty()
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].approvals.is_empty()
         });
         let bounds = cx.debug_bounds("approve").expect("approval card rendered");
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        wait_until(cx, &view, |view| {
-            let c = &view.conversations[&1];
+        wait_until(cx, &view, |view, cx| {
+            let c = &view.state.read(cx).conversations()[&1];
             !c.running
                 && c.rows.iter().any(|row| {
                     matches!(row, Row::Item(item)
@@ -5683,16 +5896,19 @@ mod tests {
         // Stop ends a long reply and keeps what streamed.
         cx.simulate_input("a long one");
         cx.simulate_keystrokes("ctrl-enter");
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].rows.iter().any(|row| {
-                matches!(row, Row::Item(item)
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1]
+                .rows
+                .iter()
+                .any(|row| {
+                    matches!(row, Row::Item(item)
                 if item.status == ItemStatus::InProgress && item.text.contains("word1"))
-            })
+                })
         });
         let bounds = cx.debug_bounds("stop").expect("stop shown while running");
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        wait_until(cx, &view, |view| {
-            let c = &view.conversations[&1];
+        wait_until(cx, &view, |view, cx| {
+            let c = &view.state.read(cx).conversations()[&1];
             !c.running
                 && matches!(
                     c.rows.last(),
@@ -5707,13 +5923,23 @@ mod tests {
         view.update(cx, |view, cx| view.flush_logs(cx));
         let store = Store::open(&path).unwrap();
         cx.executor().allow_parking();
-        let (restored, cx) =
-            cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        wait_until(cx, &restored, |view| {
-            view.conversations.get(&1).is_some_and(|c| !c.is_loading())
+        let (restored, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
         });
-        restored.read_with(cx, |view, _| {
-            let rows = &view.conversations[&1].rows;
+        wait_until(cx, &restored, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
+                .get(&1)
+                .is_some_and(|c| !c.is_loading())
+        });
+        restored.read_with(cx, |view, cx| {
+            let rows = &view.state.read(cx).conversations()[&1].rows;
             assert!(rows.contains(&Row::Decision {
                 action: "echo scripted".into(),
                 allowed: true
@@ -5736,12 +5962,21 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        view.update(cx, |view, _| {
-            view.claude = Some(ClaudeConnection::new(
-                Some(PathBuf::from("/nonexistent/claude")),
-                view.wake.clone(),
-            ))
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(PathBuf::from("/nonexistent/claude")),
+                    state.test_wake().clone(),
+                )));
+            })
         });
         let bounds = cx.debug_bounds("welcome-claude").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -5749,8 +5984,10 @@ mod tests {
         cx.simulate_input("hello");
         cx.simulate_keystrokes("ctrl-enter");
         // The failure arrives from the connection's worker, after the send returned.
-        wait_until(cx, &view, |view| {
-            view.conversations
+        wait_until(cx, &view, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
                 .get(&1)
                 .is_some_and(|c| c.error.is_some())
         });
@@ -5758,8 +5995,8 @@ mod tests {
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(300));
         cx.run_until_parked();
-        view.read_with(cx, |view, _| {
-            let conversation = &view.conversations[&1];
+        view.read_with(cx, |view, cx| {
+            let conversation = &view.state.read(cx).conversations()[&1];
             let error = conversation.error.clone().unwrap_or_default();
             assert!(
                 error.starts_with("Could not start Claude Code at /nonexistent/claude."),
@@ -5801,20 +6038,35 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        view.update(cx, |view, _| {
-            view.claude = Some(ClaudeConnection::new(Some(script), view.wake.clone()))
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(script),
+                    state.test_wake().clone(),
+                )));
+            })
         });
         let bounds = cx.debug_bounds("welcome-claude").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         cx.simulate_input("a long one");
         cx.simulate_keystrokes("ctrl-enter");
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].rows.iter().any(|row| {
-                matches!(row, Row::Item(item)
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1]
+                .rows
+                .iter()
+                .any(|row| {
+                    matches!(row, Row::Item(item)
                 if item.status == ItemStatus::InProgress && item.text.contains("word1"))
-            })
+                })
         });
         cx.simulate_input("change course");
         cx.simulate_keystrokes("ctrl-enter");
@@ -5822,7 +6074,7 @@ mod tests {
             .advance_clock(std::time::Duration::from_millis(300));
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
-            let conversation = &view.conversations[&1];
+            let conversation = &view.state.read(cx).conversations()[&1];
             let error = conversation.error.clone().unwrap_or_default();
             assert!(
                 error.starts_with("This Claude Code version does not report message progress"),
@@ -5838,7 +6090,9 @@ mod tests {
                 if item.text == "change course"))
             );
         });
-        wait_until(cx, &view, |view| !view.conversations[&1].running);
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].running
+        });
     }
 
     #[gpui::test]
@@ -5848,7 +6102,14 @@ mod tests {
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         for selector in ["new-session", "new-claude"] {
             let bounds = cx.debug_bounds(selector).expect("control rendered");
             cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -5884,7 +6145,14 @@ mod tests {
         store.set_settled(1, true).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         assert!(cx.debug_bounds("session-1").is_none());
         assert!(cx.debug_bounds("session-2").is_some());
 
@@ -5920,7 +6188,14 @@ mod tests {
         store.select(4).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         view.update(cx, |this, cx| {
             let mut live = Conversation::default();
             live.running = true;
@@ -5930,7 +6205,9 @@ mod tests {
                 action: "cargo test".into(),
                 detail: None,
             });
-            this.conversations.insert(3, live);
+            this.state.update(cx, |state, _| {
+                state.test_conversations_mut().insert(3, live)
+            });
             this.refresh(cx);
         });
         cx.run_until_parked();
@@ -5964,10 +6241,23 @@ mod tests {
         store.select(1).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let missing = dir.path().join("no-such-codex");
         view.update_in(cx, |this, window, cx| {
-            this.codex = Some(CodexConnection::new(Some(missing), "0", this.wake.clone()));
+            this.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(missing),
+                    "0",
+                    state.test_wake().clone(),
+                )));
+            });
             this.composer
                 .update(cx, |input, cx| input.set_value("hello".into(), cx));
             let draft = this.composer_draft(cx).unwrap();
@@ -5976,15 +6266,16 @@ mod tests {
         cx.run_until_parked();
         // The start fails on the connection's worker, after the send returned. Until
         // then the turn is running.
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].error.is_some() && !view.conversations[&1].running
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1].error.is_some()
+                && !view.state.read(cx).conversations()[&1].running
         });
         cx.run_until_parked();
         let header = y(cx, "attention-section");
         assert!(header < y(cx, "session-1") && y(cx, "session-1") < y(cx, "working-section"));
         assert!(y(cx, "working-section") < y(cx, "session-2"));
-        view.read_with(cx, |this, _| {
-            let session = &this.store.workspace().sessions()[0];
+        view.read_with(cx, |this, cx| {
+            let session = &this.state.read(cx).store().workspace().sessions()[0];
             assert_eq!(session.last_turn(), Some(keystone_core::LastTurn::Failed));
             assert_eq!(session.attention(false, false), Some(Attention::Failed));
         });
@@ -6007,7 +6298,14 @@ mod tests {
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         // Session 1's history arrives only when the test releases it.
         let (release, released) = std::sync::mpsc::channel::<()>();
         let released = std::sync::Mutex::new(released);
@@ -6018,17 +6316,32 @@ mod tests {
                 }
                 keystone_agent::log::read(dir, session)
             });
-            this.logs = Logs::with_reader(sessions.clone(), this.wake.clone(), read);
-            this.conversations.clear();
-            this.conversation(2);
-            assert!(this.conversation(1).is_loading());
-            this.conversation(1)
-                .apply(Event::ApprovalRequested(keystone_agent::Approval {
-                    request: keystone_agent::RequestId("1".into()),
-                    item_id: None,
-                    action: "cargo test".into(),
-                    detail: None,
-                }));
+            this.state.update(cx, |state, _| {
+                state.test_set_logs(Logs::with_reader(
+                    sessions.clone(),
+                    state.test_wake().clone(),
+                    read,
+                ));
+            });
+            this.state
+                .update(cx, |state, _| state.test_conversations_mut().clear());
+            this.state.update(cx, |state, _| {
+                state.test_conversation(2);
+            });
+            assert!(
+                this.state
+                    .update(cx, |state, _| state.test_conversation(1).is_loading())
+            );
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).apply(Event::ApprovalRequested(
+                    keystone_agent::Approval {
+                        request: keystone_agent::RequestId("1".into()),
+                        item_id: None,
+                        action: "cargo test".into(),
+                        detail: None,
+                    },
+                ))
+            });
             this.refresh(cx);
         });
         cx.run_until_parked();
@@ -6036,10 +6349,12 @@ mod tests {
         assert!(y(cx, "working-section") < y(cx, "session-1"));
 
         release.send(()).unwrap();
-        wait_until(cx, &view, |view| !view.conversations[&1].is_loading());
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].is_loading()
+        });
         cx.run_until_parked();
-        view.read_with(cx, |this, _| {
-            assert_eq!(this.conversations[&1].approvals.len(), 1)
+        view.read_with(cx, |this, cx| {
+            assert_eq!(this.state.read(cx).conversations()[&1].approvals.len(), 1)
         });
         let header = y(cx, "attention-section");
         assert!(header < y(cx, "session-1") && y(cx, "session-1") < y(cx, "working-section"));
@@ -6059,7 +6374,14 @@ mod tests {
         store.record_turn_end(1, false, 3).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         assert!(y(cx, "session-1") < y(cx, "working-section"));
 
         click(cx, "session-1");
@@ -6091,7 +6413,14 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let line = (0..60)
             .map(|n| format!("w{n:02}"))
             .collect::<Vec<_>>()
@@ -6118,7 +6447,14 @@ mod tests {
             .unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let field = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("composer-field").unwrap();
         let send = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("send").unwrap();
         let (empty, toolbar) = (field(cx), send(cx));
@@ -6175,7 +6511,14 @@ mod tests {
             .unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let saved = |path: &Path| {
             let store = Store::open(path).unwrap();
             let settled = store
@@ -6206,7 +6549,14 @@ mod tests {
             bind_keys(cx);
         });
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let toggle_x =
             |cx: &mut gpui::VisualTestContext| cx.debug_bounds("sidebar-toggle").unwrap().origin.x;
         assert_eq!(toggle_x(cx), px(6.));
@@ -6354,20 +6704,39 @@ mod tests {
         seed_long_session(&sessions, 1, 3);
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let (release, released) = std::sync::mpsc::channel::<()>();
         let released = std::sync::Mutex::new(released);
-        view.update(cx, |this, _| {
+        view.update(cx, |this, cx| {
             let read: keystone_agent::log::Reader = Arc::new(move |dir, session| {
                 if session == 1 {
                     let _ = released.lock().unwrap().recv();
                 }
                 keystone_agent::log::read(dir, session)
             });
-            this.logs = Logs::with_reader(sessions.clone(), this.wake.clone(), read);
-            this.conversations.clear();
-            this.conversation(2);
-            assert!(this.conversation(1).is_loading());
+            this.state.update(cx, |state, _| {
+                state.test_set_logs(Logs::with_reader(
+                    sessions.clone(),
+                    state.test_wake().clone(),
+                    read,
+                ));
+            });
+            this.state
+                .update(cx, |state, _| state.test_conversations_mut().clear());
+            this.state.update(cx, |state, _| {
+                state.test_conversation(2);
+            });
+            assert!(
+                this.state
+                    .update(cx, |state, _| state.test_conversation(1).is_loading())
+            );
         });
         (dir, view, cx, release)
     }
@@ -6383,15 +6752,17 @@ mod tests {
         release: &std::sync::mpsc::Sender<()>,
     ) {
         release.send(()).unwrap();
-        wait_until(cx, view, |view| !view.conversations[&1].is_loading());
+        wait_until(cx, view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].is_loading()
+        });
     }
 
     fn last_turn(
         view: &gpui::Entity<Keystone>,
         cx: &mut gpui::VisualTestContext,
     ) -> Option<keystone_core::LastTurn> {
-        view.read_with(cx, |this, _| {
-            this.store.workspace().sessions()[0].last_turn()
+        view.read_with(cx, |this, cx| {
+            this.state.read(cx).store().workspace().sessions()[0].last_turn()
         })
     }
 
@@ -6476,13 +6847,17 @@ mod tests {
         codex.send("a");
         codex.end("a", "failed");
         deliver(&view, cx, &mut codex);
-        let rows = view.read_with(cx, |this, _| this.conversations[&1].rows.len());
+        let rows = view.read_with(cx, |this, cx| {
+            this.state.read(cx).conversations()[&1].rows.len()
+        });
         // The user pressed Stop before the failure reached them.
         codex.stop();
         deliver(&view, cx, &mut codex);
         assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
         assert_eq!(
-            view.read_with(cx, |this, _| this.conversations[&1].rows.len()),
+            view.read_with(cx, |this, cx| this.state.read(cx).conversations()[&1]
+                .rows
+                .len()),
             rows
         );
     }
@@ -6498,8 +6873,12 @@ mod tests {
             .create(Provider::Codex, &working_directory(), 1)
             .unwrap();
         let (view, cx) = open_window(&path, cx);
-        wait_until(cx, &view, |view| {
-            view.conversations.get(&1).is_some_and(|c| !c.is_loading())
+        wait_until(cx, &view, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
+                .get(&1)
+                .is_some_and(|c| !c.is_loading())
         });
         let mut codex = Codex::open();
         codex.send("a");
@@ -6534,8 +6913,8 @@ mod tests {
             }
         });
         cx.run_until_parked();
-        view.read_with(cx, |view, _| {
-            let conversation = &view.conversations[&1];
+        view.read_with(cx, |view, cx| {
+            let conversation = &view.state.read(cx).conversations()[&1];
             let waiting: Vec<_> = conversation
                 .approvals
                 .iter()
@@ -6673,12 +7052,16 @@ mod tests {
         load(&view, cx, &release);
         assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
         // A Stop that reaches Claude after the failure changes nothing.
-        let rows = view.read_with(cx, |this, _| this.conversations[&1].rows.len());
+        let rows = view.read_with(cx, |this, cx| {
+            this.state.read(cx).conversations()[&1].rows.len()
+        });
         claude.stop();
         deliver_claude(&view, cx, &mut claude);
         assert_eq!(last_turn(&view, cx), Some(keystone_core::LastTurn::Failed));
         assert_eq!(
-            view.read_with(cx, |this, _| this.conversations[&1].rows.len()),
+            view.read_with(cx, |this, cx| this.state.read(cx).conversations()[&1]
+                .rows
+                .len()),
             rows
         );
     }
@@ -6725,22 +7108,37 @@ mod tests {
         let script = claude_script(dir.path(), "");
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        view.update(cx, |this, _| {
-            this.claude = Some(ClaudeConnection::new(Some(script), this.wake.clone()))
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
         });
-        let running = |view: &Keystone| view.conversations[&1].running;
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(script),
+                    state.test_wake().clone(),
+                )));
+            })
+        });
+        let running = |view: &Keystone, cx: &App| view.state.read(cx).conversations()[&1].running;
 
         send_text(&view, cx, "a long one");
         assert!(in_section(cx, "session-1", Section::Working));
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].rows.iter().any(|row| {
-                matches!(row, Row::Item(item)
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1]
+                .rows
+                .iter()
+                .any(|row| {
+                    matches!(row, Row::Item(item)
                 if item.status == ItemStatus::InProgress && item.text.contains("word1"))
-            })
+                })
         });
         view.update_in(cx, |this, window, cx| this.stop_turn(1, window, cx));
-        wait_until(cx, &view, |view| !running(view));
+        wait_until(cx, &view, |view, cx| !running(view, cx));
         assert_eq!(
             last_turn(&view, cx),
             Some(keystone_core::LastTurn::Finished)
@@ -6748,24 +7146,24 @@ mod tests {
         assert!(in_section(cx, "session-1", Section::Attention));
 
         send_text(&view, cx, "please run it");
-        wait_until(cx, &view, |view| {
-            !view.conversations[&1].approvals.is_empty()
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].approvals.is_empty()
         });
         cx.run_until_parked();
         assert!(in_section(cx, "session-1", Section::Attention));
         click(cx, "approve");
-        wait_until(cx, &view, |view| !running(view));
+        wait_until(cx, &view, |view, cx| !running(view, cx));
         cx.run_until_parked();
         assert!(in_section(cx, "session-1", Section::Attention));
 
         // A reply that ends while the user is elsewhere is unread.
         send_text(&view, cx, "hello");
         view.update(cx, |this, cx| this.select(2, cx));
-        wait_until(cx, &view, |view| !running(view));
+        wait_until(cx, &view, |view, cx| !running(view, cx));
         cx.run_until_parked();
         assert!(in_section(cx, "session-1", Section::Attention));
-        view.read_with(cx, |this, _| {
-            let session = &this.store.workspace().sessions()[0];
+        view.read_with(cx, |this, cx| {
+            let session = &this.state.read(cx).store().workspace().sessions()[0];
             assert_eq!(session.attention(false, false), Some(Attention::Replied));
         });
     }
@@ -6784,12 +7182,26 @@ mod tests {
         let script = claude_script(dir.path(), "KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1");
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
-        view.update(cx, |this, _| {
-            this.claude = Some(ClaudeConnection::new(Some(script), this.wake.clone()))
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(script),
+                    state.test_wake().clone(),
+                )));
+            })
         });
         send_text(&view, cx, "hello");
-        wait_until(cx, &view, |view| !view.conversations[&1].running);
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].running
+        });
         cx.run_until_parked();
         assert!(in_section(cx, "session-1", Section::Attention));
         assert!(in_section(cx, "session-2", Section::Working));
@@ -6811,14 +7223,27 @@ mod tests {
         store.select(1).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let missing = dir.path().join("no-such-claude");
-        view.update(cx, |this, _| {
-            this.claude = Some(ClaudeConnection::new(Some(missing), this.wake.clone()))
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(missing),
+                    state.test_wake().clone(),
+                )));
+            })
         });
         send_text(&view, cx, "hello");
-        wait_until(cx, &view, |view| {
-            view.conversations[&1].error.is_some() && !view.conversations[&1].running
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).conversations()[&1].error.is_some()
+                && !view.state.read(cx).conversations()[&1].running
         });
         cx.run_until_parked();
         assert!(in_section(cx, "session-1", Section::Attention));
@@ -6846,7 +7271,14 @@ mod tests {
         let store = Store::open(&path).unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (_view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         for selector in [
             "new-session",
             "new-claude",
@@ -6896,8 +7328,8 @@ mod tests {
             });
             this.create(Provider::Claude, cx);
             assert!(this.error.is_some());
-            assert_eq!(this.store.workspace().selected(), Some(1));
-            assert_eq!(this.store.workspace().sessions().len(), 1);
+            assert_eq!(this.state.read(cx).store().workspace().selected(), Some(1));
+            assert_eq!(this.state.read(cx).store().workspace().sessions().len(), 1);
             assert_eq!(this.composer.read(cx).value(), "Keep this draft");
         });
         assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -6924,7 +7356,7 @@ mod tests {
             });
         });
         cx.simulate_keystrokes("enter");
-        assert!(view.read_with(cx, |view, _| view.renaming.is_none()));
+        assert!(view.read_with(cx, |view, _cx| view.renaming.is_none()));
         assert_eq!(saved_title(), "Release notes");
 
         cx.simulate_keystrokes("f2");
@@ -6934,7 +7366,7 @@ mod tests {
                 .update(cx, |input, cx| input.set_value("Discarded".into(), cx));
         });
         cx.simulate_keystrokes("escape");
-        assert!(view.read_with(cx, |view, _| view.renaming.is_none()));
+        assert!(view.read_with(cx, |view, _cx| view.renaming.is_none()));
         assert_eq!(saved_title(), "Release notes");
     }
 
@@ -6972,7 +7404,7 @@ mod tests {
             keystroke: gpui::Keystroke::parse("enter").unwrap(),
         });
         cx.run_until_parked();
-        assert!(view.read_with(cx, |view, _| view.renaming.is_some()));
+        assert!(view.read_with(cx, |view, _cx| view.renaming.is_some()));
         assert!(
             cx.debug_bounds("rename-error").is_some(),
             "the dialog shows the error"
@@ -6986,7 +7418,7 @@ mod tests {
 
         std::fs::rename(dir.path().join("backup"), &state_dir).unwrap();
         cx.simulate_keystrokes("enter");
-        assert!(view.read_with(cx, |view, _| view.renaming.is_none()));
+        assert!(view.read_with(cx, |view, _cx| view.renaming.is_none()));
         let saved = Store::open(&path).unwrap().workspace().sessions()[0]
             .title()
             .to_owned();
@@ -7008,7 +7440,14 @@ mod tests {
             .unwrap();
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         std::fs::rename(&state_dir, dir.path().join("backup")).unwrap();
         let bounds = cx.debug_bounds("composer-field").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -7018,14 +7457,14 @@ mod tests {
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
-            assert_eq!(view.store.workspace().selected(), Some(2));
+            assert_eq!(view.state.read(cx).store().workspace().selected(), Some(2));
             assert_eq!(view.composer.read(cx).value(), "Keep my unsaved draft");
             assert!(view.error.as_deref().unwrap().contains("Draft not saved"));
         });
         view.update(cx, |view, cx| {
             view.create(Provider::Claude, cx);
-            assert_eq!(view.store.workspace().selected(), Some(2));
-            assert_eq!(view.store.workspace().sessions().len(), 2);
+            assert_eq!(view.state.read(cx).store().workspace().selected(), Some(2));
+            assert_eq!(view.state.read(cx).store().workspace().sessions().len(), 2);
             assert_eq!(view.composer.read(cx).value(), "Keep my unsaved draft");
             assert!(view.error.as_deref().unwrap().contains("Draft not saved"));
         });
@@ -7085,7 +7524,7 @@ mod tests {
     }
 
     fn palette_open(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> bool {
-        view.read_with(cx, |view, _| view.palette.is_some())
+        view.read_with(cx, |view, _cx| view.palette.is_some())
     }
 
     #[gpui::test]
@@ -7096,11 +7535,14 @@ mod tests {
         run_from_palette(cx, "new c");
         assert!(!palette_open(&view, cx));
         assert!(cx.debug_bounds("palette").is_none());
-        view.read_with(cx, |view, _| {
-            let sessions = view.store.workspace().sessions();
+        view.read_with(cx, |view, cx| {
+            let sessions = view.state.read(cx).store().workspace().sessions();
             assert_eq!(sessions.len(), 1);
             assert_eq!(sessions[0].provider(), Provider::Codex);
-            assert_eq!(view.store.workspace().selected(), Some(sessions[0].id()));
+            assert_eq!(
+                view.state.read(cx).store().workspace().selected(),
+                Some(sessions[0].id())
+            );
         });
         assert!(
             composer_focused(&view, cx),
@@ -7135,7 +7577,7 @@ mod tests {
             );
             view.read_with(cx, |view, cx| {
                 assert_eq!(view.composer.read(cx).value(), "half a thought");
-                assert!(!view.store.workspace().sessions()[0].settled());
+                assert!(!view.state.read(cx).store().workspace().sessions()[0].settled());
             });
         }
     }
@@ -7145,7 +7587,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
         let customizing = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
-            view.read_with(cx, |view, _| {
+            view.read_with(cx, |view, _cx| {
                 view.presentation.current.customization.is_open()
             })
         };
@@ -7167,7 +7609,7 @@ mod tests {
         let (view, cx) = open_with_session(dir.path(), cx);
         cx.simulate_keystrokes("f2");
         cx.run_until_parked();
-        assert!(view.read_with(cx, |view, _| view.renaming.is_some()));
+        assert!(view.read_with(cx, |view, _cx| view.renaming.is_some()));
         cx.simulate_keystrokes("ctrl-k");
         cx.run_until_parked();
         assert!(
@@ -7209,8 +7651,8 @@ mod tests {
         std::fs::write(dir.path().join("README.md"), "").unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
         let saved_files_views = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
-            view.read_with(cx, |view, _| {
-                view.saved_layout().map(|layout| {
+            view.read_with(cx, |view, cx| {
+                view.saved_layout(cx).map(|layout| {
                     layout
                         .shown()
                         .views()
@@ -7309,7 +7751,7 @@ mod tests {
         cx.run_until_parked();
         assert!(palette_open(&view, cx));
         view.read_with(cx, |view, cx| {
-            assert_eq!(view.store.workspace().sessions().len(), 1);
+            assert_eq!(view.state.read(cx).store().workspace().sessions().len(), 1);
             assert_eq!(
                 view.composer.read(cx).value(),
                 "half a thought",
@@ -7362,7 +7804,7 @@ mod tests {
         cx.run_until_parked();
         assert!(palette_open(&view, cx));
         assert!(
-            view.read_with(cx, |view, _| view
+            view.read_with(cx, |view, _cx| view
                 .presentation
                 .current
                 .customization
@@ -7381,7 +7823,9 @@ mod tests {
                 action: "cargo test".into(),
                 detail: None,
             });
-            this.conversations.insert(1, live);
+            this.state.update(cx, |state, _| {
+                state.test_conversations_mut().insert(1, live)
+            });
             this.refresh(cx);
         });
         cx.run_until_parked();
@@ -7391,7 +7835,7 @@ mod tests {
     fn settle_skips_approval_held_while_history_loads(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        view.update(cx, |this, _| {
+        view.update(cx, |this, cx| {
             let mut live = Conversation::loading();
             live.apply(keystone_agent::Event::ApprovalRequested(
                 keystone_agent::Approval {
@@ -7401,7 +7845,9 @@ mod tests {
                     detail: None,
                 },
             ));
-            this.conversations.insert(1, live);
+            this.state.update(cx, |state, _| {
+                state.test_conversations_mut().insert(1, live)
+            });
         });
         cx.simulate_keystrokes("ctrl-shift-s");
         cx.run_until_parked();
@@ -7409,10 +7855,10 @@ mod tests {
     }
 
     fn settled(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> (bool, bool) {
-        view.read_with(cx, |view, _| {
-            let on_disk = Store::open(view.store.path()).unwrap();
+        view.read_with(cx, |view, cx| {
+            let on_disk = Store::open(view.state.read(cx).store().path()).unwrap();
             (
-                view.store.workspace().sessions()[0].settled(),
+                view.state.read(cx).store().workspace().sessions()[0].settled(),
                 on_disk.workspace().sessions()[0].settled(),
             )
         })
@@ -7426,7 +7872,7 @@ mod tests {
         run_from_palette(cx, "settle");
         assert!(!palette_open(&view, cx));
         assert_eq!(settled(&view, cx), (false, false));
-        view.read_with(cx, |view, _| {
+        view.read_with(cx, |view, _cx| {
             assert_eq!(
                 view.error.as_deref(),
                 Some("Answer the approval request before settling this session.")
@@ -7442,10 +7888,17 @@ mod tests {
         cx.simulate_keystrokes("ctrl-shift-s");
         cx.run_until_parked();
         assert_eq!(settled(&view, cx), (false, false));
-        assert!(view.read_with(cx, |view, _| view.error.is_some()));
+        assert!(view.read_with(cx, |view, _cx| view.error.is_some()));
 
-        view.update(cx, |this, _| {
-            this.conversations.get_mut(&1).unwrap().approvals.clear()
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _| {
+                state
+                    .test_conversations_mut()
+                    .get_mut(&1)
+                    .unwrap()
+                    .approvals
+                    .clear()
+            })
         });
         cx.simulate_keystrokes("ctrl-shift-s");
         cx.run_until_parked();
@@ -7471,7 +7924,14 @@ mod tests {
         }
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         let mut frames_ms = Vec::new();
         for _ in 0..30 {
             view.update_in(cx, |this, window, cx| this.toggle_palette(window, cx));
@@ -7487,7 +7947,7 @@ mod tests {
             view.update_in(cx, |this, window, cx| this.toggle_palette(window, cx));
             cx.update(|window, cx| window.draw(cx).clear(cx));
         }
-        assert!(view.read_with(cx, |view, _| view.palette.is_none()));
+        assert!(view.read_with(cx, |view, _cx| view.palette.is_none()));
         frames_ms.sort_by(f64::total_cmp);
         eprintln!(
             "PERF palette_open_ms={:.2} palette_open_p95_ms={:.2}",
@@ -7570,11 +8030,12 @@ fn main() {
         }
     };
     gpui_platform::application()
+        .with_quit_mode(gpui::QuitMode::Explicit)
         .with_assets(keystone_ui::Icons)
         .run(move |cx: &mut App| {
             keystone_ui::init(cx);
             bind_keys(cx);
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            let state = install_app_state(store, cx);
             let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
             cx.open_window(
                 WindowOptions {
@@ -7585,7 +8046,7 @@ fn main() {
                 |window, cx| {
                     let view = cx.new(|cx| {
                         let view = Keystone::new(
-                            store,
+                            state.clone(),
                             std::env::var_os("KEYSTONE_VISUAL_FIXTURE").is_some(),
                             window,
                             cx,
@@ -7593,11 +8054,7 @@ fn main() {
                         view.focus.focus(window, cx);
                         view
                     });
-                    let weak = view.downgrade();
-                    window.on_window_should_close(cx, move |_, cx| {
-                        weak.update(cx, |view, cx| view.save_before_exit(cx))
-                            .unwrap_or(true)
-                    });
+                    register_window(view.downgrade(), window, cx);
                     view
                 },
             )

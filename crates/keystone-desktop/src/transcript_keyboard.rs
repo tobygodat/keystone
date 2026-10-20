@@ -1,7 +1,7 @@
 use crate::Keystone;
 use crate::conversation::{self, Row};
 use crate::view_state::{CopyTarget, ViewKey};
-use gpui::{ClipboardItem, Context, Window};
+use gpui::{App, ClipboardItem, Context, Window};
 use keystone_agent::{ItemKind, ItemStatus};
 use keystone_ui::markdown::{Block, Document};
 
@@ -104,7 +104,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.store.workspace().selected() else {
+        let Some(session) = self.state.read(cx).store().workspace().selected() else {
             return;
         };
         let views = self.presentation.current.arrangement.visible.clone();
@@ -138,7 +138,7 @@ impl Keystone {
         );
     }
     pub(crate) fn focus_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.store.workspace().selected() else {
+        let Some(session) = self.state.read(cx).store().workspace().selected() else {
             return;
         };
         let Some(key) = self
@@ -159,7 +159,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(conversation) = self.conversations.get(&key.session) else {
+        let Some(conversation) = self.state.read(cx).conversations().get(&key.session) else {
             return;
         };
         if conversation.is_loading() {
@@ -232,6 +232,7 @@ impl Keystone {
         &self,
         key: ViewKey,
         read: impl FnOnce(&[(CopyTarget, &str)]) -> R,
+        cx: &App,
     ) -> R {
         let Some(index) = self
             .presentation
@@ -243,7 +244,9 @@ impl Keystone {
             return read(&[]);
         };
         let Some(row) = self
-            .conversations
+            .state
+            .read(cx)
+            .conversations()
             .get(&key.session)
             .and_then(|c| c.rows.get(index))
         else {
@@ -277,9 +280,11 @@ impl Keystone {
         {
             self.transcript_row(key, 0, window, cx);
         }
-        let actions: Vec<_> = self.with_row_actions(key, |actions| {
-            actions.iter().map(|(target, _)| *target).collect()
-        });
+        let actions: Vec<_> = self.with_row_actions(
+            key,
+            |actions| actions.iter().map(|(target, _)| *target).collect(),
+            cx,
+        );
         let jump = self.presentation.current.views.scrolled_up(key);
         let keyboard = self.presentation.current.views.keyboard(key, cx);
         let at = if keyboard.jump_focus.is_focused(window) {
@@ -351,12 +356,16 @@ impl Keystone {
             .views
             .keyboard_state(key)
             .and_then(|k| k.action);
-        let text = self.with_row_actions(key, |actions| {
-            target
-                .and_then(|target| actions.iter().find(|(t, _)| *t == target))
-                .or_else(|| actions.first())
-                .map(|(_, text)| (*text).to_owned())
-        });
+        let text = self.with_row_actions(
+            key,
+            |actions| {
+                target
+                    .and_then(|target| actions.iter().find(|(t, _)| *t == target))
+                    .or_else(|| actions.first())
+                    .map(|(_, text)| (*text).to_owned())
+            },
+            cx,
+        );
         if let Some(text) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -405,14 +414,16 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.store.workspace().selected() else {
+        let Some(session) = self.state.read(cx).store().workspace().selected() else {
             return;
         };
         let visible = self.presentation.current.arrangement.visible.clone();
         for view in visible {
             let key = ViewKey { view, session };
             if self
-                .conversations
+                .state
+                .read(cx)
+                .conversations()
                 .get(&session)
                 .is_some_and(|c| c.is_loading())
             {
@@ -422,7 +433,9 @@ impl Keystone {
                 continue;
             };
             let hidden_row = keyboard.row.is_some_and(|row| {
-                self.conversations
+                self.state
+                    .read(cx)
+                    .conversations()
                     .get(&session)
                     .and_then(|c| c.rows.get(row))
                     .is_none_or(|row| !conversation::visible(row))
@@ -435,9 +448,11 @@ impl Keystone {
                 continue;
             }
             let invalid_action = keyboard.action_focus.is_focused(window)
-                && !self.with_row_actions(key, |actions| {
-                    actions.iter().any(|(t, _)| Some(*t) == keyboard.action)
-                });
+                && !self.with_row_actions(
+                    key,
+                    |actions| actions.iter().any(|(t, _)| Some(*t) == keyboard.action),
+                    cx,
+                );
             let hidden_jump = keyboard.jump_focus.is_focused(window)
                 && !self.presentation.current.views.scrolled_up(key);
             if invalid_action || hidden_jump {

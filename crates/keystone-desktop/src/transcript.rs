@@ -158,6 +158,18 @@ pub fn row(
                 .text_color(colors.text_muted)
                 .child(format!("Changed {}", paths.join(", ")))
                 .into_any_element(),
+            ItemKind::Other { .. }
+                if item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX) =>
+            {
+                div()
+                    .automation_id(format!("log-loss-notice-{index}"))
+                    .child(
+                        Label::new(item.text.clone())
+                            .size(TextSize::Ui)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element()
+            }
             ItemKind::Tool { name } | ItemKind::Other { name } => div()
                 .text_size(TextSize::Ui.px())
                 .text_color(colors.text_muted)

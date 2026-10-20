@@ -2,8 +2,9 @@ use crate::arrangement_editor::Action;
 use crate::customization::label;
 use crate::{Keystone, ViewKey, arch_mark, model_selector, now_ms};
 use gpui::{
-    Anchor, AnyElement, AvailableSpace, Bounds, Context, Empty, Focusable, FontWeight, IntoElement,
-    MouseButton, Pixels, Point, SharedString, Window, canvas, div, prelude::*, px, size,
+    Anchor, AnyElement, App, AvailableSpace, Bounds, Context, Empty, Focusable, FontWeight,
+    IntoElement, MouseButton, Pixels, Point, SharedString, Window, canvas, div, prelude::*, px,
+    size,
 };
 use keystone_core::{
     ApprovalMode, Axis, Component, Composition, Edit, Node, NodePath, Place, Provider, Size, ViewId,
@@ -180,8 +181,8 @@ fn tab_label(id: ViewId, c: &Composition) -> String {
 
 impl Keystone {
     /// The composition on screen: the Customize draft while it is open, else the saved one.
-    pub(crate) fn shown_composition(&self) -> Composition {
-        let saved = self.saved_composition();
+    pub(crate) fn shown_composition(&self, cx: &App) -> Composition {
+        let saved = self.saved_composition(cx);
         self.presentation
             .current
             .customization
@@ -189,8 +190,8 @@ impl Keystone {
             .clone()
     }
 
-    pub(crate) fn arrangement_has_sidebar(&self) -> bool {
-        self.shown_composition()
+    pub(crate) fn arrangement_has_sidebar(&self, cx: &App) -> bool {
+        self.shown_composition(cx)
             .views()
             .any(|(_, component)| component == Component::SessionList)
     }
@@ -204,7 +205,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let before = self.shown_composition();
+        let before = self.shown_composition(cx);
         let closing = match edit {
             Edit::Close(view) if self.view_contains_focus(view, window, cx) => Some(view),
             _ => None,
@@ -217,8 +218,10 @@ impl Keystone {
                 (Err(problem), _) => Err(problem.to_string()),
                 (Ok(_), Err(error)) => Err(format!("Cannot save this project's layout. {error}")),
                 (Ok(layout), Ok(project)) => self
-                    .store
-                    .set_project_layout(project, Some(layout.into()))
+                    .state
+                    .update(cx, |state, cx| {
+                        state.set_project_layout(project, Some(layout.into()), cx)
+                    })
                     .map(|applied| crate::durability_warning(applied.durability))
                     .map_err(|error| error.to_string()),
             };
@@ -235,9 +238,9 @@ impl Keystone {
         // A closed view's focus handle outlives it, and a handle that is no longer drawn
         // swallows every shortcut, so focus moves to what took the view's place.
         if let Some(closed) = closing
-            && self.shown_composition().component(closed).is_none()
+            && self.shown_composition(cx).component(closed).is_none()
         {
-            let shown = self.shown_in_place_of(closed, &before);
+            let shown = self.shown_in_place_of(closed, &before, cx);
             self.focus_view(shown, window, cx);
         }
         self.refresh(cx);
@@ -245,8 +248,8 @@ impl Keystone {
 
     /// The view on screen where `closed` was: the rest of its tab group, or whatever
     /// the fitted tabs fall back to.
-    fn shown_in_place_of(&self, closed: ViewId, before: &Composition) -> Option<ViewId> {
-        let after = self.shown_composition();
+    fn shown_in_place_of(&self, closed: ViewId, before: &Composition, cx: &App) -> Option<ViewId> {
+        let after = self.shown_composition(cx);
         if self.presentation.current.arrangement.fitted {
             return self
                 .fitted_tab(&after)
@@ -262,8 +265,8 @@ impl Keystone {
 
     /// Focuses the content of `view`, or the window when there is none to focus.
     fn focus_view(&mut self, view: Option<ViewId>, window: &mut Window, cx: &mut Context<Self>) {
-        let component = view.and_then(|view| self.shown_composition().component(view));
-        let session = self.store.workspace().selected();
+        let component = view.and_then(|view| self.shown_composition(cx).component(view));
+        let session = self.state.read(cx).store().workspace().selected();
         match (component, view, session) {
             (Some(Component::Files), _, _) => self.focus_files(window, cx),
             (Some(Component::Conversation), Some(view), Some(session)) => self
@@ -301,26 +304,38 @@ impl Keystone {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.shown_composition().component(view) == Some(Component::Conversation) {
-            return self.store.workspace().selected().is_some_and(|session| {
-                self.presentation.current.views.contains_focus(
-                    ViewKey { view, session },
-                    window,
-                    cx,
-                )
-            });
+        if self.shown_composition(cx).component(view) == Some(Component::Conversation) {
+            return self
+                .state
+                .read(cx)
+                .store()
+                .workspace()
+                .selected()
+                .is_some_and(|session| {
+                    self.presentation.current.views.contains_focus(
+                        ViewKey { view, session },
+                        window,
+                        cx,
+                    )
+                });
         }
-        let handle = match self.shown_composition().component(view) {
+        let handle = match self.shown_composition(cx).component(view) {
             Some(Component::Files) => self
-                .files_root()
+                .files_root(cx)
                 .ok()
                 .map(|root| self.files.browser(&root, cx).focus_handle(cx)),
-            Some(Component::Conversation) => self.store.workspace().selected().map(|session| {
-                self.presentation
-                    .current
-                    .views
-                    .focus(ViewKey { view, session }, cx)
-            }),
+            Some(Component::Conversation) => self
+                .state
+                .read(cx)
+                .store()
+                .workspace()
+                .selected()
+                .map(|session| {
+                    self.presentation
+                        .current
+                        .views
+                        .focus(ViewKey { view, session }, cx)
+                }),
             _ => None,
         };
         handle.is_some_and(|handle| handle.contains_focused(window, cx))
@@ -347,7 +362,7 @@ impl Keystone {
             return self.select_tab(view, window, cx);
         }
         let surfaces: Vec<_> = self
-            .shown_composition()
+            .shown_composition(cx)
             .views()
             .filter(|(_, component)| component.is_surface())
             .map(|(id, _)| id)
@@ -387,10 +402,10 @@ impl Keystone {
     /// The composer's minimum holds the widest of each control any session shows, so a
     /// Send, a provider's report or another selection never refits the arrangement.
     fn composer_minimum_width(&self, window: &mut Window, cx: &mut Context<Self>) -> f32 {
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.selected_session(cx) else {
             return COMPOSER_MIN;
         };
-        let folder = self.conversation_folder(session.id()).unwrap();
+        let folder = self.conversation_folder(session.id(), cx).unwrap();
         let models = [Provider::Claude, Provider::Codex].map(|provider| {
             let selection = model_selector::Selection {
                 provider,
@@ -442,7 +457,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let c = self.shown_composition();
+        let c = self.shown_composition(cx);
         self.presentation.current.arrangement.composer_min_width =
             self.composer_minimum_width(window, cx);
         let required = minimum(
@@ -478,7 +493,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let c = self.shown_composition();
+        let c = self.shown_composition(cx);
         let fitted = self.presentation.current.arrangement.fitted;
         let viewport = window.viewport_size();
         let toolbar = if self.presentation.current.customization.is_open() {
@@ -589,7 +604,7 @@ impl Keystone {
             Node::Split { axis, children } => {
                 if *axis == Axis::Column
                     && children.len() == 2
-                    && self.selected_session().is_none()
+                    && self.selected_session(cx).is_none()
                     && !self.fixture
                     && !self.presentation.current.customization.is_open()
                     && matches!(children[0].node, Node::View { id } if c.component(id) == Some(Component::Conversation))
@@ -629,7 +644,7 @@ impl Keystone {
                     .child(
                         canvas(
                             move |bounds, _, cx| {
-                                let _ = app.update(cx, |this, _| {
+                                let _ = app.update(cx, |this, _cx| {
                                     if !this.presentation.matches(activation) {
                                         return;
                                     }
@@ -715,7 +730,7 @@ impl Keystone {
                             .child(
                                 canvas(
                                     move |bounds, _, cx| {
-                                        let _ = app.update(cx, |this, _| {
+                                        let _ = app.update(cx, |this, _cx| {
                                             if !this.presentation.matches(activation) {
                                                 return;
                                             }
@@ -916,14 +931,14 @@ impl Keystone {
     /// Brings a tabbed `view` to the front of its group, in the layout or the Customize
     /// draft, and gives it focus when the tab it hides held focus.
     fn select_tab(&mut self, view: ViewId, window: &mut Window, cx: &mut Context<Self>) {
-        let c = self.shown_composition();
+        let c = self.shown_composition(cx);
         let Some((views, selected)) = tabs_holding(c.root(), view) else {
             return;
         };
         let views = views.to_vec();
         if views[selected] != view {
             self.edit_surfaces(Edit::SelectTab(view), window, cx);
-            let shown = self.shown_composition();
+            let shown = self.shown_composition(cx);
             if tabs_holding(shown.root(), view)
                 .is_none_or(|(views, selected)| views[selected] != view)
             {
@@ -944,7 +959,7 @@ impl Keystone {
         let component = c.component(id).unwrap();
         let editing = self.presentation.current.customization.is_open();
         let colors = cx.theme().colors;
-        let current = self.selected_session().map(|s| (s.id(), s.provider()));
+        let current = self.selected_session(cx).map(|s| (s.id(), s.provider()));
         let mut pane = v_flex()
             .id(("occurrence", id.0 as usize))
             .relative()
@@ -1048,7 +1063,7 @@ impl Keystone {
                     .justify_end()
                     .p_3()
                     .child(self.composer(current, window_width, cx))
-                    .children(self.error_line());
+                    .children(self.error_line(cx));
             }
             Component::Files => {
                 pane = pane.child(self.file_list(cx));
@@ -1057,7 +1072,12 @@ impl Keystone {
                 self.presentation.current.arrangement.visible.push(id);
                 if let Some((session, _)) = current {
                     let key = ViewKey { view: id, session };
-                    let rows = self.conversations.get(&session).map_or(0, |c| c.rows.len());
+                    let rows = self
+                        .state
+                        .read(cx)
+                        .conversations()
+                        .get(&session)
+                        .map_or(0, |c| c.rows.len());
                     self.presentation.current.views.list(key, rows);
                     let focus = self.presentation.current.views.focus(key, cx);
                     pane = pane
@@ -1147,7 +1167,9 @@ impl Keystone {
                     let activation = self.presentation.activation();
                     let app = cx.weak_entity();
                     let empty = self
-                        .conversations
+                        .state
+                        .read(cx)
+                        .conversations()
                         .get(&session)
                         .is_some_and(|c| !c.is_loading() && c.is_empty());
                     pane = pane.child(
@@ -1486,8 +1508,8 @@ impl Keystone {
             || self.presentation.current.arrangement.surface_menu.is_some()
             || (self.presentation.current.arrangement.sidebar_overlay
                 && self.presentation.current.arrangement.fitted
-                && self.arrangement_has_sidebar())
-            || self.store.workspace().selected() != Some(key.session)
+                && self.arrangement_has_sidebar(cx))
+            || self.state.read(cx).store().workspace().selected() != Some(key.session)
             || !self
                 .presentation
                 .current
@@ -1511,14 +1533,18 @@ impl Keystone {
             .keyboard_state(key)
             .and_then(|k| k.row)
             .is_some_and(|row| {
-                self.conversations.get(&key.session).is_some_and(|c| {
-                    c.rows
-                        .iter()
-                        .enumerate()
-                        .rev()
-                        .find(|(_, r)| crate::conversation::visible(r))
-                        .is_some_and(|(last, _)| row < last)
-                })
+                self.state
+                    .read(cx)
+                    .conversations()
+                    .get(&key.session)
+                    .is_some_and(|c| {
+                        c.rows
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find(|(_, r)| crate::conversation::visible(r))
+                            .is_some_and(|(last, _)| row < last)
+                    })
             })
         {
             return;
@@ -1526,13 +1552,13 @@ impl Keystone {
         if self.presentation.current.views.scrolled_up(key) || self.replies.borrow().pacing() {
             return;
         }
-        let Some(conversation) = self.conversations.get(&key.session) else {
+        let Some(conversation) = self.state.read(cx).conversations().get(&key.session) else {
             return;
         };
         if conversation.running || conversation.is_loading() {
             return;
         }
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.selected_session(cx) else {
             return;
         };
         let Some(updated) = session
@@ -1549,7 +1575,10 @@ impl Keystone {
         {
             return;
         }
-        match self.store.mark_viewed(key.session, now_ms()) {
+        match self
+            .state
+            .update(cx, |state, cx| state.mark_viewed(key.session, now_ms(), cx))
+        {
             Ok(applied) => self.error = crate::durability_warning(applied.durability),
             Err(error) => self.error = Some(format!("Could not save read status. {error}")),
         }

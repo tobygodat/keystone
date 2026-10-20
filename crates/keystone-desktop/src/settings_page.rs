@@ -196,7 +196,13 @@ impl Keystone {
         let page = self.settings.as_ref()?;
         let at = page.section_index();
         let (_, title, _, rows) = SECTIONS[at];
-        let appearance = self.store.workspace().preferences().appearance();
+        let appearance = self
+            .state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .appearance();
         let rows = rows.iter().enumerate().map(|(row, &(label, field))| {
             h_flex()
                 .gap(spacing::MD)
@@ -225,7 +231,7 @@ impl Keystone {
                         ),
                     )
                     .children(rows)
-                    .children(self.error_line().map(|error| {
+                    .children(self.error_line(cx).map(|error| {
                         div()
                             .pt(spacing::MD)
                             .automation_id("settings-error")
@@ -442,7 +448,16 @@ impl Keystone {
                 };
                 window.focus(&page.density[next], cx);
                 let density = DENSITIES[next].0;
-                if self.store.workspace().preferences().appearance().density != density {
+                if self
+                    .state
+                    .read(cx)
+                    .store()
+                    .workspace()
+                    .preferences()
+                    .appearance()
+                    .density
+                    != density
+                {
                     self.update_appearance(|appearance| appearance.density = density, window, cx);
                 }
             }
@@ -455,7 +470,9 @@ impl Keystone {
 #[cfg(all(test, feature = "ui-tests"))]
 mod tests {
     use crate::{Keystone, bind_keys};
-    use gpui::{Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px};
+    use gpui::{
+        AppContext, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
+    };
     use keystone_core::{Appearance, Density, Store, ThemeMode};
     use keystone_ui::{ActiveTheme, TextSize};
     use std::path::Path;
@@ -485,7 +502,12 @@ mod tests {
         });
         cx.executor().allow_parking();
         cx.add_window_view(|window, cx| {
-            let view = Keystone::new(store, false, window, cx);
+            let view = Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            );
             view.focus.focus(window, cx);
             view
         })
@@ -566,7 +588,7 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
-        view.read_with(cx, |view, _| {
+        view.read_with(cx, |view, cx| {
             assert!(
                 view.error
                     .as_deref()
@@ -574,7 +596,13 @@ mod tests {
                     .starts_with("Settings not saved.")
             );
             assert_eq!(
-                view.store.workspace().preferences().appearance().theme,
+                view.state
+                    .read(cx)
+                    .store()
+                    .workspace()
+                    .preferences()
+                    .appearance()
+                    .theme,
                 ThemeMode::System
             );
         });
@@ -763,7 +791,7 @@ mod tests {
         );
         assert!(!shown(cx, "customize-toggle"));
         assert_eq!(cx.debug_bounds("settings"), Some(cog), "the cog stays put");
-        view.read_with(cx, |view, _| assert!(view.settings.is_some()));
+        view.read_with(cx, |view, _cx| assert!(view.settings.is_some()));
 
         click(cx, "settings");
         assert!(!shown(cx, "settings-page"), "the page's cog closes it");
@@ -830,7 +858,7 @@ mod tests {
             );
             view.update_in(cx, |view, window, cx| {
                 let files = view
-                    .shown_composition()
+                    .shown_composition(cx)
                     .views()
                     .find(|(_, component)| *component == keystone_core::Component::Files)
                     .unwrap()
@@ -876,7 +904,7 @@ mod tests {
         assert!(shown(cx, "surface-add-conversation"));
         keys(cx, "ctrl-,");
         assert!(shown(cx, "settings-page"));
-        view.read_with(cx, |view, _| {
+        view.read_with(cx, |view, _cx| {
             assert!(view.presentation.current.arrangement.surface_menu.is_none());
         });
         keys(cx, "escape");
@@ -936,9 +964,9 @@ mod tests {
         let (view, cx) = open_window(&path, cx);
         keys(cx, "ctrl-, f2");
         assert!(!shown(cx, "settings-page"));
-        view.read_with(cx, |view, _| assert!(view.renaming.is_some()));
+        view.read_with(cx, |view, _cx| assert!(view.renaming.is_some()));
         keys(cx, "escape");
-        view.read_with(cx, |view, _| assert!(view.renaming.is_none()));
+        view.read_with(cx, |view, _cx| assert!(view.renaming.is_none()));
         settings_shortcuts_work(cx);
     }
 
@@ -994,7 +1022,7 @@ mod tests {
         assert!(shown(cx, "settings-page"), "the page stays");
         view.read_with(cx, |view, cx| {
             assert_eq!(view.composer.read(cx).value(), DRAFT);
-            let conversation = &view.conversations[&1];
+            let conversation = &view.state.read(cx).conversations()[&1];
             assert!(conversation.rows.is_empty(), "no turn started");
             assert_eq!(conversation.error, None, "no send was attempted");
         });

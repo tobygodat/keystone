@@ -3,9 +3,7 @@ use crate::arrangement::Arrangement;
 use crate::arrangement_editor::{Customization, RequestIds};
 use crate::view_state::ViewStates;
 use gpui::{App, AppContext, Context, Entity, FocusHandle, Focusable, Window};
-use keystone_core::{
-    Composition, Preferences, ProjectId, Provider, SessionContext, WorkingDirectory,
-};
+use keystone_core::{Composition, Preferences, ProjectId, Provider, WorkingDirectory};
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -217,20 +215,7 @@ impl Keystone {
             });
         }
     }
-    pub(crate) fn conversation_folder(&self, session: u64) -> Option<ConversationFolder> {
-        self.store
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| s.id() == session)
-            .map(|s| match s.context() {
-                SessionContext::Recorded { directory, .. } => {
-                    ConversationFolder::Recorded(directory.clone())
-                }
-                SessionContext::LegacyMissing => ConversationFolder::LegacyMissing,
-                SessionContext::Unsupported => ConversationFolder::Unsupported,
-            })
-    }
+
     pub(crate) fn project_tooltip(&self) -> String {
         match &self.presentation.project {
             Ok(project) => format!(
@@ -306,7 +291,13 @@ impl Keystone {
             None
         } else {
             Some(ProjectPresentation::new(
-                &self.store.workspace().preferences().composition(&project),
+                &self
+                    .state
+                    .read(cx)
+                    .store()
+                    .workspace()
+                    .preferences()
+                    .composition(&project),
                 self.presentation.requests.clone(),
                 cx,
             ))
@@ -359,8 +350,8 @@ impl Keystone {
         }
     }
     pub(crate) fn choose_legacy_folder(&mut self, session: u64, cx: &mut Context<Self>) {
-        if self.store.workspace().selected() != Some(session)
-            || self.conversation_folder(session) != Some(ConversationFolder::LegacyMissing)
+        if self.state.read(cx).store().workspace().selected() != Some(session)
+            || self.conversation_folder(session, cx) != Some(ConversationFolder::LegacyMissing)
         {
             return;
         }
@@ -389,8 +380,9 @@ impl Keystone {
     ) {
         if self.presentation.legacy_picker != Some(ticket)
             || !self.presentation.matches(ticket.activation)
-            || self.store.workspace().selected() != Some(ticket.session)
-            || self.conversation_folder(ticket.session) != Some(ConversationFolder::LegacyMissing)
+            || self.state.read(cx).store().workspace().selected() != Some(ticket.session)
+            || self.conversation_folder(ticket.session, cx)
+                != Some(ConversationFolder::LegacyMissing)
         {
             return;
         }
@@ -410,18 +402,15 @@ impl Keystone {
                 return;
             }
         };
-        match self
-            .store
-            .choose_legacy_directory(ticket.session, &directory)
-        {
+        match self.state.update(cx, |state, cx| {
+            state.choose_legacy_directory(ticket.session, &directory, cx)
+        }) {
             Ok(applied) => {
-                self.conversation(ticket.session).error = None;
-                self.folder_warning =
-                    (!self.store.is_durable(applied.revision)).then_some(crate::FolderWarning {
+                self.folder_warning = (!self.state.read(cx).store().is_durable(applied.revision))
+                    .then_some(crate::FolderWarning {
                         session: ticket.session,
                         revision: applied.revision,
                     });
-                self.commit(ticket.session);
                 self.refresh(cx);
             }
             Err(error) => self.folder_error(
@@ -431,45 +420,6 @@ impl Keystone {
                 ),
                 cx,
             ),
-        }
-    }
-    fn folder_error(&mut self, session: u64, error: String, cx: &mut Context<Self>) {
-        self.conversation(session).error = Some(error);
-        self.commit(session);
-        self.refresh(cx);
-    }
-    pub(crate) fn dispatch_directory(
-        &mut self,
-        session: u64,
-        cx: &mut Context<Self>,
-    ) -> Option<WorkingDirectory> {
-        let result = match self.conversation_folder(session)? {
-            ConversationFolder::Recorded(directory) => match std::fs::metadata(directory.path()) {
-                Ok(metadata)
-                    if metadata.is_dir()
-                        && std::ffi::CString::new(directory.as_str()).is_ok_and(
-                            |path| unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 },
-                        ) =>
-                {
-                    Ok(directory)
-                }
-                _ => Err(
-                    "Not sent. This conversation's saved folder is unavailable. Your draft is kept.",
-                ),
-            },
-            ConversationFolder::LegacyMissing => Err(
-                "Not sent. Choose a conversation folder using the folder button beside the model. Your draft is kept.",
-            ),
-            ConversationFolder::Unsupported => Err(
-                "Not sent. This conversation has saved folder data that this version cannot use. Your draft is kept.",
-            ),
-        };
-        match result {
-            Ok(directory) => Some(directory),
-            Err(error) => {
-                self.folder_error(session, error.into(), cx);
-                None
-            }
         }
     }
 }

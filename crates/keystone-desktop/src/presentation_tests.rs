@@ -6,7 +6,7 @@ use crate::model_selector::{CatalogKey, Choices};
 use crate::view_state::ViewKey;
 use gpui::{ListOffset, TestAppContext, VisualTestContext, px};
 use keystone_agent::Event;
-use keystone_core::{ApprovalMode, ContextOrigin, Provider, Store, ViewId};
+use keystone_core::{ApprovalMode, ContextOrigin, Provider, SessionContext, Store, ViewId};
 use keystone_ui::Color;
 use std::fs::File;
 use std::path::Path;
@@ -41,7 +41,14 @@ fn open(
     }
     cx.update(keystone_ui::init);
     cx.executor().allow_parking();
-    let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        Keystone::new(
+            cx.new(|cx| crate::AppState::new(store, cx)),
+            false,
+            window,
+            cx,
+        )
+    });
     pick(&view, cx, &dir.path().join("a"));
     (dir, view, cx)
 }
@@ -66,7 +73,9 @@ fn project_switch_releases_a_transcript_copy_action_and_restores_its_row(cx: &mu
     view.update(cx, |this, cx| {
         let mut conversation = crate::Conversation::default();
         conversation.push_local("project-local keyboard row");
-        this.conversations.insert(1, conversation);
+        this.state.update(cx, |state, _| {
+            state.test_conversations_mut().insert(1, conversation)
+        });
         cx.notify();
     });
     cx.simulate_keystrokes("ctrl-shift-t home tab");
@@ -100,10 +109,14 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
     cx: &mut TestAppContext,
 ) {
     let (dir, view, cx) = open(cx, true);
+    view.update(cx, |this, cx| {
+        this.state
+            .update(cx, |state, cx| state.flush_logs(cx).unwrap());
+    });
     let a = dir.path().join("a");
     let b = dir.path().join("b");
     let (activation, candidate, prompt) = view.update(cx, |this, cx| {
-        let saved = this.saved_composition();
+        let saved = this.saved_composition(cx);
         this.presentation
             .current
             .customization
@@ -119,11 +132,14 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
             .customization
             .shown(&saved)
             .clone();
-        this.store
-            .set_project_layout(
-                this.presentation.project.as_ref().unwrap(),
-                Some(candidate.clone().into()),
-            )
+        this.state
+            .update(cx, |state, cx| {
+                state.set_project_layout(
+                    this.presentation.project.as_ref().unwrap(),
+                    Some(candidate.clone().into()),
+                    cx,
+                )
+            })
             .unwrap();
         this.presentation.current.customization.saved(
             Commit::Apply,
@@ -137,12 +153,17 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
             .update(cx, |i, cx| i.set_value("Keep A prompt".into(), cx));
         let prompt = this.presentation.current.customize_prompt.clone();
         for i in 0..40 {
-            this.conversation(1).push_local(&format!(
-                "Retained row {i}. {}",
-                "Content for measured scroll. ".repeat(8)
-            ));
+            this.state.update(cx, |state, _| {
+                state.test_conversation(1).push_local(&format!(
+                    "Retained row {i}. {}",
+                    "Content for measured scroll. ".repeat(8)
+                ))
+            });
         }
-        this.commit(1);
+        this.commit(1, cx);
+        (this.presentation.activation(), candidate, prompt)
+    });
+    view.update(cx, |this, _| {
         this.presentation
             .current
             .views
@@ -151,7 +172,6 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
                 item_ix: 7,
                 offset_in_item: px(19.),
             });
-        (this.presentation.activation(), candidate, prompt)
     });
     pick(&view, cx, &b);
     view.update_in(cx, |this, window, cx| {
@@ -167,9 +187,12 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
             .current
             .customize_prompt
             .update(cx, |i, cx| i.set_value("B prompt".into(), cx));
-        this.conversation(1)
-            .push_local("Appended while A is parked.");
-        this.commit(1);
+        this.state.update(cx, |state, _| {
+            state
+                .test_conversation(1)
+                .push_local("Appended while A is parked.")
+        });
+        this.commit(1, cx);
     });
     pick(&view, cx, &a);
     view.read_with(cx, |this, cx| {
@@ -186,14 +209,14 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
             this.presentation
                 .current
                 .customization
-                .shown(&this.saved_composition()),
+                .shown(&this.saved_composition(cx)),
             &candidate
         );
         assert!(
             this.presentation
                 .current
                 .customization
-                .can_undo(&this.saved_composition())
+                .can_undo(&this.saved_composition(cx))
         );
         let list = this.presentation.current.views.get(key()).unwrap();
         assert_eq!(list.item_count(), 42);
@@ -203,16 +226,20 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
     view.update_in(cx, |this, window, cx| {
         this.customize(Action::Undo, window, cx)
     });
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, cx| {
         assert!(
-            this.store
+            this.state
+                .read(cx)
+                .store()
                 .workspace()
                 .preferences()
                 .project_layout(&ProjectId::new(&a).unwrap())
                 .is_none()
         );
         assert!(
-            this.store
+            this.state
+                .read(cx)
+                .store()
                 .workspace()
                 .preferences()
                 .project_layout(&ProjectId::new(&b).unwrap())
@@ -234,7 +261,7 @@ fn newest_project_picker_and_same_canonical_alias_preserve_current_work(cx: &mut
     let b = dir.path().join("b");
     std::os::unix::fs::symlink(dir.path().join("a"), dir.path().join("alias")).unwrap();
     view.update(cx, |this, cx| {
-        let saved = this.saved_composition();
+        let saved = this.saved_composition(cx);
         this.presentation
             .current
             .customization
@@ -262,10 +289,15 @@ fn newest_project_picker_and_same_canonical_alias_preserve_current_work(cx: &mut
         this.finish_project_pick(same, FolderPick::Selected(dir.path().join("alias")), cx);
         assert_eq!(this.presentation.activation(), activation);
         assert_eq!(this.presentation.current.customization.running(), running);
-        assert_eq!(this.store.workspace().sessions()[0].draft(), "");
+        assert_eq!(
+            this.state.read(cx).store().workspace().sessions()[0].draft(),
+            ""
+        );
         assert_eq!(this.composer.read(cx).value(), "Current draft");
         assert!(
-            this.store
+            this.state
+                .read(cx)
+                .store()
                 .workspace()
                 .preferences()
                 .project_layout(this.presentation.project.as_ref().unwrap())
@@ -278,7 +310,7 @@ fn newest_project_picker_and_same_canonical_alias_preserve_current_work(cx: &mut
 fn failed_draft_barrier_keeps_project_preview_and_helper_acceptance(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx, true);
     view.update(cx, |this, cx| {
-        let saved = this.saved_composition();
+        let saved = this.saved_composition(cx);
         this.presentation
             .current
             .customization
@@ -315,7 +347,7 @@ fn failed_draft_barrier_keeps_project_preview_and_helper_acceptance(cx: &mut Tes
 fn suspended_helpers_and_old_frame_mutations_stay_stale_after_return(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx, true);
     let (request, stale) = view.update(cx, |this, cx| {
-        let saved = this.saved_composition();
+        let saved = this.saved_composition(cx);
         this.presentation
             .current
             .customization
@@ -336,8 +368,8 @@ fn suspended_helpers_and_old_frame_mutations_stay_stale_after_return(cx: &mut Te
         )
     });
     pick(&view, cx, &dir.path().join("b"));
-    view.update(cx, |this, _| {
-        let saved = this.saved_composition();
+    view.update(cx, |this, cx| {
+        let saved = this.saved_composition(cx);
         this.presentation
             .current
             .customization
@@ -358,7 +390,7 @@ fn suspended_helpers_and_old_frame_mutations_stay_stale_after_return(cx: &mut Te
     });
     pick(&view, cx, &dir.path().join("a"));
     cx.update(|window, cx| stale(&(), window, cx));
-    view.update(cx, |this, _| {
+    view.update(cx, |this, _cx| {
         assert!(this.provider_filter.is_none());
         assert!(!this.presentation.current.customization.receive(
             request,
@@ -380,7 +412,7 @@ fn legacy_ticket_is_invalid_after_selection_return_and_after_project_transition(
         this.finish_legacy_folder(first, FolderPick::Failed("stale error".into()), cx);
         this.finish_legacy_folder(first, FolderPick::Selected(dir.path().join("a")), cx);
         assert_eq!(
-            this.conversation_folder(1),
+            this.conversation_folder(1, cx),
             Some(ConversationFolder::LegacyMissing)
         );
         assert!(this.error.is_none());
@@ -389,7 +421,7 @@ fn legacy_ticket_is_invalid_after_selection_return_and_after_project_transition(
         this.finish_legacy_folder(latest, FolderPick::Cancelled, cx);
         this.finish_legacy_folder(older, FolderPick::Selected(dir.path().join("a")), cx);
         assert_eq!(
-            this.conversation_folder(1),
+            this.conversation_folder(1, cx),
             Some(ConversationFolder::LegacyMissing)
         );
         let ticket = this.presentation.legacy_ticket(1).unwrap();
@@ -397,7 +429,7 @@ fn legacy_ticket_is_invalid_after_selection_return_and_after_project_transition(
         this.finish_project_pick(project, FolderPick::Selected(dir.path().join("b")), cx);
         this.finish_legacy_folder(ticket, FolderPick::Selected(dir.path().join("a")), cx);
         assert_eq!(
-            this.conversation_folder(1),
+            this.conversation_folder(1, cx),
             Some(ConversationFolder::LegacyMissing)
         );
     });
@@ -419,24 +451,24 @@ fn legacy_choice_saves_without_send_and_unsupported_data_cannot_be_replaced(
             window,
             cx,
         );
-        assert!(this.codex.is_none());
+        assert!(this.state.read(cx).test_codex().is_none());
         assert_eq!(this.composer.read(cx).value(), "Explicit only");
-        assert!(this.conversation(1).rows.is_empty());
+        assert!(this.state.read(cx).conversations()[&1].rows.is_empty());
         let ticket = this.presentation.legacy_ticket(1).unwrap();
         this.select(1, cx);
         this.finish_legacy_folder(ticket, FolderPick::Selected(dir.path().join("a")), cx);
         assert!(matches!(
-            this.store.workspace().sessions()[0].context(),
+            this.state.read(cx).store().workspace().sessions()[0].context(),
             SessionContext::Recorded {
                 origin: ContextOrigin::Chosen,
                 ..
             }
         ));
         assert_eq!(this.composer.read(cx).value(), "Explicit only");
-        assert!(this.codex.is_none());
-        assert!(this.conversation(1).rows.is_empty());
+        assert!(this.state.read(cx).test_codex().is_none());
+        assert!(this.state.read(cx).conversations()[&1].rows.is_empty());
         this.select(2, cx);
-        let before = std::fs::read(this.store.path()).unwrap();
+        let before = std::fs::read(this.state.read(cx).store().path()).unwrap();
         this.choose_legacy_folder(2, cx);
         this.send_message(
             crate::ComposerDraft {
@@ -446,12 +478,15 @@ fn legacy_choice_saves_without_send_and_unsupported_data_cannot_be_replaced(
             window,
             cx,
         );
-        assert!(this.claude.is_none());
+        assert!(this.state.read(cx).test_claude().is_none());
         assert_eq!(
-            this.conversation_folder(2),
+            this.conversation_folder(2, cx),
             Some(ConversationFolder::Unsupported)
         );
-        assert_eq!(std::fs::read(this.store.path()).unwrap(), before);
+        assert_eq!(
+            std::fs::read(this.state.read(cx).store().path()).unwrap(),
+            before
+        );
     });
 }
 
@@ -464,16 +499,16 @@ fn full_access_callbacks_require_the_exact_confirmation(cx: &mut TestAppContext)
         this.confirm_full_access = None;
         this.choose_approval_mode(keystone_core::ApprovalMode::FullAccess, window, cx);
         let latest = this.confirm_full_access.as_ref().unwrap().identity.clone();
-        assert!(this.take_full_access_confirmation(&old).is_none());
+        assert!(this.take_full_access_confirmation(&old, cx).is_none());
         assert!(Rc::ptr_eq(
             &this.confirm_full_access.as_ref().unwrap().identity,
             &latest
         ));
         let ticket = this.presentation.project_ticket().unwrap();
         this.finish_project_pick(ticket, FolderPick::Selected(dir.path().join("b")), cx);
-        assert!(this.take_full_access_confirmation(&latest).is_none());
+        assert!(this.take_full_access_confirmation(&latest, cx).is_none());
         assert_eq!(
-            this.store.workspace().sessions()[0].approval_mode(),
+            this.state.read(cx).store().workspace().sessions()[0].approval_mode(),
             keystone_core::ApprovalMode::Provider
         );
     });
@@ -502,17 +537,18 @@ fn unavailable_recorded_directory_never_uses_the_layout_project(cx: &mut TestApp
                 window,
                 cx,
             );
-            assert!(this.codex.is_none());
-            assert!(this.conversation(1).rows.is_empty());
+            assert!(this.state.read(cx).test_codex().is_none());
+            assert!(this.state.read(cx).conversations()[&1].rows.is_empty());
             assert_eq!(this.composer.read(cx).value(), "Keep unavailable draft");
             assert!(
-                this.conversation(1)
+                this.state.read(cx).conversations()[&1]
                     .error
                     .as_ref()
                     .unwrap()
                     .contains("saved folder is unavailable")
             );
-            let Some(ConversationFolder::Recorded(directory)) = this.conversation_folder(1) else {
+            let Some(ConversationFolder::Recorded(directory)) = this.conversation_folder(1, cx)
+            else {
                 panic!()
             };
             assert_eq!(directory.path(), a);
@@ -533,32 +569,38 @@ fn creation_after_project_switch_records_b_and_keeps_existing_a_context(cx: &mut
     pick(&view, cx, &dir.path().join("b"));
     view.update(cx, |this, cx| {
         this.create(Provider::Claude, cx);
-        assert_eq!(this.store.workspace().selected(), Some(3));
+        assert_eq!(this.state.read(cx).store().workspace().selected(), Some(3));
         assert_eq!(
-            this.store.workspace().sessions()[0].draft(),
+            this.state.read(cx).store().workspace().sessions()[0].draft(),
             "A unsent draft"
         );
         for (session, folder) in [(1, "a"), (3, "b")] {
-            let Some(ConversationFolder::Recorded(directory)) = this.conversation_folder(session)
+            let Some(ConversationFolder::Recorded(directory)) =
+                this.conversation_folder(session, cx)
             else {
                 panic!()
             };
             assert_eq!(directory.path(), dir.path().join(folder));
         }
         assert!(matches!(
-            this.store.workspace().sessions()[2].context(),
+            this.state.read(cx).store().workspace().sessions()[2].context(),
             SessionContext::Recorded {
                 origin: ContextOrigin::Created,
                 ..
             }
         ));
         assert_eq!(this.composer.read(cx).value(), "");
-        assert!(this.codex.is_none() && this.claude.is_none());
+        assert!(
+            this.state.read(cx).test_codex().is_none()
+                && this.state.read(cx).test_claude().is_none()
+        );
     });
 }
 
-fn refuse_directory_sync(this: &mut Keystone) {
-    this.store.sync_directory = |_| Err(std::io::Error::other("directory sync unavailable"));
+fn refuse_directory_sync(this: &mut Keystone, cx: &mut Context<Keystone>) {
+    this.state.update(cx, |state, _| {
+        state.test_sync_directory(|_| Err(std::io::Error::other("directory sync unavailable")));
+    });
 }
 
 #[gpui::test]
@@ -573,20 +615,22 @@ fn folder_success_keeps_an_unresolved_provider_thread_error(cx: &mut TestAppCont
         };
         this.receive(vec![], vec![(1, ready)], cx);
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let unresolved = |this: &Keystone| {
-            this.error
+        let unresolved = |this: &Keystone, cx: &App| {
+            this.state
+                .read(cx)
+                .error
                 .as_deref()
                 .is_some_and(|e| e.starts_with("Could not save the conversation ID"))
         };
-        assert!(unresolved(this), "{:?}", this.error);
+        assert!(unresolved(this, cx), "{:?}", this.error);
         let ticket = this.presentation.legacy_ticket(1).unwrap();
         this.finish_legacy_folder(ticket, FolderPick::Selected(dir.path().join("a")), cx);
         assert!(matches!(
-            this.conversation_folder(1),
+            this.conversation_folder(1, cx),
             Some(ConversationFolder::Recorded(_))
         ));
-        assert!(unresolved(this), "{:?}", this.error);
-        let saved = std::fs::read_to_string(this.store.path()).unwrap();
+        assert!(unresolved(this, cx), "{:?}", this.error);
+        let saved = std::fs::read_to_string(this.state.read(cx).store().path()).unwrap();
         assert!(saved.contains(r#""origin":"chosen""#), "{saved}");
         assert!(!saved.contains("rejected-thread"), "{saved}");
     });
@@ -596,36 +640,44 @@ fn folder_success_keeps_an_unresolved_provider_thread_error(cx: &mut TestAppCont
 fn applied_folder_warning_ends_with_confirmation_and_never_returns(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx, false);
     view.update_in(cx, |this, window, cx| {
-        refuse_directory_sync(this);
+        refuse_directory_sync(this, cx);
         let ticket = this.presentation.legacy_ticket(1).unwrap();
         this.finish_legacy_folder(ticket, FolderPick::Selected(dir.path().join("a")), cx);
         assert_eq!(
-            this.status_line(),
+            this.status_line(cx),
             Some((FOLDER_UNCONFIRMED.into(), Color::Warning))
         );
 
-        this.store.sync_directory = File::sync_all;
+        this.state.update(cx, |state, _| {
+            state.test_sync_directory(File::sync_all);
+        });
         this.customize(Action::Open, window, cx);
         this.customize(Action::Duplicate(ViewId::MAIN), window, cx);
         this.customize(Action::Apply, window, cx);
-        assert!(this.saved_layout().is_some());
-        assert_eq!(this.status_line(), None, "confirmed by the unrelated Apply");
+        assert!(this.saved_layout(cx).is_some());
+        assert_eq!(
+            this.status_line(cx),
+            None,
+            "confirmed by the unrelated Apply"
+        );
 
-        refuse_directory_sync(this);
+        refuse_directory_sync(this, cx);
         this.set_approval_mode(1, ApprovalMode::ReadOnly, window, cx);
-        let (later, color) = this.status_line().unwrap();
+        let (later, color) = this.status_line(cx).unwrap();
         assert!(
             later.starts_with("Change saved, but crash durability"),
             "{later}"
         );
         assert_eq!(color, Color::Danger);
 
-        this.store.sync_directory = File::sync_all;
+        this.state.update(cx, |state, _| {
+            state.test_sync_directory(File::sync_all);
+        });
         this.composer
             .update(cx, |i, cx| i.set_value("typed after".into(), cx));
         assert!(this.save_draft(cx));
         assert_eq!(
-            this.status_line(),
+            this.status_line(cx),
             None,
             "the folder warning does not return"
         );
@@ -636,7 +688,7 @@ fn applied_folder_warning_ends_with_confirmation_and_never_returns(cx: &mut Test
 fn send_with_unrelated_save_debt_refuses_without_blaming_a_folder(cx: &mut TestAppContext) {
     let (_dir, view, cx) = open(cx, true);
     view.update_in(cx, |this, window, cx| {
-        refuse_directory_sync(this);
+        refuse_directory_sync(this, cx);
         this.set_approval_mode(1, ApprovalMode::ReadOnly, window, cx);
         this.composer
             .update(cx, |i, cx| i.set_value("Retry later".into(), cx));
@@ -648,11 +700,11 @@ fn send_with_unrelated_save_debt_refuses_without_blaming_a_folder(cx: &mut TestA
             window,
             cx,
         );
-        assert!(this.codex.is_none());
+        assert!(this.state.read(cx).test_codex().is_none());
         assert_eq!(this.composer.read(cx).value(), "Retry later");
-        assert!(this.conversation(1).rows.is_empty());
+        assert!(this.state.read(cx).conversations()[&1].rows.is_empty());
         assert_eq!(
-            this.conversation(1).error.as_deref(),
+            this.state.read(cx).conversations()[&1].error.as_deref(),
             Some(
                 "Not sent. Could not finish saving changes. Your draft is kept. Send will retry saving. directory sync unavailable"
             )
@@ -664,8 +716,8 @@ fn send_with_unrelated_save_debt_refuses_without_blaming_a_folder(cx: &mut TestA
 fn first_send_lock_waits_for_the_send_barrier_when_its_sync_is_pending(cx: &mut TestAppContext) {
     let (_dir, view, cx) = open(cx, true);
     view.update_in(cx, |this, window, cx| {
-        assert!(!this.store.workspace().sessions()[0].started());
-        refuse_directory_sync(this);
+        assert!(!this.state.read(cx).store().workspace().sessions()[0].started());
+        refuse_directory_sync(this, cx);
         this.composer
             .update(cx, |i, cx| i.set_value("First message".into(), cx));
         this.send_message(
@@ -676,19 +728,19 @@ fn first_send_lock_waits_for_the_send_barrier_when_its_sync_is_pending(cx: &mut 
             window,
             cx,
         );
-        assert!(this.codex.is_none());
+        assert!(this.state.read(cx).test_codex().is_none());
         assert_eq!(this.composer.read(cx).value(), "First message");
         assert!(
-            this.conversation(1)
+            this.state.read(cx).conversations()[&1]
                 .error
                 .as_deref()
                 .is_some_and(|e| e.starts_with("Not sent. Could not finish saving changes.")),
             "{:?}",
-            this.conversation(1).error
+            this.state.read(cx).conversations()[&1].error
         );
-        let saved = std::fs::read_to_string(this.store.path()).unwrap();
+        let saved = std::fs::read_to_string(this.state.read(cx).store().path()).unwrap();
         assert!(saved.contains(r#""model_locked":true"#), "{saved}");
-        assert!(this.store.workspace().sessions()[0].started());
+        assert!(this.state.read(cx).store().workspace().sessions()[0].started());
     });
 }
 
@@ -720,11 +772,13 @@ fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     (script, log)
 }
 
-fn claude_from(this: &mut Keystone, program: std::path::PathBuf) {
-    this.claude = Some(keystone_agent::ClaudeConnection::new(
-        Some(program),
-        this.wake.clone(),
-    ));
+fn claude_from(this: &mut Keystone, program: std::path::PathBuf, cx: &mut Context<Keystone>) {
+    this.state.update(cx, |state, _| {
+        state.test_set_claude(Some(keystone_agent::ClaudeConnection::new(
+            Some(program),
+            state.test_wake().clone(),
+        )));
+    });
 }
 
 /// The model names the menu would list for the session once its catalog arrives.
@@ -737,8 +791,8 @@ fn listed(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         cx.run_until_parked();
-        let ready = view.read_with(cx, |this, _| {
-            match this.model_selection(session, provider).choices {
+        let ready = view.read_with(cx, |this, cx| {
+            match this.model_selection(session, provider, cx).choices {
                 Choices::Ready(models) => Some(models.iter().map(|m| m.model.clone()).collect()),
                 _ => None,
             }
@@ -773,21 +827,27 @@ fn changing_provider_clears_a_completed_catalog_notice(cx: &mut TestAppContext) 
     );
     std::fs::write(&claude, body).unwrap();
     view.update(cx, |this, cx| {
-        claude_from(this, claude);
+        claude_from(this, claude, cx);
         this.request_catalog(2, Provider::Claude, cx);
     });
     listed(&view, cx, 2, Provider::Claude);
     view.update_in(cx, |this, window, cx| {
-        this.conversation(2).restore(Ok(Vec::new()));
+        this.state.update(cx, |state, _| {
+            state.test_conversation(2).restore(Ok(Vec::new()))
+        });
         assert!(
-            this.conversation(2)
+            this.state.read(cx).conversations()[&2]
                 .provider_notice
                 .as_deref()
                 .unwrap()
                 .contains("Claude Code")
         );
         this.choose_provider(2, Provider::Codex, window, cx);
-        assert!(this.conversation(2).provider_notice.is_none());
+        assert!(
+            this.state.read(cx).conversations()[&2]
+                .provider_notice
+                .is_none()
+        );
     });
 }
 
@@ -801,7 +861,7 @@ fn a_late_catalog_notice_cannot_cross_provider_selection(cx: &mut TestAppContext
     );
     std::fs::write(&claude, body).unwrap();
     view.update_in(cx, |this, window, cx| {
-        claude_from(this, claude);
+        claude_from(this, claude, cx);
         this.request_catalog(2, Provider::Claude, cx);
         this.choose_provider(2, Provider::Codex, window, cx);
     });
@@ -809,8 +869,14 @@ fn a_late_catalog_notice_cannot_cross_provider_selection(cx: &mut TestAppContext
     view.update_in(cx, |this, window, cx| {
         let _ = window;
         this.pump(cx);
-        this.conversation(2).restore(Ok(Vec::new()));
-        assert!(this.conversation(2).provider_notice.is_none());
+        this.state.update(cx, |state, _| {
+            state.test_conversation(2).restore(Ok(Vec::new()))
+        });
+        assert!(
+            this.state.read(cx).conversations()[&2]
+                .provider_notice
+                .is_none()
+        );
     });
 }
 
@@ -822,7 +888,7 @@ fn a_draft_catalog_starts_in_the_conversation_folder_not_the_layout_project(
     pick(&view, cx, &dir.path().join("b"));
     let (claude, log) = logged_claude(dir.path());
     view.update(cx, |this, cx| {
-        claude_from(this, claude);
+        claude_from(this, claude, cx);
         this.request_catalog(2, Provider::Claude, cx);
     });
     assert_eq!(
@@ -840,16 +906,22 @@ fn a_draft_without_a_usable_folder_asks_nothing_and_leaves_other_drafts_their_ca
     let (claude, log) = logged_claude(dir.path());
     view.update(cx, |this, cx| {
         let a = WorkingDirectory::new(&dir.path().join("a")).unwrap();
-        assert_eq!(this.store.create(Provider::Claude, &a, 3).unwrap().value, 3);
-        claude_from(this, claude);
+        assert_eq!(
+            this.state
+                .update(cx, |state, cx| state.create(Provider::Claude, &a, 3, cx))
+                .unwrap()
+                .value,
+            3
+        );
+        claude_from(this, claude, cx);
         for (session, provider) in [(1, Provider::Codex), (2, Provider::Claude)] {
             this.request_catalog(session, provider, cx);
             assert!(matches!(
-                this.model_selection(session, provider).choices,
+                this.model_selection(session, provider, cx).choices,
                 Choices::Unavailable(_)
             ));
         }
-        assert!(this.codex.is_none());
+        assert!(this.state.read(cx).test_codex().is_none());
         this.request_catalog(3, Provider::Claude, cx);
     });
     assert_eq!(
@@ -857,9 +929,9 @@ fn a_draft_without_a_usable_folder_asks_nothing_and_leaves_other_drafts_their_ca
         ["fake-opus", "fake-haiku"]
     );
     assert_eq!(started_in(&log), [canonical(dir.path().join("a"))]);
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, cx| {
         assert!(matches!(
-            this.model_selection(2, Provider::Claude).choices,
+            this.model_selection(2, Provider::Claude, cx).choices,
             Choices::Unavailable(_)
         ));
     });
@@ -870,11 +942,13 @@ fn a_chosen_legacy_folder_loads_its_catalog_without_a_retry(cx: &mut TestAppCont
     let (dir, view, cx) = open(cx, false);
     let (claude, log) = logged_claude(dir.path());
     view.update(cx, |this, cx| {
-        this.store.set_provider(1, Provider::Claude).unwrap();
-        claude_from(this, claude);
+        this.state
+            .update(cx, |state, cx| state.set_provider(1, Provider::Claude, cx))
+            .unwrap();
+        claude_from(this, claude, cx);
         this.request_catalog(1, Provider::Claude, cx);
         assert!(matches!(
-            this.model_selection(1, Provider::Claude).choices,
+            this.model_selection(1, Provider::Claude, cx).choices,
             Choices::Unavailable(_)
         ));
         let ticket = this.presentation.legacy_ticket(1).unwrap();
@@ -903,8 +977,14 @@ fn drafts_in_two_folders_each_get_the_catalog_of_their_own_folder(cx: &mut TestA
     let (claude, log) = logged_claude(dir.path());
     view.update(cx, |this, cx| {
         let b = WorkingDirectory::new(&dir.path().join("b")).unwrap();
-        assert_eq!(this.store.create(Provider::Claude, &b, 3).unwrap().value, 3);
-        claude_from(this, claude);
+        assert_eq!(
+            this.state
+                .update(cx, |state, cx| state.create(Provider::Claude, &b, 3, cx))
+                .unwrap()
+                .value,
+            3
+        );
+        claude_from(this, claude, cx);
         this.request_catalog(2, Provider::Claude, cx);
         this.request_catalog(3, Provider::Claude, cx);
     });
@@ -973,7 +1053,11 @@ fn a_400px_composer_keeps_a_model_target_and_every_action_through_a_turn(cx: &mu
             assert!(inside(send, window));
         };
         check(cx, &[]);
-        view.update(cx, |this, _| this.store.lock_model(session).unwrap());
+        view.update(cx, |this, cx| {
+            this.state
+                .update(cx, |state, cx| state.lock_model(session, cx))
+                .unwrap()
+        });
         apply(&view, cx, session, Event::TurnStarted);
         check(cx, &["stop"]);
         apply(
@@ -1001,15 +1085,19 @@ fn the_model_menu_fits_a_400px_window_and_keeps_its_columns_when_wide(cx: &mut T
                 provider: Provider::Codex,
                 directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
             };
-            this.catalogs.clear(&key);
-            this.catalogs.ask(key, 1);
-            this.catalogs.apply(
-                Provider::Codex,
-                1,
-                keystone_agent::Catalog::Failed(
-                    "Codex stopped before it listed its models, with a long reason.".into(),
-                ),
-            );
+            this.state
+                .update(cx, |state, _cx| state.test_catalogs_mut().clear(&key));
+            this.state
+                .update(cx, |state, _cx| state.test_catalogs_mut().ask(key, 1));
+            this.state.update(cx, |state, _cx| {
+                state.test_catalogs_mut().apply(
+                    Provider::Codex,
+                    1,
+                    keystone_agent::Catalog::Failed(
+                        "Codex stopped before it listed its models, with a long reason.".into(),
+                    ),
+                )
+            });
             this.model_menu = Some(1);
             cx.notify();
         });
@@ -1058,7 +1146,7 @@ fn fitted_boundary(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> f32 {
     let fitted = |width: f32, cx: &mut VisualTestContext| {
         cx.simulate_resize(gpui::size(px(width), px(800.)));
         cx.run_until_parked();
-        view.read_with(cx, |this, _| this.presentation.current.arrangement.fitted)
+        view.read_with(cx, |this, _cx| this.presentation.current.arrangement.fitted)
     };
     let (mut fits, mut unfit) = (2400., 400.);
     assert!(fitted(unfit, cx) && !fitted(fits, cx));
@@ -1080,8 +1168,10 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
     let (dir, view, cx) = open(cx, true);
     let (claude, _log) = logged_claude(dir.path());
     view.update(cx, |this, cx| {
-        claude_from(this, claude);
-        this.store.set_model(2, Some(LONG.into())).unwrap();
+        claude_from(this, claude, cx);
+        this.state
+            .update(cx, |state, cx| state.set_model(2, Some(LONG.into()), cx))
+            .unwrap();
         this.select(2, cx);
     });
     cx.run_until_parked();
@@ -1098,24 +1188,27 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
     at_boundary(cx, "selecting a Codex draft");
     view.update(cx, |this, cx| this.select(2, cx));
     cx.run_until_parked();
-    view.update(cx, |this, _| {
+    view.update(cx, |this, cx| {
         let key = CatalogKey {
             provider: Provider::Claude,
             directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
         };
-        this.catalogs.ask(key, 2);
-        this.catalogs.apply(
-            Provider::Claude,
-            2,
-            keystone_agent::Catalog::Ready {
-                models: vec![keystone_agent::ModelInfo {
-                    model: LONG.into(),
-                    label: "A catalog label far longer than the provider default label".into(),
-                    resolved: None,
-                }],
-                default_model: None,
-            },
-        );
+        this.state
+            .update(cx, |state, _cx| state.test_catalogs_mut().ask(key, 2));
+        this.state.update(cx, |state, _cx| {
+            state.test_catalogs_mut().apply(
+                Provider::Claude,
+                2,
+                keystone_agent::Catalog::Ready {
+                    models: vec![keystone_agent::ModelInfo {
+                        model: LONG.into(),
+                        label: "A catalog label far longer than the provider default label".into(),
+                        resolved: None,
+                    }],
+                    default_model: None,
+                },
+            )
+        });
     });
     at_boundary(cx, "a long catalog label");
 
@@ -1133,14 +1226,17 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
         );
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    while view.read_with(cx, |this, _| {
-        this.conversations[&2].reported_model.as_deref() != Some(LONG)
+    while view.read_with(cx, |this, cx| {
+        this.state.read(cx).conversations()[&2]
+            .reported_model
+            .as_deref()
+            != Some(LONG)
     }) {
         assert!(std::time::Instant::now() < deadline, "no model report");
         std::thread::sleep(std::time::Duration::from_millis(20));
         cx.run_until_parked();
         assert!(
-            !view.read_with(cx, |this, _| this.presentation.current.arrangement.fitted),
+            !view.read_with(cx, |this, _cx| this.presentation.current.arrangement.fitted),
             "the Send or its report refit the layout"
         );
     }

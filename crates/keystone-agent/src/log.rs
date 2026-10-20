@@ -15,10 +15,10 @@
 //! or FUSE handle may require restarting, which loses the in-memory retry queue.
 
 use crate::connection::Wake;
-use crate::item::{Item, TurnStatus};
+use crate::item::{Item, ItemKind, ItemStatus, TurnStatus};
 use crate::worker::Worker;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
@@ -169,8 +169,14 @@ pub enum Report {
         session: u64,
         entries: Result<Vec<Entry>, String>,
     },
-    /// Saving failed with this error, or with `None`, works again after a failure.
-    Saved { session: u64, error: Option<String> },
+    /// `retryable` distinguishes outstanding I/O from terminal admission loss.
+    /// `lost` counts rejected entries, including ones whose gap marker is saved.
+    Saved {
+        session: u64,
+        error: Option<String>,
+        retryable: bool,
+        lost: u64,
+    },
 }
 
 /// Reads a session's saved entries. [`read`], unless a test needs a slower disk.
@@ -199,31 +205,46 @@ pub struct Logs {
 struct Files {
     dir: PathBuf,
     sessions: BTreeMap<u64, PendingSession>,
-    failing: BTreeMap<u64, String>,
+    failing: BTreeMap<u64, SaveFailure>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SaveFailure {
+    message: String,
+    retryable: bool,
 }
 
 /// Maximum serialized bytes retained across the worker mailbox and failed writes.
-/// Once exceeded, that session rejects further batches and flush stays failed for
-/// the lifetime of these Logs, even if earlier entries recover. Rejected entries
-/// are not retained: callers must surface the append error. This fail-closed limit
-/// prevents later entries from masking a gap. Queue metadata is additional memory.
+/// Once exceeded, that session rejects further batches and `flush` stays failed for
+/// the lifetime of these Logs, even if earlier entries recover. `flush_pending`
+/// saves a gap marker and reports only still-retryable work. Rejected entries are
+/// not retained: callers must surface the loss. Queue metadata is additional memory.
 pub const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+pub const LOSS_MARKER_PREFIX: &str = "keystone-log-loss-";
 
 #[derive(Default)]
 struct Budget {
     bytes: usize,
-    rejected: BTreeSet<u64>,
+    rejected: BTreeMap<u64, Loss>,
 }
 
-fn limit_error(session: u64) -> String {
+#[derive(Default)]
+struct Loss {
+    entries: u64,
+    marked: u64,
+    queued: u64,
+}
+
+fn limit_error(session: u64, entries: u64) -> String {
     format!(
-        "Session {session}: the 16 MiB log retry buffer limit was exceeded. Entries were rejected and are not saved; further writes are disabled for this session until restart."
+        "Session {session}: the 16 MiB log retry buffer limit was exceeded. {entries} entries were rejected and are not saved; further writes are disabled for this session until restart."
     )
 }
 
 struct PendingWrite {
     line: Vec<u8>,
     sync: bool,
+    loss_marker: Option<u64>,
 }
 
 #[derive(Default)]
@@ -341,8 +362,9 @@ impl Logs {
             return Ok(());
         }
         let mut admission = self.budget.lock().unwrap();
-        if admission.rejected.contains(&session) {
-            return Err(limit_error(session));
+        let count = writes.len() as u64;
+        if admission.rejected.contains_key(&session) {
+            return Err(self.reject(session, count, &mut admission));
         }
         let mut pending = VecDeque::new();
         let mut bytes = 0;
@@ -354,24 +376,13 @@ impl Logs {
             if serde_json::to_writer(&mut line, &write.entry).is_err()
                 || line.write_all(b"\n").is_err()
             {
-                admission.rejected.insert(session);
-                let (files, reports, wake) =
-                    (self.files.clone(), self.reports.clone(), self.wake.clone());
-                self.writer.run(move || {
-                    let error = limit_error(session);
-                    files.lock().unwrap().failing.insert(session, error.clone());
-                    reports.lock().unwrap().push(Report::Saved {
-                        session,
-                        error: Some(error),
-                    });
-                    wake();
-                });
-                return Err(limit_error(session));
+                return Err(self.reject(session, count, &mut admission));
             }
             bytes += line.bytes.len();
             pending.push_back(PendingWrite {
                 line: line.bytes,
                 sync: write.sync,
+                loss_marker: None,
             });
         }
         admission.bytes += bytes;
@@ -396,10 +407,60 @@ impl Logs {
         Ok(())
     }
 
+    fn reject(&self, session: u64, count: u64, budget: &mut Budget) -> String {
+        let loss = budget.rejected.entry(session).or_default();
+        loss.entries = loss.entries.saturating_add(count);
+        let error = limit_error(session, loss.entries);
+        let (reports, wake, budget, files) = (
+            self.reports.clone(),
+            self.wake.clone(),
+            self.budget.clone(),
+            self.files.clone(),
+        );
+        self.writer.run(move || {
+            let entries = budget.lock().unwrap().rejected[&session].entries;
+            let files = files.lock().unwrap();
+            let failure = files
+                .failing
+                .get(&session)
+                .filter(|failure| failure.retryable);
+            reports.lock().unwrap().push(Report::Saved {
+                session,
+                error: Some(failure.map_or_else(
+                    || limit_error(session, entries),
+                    |failure| failure.message.clone(),
+                )),
+                retryable: failure.is_some(),
+                lost: entries,
+            });
+            wake();
+        });
+        error
+    }
+
+    pub fn lost_entries(&self, session: u64) -> u64 {
+        self.budget
+            .lock()
+            .unwrap()
+            .rejected
+            .get(&session)
+            .map_or(0, |loss| loss.entries)
+    }
+
     /// Retries pending appends and requested syncs, then reports every outstanding
-    /// failure. A sync failure retries only sync; a partial append is rolled back
-    /// before replay. Does not wait for loads; see [`Logs::wait_for_loads`].
+    /// failure, including terminal admission loss. This strict barrier never succeeds
+    /// after a rejection; the desktop's Quit uses [`Logs::flush_pending`] instead.
     pub fn flush(&self) -> Result<(), String> {
+        self.barrier(false)
+    }
+
+    /// Saves recoverable work and a durable loss marker without vetoing on entries
+    /// that admission already rejected. Normal writes remain disabled until restart.
+    pub fn flush_pending(&self) -> Result<(), String> {
+        self.barrier(true)
+    }
+
+    fn barrier(&self, record_loss: bool) -> Result<(), String> {
         let (files, budget, reports, wake) = (
             self.files.clone(),
             self.budget.clone(),
@@ -416,19 +477,45 @@ impl Logs {
                     recovered.push(report);
                 }
             }
-            let mut errors = files.failing.clone();
-            for session in &budget.lock().unwrap().rejected {
-                errors.insert(*session, limit_error(*session));
+            let mut marker_errors = Vec::new();
+            if record_loss {
+                let (sessions, errors) = files.queue_loss_markers(&budget);
+                marker_errors = errors;
+                for session in sessions {
+                    if let Some(report) = files.retry(session, &budget) {
+                        recovered.push(report);
+                    }
+                }
+            }
+            let mut errors: BTreeMap<_, _> = files
+                .failing
+                .iter()
+                .filter(|(_, failure)| !record_loss || failure.retryable)
+                .map(|(session, failure)| (*session, failure.message.clone()))
+                .collect();
+            if !record_loss {
+                for (session, loss) in &budget.lock().unwrap().rejected {
+                    let limit = limit_error(*session, loss.entries);
+                    errors
+                        .entry(*session)
+                        .and_modify(|error| {
+                            if *error != limit {
+                                *error = format!("{error}; {limit}");
+                            }
+                        })
+                        .or_insert(limit);
+                }
             }
             drop(files);
             if !recovered.is_empty() {
                 reports.lock().unwrap().extend(recovered);
                 wake();
             }
+            let errors: Vec<_> = errors.into_values().chain(marker_errors).collect();
             let result = if errors.is_empty() {
                 Ok(())
             } else {
-                Err(errors.into_values().collect::<Vec<_>>().join("; "))
+                Err(errors.join("; "))
             };
             let _ = done.send(result);
         });
@@ -443,16 +530,86 @@ impl Logs {
 }
 
 impl Files {
+    fn queue_loss_markers(&mut self, budget: &Mutex<Budget>) -> (Vec<u64>, Vec<String>) {
+        let sessions: Vec<_> = budget.lock().unwrap().rejected.keys().copied().collect();
+        let mut queued = Vec::new();
+        let mut errors = Vec::new();
+        for session in sessions {
+            if self
+                .sessions
+                .get(&session)
+                .is_some_and(|pending| !pending.writes.is_empty())
+            {
+                continue;
+            }
+            let mut budget = budget.lock().unwrap();
+            let loss = &budget.rejected[&session];
+            if loss.entries == loss.marked || loss.queued > loss.marked {
+                continue;
+            }
+            let total = loss.entries;
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |time| time.as_nanos());
+            let text = format!(
+                "{} log entries were lost (log budget exceeded).",
+                total - loss.marked
+            );
+            let entry = Entry::Item {
+                item: Item {
+                    id: format!(
+                        "{LOSS_MARKER_PREFIX}{}-{nanos}-{session}-{total}",
+                        std::process::id()
+                    ),
+                    kind: ItemKind::Other {
+                        name: format!("Keystone log loss: {text}"),
+                    },
+                    text,
+                    status: ItemStatus::Failed,
+                },
+                seq: None,
+                run: None,
+            };
+            let mut line = serde_json::to_vec(&entry).expect("log loss marker is serializable");
+            line.push(b'\n');
+            if budget.bytes + line.len() > MAX_PENDING_BYTES {
+                errors.push(format!(
+                    "Session {session}: the log loss marker is waiting for retry-buffer space"
+                ));
+                continue;
+            }
+            budget.bytes += line.len();
+            budget.rejected.get_mut(&session).unwrap().queued = total;
+            self.sessions
+                .entry(session)
+                .or_default()
+                .writes
+                .push_back(PendingWrite {
+                    line,
+                    sync: true,
+                    loss_marker: Some(total),
+                });
+            queued.push(session);
+        }
+        (queued, errors)
+    }
+
     fn retry(&mut self, session: u64, budget: &Mutex<Budget>) -> Option<Report> {
         let pending = self.sessions.get_mut(&session).expect("queued above");
         let result = pending.retry(&self.dir, session, budget);
-        let error = if budget.lock().unwrap().rejected.contains(&session) {
-            Some(limit_error(session))
-        } else {
-            result
-                .err()
-                .map(|error| format!("Session {session}: {error}"))
-        };
+        let failure = result
+            .err()
+            .map(|error| format!("Session {session}: {error}"));
+        let lost = budget
+            .lock()
+            .unwrap()
+            .rejected
+            .get(&session)
+            .map_or(0, |loss| loss.entries);
+        let retryable = failure.is_some();
+        let error = failure
+            .or_else(|| (lost > 0).then(|| limit_error(session, lost)))
+            .map(|message| SaveFailure { message, retryable });
         match error {
             Some(error) => {
                 if self.failing.get(&session) == Some(&error) {
@@ -461,12 +618,16 @@ impl Files {
                 self.failing.insert(session, error.clone());
                 Some(Report::Saved {
                     session,
-                    error: Some(error),
+                    error: Some(error.message),
+                    retryable,
+                    lost,
                 })
             }
             None => self.failing.remove(&session).map(|_| Report::Saved {
                 session,
                 error: None,
+                retryable: false,
+                lost: 0,
             }),
         }
     }
@@ -492,7 +653,17 @@ impl PendingSession {
             if write.sync {
                 log.sync()?;
             }
-            budget.lock().unwrap().bytes -= write.line.len();
+            {
+                let mut budget = budget.lock().unwrap();
+                budget.bytes -= write.line.len();
+                if let Some(marked) = write.loss_marker {
+                    budget
+                        .rejected
+                        .get_mut(&session)
+                        .expect("loss marker has a rejection")
+                        .marked = marked;
+                }
+            }
             self.writes.pop_front();
             self.progress = Progress::Append;
         }
@@ -660,7 +831,9 @@ mod tests {
             &logs.drain()[..],
             [Report::Saved {
                 session: 2,
-                error: Some(_)
+                error: Some(_),
+                retryable: true,
+                lost: 0,
             }]
         ));
         std::fs::remove_file(&sessions).unwrap();
@@ -671,7 +844,9 @@ mod tests {
             logs.drain(),
             vec![Report::Saved {
                 session: 2,
-                error: None
+                error: None,
+                retryable: false,
+                lost: 0,
             }]
         );
         // Further successes report nothing.
@@ -703,11 +878,15 @@ mod tests {
             vec![
                 Report::Saved {
                     session: 1,
-                    error: None
+                    error: None,
+                    retryable: false,
+                    lost: 0,
                 },
                 Report::Saved {
                     session: 2,
-                    error: None
+                    error: None,
+                    retryable: false,
+                    lost: 0,
                 },
             ]
         );
@@ -776,7 +955,8 @@ mod tests {
             report,
             Report::Saved {
                 session: 1,
-                error: None
+                error: None,
+                ..
             }
         )));
         logs.flush().unwrap();
@@ -786,7 +966,9 @@ mod tests {
             logs.drain(),
             vec![Report::Saved {
                 session: 1,
-                error: None
+                error: None,
+                retryable: false,
+                lost: 0,
             }]
         );
         assert_eq!(logs.budget.lock().unwrap().bytes, 0);
@@ -839,7 +1021,8 @@ mod tests {
             report,
             Report::Saved {
                 session: 1,
-                error: None
+                error: None,
+                ..
             }
         )));
         logs.append(2, vec![entry(3)]).unwrap();
@@ -877,6 +1060,154 @@ mod tests {
         assert!(
             matches!(reports.last(), Some(Report::Saved { error: Some(error), .. }) if error.contains("rejected"))
         );
+    }
+
+    #[test]
+    fn pending_barrier_records_oversized_batch_loss_once_without_resetting_rejection() {
+        let (logs, _, dir) = logs();
+        let mut oversized = entry(0);
+        if let Entry::Item { item, .. } = &mut oversized.entry {
+            item.text = "a".repeat(MAX_PENDING_BYTES);
+        }
+        assert!(logs.append(1, vec![oversized, entry(1)]).is_err());
+        assert_eq!(logs.lost_entries(1), 2);
+        logs.flush_pending().unwrap();
+        logs.flush_pending().unwrap();
+        let sessions = dir.path().join("sessions");
+        let entries = read(&sessions, 1).unwrap();
+        assert!(
+            matches!(&entries[..], [Entry::Item { item, seq: None, run: None }] if
+            item.kind == ItemKind::Other { name: "Keystone log loss: 2 log entries were lost (log budget exceeded).".into() }
+                && item.text == "2 log entries were lost (log budget exceeded)."
+                && item.status == ItemStatus::Failed)
+        );
+        assert!(logs.flush().unwrap_err().contains("2 entries"));
+        assert!(logs.append(1, vec![entry(2)]).is_err());
+        logs.flush_pending().unwrap();
+        let entries = read(&sessions, 1).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            matches!(&entries[1], Entry::Item { item, .. } if item.text == "1 log entries were lost (log budget exceeded).")
+        );
+        assert_eq!(logs.lost_entries(1), 3);
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn terminal_loss_does_not_mask_a_retained_write_failure_and_recovery_keeps_order() {
+        let (logs, _, dir) = logs();
+        let sessions = dir.path().join("sessions");
+        fs::write(&sessions, "blocked").unwrap();
+        let mut large = entry(0);
+        if let Entry::Item { item, .. } = &mut large.entry {
+            item.text = "a".repeat(MAX_PENDING_BYTES / 2);
+        }
+        logs.append(1, vec![large.clone()]).unwrap();
+        let original = logs.flush().unwrap_err();
+        logs.drain();
+        assert!(logs.append(1, vec![large]).is_err());
+        logs.writer.flush();
+        assert!(
+            matches!(logs.drain().last(), Some(Report::Saved { error: Some(error), retryable: true, lost: 1, .. }) if error.contains(&original))
+        );
+        assert!(logs.flush_pending().unwrap_err().contains(&original));
+        fs::remove_file(&sessions).unwrap();
+        logs.flush_pending().unwrap();
+        let entries = read(&sessions, 1).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], Entry::Item { seq: Some(0), .. }));
+        assert!(
+            matches!(&entries[1], Entry::Item { item, .. } if item.text == "1 log entries were lost (log budget exceeded).")
+        );
+        assert!(matches!(
+            logs.drain().last(),
+            Some(Report::Saved {
+                retryable: false,
+                lost: 1,
+                ..
+            })
+        ));
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn loss_markers_share_the_budget_and_wait_for_other_sessions_to_recover() {
+        let (logs, _, dir) = logs();
+        let sessions = dir.path().join("sessions");
+        fs::write(&sessions, "blocked").unwrap();
+        let mut full = entry(0);
+        let overhead = serde_json::to_vec(&full.entry).unwrap().len() + 1;
+        if let Entry::Item { item, .. } = &mut full.entry {
+            item.text = "a".repeat(MAX_PENDING_BYTES - overhead - 1);
+        }
+        logs.append(1, vec![full]).unwrap();
+        assert!(logs.append(2, vec![entry(1)]).is_err());
+        let error = logs.flush_pending().unwrap_err();
+        assert!(error.contains("Session 1") && error.contains("retry-buffer space"));
+        assert!(logs.budget.lock().unwrap().bytes <= MAX_PENDING_BYTES);
+        fs::remove_file(&sessions).unwrap();
+        logs.flush_pending().unwrap();
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0]);
+        assert!(
+            matches!(&read(&sessions, 2).unwrap()[..], [Entry::Item { item, .. }] if item.text == "1 log entries were lost (log budget exceeded).")
+        );
+        logs.append(3, vec![entry(2)]).unwrap();
+        logs.flush_pending().unwrap();
+        assert_eq!(seqs(&read(&sessions, 3).unwrap()), [2]);
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn a_loss_marker_sync_failure_is_retryable_without_duplicate_markers() {
+        let (logs, _, dir) = logs();
+        let mut oversized = entry(0);
+        if let Entry::Item { item, .. } = &mut oversized.entry {
+            item.text = "a".repeat(MAX_PENDING_BYTES);
+        }
+        assert!(logs.append(1, vec![oversized]).is_err());
+        logs.writer.flush();
+        inject(&logs, 1, VecDeque::from([Fault::Sync, Fault::Sync]));
+        assert!(logs.flush_pending().unwrap_err().contains("sync failure"));
+        let before = fs::read(path(&dir.path().join("sessions"), 1)).unwrap();
+        assert!(logs.budget.lock().unwrap().bytes > 0);
+        assert!(logs.flush_pending().unwrap_err().contains("sync failure"));
+        logs.flush_pending().unwrap();
+        assert_eq!(
+            fs::read(path(&dir.path().join("sessions"), 1)).unwrap(),
+            before
+        );
+        assert_eq!(read(&dir.path().join("sessions"), 1).unwrap().len(), 1);
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn a_loss_marker_partial_append_repairs_its_tail_before_replay() {
+        let (logs, _, dir) = logs();
+        let mut oversized = entry(0);
+        if let Entry::Item { item, .. } = &mut oversized.entry {
+            item.text = "a".repeat(MAX_PENDING_BYTES);
+        }
+        assert!(logs.append(1, vec![oversized]).is_err());
+        logs.writer.flush();
+        inject(
+            &logs,
+            1,
+            VecDeque::from([Fault::Append(13), Fault::Rollback]),
+        );
+        assert!(logs.flush_pending().unwrap_err().contains("append failure"));
+        assert!(logs.flush_pending().unwrap_err().contains("tail repair"));
+        logs.flush_pending().unwrap();
+        let sessions = dir.path().join("sessions");
+        assert_eq!(read(&sessions, 1).unwrap().len(), 1);
+        assert_eq!(
+            fs::read(path(&sessions, 1))
+                .unwrap()
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count(),
+            1
+        );
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
     }
 
     #[test]

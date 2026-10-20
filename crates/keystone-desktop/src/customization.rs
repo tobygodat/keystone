@@ -2,7 +2,7 @@ use crate::arrangement_editor::{Action, Chooser, Effect, Interpretation};
 use crate::customization_agent::{Agent, Outcome, Programs, REQUEST_TIMEOUT};
 use crate::{Keystone, SendMessage, provider_name};
 use gpui::{
-    Context, Focusable, FontWeight, IntoElement, MouseButton, SharedString, Window, div,
+    App, Context, Focusable, FontWeight, IntoElement, MouseButton, SharedString, Window, div,
     prelude::*, px,
 };
 use keystone_core::{
@@ -75,25 +75,37 @@ pub fn label(component: Component) -> &'static str {
 }
 
 impl Keystone {
-    pub(crate) fn saved_layout(&self) -> Option<&SavedComposition> {
-        self.presentation
-            .project
-            .as_ref()
-            .ok()
-            .and_then(|p| self.store.workspace().preferences().project_layout(p))
+    pub(crate) fn saved_layout<'a>(&self, cx: &'a App) -> Option<&'a SavedComposition> {
+        self.presentation.project.as_ref().ok().and_then(|p| {
+            self.state
+                .read(cx)
+                .store()
+                .workspace()
+                .preferences()
+                .project_layout(p)
+        })
     }
-    pub(crate) fn saved_composition(&self) -> Composition {
+    pub(crate) fn saved_composition(&self, cx: &App) -> Composition {
         self.presentation.project.as_ref().map_or_else(
             |_| {
                 Composition::from_sidebar(
-                    self.store
+                    self.state
+                        .read(cx)
+                        .store()
                         .workspace()
                         .preferences()
                         .sidebar_layout()
                         .shown(),
                 )
             },
-            |p| self.store.workspace().preferences().composition(p),
+            |p| {
+                self.state
+                    .read(cx)
+                    .store()
+                    .workspace()
+                    .preferences()
+                    .composition(p)
+            },
         )
     }
     pub(crate) fn customize(
@@ -102,8 +114,8 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let saved = self.saved_composition();
-        let raw = self.saved_layout().cloned();
+        let saved = self.saved_composition(cx);
+        let raw = self.saved_layout(cx).cloned();
         let opening = action == Action::Open && !self.presentation.current.customization.is_open();
         let closing = action == Action::Close && self.presentation.current.customization.is_open();
         if opening || matches!(action, Action::Reset | Action::Discard | Action::Close) {
@@ -165,11 +177,13 @@ impl Keystone {
                     }
                 }
                 Effect::Save(layout, commit) => {
-                    let previous = self.saved_layout().cloned();
+                    let previous = self.saved_layout(cx).cloned();
                     let result = match &self.presentation.project {
                         Ok(project) => self
-                            .store
-                            .set_project_layout(project, layout)
+                            .state
+                            .update(cx, |state, cx| {
+                                state.set_project_layout(project, layout, cx)
+                            })
                             .map(|a| !matches!(a.durability, keystone_core::Durability::Synced))
                             .map_err(|e| e.to_string()),
                         Err(error) => Err(format!("Cannot save this project's layout. {error}")),
@@ -177,7 +191,7 @@ impl Keystone {
                     if result.is_ok() {
                         self.presentation.current.arrangement.restore_tabs();
                     }
-                    let shown = self.saved_composition();
+                    let shown = self.saved_composition(cx);
                     self.presentation
                         .current
                         .customization
@@ -185,7 +199,9 @@ impl Keystone {
                 }
                 Effect::Borrow(source) => {
                     let raw = self
-                        .store
+                        .state
+                        .read(cx)
+                        .store()
                         .workspace()
                         .preferences()
                         .project_layout(&source)
@@ -201,7 +217,7 @@ impl Keystone {
         }
     }
     fn customize_agent(&mut self) -> &Agent {
-        let wake = self.wake.clone();
+        let wake = self.customize_wake.clone();
         self.customize_agent.get_or_insert_with(|| {
             Agent::new(
                 Programs {
@@ -260,7 +276,7 @@ impl Keystone {
             .presentation
             .current
             .customization
-            .shown(&self.saved_composition())
+            .shown(&self.saved_composition(cx))
             .clone();
         let order = crate::arrangement::ordered_views(c.root());
         let Some(at) = order.iter().position(|id| *id == view) else {
@@ -338,7 +354,7 @@ impl Keystone {
             .presentation
             .current
             .customization
-            .shown(&self.saved_composition())
+            .shown(&self.saved_composition(cx))
             .clone();
         if let Some((split, sizes)) = find(c.root(), id, &mut vec![], delta, mode) {
             self.customize(Action::Edit(Edit::Resize { split, sizes }), window, cx);
@@ -350,7 +366,7 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors;
-        let saved = self.saved_composition();
+        let saved = self.saved_composition(cx);
         let running = self.presentation.current.customization.running().is_some();
         let dirty = self.presentation.current.customization.can_discard(&saved);
         let current = self.presentation.current.customization.shown(&saved);
@@ -436,7 +452,7 @@ impl Keystone {
                             .presentation
                             .current
                             .customization
-                            .can_apply(self.saved_layout(), &saved),
+                            .can_apply(self.saved_layout(cx), &saved),
                     ))
                     .child(act("customize-close", "Close", Action::Close, false)),
             )
@@ -683,7 +699,9 @@ impl Keystone {
                 }))
         };
         let sources: Vec<_> = self
-            .store
+            .state
+            .read(cx)
+            .store()
             .workspace()
             .preferences()
             .project_layouts()
@@ -867,7 +885,14 @@ mod tests {
             crate::bind_keys(cx);
         });
         cx.executor().allow_parking();
-        cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx))
+        cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        })
     }
     fn click(cx: &mut VisualTestContext, name: &'static str) {
         let bounds = cx
@@ -892,20 +917,20 @@ mod tests {
                 this.presentation
                     .current
                     .customization
-                    .shown(&this.saved_composition())
+                    .shown(&this.saved_composition(cx))
                     .views()
                     .filter(|(_, c)| *c == Component::Conversation)
                     .count(),
                 2
             );
             assert_eq!(this.composer.read(cx).value(), "keep this draft");
-            assert!(this.saved_layout().is_none());
+            assert!(this.saved_layout(cx).is_none());
         });
         cx.simulate_keystrokes("ctrl-s");
         cx.run_until_parked();
-        view.read_with(cx, |this, _| {
+        view.read_with(cx, |this, cx| {
             assert_eq!(
-                this.saved_layout()
+                this.saved_layout(cx)
                     .unwrap()
                     .supported()
                     .unwrap()
@@ -916,7 +941,7 @@ mod tests {
             );
         });
         click(cx, "customize-undo");
-        view.read_with(cx, |this, _| assert!(this.saved_layout().is_none()));
+        view.read_with(cx, |this, cx| assert!(this.saved_layout(cx).is_none()));
         click(cx, "customize-borrow");
         assert!(cx.debug_bounds("borrow-empty-close").is_some());
         cx.simulate_keystrokes("escape");
@@ -946,9 +971,9 @@ mod tests {
             cx.debug_bounds("files-tab-0").is_some(),
             "Undo cannot take back a layout that changed since Apply"
         );
-        view.read_with(cx, |this, _| {
+        view.read_with(cx, |this, cx| {
             assert!(
-                this.saved_composition()
+                this.saved_composition(cx)
                     .views()
                     .any(|(_, c)| c == Component::Files)
             );
@@ -971,11 +996,11 @@ mod tests {
         let (view, cx) = open(&path, cx);
         click(cx, "customize-toggle");
         click(cx, "component-duplicate");
-        let candidate = view.read_with(cx, |this, _| {
+        let candidate = view.read_with(cx, |this, cx| {
             this.presentation
                 .current
                 .customization
-                .shown(&this.saved_composition())
+                .shown(&this.saved_composition(cx))
                 .clone()
         });
         click(cx, "customize-borrow");
@@ -983,12 +1008,12 @@ mod tests {
         click(cx, "borrow-preview");
         assert!(cx.debug_bounds("borrow-keep").is_some());
         click(cx, "borrow-keep");
-        view.read_with(cx, |this, _| {
+        view.read_with(cx, |this, cx| {
             assert_eq!(
                 this.presentation
                     .current
                     .customization
-                    .shown(&this.saved_composition()),
+                    .shown(&this.saved_composition(cx)),
                 &candidate
             )
         });
@@ -996,26 +1021,31 @@ mod tests {
         click(cx, "borrow-source-0");
         click(cx, "borrow-preview");
         click(cx, "borrow-replace");
-        view.read_with(cx, |this, _| {
-            let saved = this.saved_composition();
+        view.read_with(cx, |this, cx| {
+            let saved = this.saved_composition(cx);
             let next = this.presentation.current.customization.shown(&saved);
             assert!(
                 next.views()
                     .all(|(id, _)| !candidate.views().any(|(old, _)| id == old))
             );
             assert_eq!(
-                this.store.workspace().preferences().project_layout(&source),
+                this.state
+                    .read(cx)
+                    .store()
+                    .workspace()
+                    .preferences()
+                    .project_layout(&source),
                 Some(&raw)
             );
         });
         click(cx, "customize-discard");
-        view.read_with(cx, |this, _| {
+        view.read_with(cx, |this, cx| {
             assert_eq!(
                 this.presentation
                     .current
                     .customization
-                    .shown(&this.saved_composition()),
-                &this.saved_composition()
+                    .shown(&this.saved_composition(cx)),
+                &this.saved_composition(cx)
             )
         });
     }
@@ -1043,14 +1073,16 @@ mod tests {
                 size: Size::Fill(NonZeroU16::MIN),
             })
             .unwrap();
-        view.update(cx, |this, _| {
-            this.store
-                .set_project_layout(&source, Some(revised.into()))
+        view.update(cx, |this, cx| {
+            this.state
+                .update(cx, |state, cx| {
+                    state.set_project_layout(&source, Some(revised.into()), cx)
+                })
                 .unwrap();
         });
         click(cx, "borrow-preview");
-        view.read_with(cx, |this, _| {
-            let saved = this.saved_composition();
+        view.read_with(cx, |this, cx| {
+            let saved = this.saved_composition(cx);
             let candidate = this.presentation.current.customization.shown(&saved);
             assert_eq!(
                 candidate
@@ -1059,7 +1091,7 @@ mod tests {
                     .count(),
                 2
             );
-            assert!(this.saved_layout().is_none());
+            assert!(this.saved_layout(cx).is_none());
         });
     }
 
@@ -1093,7 +1125,7 @@ mod tests {
         let (view, cx) = open(&path, cx);
         click(cx, "welcome-codex");
         cx.simulate_input("same editor");
-        let composer = view.read_with(cx, |this, _| this.composer.clone());
+        let composer = view.read_with(cx, |this, _cx| this.composer.clone());
         click(cx, "customize-toggle");
         click(cx, "select-component-2");
         click(cx, "component-right");
@@ -1103,20 +1135,20 @@ mod tests {
         view.read_with(cx, |this, cx| {
             assert_eq!(this.composer, composer);
             assert_eq!(this.composer.read(cx).value(), "same editor");
-            assert!(this.saved_layout().is_none());
+            assert!(this.saved_layout(cx).is_none());
             assert_ne!(
                 this.presentation
                     .current
                     .customization
-                    .shown(&this.saved_composition()),
-                &this.saved_composition()
+                    .shown(&this.saved_composition(cx)),
+                &this.saved_composition(cx)
             );
         });
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
-        view.read_with(cx, |this, _| {
+        view.read_with(cx, |this, cx| {
             assert!(!this.presentation.current.customization.is_open());
-            assert!(this.saved_layout().is_none());
+            assert!(this.saved_layout(cx).is_none());
         });
         assert!(cx.debug_bounds("composer-field").is_some());
     }

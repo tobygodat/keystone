@@ -58,11 +58,20 @@ fn open(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Keystone>, &mut V
         crate::bind_keys(cx);
     });
     cx.executor().allow_parking();
-    let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        Keystone::new(
+            cx.new(|cx| crate::AppState::new(store, cx)),
+            false,
+            window,
+            cx,
+        )
+    });
     cx.simulate_resize(gpui::size(px(1200.), px(900.)));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !view.read_with(cx, |this, _| {
-        this.conversations
+    while !view.read_with(cx, |this, cx| {
+        this.state
+            .read(cx)
+            .conversations()
             .get(&1)
             .is_some_and(|c| c.rows.len() == 50)
     }) {
@@ -93,7 +102,7 @@ fn two_visible_occurrences_keep_scroll_and_focus_across_session_selection(cx: &m
         ..Default::default()
     });
     cx.run_until_parked();
-    let top = view.read_with(cx, |this, _| {
+    let top = view.read_with(cx, |this, _cx| {
         assert!(this.presentation.current.views.scrolled_up(first));
         assert!(!this.presentation.current.views.scrolled_up(second));
         assert!(
@@ -115,7 +124,7 @@ fn two_visible_occurrences_keep_scroll_and_focus_across_session_selection(cx: &m
             .logical_scroll_top()
     });
     click(cx, "conversation");
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, _cx| {
         assert_eq!(
             this.presentation
                 .current
@@ -125,7 +134,7 @@ fn two_visible_occurrences_keep_scroll_and_focus_across_session_selection(cx: &m
         )
     });
     click(cx, "conversation-view-3");
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, _cx| {
         assert_eq!(
             this.presentation
                 .current
@@ -136,7 +145,7 @@ fn two_visible_occurrences_keep_scroll_and_focus_across_session_selection(cx: &m
     });
     click(cx, "session-2");
     click(cx, "session-1");
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, _cx| {
         let restored = this
             .presentation
             .current
@@ -156,8 +165,8 @@ fn resize_changes_visible_geometry_without_retyping_auto_or_unrelated_fill(
 ) {
     let (_dir, view, cx) = open(cx);
     drag(cx, "split-grip-[]-0", 40., 0.);
-    view.read_with(cx, |this, _| {
-        let saved = this.saved_composition();
+    view.read_with(cx, |this, cx| {
+        let saved = this.saved_composition(cx);
         let c = this.presentation.current.customization.shown(&saved);
         let Node::Split { children, .. } = c.root() else {
             panic!()
@@ -168,7 +177,7 @@ fn resize_changes_visible_geometry_without_retyping_auto_or_unrelated_fill(
             panic!()
         };
         assert_eq!(children.last().unwrap().size, Size::Auto);
-        assert!(this.saved_layout().is_none());
+        assert!(this.saved_layout(cx).is_none());
     });
     let first = cx.debug_bounds("conversation").unwrap().size.height;
     let second = cx.debug_bounds("conversation-view-3").unwrap().size.height;
@@ -195,14 +204,19 @@ fn a_narrow_composer_keeps_streaming_controls_inside_the_window(cx: &mut TestApp
     }))
     .unwrap();
     view.update_in(cx, |this, window, cx| {
-        this.store
-            .set_project_layout(
-                this.presentation.project.as_ref().unwrap(),
-                Some(preferred.clone().into()),
-            )
+        this.state
+            .update(cx, |state, cx| {
+                state.set_project_layout(
+                    this.presentation.project.as_ref().unwrap(),
+                    Some(preferred.clone().into()),
+                    cx,
+                )
+            })
             .unwrap();
         this.customize(crate::arrangement_editor::Action::Discard, window, cx);
-        this.conversations.get_mut(&1).unwrap().running = true;
+        this.state.update(cx, |state, _| {
+            state.test_conversations_mut().get_mut(&1).unwrap().running = true;
+        });
         cx.notify();
     });
     cx.simulate_resize(gpui::size(px(1280.), px(900.)));
@@ -214,23 +228,25 @@ fn a_narrow_composer_keeps_streaming_controls_inside_the_window(cx: &mut TestApp
         assert!(bounds.right() <= px(1280.), "{id} clips at the window edge");
         right = bounds.right();
     }
-    view.read_with(cx, |this, _| {
-        assert_eq!(this.saved_composition(), preferred)
+    view.read_with(cx, |this, cx| {
+        assert_eq!(this.saved_composition(cx), preferred)
     });
 }
 
 fn unread(view: &Entity<Keystone>, cx: &mut VisualTestContext) {
     view.update_in(cx, |this, window, cx| {
         window.activate_window();
-        this.store.record_turn_end(1, false, 10).unwrap();
+        this.state
+            .update(cx, |state, cx| state.record_turn_end(1, false, 10, cx))
+            .unwrap();
         cx.notify();
     });
     cx.run_until_parked();
 }
 
 fn viewed(view: &Entity<Keystone>, cx: &VisualTestContext) -> u64 {
-    view.read_with(cx, |this, _| {
-        this.selected_session().unwrap().viewed_at().unwrap()
+    view.read_with(cx, |this, cx| {
+        this.selected_session(cx).unwrap().viewed_at().unwrap()
     })
 }
 
@@ -264,7 +280,7 @@ fn failed_observation_waits_for_deliberate_activation_before_retry(cx: &mut Test
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     click(cx, "conversation");
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, _cx| {
         assert!(
             this.error
                 .as_ref()
@@ -280,13 +296,17 @@ fn failed_observation_waits_for_deliberate_activation_before_retry(cx: &mut Test
         cx.run_until_parked();
     }
     assert!(viewed(&view, cx) < 10);
-    let writes = view.read_with(cx, |this, _| this.store.writes());
+    let writes = view.read_with(cx, |this, cx| this.state.read(cx).store().writes());
     click(cx, "composer-field");
     click(cx, "conversation");
     assert!(viewed(&view, cx) >= 10);
-    view.read_with(cx, |this, _| assert_eq!(this.store.writes(), writes + 1));
+    view.read_with(cx, |this, cx| {
+        assert_eq!(this.state.read(cx).store().writes(), writes + 1)
+    });
     click(cx, "conversation");
-    view.read_with(cx, |this, _| assert_eq!(this.store.writes(), writes + 1));
+    view.read_with(cx, |this, cx| {
+        assert_eq!(this.state.read(cx).store().writes(), writes + 1)
+    });
 }
 
 fn tabbed(selected: usize) -> Composition {
@@ -325,11 +345,14 @@ fn tabbed_three() -> Composition {
 /// Saves `layout` for the project and leaves Customize.
 fn use_layout(view: &Entity<Keystone>, cx: &mut VisualTestContext, layout: Composition) {
     view.update_in(cx, |this, window, cx| {
-        this.store
-            .set_project_layout(
-                this.presentation.project.as_ref().unwrap(),
-                Some(layout.into()),
-            )
+        this.state
+            .update(cx, |state, cx| {
+                state.set_project_layout(
+                    this.presentation.project.as_ref().unwrap(),
+                    Some(layout.into()),
+                    cx,
+                )
+            })
             .unwrap();
         this.customize(Action::Close, window, cx);
     });
@@ -432,7 +455,7 @@ fn a_tab_choice_that_cannot_be_saved_leaves_focus_where_it_was(cx: &mut TestAppC
     std::fs::create_dir(&path).unwrap();
     click(cx, "surface-tabs-0-tab-1");
     assert!(cx.debug_bounds("conversation").is_some(), "the tab stays");
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, _cx| {
         assert!(
             this.error
                 .as_ref()
@@ -559,7 +582,7 @@ fn keyboard_actions_follow_occurrences_and_release_hidden_focus(cx: &mut TestApp
         );
     });
     cx.simulate_keystrokes("shift-f6");
-    view.read_with(cx, |v, _| {
+    view.read_with(cx, |v, _cx| {
         assert_eq!(
             v.presentation
                 .current
@@ -682,7 +705,7 @@ fn a_files_menu_insert_that_cannot_save_does_not_focus_an_absent_tree(cx: &mut T
                 .unwrap()
                 .starts_with("Layout not changed.")
         );
-        let root = this.files_root().unwrap();
+        let root = this.files_root(cx).unwrap();
         assert!(
             !this
                 .files
@@ -802,11 +825,15 @@ fn fitting_away_the_tab_strips_closes_the_surface_menu(cx: &mut TestAppContext) 
 fn a_tab_choice_is_saved_and_customize_previews_replace_it(cx: &mut TestAppContext) {
     let (_dir, view, cx) = open(cx);
     use_layout(&view, cx, tabbed_three());
-    let writes = view.read_with(cx, |this, _| this.store.writes());
+    let writes = view.read_with(cx, |this, cx| this.state.read(cx).store().writes());
     click(cx, "surface-tabs-0-tab-1");
     assert!(cx.debug_bounds("conversation-view-3").is_some());
-    view.read_with(cx, |this, _| {
-        assert_eq!(this.store.writes(), writes + 1, "the choice is saved");
+    view.read_with(cx, |this, cx| {
+        assert_eq!(
+            this.state.read(cx).store().writes(),
+            writes + 1,
+            "the choice is saved"
+        );
     });
     click(cx, "customize-toggle");
     assert!(
@@ -840,11 +867,14 @@ fn fitted_sidebar_entry_points_without_session_list_do_not_block_observation(
 ) {
     let (_dir, view, cx) = open(cx);
     view.update_in(cx, |this, window, cx| {
-        this.store
-            .set_project_layout(
-                this.presentation.project.as_ref().unwrap(),
-                Some(tabbed(0).into()),
-            )
+        this.state
+            .update(cx, |state, cx| {
+                state.set_project_layout(
+                    this.presentation.project.as_ref().unwrap(),
+                    Some(tabbed(0).into()),
+                    cx,
+                )
+            })
             .unwrap();
         this.customize(Action::Close, window, cx);
     });
@@ -854,24 +884,26 @@ fn fitted_sidebar_entry_points_without_session_list_do_not_block_observation(
     click(cx, "sidebar-toggle");
     click(cx, "conversation");
     assert!(viewed(&view, cx) >= 10);
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, _cx| {
         assert!(!this.presentation.current.arrangement.sidebar_overlay)
     });
     click(cx, "composer-field");
     view.update(cx, |this, cx| {
-        this.store
-            .record_turn_end(1, false, crate::now_ms() + 1)
+        this.state
+            .update(cx, |state, cx| {
+                state.record_turn_end(1, false, crate::now_ms() + 1, cx)
+            })
             .unwrap();
         cx.notify();
     });
     cx.dispatch_action(crate::FocusSearch);
     cx.run_until_parked();
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, _cx| {
         assert!(!this.presentation.current.arrangement.sidebar_overlay)
     });
     click(cx, "conversation");
-    view.read_with(cx, |this, _| {
-        let session = this.selected_session().unwrap();
+    view.read_with(cx, |this, cx| {
+        let session = this.selected_session(cx).unwrap();
         assert!(session.viewed_at() >= session.updated_at());
     });
 }
@@ -882,11 +914,14 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
 ) {
     let (dir, view, cx) = open(cx);
     view.update_in(cx, |this, window, cx| {
-        this.store
-            .set_project_layout(
-                this.presentation.project.as_ref().unwrap(),
-                Some(tabbed(0).into()),
-            )
+        this.state
+            .update(cx, |state, cx| {
+                state.set_project_layout(
+                    this.presentation.project.as_ref().unwrap(),
+                    Some(tabbed(0).into()),
+                    cx,
+                )
+            })
             .unwrap();
         this.customize(Action::Close, window, cx);
     });
@@ -899,8 +934,8 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     assert_eq!(std::fs::read(&path).unwrap(), original);
     click(cx, "customize-toggle");
     view.update(cx, |this, cx| {
-        let saved = this.saved_composition();
-        let raw = this.saved_layout().cloned();
+        let saved = this.saved_composition(cx);
+        let raw = this.saved_layout(cx).cloned();
         this.presentation.current.customization.dispatch(
             Action::Ask {
                 provider: Provider::Codex,
@@ -922,8 +957,8 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     assert!(cx.debug_bounds("conversation-view-3").is_some());
     click(cx, "customize-apply");
     assert!(cx.debug_bounds("conversation-view-3").is_some());
-    view.read_with(cx, |this, _| {
-        assert_eq!(this.saved_composition(), tabbed(1))
+    view.read_with(cx, |this, cx| {
+        assert_eq!(this.saved_composition(cx), tabbed(1))
     });
     click(cx, "customize-close");
     assert!(cx.debug_bounds("conversation-view-3").is_some());
@@ -935,8 +970,8 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     click(cx, "customize-toggle");
     click(cx, "fitted-tab-3");
     view.update(cx, |this, cx| {
-        let saved = this.saved_composition();
-        let raw = this.saved_layout().cloned();
+        let saved = this.saved_composition(cx);
+        let raw = this.saved_layout(cx).cloned();
         this.presentation.current.customization.dispatch(
             Action::Ask {
                 provider: Provider::Codex,
@@ -969,8 +1004,8 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     click(cx, "customize-toggle");
     click(cx, "customize-undo");
     assert!(cx.debug_bounds("conversation").is_some());
-    view.read_with(cx, |this, _| {
-        assert_eq!(this.saved_composition(), tabbed(0))
+    view.read_with(cx, |this, cx| {
+        assert_eq!(this.saved_composition(cx), tabbed(0))
     });
 }
 
@@ -995,11 +1030,14 @@ fn fitting_uses_the_first_displayed_preferred_pane_and_refits_to_it_again(cx: &m
     }))
     .unwrap();
     view.update_in(cx, |this, window, cx| {
-        this.store
-            .set_project_layout(
-                this.presentation.project.as_ref().unwrap(),
-                Some(preferred.into()),
-            )
+        this.state
+            .update(cx, |state, cx| {
+                state.set_project_layout(
+                    this.presentation.project.as_ref().unwrap(),
+                    Some(preferred.into()),
+                    cx,
+                )
+            })
             .unwrap();
         this.customize(Action::Close, window, cx);
     });
@@ -1045,11 +1083,11 @@ fn open_auto_row(
 #[gpui::test]
 fn an_auto_row_of_conversation_and_composer_keeps_both_visible(cx: &mut TestAppContext) {
     let (_dir, view, cx) = open_auto_row(cx);
-    view.read_with(cx, |this, _| {
+    view.read_with(cx, |this, cx| {
         let Node::Split {
             axis: Axis::Row,
             children,
-        } = this.saved_composition().root().clone()
+        } = this.saved_composition(cx).root().clone()
         else {
             panic!("root is not a row")
         };

@@ -41,30 +41,35 @@ struct Burst {
 impl Replies {
     /// Takes in a reply row of the session on screen after it changed. Text added to a
     /// streaming reply is paced; anything else is shown as it is.
+    #[cfg(test)]
     pub fn observe(&mut self, key: Key, item: &Item, now: Instant) {
+        self.observe_text(key, &item.text, item.status, now);
+    }
+
+    pub fn observe_text(&mut self, key: Key, text: &str, status: ItemStatus, now: Instant) {
         let fresh = !self.rows.contains_key(&key);
-        if fresh && item.status != ItemStatus::InProgress {
+        if fresh && status != ItemStatus::InProgress {
             return;
         }
         let reply = self.rows.entry(key).or_default();
-        if item.status != ItemStatus::InProgress {
-            reply.parser.finish(&item.text);
+        if status != ItemStatus::InProgress {
+            reply.parser.finish(text);
             reply.burst = None;
             return;
         }
-        if fresh || !item.text.starts_with(reply.parser.source()) {
-            reply.parser.set_text(&item.text);
+        if fresh || !text.starts_with(reply.parser.source()) {
+            reply.parser.set_text(text);
             reply.burst = None;
             return;
         }
         let shown = reply.parser.source().len();
-        if item.text.len() == shown {
+        if text.len() == shown {
             return;
         }
         match &reply.burst {
             None => {
-                reply.advance(&item.text, LEAD);
-                if reply.parser.source().len() < item.text.len() {
+                reply.advance(text, LEAD);
+                if reply.parser.source().len() < text.len() {
                     reply.burst = Some(Burst {
                         last: now,
                         deadline: now + CATCH_UP,
@@ -72,7 +77,7 @@ impl Replies {
                 }
             }
             Some(burst) if now >= burst.deadline => {
-                reply.parser.set_text(&item.text);
+                reply.parser.set_text(text);
                 reply.burst = None;
             }
             Some(_) => {}

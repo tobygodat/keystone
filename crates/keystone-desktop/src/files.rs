@@ -389,12 +389,14 @@ impl Render for FileBrowser {
 
 impl Keystone {
     /// The selected session's recorded folder, or else the current project.
-    pub(crate) fn files_root(&self) -> Result<PathBuf, String> {
+    pub(crate) fn files_root(&self, cx: &App) -> Result<PathBuf, String> {
         let recorded = self
-            .store
+            .state
+            .read(cx)
+            .store()
             .workspace()
             .selected()
-            .and_then(|session| self.conversation_folder(session));
+            .and_then(|session| self.conversation_folder(session, cx));
         match (recorded, &self.presentation.project) {
             (Some(ConversationFolder::Recorded(directory)), _) => Ok(directory.path().to_owned()),
             (_, Ok(project)) => Ok(project.path().to_owned()),
@@ -404,13 +406,13 @@ impl Keystone {
 
     pub(crate) fn focus_files(&self, window: &mut Window, cx: &mut Context<Self>) {
         if !self
-            .shown_composition()
+            .shown_composition(cx)
             .views()
             .any(|(_, component)| component == Component::Files)
         {
             return;
         }
-        if let Ok(root) = self.files_root() {
+        if let Ok(root) = self.files_root(cx) {
             let browser = self.files.browser(&root, cx);
             window.focus(&browser.focus_handle(cx), cx);
         }
@@ -420,7 +422,7 @@ impl Keystone {
     /// focuses it, or opens one to the right of the conversation the user last worked
     /// in, else the first visible or declared one, and focuses its tree.
     pub(crate) fn toggle_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.shown_composition();
+        let shown = self.shown_composition(cx);
         if let Some((files, _)) = shown.views().find(|(_, c)| *c == Component::Files) {
             if self.view_contains_focus(files, window, cx) {
                 return self.edit_surfaces(Edit::Close(files), window, cx);
@@ -438,7 +440,9 @@ impl Keystone {
             .filter(|view| shown.component(*view) == Some(Component::Conversation))
             .collect();
         let target = self
-            .store
+            .state
+            .read(cx)
+            .store()
             .workspace()
             .selected()
             .and_then(|session| {
@@ -463,7 +467,7 @@ impl Keystone {
         };
         self.open_surface(Component::Files, at, FILES_WIDTH, window, cx);
         if let Some((files, _)) = self
-            .shown_composition()
+            .shown_composition(cx)
             .views()
             .find(|(_, c)| *c == Component::Files)
         {
@@ -473,7 +477,7 @@ impl Keystone {
     }
 
     pub(crate) fn file_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        match self.files_root() {
+        match self.files_root(cx) {
             Ok(root) => div()
                 .flex_1()
                 .min_h_0()
@@ -650,7 +654,14 @@ mod ui_tests {
         cx.update(keystone_ui::init);
         cx.update(crate::bind_keys);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|window, cx| Keystone::new(store, false, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
         view.update_in(cx, |this, window, cx| this.focus.focus(window, cx));
         cx.run_until_parked();
         (view, cx)
@@ -662,8 +673,8 @@ mod ui_tests {
     }
 
     fn browser(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> Entity<FileBrowser> {
-        view.read_with(cx, |view, _| {
-            view.files.browsers.borrow()[&view.files_root().unwrap()].clone()
+        view.read_with(cx, |view, cx| {
+            view.files.browsers.borrow()[&view.files_root(cx).unwrap()].clone()
         })
     }
 
