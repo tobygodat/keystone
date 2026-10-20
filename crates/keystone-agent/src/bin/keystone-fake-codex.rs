@@ -28,6 +28,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[path = "support/orchestrator.rs"]
+mod orchestrator;
+
 type Out = Arc<Mutex<io::Stdout>>;
 
 fn emit(out: &Out, message: Value) {
@@ -74,6 +77,8 @@ fn main() {
         .unwrap_or_default();
     let defaults = || (json!("on-request"), json!({"type": "workspaceWrite"}));
     let mut models: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut servers: std::collections::HashMap<String, orchestrator::Server> =
+        std::collections::HashMap::new();
     let no_catalog = std::env::var("KEYSTONE_FAKE_CODEX_NO_CATALOG").is_ok_and(|v| v == "1");
 
     for line in io::stdin().lock().lines() {
@@ -120,6 +125,7 @@ fn main() {
                 let thread = format!("fake-thread-{n}");
                 let (approval, sandbox) = defaults();
                 let model = thread_model(&mut models, &thread, &params);
+                thread_server(&mut servers, &thread, &params);
                 reply(json!({"thread": {"id": thread},
                     "approvalPolicy": approval, "sandbox": sandbox, "model": model}));
             }
@@ -127,6 +133,7 @@ fn main() {
                 let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
                 let (approval, sandbox) = policies.get(&thread).cloned().unwrap_or_else(defaults);
                 let model = thread_model(&mut models, &thread, &params);
+                thread_server(&mut servers, &thread, &params);
                 reply(json!({"thread": {"id": thread},
                     "approvalPolicy": approval, "sandbox": sandbox, "model": model}));
             }
@@ -178,6 +185,7 @@ fn main() {
                     .get(&thread)
                     .cloned()
                     .unwrap_or_else(|| "fake-default".into());
+                let server = servers.get(&thread).cloned();
                 // Unique per process, like real Codex IDs, so a restart never reuses one.
                 let turn_id = format!(
                     "fake-turn-{}-{}",
@@ -196,7 +204,16 @@ fn main() {
                 let (out, next, turns) = (out.clone(), next.clone(), turns.clone());
                 thread::spawn(move || {
                     run_turn(
-                        &out, &next, &thread, &turn_id, &text, &policy, &model, &turn, delay,
+                        &out,
+                        &next,
+                        &thread,
+                        &turn_id,
+                        &text,
+                        &policy,
+                        &model,
+                        server.as_ref(),
+                        &turn,
+                        delay,
                     );
                     turns.lock().unwrap().remove(&turn_id);
                 });
@@ -273,6 +290,20 @@ fn thread_model(
         .clone()
 }
 
+fn thread_server(
+    servers: &mut std::collections::HashMap<String, orchestrator::Server>,
+    thread: &str,
+    params: &Value,
+) {
+    if let Some(config) = params["config"]["mcp_servers"].get("keystone") {
+        if let Some(server) = orchestrator::Server::from_config(config, "http_headers") {
+            servers.insert(thread.to_owned(), server);
+        } else {
+            servers.remove(thread);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_turn(
     out: &Out,
@@ -282,6 +313,7 @@ fn run_turn(
     text: &str,
     policy: &str,
     model: &str,
+    server: Option<&orchestrator::Server>,
     turn: &Turn,
     delay: Duration,
 ) {
@@ -354,7 +386,7 @@ fn run_turn(
         }
     }
 
-    let words = std::env::var("KEYSTONE_FAKE_CODEX_REPLY").unwrap_or_else(|_| {
+    let words = orchestrator::reply(text, server, turn_id).or_else(|| std::env::var("KEYSTONE_FAKE_CODEX_REPLY").ok()).unwrap_or_else(|| {
         format!(
             "Scripted Codex reply (test data, no model call). You wrote: {text}. \
              This reply streams one word at a time so streaming, steering, and stopping can be checked. \
@@ -364,6 +396,16 @@ fn run_turn(
     let mut steer = None;
     let message_id = format!("msg-{turn_id}");
     let streamed = stream(out, &with, &message_id, &words, turn, delay, &mut steer);
+    let scripted_child = orchestrator::is_child_message(text);
+    if scripted_child && steer.is_none() {
+        orchestrator::hold_child(|| {
+            if let Some(text) = turn.steer.lock().unwrap().take() {
+                steer = Some(text);
+                return true;
+            }
+            turn.interrupt.load(Ordering::Relaxed)
+        });
+    }
     if turn.silent.load(Ordering::SeqCst) {
         return;
     }
@@ -383,6 +425,12 @@ fn run_turn(
             "item/agentMessage/delta",
             with(json!({"itemId": steered_id, "delta": text})),
         );
+        if scripted_child {
+            orchestrator::hold_child(|| turn.interrupt.load(Ordering::Relaxed));
+            if turn.interrupt.load(Ordering::Relaxed) {
+                return finish(out, thread, turn_id, "interrupted");
+            }
+        }
         let item = json!({"type": "agentMessage", "id": steered_id, "text": text});
         notify(out, "item/completed", with(json!({"item": item})));
     }

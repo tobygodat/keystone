@@ -10,6 +10,13 @@ From [scope.md](../scope.md): local execution, provider-native capabilities and 
 
 Keystone is one local process with one window owner. It does not need multi-device sync, a mobile client, or an RPC layer between its own parts.
 
+[Local orchestration](orchestrator.md) adds a loopback MCP tool surface for active
+Keystone sessions to launch, steer, read, wait for and interrupt other sessions,
+without replacing either provider's native tools or system prompt.
+Launch permission is checked at admission under the connection lock. The child's
+initial write rechecks the parent's live generation and current approval ceiling,
+but does not require its admitting turn to remain running during initialization.
+
 ## What the others do
 
 | Concern | Zeron | T3 Code | Keystone (proposed) |

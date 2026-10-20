@@ -10,6 +10,7 @@ use crate::item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
     cap_output,
 };
+use crate::mcp::{Caller, Issuer};
 use keystone_core::ApprovalMode;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -93,6 +94,7 @@ enum Pending {
     Thread {
         session: u64,
         resume: bool,
+        injected: bool,
     },
     TurnStart {
         session: u64,
@@ -110,10 +112,11 @@ enum Pending {
     },
     Steer {
         session: u64,
-        text: String,
+        message: QueuedMessage,
         turn: String,
         /// The session's stop count when the steer was sent.
         epoch: u64,
+        strict: bool,
     },
     Ignore,
 }
@@ -127,6 +130,11 @@ enum Turn {
     Running(String),
 }
 
+struct QueuedMessage {
+    text: String,
+    authorization: Option<(Issuer, Caller)>,
+}
+
 #[derive(Default)]
 struct Session {
     thread: Option<String>,
@@ -134,7 +142,7 @@ struct Session {
     turn: Turn,
     /// Messages accepted but not yet delivered, in order: sent before the thread
     /// existed, or while a turn was starting and had no ID to steer.
-    waiting: Vec<String>,
+    waiting: Vec<QueuedMessage>,
     /// Stop was asked while the turn was starting. It is sent once the turn has an ID.
     stop_requested: bool,
     /// The user ended the running turn, with Stop or a denial that cancels it. Its
@@ -149,6 +157,7 @@ struct Session {
     model: Option<String>,
     /// The policy for new turns. `None` uses the user's settings.
     policy: Option<Policy>,
+    mode: ApprovalMode,
     /// The policy the running or starting turn was started under. A message for a
     /// session whose policy changed since waits for the next turn instead of steering.
     turn_policy: Option<Policy>,
@@ -170,6 +179,7 @@ pub struct CodexDriver {
     threads: HashMap<String, u64>,
     /// The user's own approval policy and sandbox, per working directory.
     baselines: HashMap<String, Baseline>,
+    mcp: HashMap<u64, Value>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -188,6 +198,7 @@ impl CodexDriver {
             sessions: HashMap::new(),
             threads: HashMap::new(),
             baselines: HashMap::new(),
+            mcp: HashMap::new(),
             unknown: 0,
         };
         let line = driver.request("initialize", params, Pending::Initialize);
@@ -206,6 +217,83 @@ impl CodexDriver {
         self.sessions
             .get(&session)
             .is_some_and(|s| s.turn != Turn::Idle)
+    }
+
+    pub(crate) fn set_mcp(&mut self, session: u64, url: String, token: String) {
+        self.mcp.insert(
+            session,
+            json!({"mcp_servers": {"keystone": {
+                "url": url, "http_headers": {"Authorization": format!("Bearer {token}")},
+                "tool_timeout_sec": 60
+            }}}),
+        );
+    }
+
+    pub(crate) fn send_from(
+        &mut self,
+        session: u64,
+        text: String,
+        issuer: Issuer,
+        caller: Caller,
+        out: &mut Outputs,
+    ) {
+        self.send(
+            session,
+            QueuedMessage {
+                text,
+                authorization: Some((issuer, caller)),
+            },
+            out,
+        );
+    }
+
+    pub(crate) fn steer(
+        &mut self,
+        session: u64,
+        text: String,
+        out: &mut Outputs,
+    ) -> Result<(), &'static str> {
+        let state = self
+            .sessions
+            .get(&session)
+            .ok_or("busy: The target is not running")?;
+        if !self.ready
+            || state.stopped
+            || state.stop_requested
+            || state.policy != state.turn_policy
+            || !state.waiting.is_empty()
+        {
+            return Err("busy: Codex cannot steer this turn immediately");
+        }
+        let (Some(thread), Turn::Running(turn)) = (&state.thread, &state.turn) else {
+            return Err("busy: Codex has no running turn to steer");
+        };
+        let (thread, turn, epoch) = (thread.clone(), turn.clone(), state.epoch);
+        let line = self.request(
+            "turn/steer",
+            json!({"threadId": thread, "expectedTurnId": turn, "input": text_input(&text)}),
+            Pending::Steer {
+                session,
+                message: QueuedMessage {
+                    text,
+                    authorization: None,
+                },
+                turn,
+                epoch,
+                strict: true,
+            },
+        );
+        out.writes.push(line);
+        Ok(())
+    }
+
+    pub(crate) fn interrupt_now(
+        &mut self,
+        session: u64,
+        out: &mut Outputs,
+    ) -> Result<(), &'static str> {
+        self.interrupt(session, out);
+        Ok(())
     }
 
     pub fn command(&mut self, command: Command, out: &mut Outputs) {
@@ -249,12 +337,20 @@ impl CodexDriver {
                 let open = self.is_open(session);
                 let state = self.sessions.entry(session).or_default();
                 state.policy = policy(mode);
+                state.mode = mode;
                 // Once open, this process knows what it sent the thread.
                 if !open {
                     state.overridden |= overridden;
                 }
             }
-            Command::Send { session, text } => self.send(session, text, out),
+            Command::Send { session, text } => self.send(
+                session,
+                QueuedMessage {
+                    text,
+                    authorization: None,
+                },
+                out,
+            ),
             Command::Interrupt { session } => self.interrupt(session, out),
             Command::Answer {
                 session,
@@ -359,6 +455,7 @@ impl CodexDriver {
         self.threads.clear();
         self.pending.clear();
         self.baselines.clear();
+        self.mcp.clear();
         self.ready = false;
     }
 
@@ -393,12 +490,19 @@ impl CodexDriver {
         if let Some(model) = self.sessions.get(&session).and_then(|s| s.model.clone()) {
             params["model"] = json!(model);
         }
+        let injected = if let Some(config) = self.mcp.remove(&session) {
+            params["config"] = config;
+            true
+        } else {
+            false
+        };
         let line = self.request(
             method,
             params,
             Pending::Thread {
                 session,
                 resume: resume.is_some(),
+                injected,
             },
         );
         self.write(line, out);
@@ -406,7 +510,15 @@ impl CodexDriver {
 
     /// Delivers a message: a new turn when idle, a steer while a turn runs, or a
     /// place in line while the thread opens or the turn starts.
-    fn send(&mut self, session: u64, text: String, out: &mut Outputs) {
+    fn send(&mut self, session: u64, message: QueuedMessage, out: &mut Outputs) {
+        if let Some(message) = &self.initialization_error {
+            return out.event(
+                session,
+                Event::Failed {
+                    message: message.clone(),
+                },
+            );
+        }
         let state = self.sessions.entry(session).or_default();
         match (state.thread.clone(), state.turn.clone()) {
             (None, _) if !state.opening => out.event(
@@ -415,34 +527,34 @@ impl CodexDriver {
                     message: "This conversation is not open in Codex".into(),
                 },
             ),
-            (None, _) | (Some(_), Turn::Starting) => state.waiting.push(text),
+            (None, _) | (Some(_), Turn::Starting) => state.waiting.push(message),
             // The running turn has another approval mode: the message starts the next
             // turn when this one ends, under the latest mode.
             (Some(_), Turn::Running(_)) if state.policy != state.turn_policy => {
-                state.waiting.push(text)
+                state.waiting.push(message)
             }
             (Some(thread), Turn::Running(turn)) => {
                 let epoch = state.epoch;
                 let line = self.request(
                     "turn/steer",
-                    json!({"threadId": thread, "expectedTurnId": turn, "input": text_input(&text)}),
+                    json!({"threadId": thread, "expectedTurnId": turn, "input": text_input(&message.text)}),
                     Pending::Steer {
                         session,
-                        text,
+                        message,
                         turn,
                         epoch,
+                        strict: false,
                     },
                 );
                 self.write(line, out);
             }
             (Some(thread), Turn::Idle) => {
-                let mut params = json!({"threadId": thread, "input": text_input(&text)});
+                let mut params = json!({"threadId": thread, "input": text_input(&message.text)});
                 match (state.policy, state.overridden) {
                     (Some(policy), _) => {
                         let (approval, sandbox) = policy.params();
                         params["approvalPolicy"] = approval;
                         params["sandboxPolicy"] = sandbox;
-                        state.overridden = true;
                     }
                     (None, false) => {}
                     (None, true) => match self.baselines.get(&state.cwd) {
@@ -452,9 +564,9 @@ impl CodexDriver {
                         }
                         // Wait for the user's settings instead of running under an
                         // override they turned off.
-                        Some(Baseline::Requested) => return state.waiting.push(text),
+                        Some(Baseline::Requested) => return state.waiting.push(message),
                         None => {
-                            state.waiting.push(text);
+                            state.waiting.push(message);
                             let cwd = state.cwd.clone();
                             return self.request_baseline(&cwd, out);
                         }
@@ -469,9 +581,24 @@ impl CodexDriver {
                         }
                     },
                 }
+                if message
+                    .authorization
+                    .as_ref()
+                    .is_some_and(|(issuer, caller)| !issuer.permits_launch(*caller, state.mode))
+                {
+                    return out.event(
+                        session,
+                        Event::Failed {
+                            message:
+                                "The launching agent no longer has permission to send this message"
+                                    .into(),
+                        },
+                    );
+                }
                 // Starting, so further messages wait for the ID instead of starting a
                 // parallel turn.
                 state.turn = Turn::Starting;
+                state.overridden |= state.policy.is_some();
                 state.turn_policy = state.policy;
                 let line = self.request("turn/start", params, Pending::TurnStart { session });
                 self.write(line, out);
@@ -545,8 +672,8 @@ impl CodexDriver {
             return;
         }
         let waiting = std::mem::take(&mut state.waiting);
-        for text in waiting {
-            self.send(session, text, out);
+        for message in waiting {
+            self.send(session, message, out);
         }
     }
 
@@ -611,7 +738,11 @@ impl CodexDriver {
                     self.flush(session, out);
                 }
             }
-            Pending::Thread { session, resume } => {
+            Pending::Thread {
+                session,
+                resume,
+                injected,
+            } => {
                 let result = serde_json::from_slice::<Response<ThreadResult>>(line)
                     .ok()
                     .and_then(|r| r.result);
@@ -637,7 +768,11 @@ impl CodexDriver {
                         let state = self.sessions.entry(session).or_default();
                         state.opening = false;
                         state.waiting.clear();
-                        let reason = error.map_or("no thread in the reply".into(), |e| e.message);
+                        let reason = if injected {
+                            "MCP-enabled thread initialization failed".into()
+                        } else {
+                            error.map_or("no thread in the reply".into(), |e| e.message)
+                        };
                         let message = if resume {
                             format!(
                                 "Could not resume this Codex conversation: {reason}. Start a new Codex session to continue."
@@ -709,16 +844,19 @@ impl CodexDriver {
             }
             Pending::Steer {
                 session,
-                text,
+                message,
                 turn,
                 epoch,
+                strict,
             } => {
                 let Some(error) = error else { return };
                 let Some(state) = self.sessions.get(&session) else {
                     return;
                 };
                 let still_running = state.turn == Turn::Running(turn.clone());
-                if state.epoch != epoch {
+                if strict {
+                    out.event(session, Event::Warning { message: "The agent message could not steer the running turn; it was not retried".into() });
+                } else if state.epoch != epoch {
                     // The user stopped the turn after sending this; never restart work.
                     out.event(
                         session,
@@ -737,7 +875,7 @@ impl CodexDriver {
                 } else {
                     // Codex reports `turn/completed` before rejecting a steer for that
                     // turn, so the turn has ended: the message starts the next one.
-                    self.send(session, text, out);
+                    self.send(session, message, out);
                 }
             }
             Pending::Ignore => {}
@@ -1160,3 +1298,7 @@ fn join_text(parts: &[Value]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[cfg(test)]
+#[path = "codex_mcp_tests.rs"]
+mod mcp_tests;

@@ -8,6 +8,9 @@ use keystone_core::{Applied, ProjectId, SavedComposition, WorkingDirectory};
 #[path = "app_state_tests.rs"]
 mod tests;
 
+#[path = "orchestrator.rs"]
+mod orchestrator;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Phase {
     Running,
@@ -49,6 +52,7 @@ pub(crate) struct AppState {
     changes: RuntimeChanged,
     pub(crate) phase: Phase,
     pending: std::collections::VecDeque<PendingSave>,
+    orchestrator: Option<orchestrator::Orchestrator>,
     #[cfg(test)]
     pub(crate) save_calls: usize,
 }
@@ -177,6 +181,7 @@ impl AppState {
 
     pub(crate) fn teardown(&mut self, cx: &mut Context<Self>) {
         self.phase = Phase::Exiting;
+        drop(self.orchestrator.take());
         drop(self.codex.take());
         drop(self.claude.take());
         self.publish(cx);
@@ -519,6 +524,7 @@ impl AppState {
             changes: RuntimeChanged::default(),
             phase: Phase::Running,
             pending: Default::default(),
+            orchestrator: None,
             #[cfg(test)]
             save_calls: 0,
         }
@@ -727,6 +733,7 @@ impl AppState {
             }
         }
         self.receive(reports, events, cx);
+        self.pump_orchestrator(cx);
     }
 
     pub(crate) fn receive(
@@ -808,7 +815,7 @@ impl AppState {
 
     fn connection(&mut self, provider: Provider) -> &dyn Connection {
         let wake = self.wake.clone();
-        match provider {
+        let connection: &dyn Connection = match provider {
             Provider::Codex => self.codex.get_or_insert_with(|| {
                 CodexConnection::new(
                     std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
@@ -822,7 +829,11 @@ impl AppState {
                     wake,
                 )
             }),
+        };
+        if let Some(orchestrator) = &self.orchestrator {
+            connection.set_mcp(orchestrator.server.issuer());
         }
+        connection
     }
 
     fn started(&self, provider: Provider) -> Option<&dyn Connection> {
@@ -864,6 +875,15 @@ impl AppState {
     }
 
     pub(crate) fn send_message(&mut self, draft: ComposerDraft, cx: &mut Context<Self>) -> bool {
+        self.send_message_from(draft, None, cx)
+    }
+
+    fn send_message_from(
+        &mut self,
+        draft: ComposerDraft,
+        caller: Option<keystone_agent::mcp::Caller>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.phase != Phase::Running {
             return false;
         }
@@ -927,6 +947,12 @@ impl AppState {
         let Some((provider, approval)) = self.approval(id) else {
             return false;
         };
+        if let Err(error) = self.ensure_orchestrator() {
+            self.conversation(id).error = Some(format!("Not sent: {error}"));
+            self.commit(id);
+            self.publish(cx);
+            return false;
+        }
         // A failure to start the provider arrives later as an error in this
         // conversation. A refusal comes now, and the text stays in the composer.
         if let Err(error) = self.store.sync_pending() {
@@ -937,14 +963,26 @@ impl AppState {
             self.refresh(cx);
             return false;
         }
-        let sent = self.connection(provider).send(
-            id,
-            cwd,
-            resume.as_deref(),
-            session.model(),
-            approval,
-            text.clone(),
-        );
+        let connection = self.connection(provider);
+        let sent = match caller {
+            Some(caller) => connection.send_from(
+                id,
+                cwd,
+                resume.as_deref(),
+                session.model(),
+                approval,
+                text.clone(),
+                caller,
+            ),
+            None => connection.send(
+                id,
+                cwd,
+                resume.as_deref(),
+                session.model(),
+                approval,
+                text.clone(),
+            ),
+        };
         if let Err(reason) = sent {
             // Shown in the session's transcript, where a draft save cannot clear it.
             self.conversation(id).error = Some(reason.to_owned());
@@ -961,13 +999,28 @@ impl AppState {
     }
 
     pub(crate) fn stop_turn(&mut self, id: u64, cx: &mut Context<Self>) {
+        let _ = self.stop_turn_from(id, None, cx);
+    }
+
+    fn stop_turn_from(
+        &mut self,
+        id: u64,
+        caller: Option<keystone_agent::mcp::Caller>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if self.phase != Phase::Running {
-            return;
+            return Err("Keystone is shutting down".into());
         }
         if let Some(connection) = self.provider(id).and_then(|p| self.started(p)) {
-            connection.command(Command::Interrupt { session: id });
+            match caller {
+                Some(caller) => connection
+                    .interrupt_from(id, caller)
+                    .map_err(str::to_owned)?,
+                None => connection.command(Command::Interrupt { session: id }),
+            }
         }
         self.publish(cx);
+        Ok(())
     }
 
     pub(crate) fn answer(

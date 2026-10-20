@@ -6,6 +6,7 @@ use crate::codex::CodexDriver;
 use crate::driver::{ApprovalState, Command, Outputs};
 use crate::host::{Exit, Process};
 use crate::item::{Catalog, Event};
+use crate::mcp::{Caller, Issuer, Lease};
 use crate::version::{self, Provider};
 use crate::worker::Worker;
 use keystone_core::ApprovalMode;
@@ -42,6 +43,34 @@ pub type StartHook = Arc<dyn Fn(u64) + Send + Sync>;
 /// order they were given, and a provider that cannot start reports [`Event::Failed`]
 /// for the session that needed it.
 pub trait Connection {
+    fn set_mcp(&self, _issuer: Issuer) {}
+    fn is_running(&self, _session: u64) -> bool {
+        false
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn send_from(
+        &self,
+        _session: u64,
+        _cwd: &str,
+        _resume: Option<&str>,
+        _model: Option<&str>,
+        _approval: ApprovalState,
+        _text: String,
+        _caller: Caller,
+    ) -> Result<(), &'static str> {
+        Err("Agent launches are not supported by this connection")
+    }
+    fn steer_from(
+        &self,
+        _session: u64,
+        _text: String,
+        _caller: Caller,
+    ) -> Result<(), &'static str> {
+        Err("Agent steering is not supported by this connection")
+    }
+    fn interrupt_from(&self, _session: u64, _caller: Caller) -> Result<(), &'static str> {
+        Err("Agent interrupts are not supported by this connection")
+    }
     /// Opens the session's conversation if needed, then sends `text`: a new turn, or a
     /// steer for the running one. `resume` is the saved provider conversation ID, and
     /// `model` the provider-native model the session asked for, applied when the
@@ -72,8 +101,8 @@ pub trait Connection {
 }
 
 /// Describes why a provider process ended.
-fn exit_reason(name: &str, exit: &Exit) -> String {
-    match (exit.code, exit.stderr_tail.is_empty()) {
+fn exit_reason(name: &str, exit: &Exit, mcp: bool) -> String {
+    match (exit.code, exit.stderr_tail.is_empty() || mcp) {
         (_, false) => format!("{name} stopped: {}", exit.stderr_tail),
         (Some(code), true) => format!("{name} stopped with exit code {code}"),
         (None, true) => format!("{name} stopped"),
@@ -134,6 +163,9 @@ pub struct CodexConnection {
 
 #[derive(Default)]
 struct Shared {
+    mcp: Option<Issuer>,
+    leases: HashMap<u64, Lease>,
+    queued: HashMap<u64, usize>,
     notice: Option<String>,
     notices: version::Notices,
     /// The `codex` program, found on first use when not given.
@@ -161,9 +193,21 @@ struct Shared {
 }
 
 impl Shared {
+    fn unqueue(&mut self, session: u64) {
+        if let Some(count) = self.queued.get_mut(&session) {
+            *count -= 1;
+            if *count == 0 {
+                self.queued.remove(&session);
+            }
+        }
+    }
+
     /// Records the session's approval state and gives it to the driver, under the lock
     /// its turns start under, so no turn can start with an older one.
     fn set_approval(&mut self, session: u64, approval: ApprovalState) {
+        if let Some(issuer) = &self.mcp {
+            issuer.set_mode(session, approval.mode);
+        }
         self.approvals.insert(session, approval);
         if let Some(driver) = &mut self.driver {
             driver.command(
@@ -227,27 +271,111 @@ impl CodexConnection {
         approval: ApprovalState,
         text: String,
     ) {
-        self.set_approval(session, approval);
+        let _ = self.send_inner(session, cwd, resume, model, approval, text, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_inner(
+        &self,
+        session: u64,
+        cwd: &str,
+        resume: Option<&str>,
+        model: Option<&str>,
+        approval: ApprovalState,
+        text: String,
+        caller: Option<Caller>,
+    ) -> Result<(), &'static str> {
+        {
+            let mut shared = self.shared.lock().unwrap();
+            if let Some(caller) = caller {
+                authorize(shared.mcp.as_ref(), caller, approval.mode)?;
+                if shared.queued.contains_key(&session)
+                    || shared
+                        .driver
+                        .as_ref()
+                        .is_some_and(|driver| driver.is_running(session))
+                {
+                    return Err("busy: The target already has a running turn");
+                }
+            }
+            shared.set_approval(session, approval);
+            *shared.queued.entry(session).or_default() += 1;
+        }
         let cwd = cwd.to_owned();
         let resume = resume.map(str::to_owned);
         let model = model.map(str::to_owned);
-        self.with_driver(session, start_failed, move |driver, shared, out| {
-            let approval = shared.approvals.get(&session).copied().unwrap_or_default();
-            driver.command(Command::Configure { session, approval }, out);
-            if !driver.is_open(session) {
-                let resume = shared.threads.get(&session).cloned().or(resume);
-                driver.command(
-                    Command::Open {
+        let pending = self.shared.clone();
+        self.with_driver(
+            session,
+            move |message| {
+                pending.lock().unwrap().unqueue(session);
+                start_failed(message)
+            },
+            move |driver, shared, out| {
+                shared.unqueue(session);
+                let approval = shared.approvals.get(&session).copied().unwrap_or_default();
+                if let Some(caller) = caller
+                    && (!shared
+                        .mcp
+                        .as_ref()
+                        .is_some_and(|issuer| issuer.permits_launch(caller, approval.mode))
+                        || driver.is_running(session))
+                {
+                    out.event(
                         session,
-                        cwd,
-                        resume,
-                        model,
-                    },
-                    out,
-                );
-            }
-            driver.command(Command::Send { session, text }, out);
-        });
+                        start_failed(
+                            "The launching agent no longer has permission to send this message"
+                                .into(),
+                        ),
+                    );
+                    return;
+                }
+                driver.command(Command::Configure { session, approval }, out);
+                if !driver.is_open(session) {
+                    if let Some(issuer) = &shared.mcp {
+                        match issuer.issue(session) {
+                            Ok(credentials) => {
+                                let (url, token, lease) = credentials.into_parts();
+                                shared.leases.insert(session, lease);
+                                issuer.set_mode(session, approval.mode);
+                                driver.set_mcp(session, url, token);
+                            }
+                            Err(_) => {
+                                out.event(
+                                    session,
+                                    start_failed(
+                                        "Could not issue Keystone tool credentials".into(),
+                                    ),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    let resume = shared.threads.get(&session).cloned().or(resume);
+                    driver.command(
+                        Command::Open {
+                            session,
+                            cwd,
+                            resume,
+                            model,
+                        },
+                        out,
+                    );
+                }
+                if let Some(caller) = caller {
+                    driver.send_from(
+                        session,
+                        text,
+                        shared.mcp.as_ref().unwrap().clone(),
+                        caller,
+                        out,
+                    );
+                } else {
+                    driver.command(Command::Send { session, text }, out);
+                }
+            },
+        );
+        Ok(())
     }
 
     /// Sends a command, starting the app-server first if it is not running.
@@ -282,8 +410,8 @@ impl CodexConnection {
     fn with_driver(
         &self,
         session: u64,
-        on_fail: fn(String) -> Event,
-        act: impl FnOnce(&mut CodexDriver, &Shared, &mut Outputs) + Send + 'static,
+        on_fail: impl FnOnce(String) -> Event + Send + 'static,
+        act: impl FnOnce(&mut CodexDriver, &mut Shared, &mut Outputs) + Send + 'static,
     ) {
         let starter = self.starter();
         let Some(worker) = &self.worker else { return };
@@ -325,8 +453,8 @@ impl Starter {
     fn run(
         &self,
         session: u64,
-        on_fail: fn(String) -> Event,
-        act: impl FnOnce(&mut CodexDriver, &Shared, &mut Outputs),
+        on_fail: impl FnOnce(String) -> Event,
+        act: impl FnOnce(&mut CodexDriver, &mut Shared, &mut Outputs),
     ) {
         let mut shared = self.shared.lock().unwrap();
         if shared.closed {
@@ -336,6 +464,7 @@ impl Starter {
             shared.generation += 1;
             let generation = shared.generation;
             shared.driver = None;
+            shared.leases.clear();
             shared.starting = true;
             shared.exited = None;
             let program = shared.program.clone();
@@ -383,7 +512,7 @@ impl Starter {
             .driver
             .take()
             .expect("driver exists while the process runs");
-        act(&mut driver, &shared, &mut out);
+        act(&mut driver, &mut shared, &mut out);
         shared.driver = Some(driver);
         let wake = deliver(&mut shared, &self.inbox, out);
         drop(shared);
@@ -460,7 +589,7 @@ impl Starter {
                 if guard.generation != generation {
                     return;
                 }
-                let reason = exit_reason("Codex", &exit);
+                let reason = exit_reason("Codex", &exit, guard.mcp.is_some());
                 // Exited before the worker took it: the worker reports the failure.
                 if guard.process.is_none() {
                     guard.exited = Some(reason);
@@ -470,6 +599,8 @@ impl Starter {
                 if let Some(mut driver) = guard.driver.take() {
                     driver.on_exit(&reason, &mut out);
                 }
+                guard.leases.clear();
+                mcp_events(guard.mcp.as_ref(), &out.events);
                 inbox.lock().unwrap().append(&mut out.events);
                 // Dropping the handle kills anything the process left behind.
                 let process = guard.process.take();
@@ -484,6 +615,87 @@ impl Starter {
 }
 
 impl Connection for CodexConnection {
+    fn set_mcp(&self, issuer: Issuer) {
+        self.shared.lock().unwrap().mcp = Some(issuer);
+    }
+
+    fn is_running(&self, session: u64) -> bool {
+        CodexConnection::is_running(self, session)
+    }
+
+    fn send_from(
+        &self,
+        session: u64,
+        cwd: &str,
+        resume: Option<&str>,
+        model: Option<&str>,
+        approval: ApprovalState,
+        text: String,
+        caller: Caller,
+    ) -> Result<(), &'static str> {
+        self.send_inner(session, cwd, resume, model, approval, text, Some(caller))
+    }
+
+    fn steer_from(&self, session: u64, text: String, caller: Caller) -> Result<(), &'static str> {
+        let mut shared = self.shared.lock().unwrap();
+        authorize(
+            shared.mcp.as_ref(),
+            caller,
+            shared
+                .approvals
+                .get(&session)
+                .copied()
+                .unwrap_or_default()
+                .mode,
+        )?;
+        if shared.closed || shared.starting || shared.process.is_none() {
+            return Err("busy: The target is not running");
+        }
+        let mut out = Outputs::default();
+        shared
+            .driver
+            .as_mut()
+            .ok_or("busy: The target is not running")?
+            .steer(session, text, &mut out)?;
+        let wake = deliver(&mut shared, &self.inbox, out);
+        drop(shared);
+        if wake {
+            (self.wake)();
+        }
+        Ok(())
+    }
+
+    fn interrupt_from(&self, session: u64, caller: Caller) -> Result<(), &'static str> {
+        let mut shared = self.shared.lock().unwrap();
+        authorize(
+            shared.mcp.as_ref(),
+            caller,
+            shared
+                .approvals
+                .get(&session)
+                .copied()
+                .unwrap_or_default()
+                .mode,
+        )?;
+        if shared.closed || shared.queued.contains_key(&session) {
+            return Err("busy: The target is still starting");
+        }
+        if shared.driver.is_none() {
+            return Ok(());
+        }
+        let mut out = Outputs::default();
+        shared
+            .driver
+            .as_mut()
+            .ok_or("busy: The target is not running")?
+            .interrupt_now(session, &mut out)?;
+        let wake = deliver(&mut shared, &self.inbox, out);
+        drop(shared);
+        if wake {
+            (self.wake)();
+        }
+        Ok(())
+    }
     fn send(
         &self,
         session: u64,
@@ -532,6 +744,7 @@ impl Drop for CodexConnection {
                 .unwrap();
             shared.generation += 1;
             shared.driver = None;
+            shared.leases.clear();
             shared.process.take()
         };
         drop(process);
@@ -542,6 +755,17 @@ impl Drop for CodexConnection {
 /// its events. Returns whether the inbox went from empty to non-empty, which is when
 /// the UI needs waking.
 fn deliver(shared: &mut Shared, inbox: &Mutex<Vec<(u64, Event)>>, mut out: Outputs) -> bool {
+    mcp_events(shared.mcp.as_ref(), &out.events);
+    for (session, event) in &out.events {
+        if matches!(event, Event::Failed { .. })
+            && !shared
+                .driver
+                .as_ref()
+                .is_some_and(|driver| driver.is_open(*session))
+        {
+            shared.leases.remove(session);
+        }
+    }
     match &shared.process {
         Some(process) => {
             for line in out.writes.drain(..) {
@@ -592,6 +816,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Default)]
 struct ClaudeShared {
+    mcp: Option<Issuer>,
     notices: version::Notices,
     /// The `claude` program, found on first use when not given.
     program: Option<PathBuf>,
@@ -623,6 +848,7 @@ struct ClaudeShared {
 
 /// A session's process, from when it begins starting until it exits.
 struct Live {
+    _lease: Option<Lease>,
     driver: ClaudeDriver,
     /// `None` while the process starts.
     process: Option<Process>,
@@ -676,6 +902,9 @@ impl ClaudeShared {
 /// write what waited for it, or need a new process. Returns what the driver wrote.
 fn configure(shared: &mut ClaudeShared, session: u64, approval: ApprovalState) -> Outputs {
     let approval = shared.launch.approval(approval);
+    if let Some(issuer) = &shared.mcp {
+        issuer.set_mode(session, approval.mode);
+    }
     shared.approvals.insert(session, approval);
     let mut out = Outputs::default();
     if let Some(live) = shared.live.get_mut(&session) {
@@ -689,7 +918,7 @@ fn configure(shared: &mut ClaudeShared, session: u64, approval: ApprovalState) -
 enum Job {
     /// A message, with the directory, saved conversation, and model to start a process
     /// with.
-    Message(PathBuf, Option<String>, Option<String>),
+    Message(PathBuf, Option<String>, Option<String>, Option<Caller>),
     /// Stop or an answer: nothing to start.
     Command,
     /// Replaces a process that cannot run the waiting turn's approval mode.
@@ -756,8 +985,35 @@ impl ClaudeConnection {
         approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
+        self.send_inner(session, cwd, resume, model, approval, text, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_inner(
+        &self,
+        session: u64,
+        cwd: &str,
+        resume: Option<&str>,
+        model: Option<&str>,
+        approval: ApprovalState,
+        text: String,
+        caller: Option<Caller>,
+    ) -> Result<(), &'static str> {
+        let issuer;
         {
             let mut shared = self.starter.shared.lock().unwrap();
+            if let Some(caller) = caller {
+                authorize(shared.mcp.as_ref(), caller, approval.mode)?;
+                if shared
+                    .live
+                    .get(&session)
+                    .is_some_and(|live| live.driver.is_running())
+                    || shared.queued.contains_key(&session)
+                {
+                    return Err("busy: The target already has a running turn");
+                }
+            }
+            issuer = shared.mcp.clone();
             let out = configure(&mut shared, session, approval);
             let refused = shared.steer_blocked(session);
             if refused.is_none() {
@@ -772,9 +1028,21 @@ impl ClaudeConnection {
             PathBuf::from(cwd),
             resume.map(str::to_owned),
             model.map(str::to_owned),
+            caller,
         );
         self.starter.queue(session, start, move |driver, out| {
-            driver.command(Command::Send { session, text }, out)
+            if let Some(caller) = caller {
+                if driver.is_running() {
+                    out.event(
+                        session,
+                        start_failed("busy: The target already has a running turn".into()),
+                    );
+                    return;
+                }
+                driver.send_from(text, issuer.unwrap(), caller, out);
+            } else {
+                driver.command(Command::Send { session, text }, out);
+            }
         });
         Ok(())
     }
@@ -911,10 +1179,36 @@ impl ClaudeStarter {
         if shared.closed {
             return;
         }
+        if let Job::Message(_, _, _, Some(caller)) = &job
+            && !shared.mcp.as_ref().is_some_and(|issuer| {
+                issuer.permits_launch(
+                    *caller,
+                    shared
+                        .approvals
+                        .get(&session)
+                        .copied()
+                        .unwrap_or_default()
+                        .mode,
+                )
+            })
+        {
+            shared.unqueue(session);
+            drop(shared);
+            push(
+                &self.inbox,
+                &self.wake,
+                session,
+                start_failed(
+                    "The launching agent no longer has permission to start this conversation"
+                        .into(),
+                ),
+            );
+            return;
+        }
         let message = matches!(job, Job::Message(..));
         let command = matches!(job, Job::Command);
         let mut start = match job {
-            Job::Message(cwd, resume, model) => Some((cwd, resume, model)),
+            Job::Message(cwd, resume, model, _) => Some((cwd, resume, model)),
             Job::Command | Job::Replace => None,
         };
         let mut carried = Vec::new();
@@ -1009,7 +1303,36 @@ impl ClaudeStarter {
             launch,
             &mut pending,
         );
+        let mut lease = None;
+        if launch == Launch::Chat
+            && let Some(issuer) = &shared.mcp
+        {
+            match issuer.issue(session) {
+                Ok(credentials) => {
+                    let (url, token, issued) = credentials.into_parts();
+                    lease = Some(issued);
+                    issuer.set_mode(session, mode);
+                    driver.set_mcp(url, token);
+                }
+                Err(_) => {
+                    if message {
+                        shared.unqueue(session);
+                    }
+                    drop(shared);
+                    push(
+                        &self.inbox,
+                        &self.wake,
+                        session,
+                        start_failed("Could not issue Keystone tool credentials".into()),
+                    );
+                    return;
+                }
+            }
+        }
         act(&mut driver, &mut pending);
+        if let Some(issuer) = &shared.mcp {
+            issuer.set_running(session, driver.is_running());
+        }
         // Counted only now that the driver has the turn, so a message sent during the
         // start is refused like any steer too early to send.
         if message {
@@ -1018,6 +1341,7 @@ impl ClaudeStarter {
         shared.live.insert(
             session,
             Live {
+                _lease: lease,
                 driver,
                 process: None,
                 probe: None,
@@ -1053,6 +1377,7 @@ impl ClaudeStarter {
         let mut out = std::mem::take(&mut live.pending);
         let ended = match spawned {
             Err(message) => {
+                live._lease = None;
                 drop(shared);
                 self.finish_start();
                 push(&self.inbox, &self.wake, session, start_failed(message));
@@ -1065,6 +1390,7 @@ impl ClaudeStarter {
                 live.process = Some(process);
                 match live.exited.take() {
                     Some(reason) => {
+                        live._lease = None;
                         live.driver.on_exit(&reason, &mut out);
                         Some(live)
                     }
@@ -1164,7 +1490,7 @@ impl ClaudeStarter {
             let wake = self.wake.clone();
             move |exit: Exit| {
                 let mut guard = shared.lock().unwrap();
-                let reason = exit_reason("Claude Code", &exit);
+                let reason = exit_reason("Claude Code", &exit, guard.mcp.is_some());
                 match guard.live.get_mut(&session) {
                     Some(live) if live.generation == generation => {
                         // Exited before the worker took it: the worker reports it.
@@ -1176,8 +1502,10 @@ impl ClaudeStarter {
                     _ => return,
                 }
                 let mut live = guard.live.remove(&session).expect("checked above");
+                live._lease = None;
                 let mut out = Outputs::default();
                 live.driver.on_exit(&reason, &mut out);
+                mcp_events(guard.mcp.as_ref(), &out.events);
                 inbox.lock().unwrap().append(&mut out.events);
                 drop(guard);
                 // Dropping the handle kills anything the process left behind.
@@ -1254,7 +1582,11 @@ impl ClaudeStarter {
             }
         };
         let on_exit = move |exit: Exit| {
-            let _ = exited.send(Some(Catalog::Failed(exit_reason("Claude Code", &exit))));
+            let _ = exited.send(Some(Catalog::Failed(exit_reason(
+                "Claude Code",
+                &exit,
+                false,
+            ))));
         };
         let process = match Process::spawn(program, &claude::ARGS, cwd, on_line, on_exit) {
             Ok(process) => process,
@@ -1380,6 +1712,96 @@ impl ClaudeStarter {
 }
 
 impl Connection for ClaudeConnection {
+    fn set_mcp(&self, issuer: Issuer) {
+        let mut shared = self.starter.shared.lock().unwrap();
+        if shared.launch == Launch::Chat {
+            shared.mcp = Some(issuer);
+        }
+    }
+
+    fn is_running(&self, session: u64) -> bool {
+        ClaudeConnection::is_running(self, session)
+    }
+
+    fn send_from(
+        &self,
+        session: u64,
+        cwd: &str,
+        resume: Option<&str>,
+        model: Option<&str>,
+        approval: ApprovalState,
+        text: String,
+        caller: Caller,
+    ) -> Result<(), &'static str> {
+        self.send_inner(session, cwd, resume, model, approval, text, Some(caller))
+    }
+
+    fn steer_from(&self, session: u64, text: String, caller: Caller) -> Result<(), &'static str> {
+        let mut shared = self.starter.shared.lock().unwrap();
+        authorize(
+            shared.mcp.as_ref(),
+            caller,
+            shared
+                .approvals
+                .get(&session)
+                .copied()
+                .unwrap_or_default()
+                .mode,
+        )?;
+        if shared.closed || shared.queued.contains_key(&session) {
+            return Err("busy: The target cannot steer immediately");
+        }
+        let live = shared
+            .live
+            .get_mut(&session)
+            .ok_or("busy: The target is not running")?;
+        if live.process.is_none() || live.replacing {
+            return Err("busy: The target is not running");
+        }
+        let mut out = Outputs::default();
+        live.driver.steer(text, &mut out)?;
+        self.starter.deliver(shared, session, out);
+        Ok(())
+    }
+
+    fn interrupt_from(&self, session: u64, caller: Caller) -> Result<(), &'static str> {
+        let mut shared = self.starter.shared.lock().unwrap();
+        authorize(
+            shared.mcp.as_ref(),
+            caller,
+            shared
+                .approvals
+                .get(&session)
+                .copied()
+                .unwrap_or_default()
+                .mode,
+        )?;
+        if shared.queued.contains_key(&session) {
+            return Err("busy: The target is still starting");
+        }
+        if !shared
+            .live
+            .get(&session)
+            .is_some_and(|live| live.driver.is_running())
+        {
+            return Ok(());
+        }
+        if shared.closed {
+            return Err("busy: The target is not running");
+        }
+        let live = shared
+            .live
+            .get_mut(&session)
+            .ok_or("busy: The target is not running")?;
+        if live.process.is_none() || live.replacing || !live.driver.is_running() {
+            return Err("busy: The target is not running");
+        }
+        let mut out = Outputs::default();
+        live.driver
+            .command(Command::Interrupt { session }, &mut out);
+        self.starter.deliver(shared, session, out);
+        Ok(())
+    }
     fn send(
         &self,
         session: u64,
@@ -1427,7 +1849,14 @@ impl Drop for ClaudeConnection {
             shared.closed = true;
             shared.generation += 1;
             (
-                shared.live.drain().map(|(_, live)| live).collect(),
+                shared
+                    .live
+                    .drain()
+                    .map(|(_, mut live)| {
+                        live._lease = None;
+                        live
+                    })
+                    .collect(),
                 shared.catalog_probes.drain().map(|(_, p)| p).collect(),
             )
         };
@@ -1451,6 +1880,15 @@ fn claude_deliver(
     session: u64,
     mut out: Outputs,
 ) -> bool {
+    mcp_events(shared.mcp.as_ref(), &out.events);
+    if shared
+        .live
+        .get(&session)
+        .is_some_and(|live| live.driver.credentials_failed())
+        && let Some(live) = shared.live.get_mut(&session)
+    {
+        live._lease = None;
+    }
     if let Some(live) = shared.live.get_mut(&session) {
         match &live.process {
             Some(process) => {
@@ -1475,6 +1913,33 @@ fn claude_deliver(
     was_empty && !inbox.is_empty()
 }
 
+fn authorize(
+    issuer: Option<&Issuer>,
+    caller: Caller,
+    mode: ApprovalMode,
+) -> Result<(), &'static str> {
+    if issuer.is_some_and(|issuer| issuer.authorize(caller, mode)) {
+        Ok(())
+    } else {
+        Err(
+            "The calling agent is no longer running or its approval mode does not permit this action",
+        )
+    }
+}
+
+fn mcp_events(issuer: Option<&Issuer>, events: &[(u64, Event)]) {
+    let Some(issuer) = issuer else { return };
+    for (session, event) in events {
+        match event {
+            Event::TurnStarted => issuer.set_running(*session, true),
+            Event::TurnCompleted { .. } | Event::Failed { .. } => {
+                issuer.set_running(*session, false)
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A seed that differs per process, so message UUIDs never repeat across restarts.
 fn random_seed() -> u64 {
     use std::hash::{BuildHasher, Hasher};
@@ -1485,3 +1950,7 @@ fn random_seed() -> u64 {
     hasher.write_u128(nanos);
     hasher.finish()
 }
+
+#[cfg(test)]
+#[path = "provider_mcp_tests.rs"]
+mod provider_mcp_tests;

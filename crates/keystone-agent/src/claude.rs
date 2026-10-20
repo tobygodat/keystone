@@ -15,6 +15,7 @@ use crate::item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
     cap_output,
 };
+use crate::mcp::{Caller, Issuer};
 use keystone_core::ApprovalMode;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -154,19 +155,25 @@ struct Turn {
     /// Messages not written yet: they wait for Claude to confirm the selected
     /// permission mode, or a steer waits to learn whether Claude reports lifecycle
     /// frames.
-    held: Vec<String>,
+    held: Vec<QueuedMessage>,
     /// Whether the turn's first message was written.
     written: bool,
 }
 
 enum Request {
     Initialize,
+    Mcp,
     Interrupt,
     /// A `set_permission_mode` for the selection with this version.
     SetMode {
         version: u64,
         target: &'static str,
     },
+}
+
+pub struct QueuedMessage {
+    text: String,
+    authorization: Option<(Issuer, Caller)>,
 }
 
 struct Pending {
@@ -213,6 +220,9 @@ pub struct ClaudeDriver {
     version: u64,
     /// Whether Claude answered `initialize`. No message is written before.
     initialized: bool,
+    mcp_request: Option<Value>,
+    mcp_ready: bool,
+    mcp_enabled: bool,
     /// The permission mode Claude last confirmed: in its `initialize` answer, an
     /// answer to `set_permission_mode`, or a `system` report.
     confirmed: Option<String>,
@@ -280,6 +290,9 @@ impl ClaudeDriver {
             mode,
             version: 0,
             initialized: false,
+            mcp_request: None,
+            mcp_ready: true,
+            mcp_enabled: false,
             confirmed: None,
             changed: false,
             leaving_plan: false,
@@ -298,6 +311,54 @@ impl ClaudeDriver {
 
     pub fn is_running(&self) -> bool {
         self.turn.is_some()
+    }
+
+    pub(crate) fn set_mcp(&mut self, url: String, token: String) {
+        self.mcp_request = Some(
+            json!({"subtype": "mcp_set_servers", "servers": {"keystone": {
+                "type": "http", "url": url, "headers": {"Authorization": format!("Bearer {token}")}
+            }}}),
+        );
+        self.mcp_ready = false;
+        self.mcp_enabled = true;
+    }
+
+    pub(crate) fn send_from(
+        &mut self,
+        text: String,
+        issuer: Issuer,
+        caller: Caller,
+        out: &mut Outputs,
+    ) {
+        self.enqueue(
+            QueuedMessage {
+                text,
+                authorization: Some((issuer, caller)),
+            },
+            out,
+        );
+    }
+
+    pub(crate) fn steer(&mut self, text: String, out: &mut Outputs) -> Result<(), &'static str> {
+        if !self.mode_confirmed()
+            || self
+                .turn
+                .as_ref()
+                .is_none_or(|turn| !turn.written || turn.stopping || !turn.held.is_empty())
+        {
+            return Err("busy: Claude Code cannot steer this turn immediately");
+        }
+        if self.steer_unsupported().is_some() {
+            return Err("busy: Claude Code cannot safely steer this turn yet");
+        }
+        self.write(
+            QueuedMessage {
+                text,
+                authorization: None,
+            },
+            out,
+        );
+        Ok(())
     }
 
     pub(crate) fn set_cancel_queued(&mut self, enabled: bool) {
@@ -336,7 +397,7 @@ impl ClaudeDriver {
 
     /// Takes the messages of a turn nothing of which was written, ending it without
     /// reporting an end: it goes on in the next process.
-    pub fn take_unsent(&mut self) -> Vec<String> {
+    pub fn take_unsent(&mut self) -> Vec<QueuedMessage> {
         match self.turn.take() {
             Some(turn) if !turn.written => turn.held,
             turn => {
@@ -347,7 +408,7 @@ impl ClaudeDriver {
     }
 
     /// Continues a turn carried over from a replaced process. Its start was reported.
-    pub fn carry(&mut self, messages: Vec<String>, out: &mut Outputs) {
+    pub fn carry(&mut self, messages: Vec<QueuedMessage>, out: &mut Outputs) {
         if messages.is_empty() || self.turn.is_some() {
             return;
         }
@@ -375,9 +436,13 @@ impl ClaudeDriver {
             Some(Request::SetMode { .. }) => {
                 "Claude Code did not confirm the approval mode in time, so nothing was sent. Send again to restart it."
             }
+            Some(Request::Mcp) => {
+                "Claude Code did not configure Keystone tools in time, so nothing was sent. Send again to restart it."
+            }
             _ => return,
         };
         self.untrusted = true;
+        self.mcp_request = None;
         self.fail_held(reason, out);
     }
 
@@ -517,10 +582,15 @@ impl ClaudeDriver {
     /// The process exited. A running turn fails, and the model it reported is gone
     /// with it.
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
+        self.mcp_request = None;
         if self.turn.is_some() {
             self.finish(TurnStatus::Failed, Some(reason.to_owned()), out);
         }
         out.event(self.session, Event::ModelLost);
+    }
+
+    pub(crate) fn credentials_failed(&self) -> bool {
+        self.untrusted || self.refused
     }
 
     /// Keystone's ID for one of Claude's requests. Claude's IDs are only unique within
@@ -533,7 +603,7 @@ impl ClaudeDriver {
     fn request(&mut self, request: Value, purpose: Request) -> String {
         self.next_request += 1;
         let id = format!("keystone-{}", self.next_request);
-        if let Request::Initialize | Request::SetMode { .. } = purpose {
+        if let Request::Initialize | Request::Mcp | Request::SetMode { .. } = purpose {
             self.timed.push(id.clone());
         }
         let line =
@@ -545,11 +615,21 @@ impl ClaudeDriver {
     /// Starts a turn, or steers the running one. Every message waits in the turn's
     /// `held` list and is written by [`ClaudeDriver::pump`].
     fn send(&mut self, text: String, out: &mut Outputs) {
+        self.enqueue(
+            QueuedMessage {
+                text,
+                authorization: None,
+            },
+            out,
+        );
+    }
+
+    fn enqueue(&mut self, message: QueuedMessage, out: &mut Outputs) {
         match &mut self.turn {
-            Some(turn) => turn.held.push(text),
+            Some(turn) => turn.held.push(message),
             None => {
                 self.turn = Some(Turn {
-                    held: vec![text],
+                    held: vec![message],
                     ..Turn::default()
                 });
                 out.event(self.session, Event::TurnStarted);
@@ -565,6 +645,7 @@ impl ClaudeDriver {
     fn mode_confirmed(&self) -> bool {
         !self.needs_restart()
             && self.initialized
+            && self.mcp_ready
             && !self.leaving_plan
             && !self.mode_requested()
             && permission_mode(self.mode)
@@ -581,6 +662,9 @@ impl ClaudeDriver {
     /// it when nothing else is pending. A process that needs replacing is left to the
     /// connection ([`ClaudeDriver::wants_restart`]).
     fn pump(&mut self, out: &mut Outputs) {
+        if !self.mcp_ready {
+            return;
+        }
         if self.turn.as_ref().is_none_or(|turn| turn.held.is_empty()) {
             return;
         }
@@ -604,13 +688,23 @@ impl ClaudeDriver {
             return;
         }
         let Some(turn) = &mut self.turn else { return };
+        let mut refused = Vec::new();
         for text in std::mem::take(&mut turn.held) {
             match &mut self.turn {
                 // A steer waits until Claude says whether it reports lifecycle frames.
                 Some(turn) if turn.written && self.lifecycle.is_none() => turn.held.push(text),
                 Some(_) => self.write(text, out),
-                None => {}
+                // A refused launch ended the turn; what followed it starts the next one.
+                None => refused.push(text),
             }
+        }
+        if !refused.is_empty() {
+            self.turn = Some(Turn {
+                held: refused,
+                ..Turn::default()
+            });
+            out.event(self.session, Event::TurnStarted);
+            self.pump(out);
         }
     }
 
@@ -634,11 +728,23 @@ impl ClaudeDriver {
 
     /// Writes one message: the turn's first, or a steer. Only [`ClaudeDriver::pump`]
     /// calls it, after checking the mode; it is checked again here.
-    fn write(&mut self, text: String, out: &mut Outputs) {
+    fn write(&mut self, message: QueuedMessage, out: &mut Outputs) {
         if !self.mode_confirmed() {
             if let Some(turn) = &mut self.turn {
-                turn.held.push(text);
+                turn.held.push(message);
             }
+            return;
+        }
+        if message
+            .authorization
+            .as_ref()
+            .is_some_and(|(issuer, caller)| !issuer.permits_launch(*caller, self.mode))
+        {
+            self.finish(
+                TurnStatus::Failed,
+                Some("The launching agent no longer has permission to send this message".into()),
+                out,
+            );
             return;
         }
         // Without lifecycle frames, the steered turn's first `result` would end it while
@@ -659,7 +765,7 @@ impl ClaudeDriver {
         let uuid = message_uuid(self.seed, self.next_message);
         let mut message = json!({
             "type": "user",
-            "message": {"role": "user", "content": text},
+                "message": {"role": "user", "content": message.text},
             "parent_tool_use_id": null,
             "uuid": uuid,
         });
@@ -1087,6 +1193,28 @@ impl ClaudeDriver {
         };
         let request = control.request;
         if request.subtype == "can_use_tool"
+            && self.mcp_enabled
+            && self.mcp_ready
+            && request
+                .tool_name
+                .as_deref()
+                .and_then(|name| name.strip_prefix("mcp__keystone__"))
+                .is_some_and(|name| {
+                    matches!(
+                        name,
+                        "capabilities"
+                            | "session_launch"
+                            | "session_send"
+                            | "session_read"
+                            | "session_wait"
+                            | "session_interrupt"
+                    )
+                })
+        {
+            out.writes.push(json!({"type":"control_response", "response":{"subtype":"success", "request_id":control.request_id, "response":{"behavior":"allow", "updatedInput":request.input.unwrap_or(Value::Null)}}}).to_string());
+            return;
+        }
+        if request.subtype == "can_use_tool"
             && request.tool_name.as_deref() == Some("ExitPlanMode")
             && self.mode == ApprovalMode::ReadOnly
         {
@@ -1179,6 +1307,34 @@ impl ClaudeDriver {
             return;
         };
         let failed = match purpose {
+            Request::Mcp => {
+                let ready = response.subtype == "success"
+                    && response.response.as_ref().is_some_and(|answer| {
+                        answer
+                            .added
+                            .as_ref()
+                            .is_some_and(|added| added.iter().any(|name| name == "keystone"))
+                            && answer.errors.as_ref().is_some_and(|errors| {
+                                errors.as_object().is_some_and(|errors| errors.is_empty())
+                            })
+                    });
+                if ready {
+                    self.mcp_ready = true;
+                    return self.pump(out);
+                }
+                self.untrusted = true;
+                self.fail_held(
+                    "Claude Code could not configure Keystone tools; nothing was sent",
+                    out,
+                );
+                return out.event(
+                    self.session,
+                    Event::Failed {
+                        message: "Claude Code could not configure Keystone tools; nothing was sent"
+                            .into(),
+                    },
+                );
+            }
             Request::SetMode { version, target } => {
                 return self.on_mode_set(response, version, target, out);
             }
@@ -1212,6 +1368,10 @@ impl ClaudeDriver {
                     .response
                     .and_then(|r| r.current_permission_mode)
                     .or_else(|| permission_mode(self.launched).map(str::to_owned));
+                if let Some(request) = self.mcp_request.take() {
+                    let line = self.request(request, Request::Mcp);
+                    out.writes.push(line);
+                }
                 return self.pump(out);
             }
             Request::Initialize => "Claude Code did not start",
@@ -1225,6 +1385,7 @@ impl ClaudeDriver {
         match purpose {
             Request::Initialize => {
                 self.untrusted = true;
+                self.mcp_request = None;
                 if self.turn.is_some() {
                     self.finish(TurnStatus::Failed, Some(message.clone()), out);
                 }
@@ -1563,6 +1724,8 @@ struct ControlResult {
 
 #[derive(Deserialize)]
 struct ModeSet {
+    added: Option<Vec<String>>,
+    errors: Option<Value>,
     mode: Option<String>,
     current_permission_mode: Option<String>,
     commands: Option<Value>,

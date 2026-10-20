@@ -63,6 +63,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/orchestrator.rs"]
+mod orchestrator;
+
 type Out = Arc<Mutex<io::Stdout>>;
 
 /// The longest a reply waits for its release file.
@@ -100,6 +103,7 @@ struct State {
 
 struct Shared {
     state: Mutex<State>,
+    mcp: Mutex<Option<orchestrator::Server>>,
     /// The permission mode, and whether the process may enter `bypassPermissions`.
     mode: Mutex<String>,
     /// The mode approving `ExitPlanMode` returns to.
@@ -239,6 +243,7 @@ fn main() {
     }
     let shared = Arc::new(Shared {
         state: Mutex::default(),
+        mcp: Mutex::default(),
         bypass: launch_mode.as_deref() == Some("bypassPermissions"),
         before_plan: Mutex::new(if mode == "plan" {
             user_mode.clone()
@@ -299,6 +304,17 @@ fn main() {
                             answer["commands"] = commands.clone();
                         }
                         reply(answer)
+                    }
+                    Some("mcp_set_servers") => {
+                        let config = &message["request"]["servers"]["keystone"];
+                        let server = orchestrator::Server::from_config(config, "headers");
+                        let accepted = config["type"] == "http" && server.is_some();
+                        *shared.mcp.lock().unwrap() = if accepted { server } else { None };
+                        reply(if accepted {
+                            json!({"added":["keystone"],"removed":[],"errors":{}})
+                        } else {
+                            json!({"added":[],"removed":[],"errors":{"keystone":"Invalid loopback MCP configuration"}})
+                        });
                     }
                     Some("set_permission_mode") => {
                         thread::sleep(hold_mode);
@@ -531,7 +547,7 @@ fn work(
             );
             "cancelled"
         } else {
-            answer(out, shared, turn, &next.text, &mode, delay)
+            answer(out, shared, turn, &next.uuid, &next.text, &mode, delay)
         };
         lifecycle(out, shared, session, &next.uuid, ended);
         shared.state.lock().unwrap().busy = false;
@@ -539,10 +555,12 @@ fn work(
 }
 
 /// Runs one message's turn and returns its lifecycle end state.
+#[allow(clippy::too_many_arguments)]
 fn answer(
     out: &Out,
     shared: &Shared,
     turn: u64,
+    request: &str,
     text: &str,
     mode: &str,
     delay: Duration,
@@ -586,7 +604,10 @@ fn answer(
     }
     let mode = mode.as_str();
     let model = &shared.model;
-    let mut reply = std::env::var("KEYSTONE_FAKE_CLAUDE_REPLY").unwrap_or_else(|_| {
+    let server = shared.mcp.lock().unwrap().clone();
+    let request = format!("{}-{turn}-{request}", std::process::id());
+    let scripted = orchestrator::reply(text, server.as_ref(), &request);
+    let mut reply = scripted.or_else(|| std::env::var("KEYSTONE_FAKE_CLAUDE_REPLY").ok()).unwrap_or_else(|| {
         format!(
             "Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan} **Model:** `{model}`"
         )
@@ -675,22 +696,7 @@ fn answer(
     for (i, word) in reply.split(' ').enumerate() {
         let abort = shared.state.lock().unwrap().abort;
         if let Some(abort) = abort {
-            emit(
-                out,
-                json!({"type": "assistant", "message": {"id": message, "content":
-                       [{"type": "text", "text": sent}]}, "parent_tool_use_id": null}),
-            );
-            return match abort {
-                Abort::Stop => stopped(out),
-                Abort::Steer => {
-                    emit(
-                        out,
-                        json!({"type": "result", "subtype": "success", "is_error": false,
-                               "terminal_reason": "aborted_streaming", "result": sent}),
-                    );
-                    "cancelled"
-                }
-            };
+            return aborted(out, &message, &sent, abort);
         }
         let piece = if i == 0 {
             word.to_owned()
@@ -712,6 +718,15 @@ fn answer(
         }
         thread::sleep(delay);
     }
+    if orchestrator::is_child_message(text) {
+        orchestrator::hold_child(|| {
+            let state = shared.state.lock().unwrap();
+            state.abort.is_some() || state.closed
+        });
+        if let Some(abort) = shared.state.lock().unwrap().abort {
+            return aborted(out, &message, &sent, abort);
+        }
+    }
     emit(
         out,
         json!({"type": "assistant", "message": {"id": message, "content":
@@ -723,6 +738,25 @@ fn answer(
         json!({"type": "result", "subtype": "success", "is_error": false, "result": sent}),
     );
     "completed"
+}
+
+fn aborted(out: &Out, message: &str, sent: &str, abort: Abort) -> &'static str {
+    emit(
+        out,
+        json!({"type": "assistant", "message": {"id": message, "content":
+               [{"type": "text", "text": sent}]}, "parent_tool_use_id": null}),
+    );
+    match abort {
+        Abort::Stop => stopped(out),
+        Abort::Steer => {
+            emit(
+                out,
+                json!({"type": "result", "subtype": "success", "is_error": false,
+                       "terminal_reason": "aborted_streaming", "result": sent}),
+            );
+            "cancelled"
+        }
+    }
 }
 
 /// Waits for the release file, if one is set. False when the wait ran out, the

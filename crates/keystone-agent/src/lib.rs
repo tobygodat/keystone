@@ -13,6 +13,7 @@ pub mod find;
 pub mod host;
 mod item;
 pub mod log;
+pub mod mcp;
 mod version;
 pub mod worker;
 

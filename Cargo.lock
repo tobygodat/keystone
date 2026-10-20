@@ -2814,10 +2814,13 @@ dependencies = [
 name = "keystone-agent"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "keystone-core",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "tempfile",
 ]
 
@@ -2846,6 +2849,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "shlex",
  "tempfile",
  "unicode-segmentation",

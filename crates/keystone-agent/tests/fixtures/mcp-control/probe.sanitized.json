@@ -1,0 +1,1143 @@
+{
+  "provenance": {
+    "claudeVersion": "2.1.301",
+    "codexVersion": "0.163.0",
+    "fullWireFixture": "~/.cache/keystone/work/KEY-34/probes/private-pz8hl637/wire.sanitized.json",
+    "notes": [
+      "Captured CLI frames and MCP requests; no user messages or inference requests.",
+      "Codex resume uses a synthetic session_meta-only rollout in an isolated CODEX_HOME.",
+      "Codex used an offline custom model provider to disable automatic websocket prewarming.",
+      "Bearer and private scratch root are redacted; loopback port is ephemeral."
+    ]
+  },
+  "control": [
+    {
+      "phase": "claude-initialize",
+      "kind": "cli_input",
+      "cli": "claude",
+      "message": {
+        "type": "control_request",
+        "request_id": "initialize",
+        "request": {
+          "subtype": "initialize"
+        }
+      }
+    },
+    {
+      "phase": "claude-mcp-set-servers",
+      "kind": "cli_input",
+      "cli": "claude",
+      "message": {
+        "type": "control_request",
+        "request_id": "set-servers",
+        "request": {
+          "subtype": "mcp_set_servers",
+          "servers": {
+            "keystone": {
+              "type": "http",
+              "url": "http://127.0.0.1:36957/claude",
+              "headers": {
+                "Authorization": "Bearer <probe-bearer>"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "phase": "claude-mcp-set-servers",
+      "kind": "cli_output",
+      "cli": "claude",
+      "stream": "stdout",
+      "message": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "set-servers",
+          "response": {
+            "added": [
+              "keystone"
+            ],
+            "removed": [],
+            "errors": {}
+          }
+        }
+      }
+    },
+    {
+      "phase": "claude-mcp-set-servers",
+      "kind": "cli_input",
+      "cli": "claude",
+      "message": {
+        "type": "control_request",
+        "request_id": "status",
+        "request": {
+          "subtype": "mcp_status"
+        }
+      }
+    },
+    {
+      "phase": "claude-mcp-set-servers",
+      "kind": "cli_output",
+      "cli": "claude",
+      "stream": "stdout",
+      "message": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "status",
+          "response": {
+            "mcpServers": [
+              {
+                "name": "keystone",
+                "status": "connected",
+                "serverInfo": {
+                  "name": "keystone-probe",
+                  "version": "1"
+                },
+                "config": {
+                  "type": "http",
+                  "url": "http://127.0.0.1:36957/claude",
+                  "headers": {
+                    "Authorization": "Bearer <probe-bearer>"
+                  }
+                },
+                "scope": "dynamic",
+                "source": "dynamic",
+                "tools": [
+                  {
+                    "name": "probe_noop",
+                    "annotations": {}
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_input",
+      "cli": "codex-start",
+      "message": {
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "keystone-probe",
+            "title": "Keystone Probe",
+            "version": "0"
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_input",
+      "cli": "codex-start",
+      "message": {
+        "method": "initialized"
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_output",
+      "cli": "codex-start",
+      "stream": "stdout",
+      "message": {
+        "method": "configWarning",
+        "params": {
+          "summary": "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.",
+          "details": null
+        },
+        "emittedAtMs": 1792438911012
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_output",
+      "cli": "codex-start",
+      "stream": "stdout",
+      "message": {
+        "method": "remoteControl/status/changed",
+        "params": {
+          "status": "disabled",
+          "serverName": "desk.local",
+          "installationId": "00000000-0000-4000-8000-000000000000",
+          "environmentId": null
+        },
+        "emittedAtMs": 1792438911012
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_input",
+      "cli": "codex-start",
+      "message": {
+        "id": 2,
+        "method": "thread/start",
+        "params": {
+          "cwd": "<private-root>/codex/cwd",
+          "config": {
+            "mcp_servers": {
+              "keystone": {
+                "url": "http://127.0.0.1:36957/codex-start",
+                "http_headers": {
+                  "Authorization": "Bearer <probe-bearer>"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_output",
+      "cli": "codex-start",
+      "stream": "stdout",
+      "message": {
+        "method": "thread/started",
+        "params": {
+          "thread": {
+            "id": "01a155af-402f-7043-ba93-aff155bbb5c7",
+            "environments": [
+              {
+                "environmentId": "local",
+                "cwd": "<private-root>/codex/cwd",
+                "runtimeWorkspaceRoots": [
+                  "<private-root>/codex/cwd"
+                ]
+              }
+            ],
+            "extra": null,
+            "sessionId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "keystone-probe",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": null,
+            "createdAt": 1792438911,
+            "updatedAt": 1792438911,
+            "recencyAt": 1792438911,
+            "status": {
+              "type": "idle"
+            },
+            "path": "<private-root>/codex/codex/sessions/2026/10/19/rollout-2026-10-19T19-41-51-01a155af-402f-7043-ba93-aff155bbb5c7.jsonl",
+            "cwd": "<private-root>/codex/cwd",
+            "cliVersion": "0.163.0",
+            "originator": "keystone-probe",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": null,
+            "name": null,
+            "daybreakEnabled": null,
+            "turns": []
+          }
+        },
+        "emittedAtMs": 1792438911052
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_output",
+      "cli": "codex-start",
+      "stream": "stdout",
+      "message": {
+        "method": "mcpServer/startupStatus/updated",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+          "name": "keystone",
+          "status": "starting",
+          "error": null,
+          "failureReason": null
+        },
+        "emittedAtMs": 1792438911052
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_output",
+      "cli": "codex-start",
+      "stream": "stdout",
+      "message": {
+        "method": "mcpServer/startupStatus/updated",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+          "name": "keystone",
+          "status": "ready",
+          "error": null,
+          "failureReason": null
+        },
+        "emittedAtMs": 1792438911113
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_input",
+      "cli": "codex-start",
+      "message": {
+        "id": 3,
+        "method": "mcpServerStatus/list",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7"
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "cli_output",
+      "cli": "codex-start",
+      "stream": "stdout",
+      "message": {
+        "id": 3,
+        "result": {
+          "data": [
+            {
+              "name": "keystone",
+              "runtimeStatus": "connected",
+              "pluginId": null,
+              "httpOrigin": "http://127.0.0.1:36957",
+              "serverInfo": {
+                "name": "keystone-probe",
+                "title": null,
+                "version": "1",
+                "description": null,
+                "icons": null,
+                "websiteUrl": null
+              },
+              "serverCapabilities": {
+                "tools": {}
+              },
+              "tools": {
+                "probe_noop": {
+                  "name": "probe_noop",
+                  "description": "Probe fixture; never call",
+                  "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                  }
+                }
+              },
+              "toolsError": null,
+              "resources": [],
+              "resourceTemplates": [],
+              "authStatus": "bearerToken"
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-live",
+      "kind": "cli_input",
+      "cli": "codex-start",
+      "message": {
+        "id": 4,
+        "method": "thread/resume",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+          "cwd": "<private-root>/codex/cwd",
+          "excludeTurns": true,
+          "config": {
+            "mcp_servers": {
+              "keystone": {
+                "url": "http://127.0.0.1:36957/codex-resume-live",
+                "http_headers": {
+                  "Authorization": "Bearer <probe-bearer>"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-live",
+      "kind": "cli_output",
+      "cli": "codex-start",
+      "stream": "stdout",
+      "message": {
+        "error": {
+          "code": -32600,
+          "message": "no rollout found for thread id 01a155af-402f-7043-ba93-aff155bbb5c7"
+        },
+        "id": 4
+      }
+    },
+    {
+      "phase": "codex-resume-live",
+      "kind": "cli_input",
+      "cli": "codex-start",
+      "message": {
+        "id": 5,
+        "method": "mcpServerStatus/list",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7"
+        }
+      }
+    },
+    {
+      "phase": "codex-resume",
+      "kind": "cli_input",
+      "cli": "codex-resume",
+      "message": {
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "keystone-probe",
+            "title": "Keystone Probe",
+            "version": "0"
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume",
+      "kind": "cli_output",
+      "cli": "codex-resume",
+      "stream": "stdout",
+      "message": {
+        "method": "configWarning",
+        "params": {
+          "summary": "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.",
+          "details": null
+        },
+        "emittedAtMs": 1792438914439
+      }
+    },
+    {
+      "phase": "codex-resume",
+      "kind": "cli_input",
+      "cli": "codex-resume",
+      "message": {
+        "method": "initialized"
+      }
+    },
+    {
+      "phase": "codex-resume",
+      "kind": "cli_output",
+      "cli": "codex-resume",
+      "stream": "stdout",
+      "message": {
+        "method": "remoteControl/status/changed",
+        "params": {
+          "status": "disabled",
+          "serverName": "desk.local",
+          "installationId": "00000000-0000-4000-8000-000000000000",
+          "environmentId": null
+        },
+        "emittedAtMs": 1792438914439
+      }
+    },
+    {
+      "phase": "codex-resume",
+      "kind": "cli_input",
+      "cli": "codex-resume",
+      "message": {
+        "id": 2,
+        "method": "thread/resume",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+          "cwd": "<private-root>/codex/cwd",
+          "excludeTurns": true,
+          "config": {
+            "mcp_servers": {
+              "keystone": {
+                "url": "http://127.0.0.1:36957/codex-resume",
+                "http_headers": {
+                  "Authorization": "Bearer <probe-bearer>"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume",
+      "kind": "cli_output",
+      "cli": "codex-resume",
+      "stream": "stdout",
+      "message": {
+        "error": {
+          "code": -32600,
+          "message": "no rollout found for thread id 01a155af-402f-7043-ba93-aff155bbb5c7"
+        },
+        "id": 2
+      }
+    },
+    {
+      "phase": "codex-resume",
+      "kind": "cli_input",
+      "cli": "codex-resume",
+      "message": {
+        "id": 3,
+        "method": "mcpServerStatus/list",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7"
+        }
+      }
+    },
+    {
+      "phase": "codex-resume",
+      "kind": "cli_output",
+      "cli": "codex-resume",
+      "stream": "stdout",
+      "message": {
+        "error": {
+          "code": -32600,
+          "message": "thread not found: 01a155af-402f-7043-ba93-aff155bbb5c7"
+        },
+        "id": 3
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_input",
+      "cli": "codex-resume-fixture",
+      "message": {
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "clientInfo": {
+            "name": "keystone-probe",
+            "title": "Keystone Probe",
+            "version": "0"
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_output",
+      "cli": "codex-resume-fixture",
+      "stream": "stdout",
+      "message": {
+        "method": "configWarning",
+        "params": {
+          "summary": "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.",
+          "details": null
+        },
+        "emittedAtMs": 1792438916587
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_output",
+      "cli": "codex-resume-fixture",
+      "stream": "stdout",
+      "message": {
+        "method": "remoteControl/status/changed",
+        "params": {
+          "status": "disabled",
+          "serverName": "desk.local",
+          "installationId": "00000000-0000-4000-8000-000000000000",
+          "environmentId": null
+        },
+        "emittedAtMs": 1792438916587
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_input",
+      "cli": "codex-resume-fixture",
+      "message": {
+        "method": "initialized"
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_input",
+      "cli": "codex-resume-fixture",
+      "message": {
+        "id": 2,
+        "method": "thread/resume",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+          "cwd": "<private-root>/codex/cwd",
+          "excludeTurns": true,
+          "config": {
+            "mcp_servers": {
+              "keystone": {
+                "url": "http://127.0.0.1:36957/codex-resume-fixture",
+                "http_headers": {
+                  "Authorization": "Bearer <probe-bearer>"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_output",
+      "cli": "codex-resume-fixture",
+      "stream": "stdout",
+      "message": {
+        "method": "mcpServer/startupStatus/updated",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+          "name": "keystone",
+          "status": "starting",
+          "error": null,
+          "failureReason": null
+        },
+        "emittedAtMs": 1792438916647
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_output",
+      "cli": "codex-resume-fixture",
+      "stream": "stdout",
+      "message": {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+          "status": {
+            "type": "idle"
+          }
+        },
+        "emittedAtMs": 1792438916648
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_output",
+      "cli": "codex-resume-fixture",
+      "stream": "stdout",
+      "message": {
+        "method": "thread/goal/cleared",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7"
+        },
+        "emittedAtMs": 1792438916648
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_output",
+      "cli": "codex-resume-fixture",
+      "stream": "stdout",
+      "message": {
+        "method": "mcpServer/startupStatus/updated",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7",
+          "name": "keystone",
+          "status": "ready",
+          "error": null,
+          "failureReason": null
+        },
+        "emittedAtMs": 1792438916697
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_input",
+      "cli": "codex-resume-fixture",
+      "message": {
+        "id": 3,
+        "method": "mcpServerStatus/list",
+        "params": {
+          "threadId": "01a155af-402f-7043-ba93-aff155bbb5c7"
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "cli_output",
+      "cli": "codex-resume-fixture",
+      "stream": "stdout",
+      "message": {
+        "id": 3,
+        "result": {
+          "data": [
+            {
+              "name": "keystone",
+              "runtimeStatus": "connected",
+              "pluginId": null,
+              "httpOrigin": "http://127.0.0.1:36957",
+              "serverInfo": {
+                "name": "keystone-probe",
+                "title": null,
+                "version": "1",
+                "description": null,
+                "icons": null,
+                "websiteUrl": null
+              },
+              "serverCapabilities": {
+                "tools": {}
+              },
+              "tools": {
+                "probe_noop": {
+                  "name": "probe_noop",
+                  "description": "Probe fixture; never call",
+                  "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                  }
+                }
+              },
+              "toolsError": null,
+              "resources": [],
+              "resourceTemplates": [],
+              "authStatus": "bearerToken"
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    }
+  ],
+  "mcp": [
+    {
+      "phase": "claude-mcp-set-servers",
+      "kind": "mcp_request",
+      "path": "/claude",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "server-discover-probe-1",
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.301",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "phase": "claude-mcp-set-servers",
+      "kind": "mcp_request",
+      "path": "/claude",
+      "authorized": true,
+      "request": {
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {
+            "roots": {
+              "listChanged": true
+            },
+            "elicitation": {
+              "form": {},
+              "url": {}
+            }
+          },
+          "clientInfo": {
+            "name": "claude-code",
+            "title": "Claude Code",
+            "version": "2.1.301",
+            "description": "Anthropic's agentic coding tool",
+            "websiteUrl": "https://claude.com/claude-code"
+          }
+        },
+        "jsonrpc": "2.0",
+        "id": 0
+      }
+    },
+    {
+      "phase": "claude-mcp-set-servers",
+      "kind": "mcp_request",
+      "path": "/claude",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "phase": "claude-mcp-set-servers",
+      "kind": "mcp_request",
+      "path": "/claude",
+      "authorized": true,
+      "request": {
+        "method": "tools/list",
+        "jsonrpc": "2.0",
+        "id": 1
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {
+            "elicitation": {
+              "form": {},
+              "url": {}
+            }
+          },
+          "clientInfo": {
+            "name": "codex-mcp-client",
+            "title": "Codex",
+            "version": "0.163.0"
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "progressToken": 0
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {
+            "elicitation": {
+              "form": {},
+              "url": {}
+            }
+          },
+          "clientInfo": {
+            "name": "codex-mcp-client",
+            "title": "Codex",
+            "version": "0.163.0"
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "progressToken": 0
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/templates/list",
+        "params": {
+          "_meta": {
+            "progressToken": 1
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-start",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "resources/list",
+        "params": {
+          "_meta": {
+            "progressToken": 2
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-live",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {
+            "elicitation": {
+              "form": {},
+              "url": {}
+            }
+          },
+          "clientInfo": {
+            "name": "codex-mcp-client",
+            "title": "Codex",
+            "version": "0.163.0"
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-live",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "phase": "codex-resume-live",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "progressToken": 0
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-live",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/list",
+        "params": {
+          "_meta": {
+            "progressToken": 1
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-live",
+      "kind": "mcp_request",
+      "path": "/codex-start",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "resources/templates/list",
+        "params": {
+          "_meta": {
+            "progressToken": 2
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "mcp_request",
+      "path": "/codex-resume-fixture",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {
+            "elicitation": {
+              "form": {},
+              "url": {}
+            }
+          },
+          "clientInfo": {
+            "name": "codex-mcp-client",
+            "title": "Codex",
+            "version": "0.163.0"
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "mcp_request",
+      "path": "/codex-resume-fixture",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "mcp_request",
+      "path": "/codex-resume-fixture",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "progressToken": 0
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "mcp_request",
+      "path": "/codex-resume-fixture",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-06-18",
+          "capabilities": {
+            "elicitation": {
+              "form": {},
+              "url": {}
+            }
+          },
+          "clientInfo": {
+            "name": "codex-mcp-client",
+            "title": "Codex",
+            "version": "0.163.0"
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "mcp_request",
+      "path": "/codex-resume-fixture",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "mcp_request",
+      "path": "/codex-resume-fixture",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "progressToken": 0
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "mcp_request",
+      "path": "/codex-resume-fixture",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "resources/list",
+        "params": {
+          "_meta": {
+            "progressToken": 2
+          }
+        }
+      }
+    },
+    {
+      "phase": "codex-resume-synthetic-metadata",
+      "kind": "mcp_request",
+      "path": "/codex-resume-fixture",
+      "authorized": true,
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/templates/list",
+        "params": {
+          "_meta": {
+            "progressToken": 1
+          }
+        }
+      }
+    }
+  ]
+}
+
