@@ -130,7 +130,7 @@ impl Launch {
 }
 
 /// What Claude is told when the user denies a tool call.
-const DENIED: &str = "The user denied this in Keystone.";
+pub(crate) const DENIED: &str = "The user denied this in Keystone.";
 
 /// What Claude is told when it asks to leave plan mode under Read only. Approving
 /// `ExitPlanMode` returns Claude to the mode it had before plan mode, which can write
@@ -592,6 +592,7 @@ impl ClaudeDriver {
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
         self.mcp_request = None;
         if self.turn.is_some() {
+            out.event(self.session, Event::RecoveryNeeded);
             self.finish(TurnStatus::Failed, Some(reason.to_owned()), out);
         }
         out.event(self.session, Event::ModelLost);
@@ -1554,7 +1555,7 @@ pub fn message_uuid(seed: u64, n: u64) -> String {
     )
 }
 
-fn tool_kind(name: &str, input: &Value) -> ItemKind {
+pub(crate) fn tool_kind(name: &str, input: &Value) -> ItemKind {
     let text = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_owned);
     match name {
         "Bash" | "PowerShell" => ItemKind::Command {
@@ -1574,7 +1575,7 @@ fn tool_kind(name: &str, input: &Value) -> ItemKind {
 }
 
 /// Claude starts a failed command's output with "Exit code N".
-fn exit_code_in(text: &str) -> Option<i32> {
+pub(crate) fn exit_code_in(text: &str) -> Option<i32> {
     text.strip_prefix("Exit code ")?
         .split(|c: char| !c.is_ascii_digit() && c != '-')
         .next()?
@@ -1583,7 +1584,7 @@ fn exit_code_in(text: &str) -> Option<i32> {
 }
 
 /// Text from a list of `{"type": "text", "text": ..}` parts.
-fn join_text(parts: &[Value]) -> String {
+pub(crate) fn join_text(parts: &[Value]) -> String {
     parts
         .iter()
         .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))

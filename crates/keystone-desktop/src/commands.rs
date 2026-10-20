@@ -5,8 +5,8 @@ use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::transcript_keyboard::*;
 use crate::{
-    FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, OpenSettings, Quit, RenameSession,
-    ToggleSettle, ToggleSidebar,
+    ContinueRecovery, FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, OpenSettings,
+    Quit, RenameSession, RetryRecovery, ToggleSettle, ToggleSidebar,
 };
 use gpui::{
     Action, AppContext, Context, DummyKeyboardMapper, Entity, FocusHandle, Focusable, IntoElement,
@@ -85,6 +85,20 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-s"],
         context: Some(APP),
         action: || Box::new(ToggleSettle),
+    },
+    Command {
+        id: "continue-recovery",
+        label: "Continue with available history",
+        keys: &["ctrl-shift-enter"],
+        context: Some(APP),
+        action: || Box::new(ContinueRecovery),
+    },
+    Command {
+        id: "retry-recovery",
+        label: "Retry recovery check",
+        keys: &["ctrl-shift-r"],
+        context: Some(APP),
+        action: || Box::new(RetryRecovery),
     },
     Command {
         id: "open-settings",

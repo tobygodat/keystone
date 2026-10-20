@@ -459,6 +459,8 @@ fn unknown_server_requests_get_an_error_and_exit_fails_the_running_turn() {
     assert_eq!(
         out.events,
         vec![
+            // The store may hold more than streamed before the exit.
+            (SESSION, Event::RecoveryNeeded),
             (
                 SESSION,
                 Event::TurnCompleted {

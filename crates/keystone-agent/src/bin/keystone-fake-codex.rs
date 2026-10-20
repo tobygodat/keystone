@@ -21,6 +21,18 @@
 //! `fake-default`, remembered per thread for the process. Each reply ends with it.
 //! `KEYSTONE_FAKE_ENV_RECEIPT` names a file each process appends its environment to, and
 //! a `CODEX_HOME` that is not a directory fails the start, as the real CLI does.
+//!
+//! Stored history: `thread/turns/list`, `thread/items/list` (newest first) and
+//! `thread/read` answer from
+//! `<CODEX_HOME or ~/.codex>/keystone-fake-threads/<thread>.json`, a `{"turns": [..]}`
+//! file a test may write itself; a missing file is an unknown thread. With
+//! `KEYSTONE_FAKE_CODEX_STORE=1` each turn is recorded there as it runs: the turn when
+//! it starts, each completed item, and its end. `KEYSTONE_FAKE_CODEX_NO_TURNS_LIST=1`
+//! answers `thread/turns/list` as an unknown method, like an older Codex: -32600, which
+//! is what the real app-server sends for a method it does not know.
+//! `KEYSTONE_FAKE_CODEX_METHOD_LOG` names a file that gets every method received, one
+//! per line. A prompt containing "crash" records its whole reply as completed after
+//! the first streamed word, then exits, as a Codex that dies mid-stream after saving.
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -42,7 +54,72 @@ fn emit(out: &Out, message: Value) {
 }
 
 fn notify(out: &Out, method: &str, params: Value) {
+    if std::env::var("KEYSTONE_FAKE_CODEX_STORE").is_ok_and(|v| v == "1") {
+        record(method, &params);
+    }
     emit(out, json!({"method": method, "params": params}));
+}
+
+/// Where a thread's stored history lives.
+fn thread_file(thread: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".codex"))
+        })?;
+    let safe = !thread.is_empty()
+        && thread
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    safe.then(|| {
+        home.join("keystone-fake-threads")
+            .join(format!("{thread}.json"))
+    })
+}
+
+fn stored_turns(thread: &str) -> Option<Vec<Value>> {
+    let bytes = std::fs::read(thread_file(thread)?).ok()?;
+    let stored: Value = serde_json::from_slice(&bytes).ok()?;
+    stored["turns"].as_array().cloned()
+}
+
+/// Records a turn's start, a completed item, or the turn's end in its thread's store.
+fn record(method: &str, params: &Value) {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap();
+    let thread = params["threadId"].as_str().unwrap_or_default();
+    let Some(path) = thread_file(thread) else {
+        return;
+    };
+    let mut turns = stored_turns(thread).unwrap_or_default();
+    match method {
+        "turn/started" => turns.push(json!({"id": params["turn"]["id"], "status": "inProgress",
+            "itemsView": "full", "items": []})),
+        "item/completed" => {
+            let Some(turn) = turns.iter_mut().rev().find(|t| t["id"] == params["turnId"]) else {
+                return;
+            };
+            let items = turn["items"].as_array_mut().unwrap();
+            items.retain(|item| item["id"] != params["item"]["id"]);
+            items.push(params["item"].clone());
+        }
+        "turn/completed" => {
+            let Some(turn) = turns
+                .iter_mut()
+                .rev()
+                .find(|t| t["id"] == params["turn"]["id"])
+            else {
+                return;
+            };
+            turn["status"] = params["turn"]["status"].clone();
+        }
+        _ => return,
+    }
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let temporary = path.with_extension("tmp");
+    if std::fs::write(&temporary, json!({"turns": turns}).to_string()).is_ok() {
+        let _ = std::fs::rename(temporary, path);
+    }
 }
 
 struct Turn {
@@ -153,8 +230,62 @@ fn main() {
             }
             continue;
         };
+        if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CODEX_METHOD_LOG")
+            && let Ok(mut log) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+        {
+            let _ = writeln!(log, "{method}");
+        }
         let reply = |result: Value| emit(&out, json!({"id": id, "result": result}));
         match method {
+            "thread/turns/list"
+                if std::env::var("KEYSTONE_FAKE_CODEX_NO_TURNS_LIST").is_ok_and(|v| v == "1") =>
+            {
+                emit(
+                    &out,
+                    json!({"id": id, "error": {"code": -32600, "message": "Invalid request: unknown variant `thread/turns/list`"}}),
+                )
+            }
+            "thread/turns/list" | "thread/read" | "thread/items/list" => {
+                let thread = params["threadId"].as_str().unwrap_or_default();
+                match stored_turns(thread) {
+                    None => emit(
+                        &out,
+                        json!({"id": id, "error": {"code": -32600, "message": format!("thread not found: {thread}")}}),
+                    ),
+                    Some(turns) if method == "thread/read" => {
+                        reply(json!({"thread": {"id": thread,
+                        "turns": if params["includeTurns"] == true { turns } else { Vec::new() }}}))
+                    }
+                    Some(turns) if method == "thread/items/list" => {
+                        // Codex 0.163's ThreadItemEntry wraps each item with its turn's ID.
+                        let mut items: Vec<Value> = turns
+                            .iter()
+                            .flat_map(|turn| {
+                                let id = turn["id"].clone();
+                                let items = turn["items"].as_array().cloned().unwrap_or_default();
+                                items.into_iter().map(move |item| {
+                                    json!({"turnId": id, "item": item,
+                                        "startedAtMs": null, "completedAtMs": null})
+                                })
+                            })
+                            .collect();
+                        items.reverse();
+                        let limit = params["limit"].as_u64().unwrap_or(50) as usize;
+                        let more = items.len() > limit;
+                        items.truncate(limit);
+                        reply(json!({"data": items, "nextCursor": more.then_some("older"),
+                            "backwardsCursor": null}))
+                    }
+                    Some(mut turns) => {
+                        turns.reverse();
+                        turns.truncate(params["limit"].as_u64().unwrap_or(50) as usize);
+                        reply(json!({"data": turns, "nextCursor": null, "backwardsCursor": null}))
+                    }
+                }
+            }
             "initialize" => {
                 if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CODEX_INITIALIZE_LOG") {
                     let _ = std::fs::write(path, params.to_string());
@@ -521,6 +652,13 @@ fn stream(
             with(json!({"itemId": item_id, "delta": delta})),
         );
         sent.push_str(&delta);
+        if i == 0 && text.contains("crash") {
+            let item = json!({"type": "agentMessage", "id": item_id, "text": text});
+            if std::env::var("KEYSTONE_FAKE_CODEX_STORE").is_ok_and(|v| v == "1") {
+                record("item/completed", &with(json!({"item": item})));
+            }
+            std::process::exit(3);
+        }
         thread::sleep(delay);
     }
     sent

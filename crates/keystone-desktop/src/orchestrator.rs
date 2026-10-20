@@ -447,6 +447,9 @@ impl AppState {
                             json!({"position":index,"decision":shown,"allowed":allowed,
                             "truncated":shown != *action})
                         }
+                        Row::Recovery(report) => {
+                            json!({"position":index,"recovery":report,"truncated":false})
+                        }
                     };
                     let mut size = serde_json::to_vec(&shown_row).unwrap().len();
                     if size > BUDGET {

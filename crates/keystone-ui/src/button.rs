@@ -5,7 +5,7 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{TextSize, radius};
 use crate::tooltip::Tooltip;
 use gpui::{
-    App, ClickEvent, ElementId, FocusHandle, IntoElement, Pixels, RenderOnce, SharedString,
+    App, ClickEvent, ElementId, FocusHandle, Hsla, IntoElement, Pixels, RenderOnce, SharedString,
     Stateful, Styled, Window, div, prelude::*, px,
 };
 
@@ -117,7 +117,7 @@ impl Common {
             return el.opacity(0.4).cursor_not_allowed();
         }
         // The ring is a border that is always there, so focus never changes the size.
-        let ring = colors.border_focused;
+        let ring = focus_ring(self.style, colors);
         let reveal = self.reveal_on_focus;
         el.when(self.reserve_focus_ring || self.focus.is_some(), |d| {
             d.border_2().border_color(ring.opacity(0.))
@@ -331,5 +331,53 @@ impl RenderOnce for IconButton {
             .base(cx)
             .w(side)
             .child(Icon::new(self.icon).color(color))
+    }
+}
+
+/// The focus ring's colour. The focus blue would vanish on a primary button's blue
+/// fill, so a primary button's ring takes its label's colour.
+fn focus_ring(style: ButtonStyle, colors: &crate::theme::Colors) -> Hsla {
+    if style == ButtonStyle::Primary {
+        colors.text_inverse
+    } else {
+        colors.border_focused
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Colors;
+
+    fn luminance(color: Hsla) -> f32 {
+        let rgb = color.to_rgb();
+        let channel = |c: f32| {
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b)
+    }
+
+    fn contrast(a: Hsla, b: Hsla) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// A focus ring must stand out from the button it marks (WCAG's 3:1 for
+    /// non-text contrast), on the primary fill as on the subtle one.
+    #[test]
+    fn focus_rings_stand_out_from_their_buttons_in_both_themes() {
+        for colors in [Colors::dark(), Colors::light()] {
+            for (style, fill) in [
+                (ButtonStyle::Primary, colors.element_inverse),
+                (ButtonStyle::Subtle, colors.element_hover),
+            ] {
+                let ratio = contrast(focus_ring(style, &colors), fill);
+                assert!(ratio >= 3.0, "{style:?}: {ratio:.2}");
+            }
+        }
     }
 }

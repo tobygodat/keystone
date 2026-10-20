@@ -73,7 +73,9 @@ gpui::actions!(
         PreviousFocus,
         ToggleSidebar,
         OpenPalette,
-        OpenSettings
+        OpenSettings,
+        ContinueRecovery,
+        RetryRecovery
     ]
 );
 
@@ -247,6 +249,9 @@ struct Keystone {
     _subscriptions: Vec<Subscription>,
     draft_save_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
+    /// The recovery card's Continue and Retry buttons, in the view the composer sends
+    /// to, so Tab reaches them.
+    recovery_focus: (FocusHandle, FocusHandle),
     new_menu: bool,
     filter_menu: bool,
     provider_filter: Option<Provider>,
@@ -363,6 +368,13 @@ impl Keystone {
         self.composer.focus_handle(cx).focus(window, cx);
         self.state
             .update(cx, |state, cx| state.answer(id, request, allow, cx));
+    }
+    /// Lets the next message go after a partial recovery, and returns to the composer
+    /// with the draft as it was.
+    fn continue_recovery(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.state
+            .update(cx, |state, cx| state.continue_after_recovery(id, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
     }
     fn selected_session<'a>(&self, cx: &'a App) -> Option<&'a keystone_core::Session> {
         self.state.read(cx).selected_session()
@@ -516,6 +528,10 @@ impl Keystone {
             _subscriptions: subscriptions,
             draft_save_task: None,
             focus: cx.focus_handle(),
+            recovery_focus: (
+                cx.focus_handle().tab_stop(true),
+                cx.focus_handle().tab_stop(true),
+            ),
             new_menu: false,
             filter_menu: false,
             provider_filter: None,
@@ -2151,6 +2167,9 @@ impl Keystone {
                             ),
                     ),
             );
+        } else if let Some(recovery) = &conversation.recovery {
+            empty = false;
+            view = view.child(self.recovery_card(key, recovery, cx));
         } else if conversation.running {
             empty = false;
             view = view.child(
@@ -2183,6 +2202,134 @@ impl Keystone {
             view = view.child(Label::new(error.clone()).size(TextSize::Ui).color(color));
         }
         (!empty).then(|| view.into_any_element())
+    }
+
+    /// Why the next message waits for recovery, with Continue and Retry where they
+    /// apply. Only the view the composer sends to gives its buttons keyboard focus.
+    fn recovery_card(
+        &self,
+        key: ViewKey,
+        recovery: &conversation::Recovery,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        use conversation::Recovery;
+        let session = key.session;
+        let colors = cx.theme().colors;
+        let (message, color, offer_continue, offer_retry) = match recovery {
+            Recovery::Loading => (
+                "Loading this conversation before sending\u{2026}".to_owned(),
+                Color::Muted,
+                false,
+                false,
+            ),
+            Recovery::Checking => (
+                "Checking what the provider saved before sending\u{2026}".to_owned(),
+                Color::Muted,
+                false,
+                false,
+            ),
+            Recovery::Saving { error: None, .. } => (
+                "Saving the recovered history before sending\u{2026}".to_owned(),
+                Color::Muted,
+                false,
+                false,
+            ),
+            Recovery::Saving {
+                error: Some(error), ..
+            } => (
+                format!("The recovered history is not saved yet, so sending waits. {error}"),
+                Color::Danger,
+                false,
+                true,
+            ),
+            Recovery::Review(_) => (
+                "Sending is paused until you continue. Your draft is kept and nothing was resent."
+                    .to_owned(),
+                Color::Muted,
+                true,
+                true,
+            ),
+            Recovery::Unavailable(reason) => (
+                format!(
+                    "Could not check what the provider saved: {reason}. This turn's outcome is unknown. Your draft is kept and nothing was resent."
+                ),
+                Color::Muted,
+                true,
+                true,
+            ),
+        };
+        let keyboard = self
+            .presentation
+            .current
+            .views
+            .send_target(&self.presentation.current.arrangement.visible, session)
+            == Some(key);
+        let (continue_focus, retry_focus) = self.recovery_focus.clone();
+        v_flex()
+            .id(arrangement::selector("recovery", key.view))
+            .automation_id(arrangement::selector("recovery", key.view))
+            .key_context("Recovery")
+            .surface(Elevation::Raised, cx)
+            .border_color(colors.border_strong)
+            .p_3()
+            .gap_2()
+            .child(Label::new(message).size(TextSize::Ui).color(color))
+            .when(offer_continue || offer_retry, |d| {
+                d.child(
+                    h_flex()
+                        .gap_2()
+                        .when(offer_continue, |d| {
+                            d.child(
+                                Button::new(
+                                    arrangement::selector("recovery-continue", key.view),
+                                    "Continue with available history",
+                                )
+                                .style(ButtonStyle::Primary)
+                                .when(keyboard, |b| b.track_focus(&continue_focus))
+                                .debug_selector(move || {
+                                    arrangement::selector("recovery-continue", key.view).to_string()
+                                })
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.continue_recovery(session, window, cx)
+                                    },
+                                )),
+                            )
+                        })
+                        .when(offer_retry, |d| {
+                            d.child(
+                                Button::new(
+                                    arrangement::selector("recovery-retry", key.view),
+                                    "Retry",
+                                )
+                                .style(ButtonStyle::Subtle)
+                                .when(keyboard, |b| b.track_focus(&retry_focus))
+                                .debug_selector(move || {
+                                    arrangement::selector("recovery-retry", key.view).to_string()
+                                })
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.state.update(cx, |state, cx| {
+                                            state.retry_recovery(session, cx)
+                                        })
+                                    },
+                                )),
+                            )
+                        })
+                        .child(
+                            Label::new(match (offer_continue, offer_retry) {
+                                (true, true) => {
+                                    "Ctrl+Shift+Enter continues \u{b7} Ctrl+Shift+R retries"
+                                }
+                                (true, false) => "Ctrl+Shift+Enter continues",
+                                _ => "Ctrl+Shift+R retries",
+                            })
+                            .size(TextSize::Sm)
+                            .color(Color::Faint),
+                        ),
+                )
+            })
+            .into_any_element()
     }
 
     fn error_line(&self, cx: &App) -> Option<impl IntoElement> {
@@ -2812,6 +2959,19 @@ impl Render for Keystone {
             .on_action(
                 self.scoped_listener(cx, |this, _: &ToggleSettle, _, cx| this.toggle_settle(cx)),
             )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &ContinueRecovery, window, cx| {
+                    if let Some(id) = this.selected_session(cx).map(|s| s.id()) {
+                        this.continue_recovery(id, window, cx)
+                    }
+                }),
+            )
+            .on_action(self.scoped_listener(cx, |this, _: &RetryRecovery, _, cx| {
+                if let Some(id) = this.selected_session(cx).map(|s| s.id()) {
+                    this.state
+                        .update(cx, |state, cx| state.retry_recovery(id, cx));
+                }
+            }))
             .on_action(
                 self.scoped_listener(cx, |this, _: &FocusComposer, window, cx| {
                     this.focus_composer(window, cx)
@@ -8643,6 +8803,138 @@ mod tests {
             frames_ms[frames_ms.len() * 95 / 100]
         );
     }
+
+    /// A partial recovery shows its card with keyboard routes: Send waits and keeps the
+    /// draft, Shift+Tab from the composer reaches Retry and then Continue, and Continue
+    /// returns to the composer without sending.
+    #[gpui::test]
+    fn a_partial_recovery_holds_send_and_continues_from_the_keyboard(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        let directory = working_directory();
+        let home = dir.path().join("claude-work");
+        let folder = home.join("projects/any");
+        std::fs::create_dir_all(&folder).unwrap();
+        let work = store
+            .add_account(Provider::Claude, "Work", home.clone(), &[])
+            .unwrap()
+            .value;
+        store.create(Provider::Claude, &directory, 1).unwrap();
+        store.set_account(1, Some(work)).unwrap();
+        store
+            .set_provider_thread(1, "claude-thread".into())
+            .unwrap();
+        let cwd = directory.path().to_str().unwrap();
+        let records = [
+            serde_json::json!({"type": "user", "uuid": "u1", "parentUuid": null,
+                "message": {"role": "user", "content": "hello"}}),
+            serde_json::json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1",
+                "message": {"id": "msg_A", "role": "assistant",
+                    "content": [{"type": "text", "text": "Recovered after the crash."}]}}),
+        ];
+        let mut text = String::new();
+        for mut record in records {
+            record["sessionId"] = "claude-thread".into();
+            record["cwd"] = cwd.into();
+            record["isSidechain"] = false.into();
+            text.push_str(&format!("{record}\n"));
+        }
+        std::fs::write(folder.join("claude-thread.jsonl"), text).unwrap();
+        let mut log =
+            keystone_agent::log::SessionLog::open(&dir.path().join("sessions"), 1).unwrap();
+        let prompt = |id: &str| Item {
+            id: id.into(),
+            kind: ItemKind::UserMessage,
+            text: "hello".into(),
+            status: ItemStatus::Completed,
+        };
+        for entry in [
+            keystone_agent::log::Entry::Item {
+                item: prompt("local:1-0"),
+                seq: Some(0),
+                run: Some(1),
+            },
+            keystone_agent::log::Entry::TurnStarted,
+            keystone_agent::log::Entry::Item {
+                item: prompt("u1"),
+                seq: Some(0),
+                run: Some(1),
+            },
+        ] {
+            log.append(&entry).unwrap();
+        }
+        log.sync().unwrap();
+        drop((log, store));
+        let (view, cx) = open_window(&dir.path().join("workspace.json"), cx);
+        view.update(cx, |view, cx| view.select(1, cx));
+        wait_until(cx, &view, |view, cx| {
+            matches!(
+                view.state.read(cx).conversations()[&1].recovery,
+                Some(conversation::Recovery::Review(_))
+            )
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("recovery-continue").is_some());
+        assert!(cx.debug_bounds("recovery-retry").is_some());
+        let shown = view.read_with(cx, |view, cx| {
+            let rows = &view.state.read(cx).conversations()[&1].rows;
+            rows.iter()
+                .position(|row| matches!(row, Row::Recovery(_)))
+                .unwrap()
+        });
+        let report = cx
+            .debug_bounds(format!("recovery-report-{shown}").leak())
+            .unwrap();
+        let row = cx
+            .debug_bounds(format!("transcript-row-{shown}").leak())
+            .unwrap();
+        assert!(
+            report.right() <= row.right() && report.size.height > px(60.),
+            "the report wraps inside its row: {report:?} in {row:?}"
+        );
+        view.read_with(cx, |view, cx| {
+            let rows = &view.state.read(cx).conversations()[&1].rows;
+            assert!(rows.iter().any(|row| matches!(row, Row::Recovery(_))));
+            assert!(rows.iter().any(|row| matches!(row,
+                Row::Item(item) if item.text == "Recovered after the crash.")));
+        });
+
+        send_text(&view, cx, "my draft");
+        view.read_with(cx, |view, cx| {
+            let conversation = &view.state.read(cx).conversations()[&1];
+            assert!(conversation.recovery.is_some() && !conversation.running);
+            assert_eq!(view.composer.read(cx).value(), "my draft");
+        });
+
+        view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));
+        cx.simulate_keystrokes("shift-tab");
+        cx.update(|window, cx| {
+            assert!(
+                view.read(cx).recovery_focus.1.is_focused(window),
+                "Shift+Tab from the composer reaches Retry"
+            )
+        });
+        cx.simulate_keystrokes("shift-tab");
+        cx.update(|window, cx| {
+            assert!(
+                view.read(cx).recovery_focus.0.is_focused(window),
+                "then Continue"
+            )
+        });
+        view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));
+        cx.simulate_keystrokes("ctrl-shift-enter");
+        cx.run_until_parked();
+        assert!(composer_focused(&view, cx));
+        view.read_with(cx, |view, cx| {
+            let conversation = &view.state.read(cx).conversations()[&1];
+            assert!(conversation.recovery.is_none());
+            assert!(!conversation.running, "continuing sends nothing");
+            assert_eq!(view.composer.read(cx).value(), "my draft");
+        });
+        assert!(cx.debug_bounds("recovery-continue").is_none());
+    }
 }
 /// The app's keyboard shortcuts, shared by `main` and the GPUI tests.
 fn bind_keys(cx: &mut App) {
@@ -8660,6 +8952,18 @@ fn bind_keys(cx: &mut App) {
             "shift-tab",
             PreviousFocus,
             Some("Keystone && !Dialog && !CommandPalette"),
+        ),
+        // The recovery card sits inside the transcript, whose Tab moves between row
+        // actions; within the card Tab moves between its buttons.
+        gpui::KeyBinding::new(
+            "tab",
+            NextFocus,
+            Some("Recovery && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "shift-tab",
+            PreviousFocus,
+            Some("Recovery && !Dialog && !CommandPalette"),
         ),
         gpui::KeyBinding::new(
             "ctrl-enter",

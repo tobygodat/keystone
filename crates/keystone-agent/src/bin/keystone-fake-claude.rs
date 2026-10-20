@@ -55,6 +55,14 @@
 //! field out. A `hook` setting of `1` reports a `SessionStart` hook before reading
 //! anything, and a `reject-flag` setting names a flag to exit on at launch, as an
 //! older Claude would.
+//!
+//! With `KEYSTONE_FAKE_CLAUDE_STORE=1` the session is recorded as Claude Code stores
+//! it: JSON Lines in `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<cwd, non-alphanumerics
+//! as ->/<session>.jsonl`, one record per user message, whole content block and tool
+//! result, chained by `parentUuid`. Message and tool IDs include the process ID, so a
+//! resumed session never reuses one. A prompt containing "crash" records its whole
+//! reply after the first streamed word, then exits, as a Claude that dies mid-stream
+//! after saving.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -69,6 +77,80 @@ use std::time::{Duration, Instant};
 mod orchestrator;
 
 type Out = Arc<Mutex<io::Stdout>>;
+
+/// The session's store file and the last record written, when recording.
+struct Store {
+    path: PathBuf,
+    session: String,
+    cwd: String,
+    last: Option<String>,
+    next: u64,
+}
+
+static STORE: Mutex<Option<Store>> = Mutex::new(None);
+
+fn open_store(session: &str) {
+    if !std::env::var("KEYSTONE_FAKE_CLAUDE_STORE").is_ok_and(|v| v == "1") {
+        return;
+    }
+    let Some(root) = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+    else {
+        return;
+    };
+    let cwd = std::env::current_dir()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let folder: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let path = root
+        .join("projects")
+        .join(folder)
+        .join(format!("{session}.jsonl"));
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    // A resumed session continues the chain where its file ends.
+    let last = std::fs::read_to_string(&path).ok().and_then(|text| {
+        text.lines().rev().find_map(|line| {
+            serde_json::from_str::<Value>(line).ok()?["uuid"]
+                .as_str()
+                .map(str::to_owned)
+        })
+    });
+    *STORE.lock().unwrap() = Some(Store {
+        path,
+        session: session.to_owned(),
+        cwd,
+        last,
+        next: 0,
+    });
+}
+
+/// Appends a record of `kind` ("user" or "assistant") with `message`, under `uuid`
+/// when given.
+fn store(kind: &str, message: Value, uuid: Option<&str>) {
+    let mut guard = STORE.lock().unwrap();
+    let Some(store) = guard.as_mut() else {
+        return;
+    };
+    store.next += 1;
+    let uuid = uuid.filter(|uuid| !uuid.is_empty()).map_or_else(
+        || format!("fake-record-{}-{}", std::process::id(), store.next),
+        str::to_owned,
+    );
+    let record = json!({"type": kind, "uuid": uuid, "parentUuid": store.last, "isSidechain": false,
+        "sessionId": store.session, "cwd": store.cwd, "version": VERSION, "message": message});
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&store.path)
+    {
+        let _ = writeln!(file, "{record}");
+    }
+    store.last = Some(uuid);
+}
 
 /// The longest a reply waits for its release file.
 const RELEASE_LIMIT: Duration = Duration::from_secs(10);
@@ -186,6 +268,7 @@ fn main() {
         std::process::exit(1);
     }
     let session = resume.unwrap_or_else(|| format!("fake-claude-session-{}", std::process::id()));
+    open_store(&session);
     let delay = Duration::from_millis(
         std::env::var("KEYSTONE_FAKE_CLAUDE_DELAY_MS")
             .ok()
@@ -575,6 +658,11 @@ fn work(
             json!({"type": "user", "message": {"role": "user", "content": next.text},
                    "parent_tool_use_id": null, "uuid": next.uuid, "isReplay": true}),
         );
+        store(
+            "user",
+            json!({"role": "user", "content": next.text}),
+            Some(&next.uuid),
+        );
         let ended = if signed_out {
             emit(
                 out,
@@ -660,8 +748,8 @@ fn answer(
         }
     }
     if text.contains("run") {
-        let message = format!("fake-tool-{turn}");
-        let tool = format!("fake-toolu-{turn}");
+        let message = format!("fake-tool-{}-{turn}", std::process::id());
+        let tool = format!("fake-toolu-{}-{turn}", std::process::id());
         let input = json!({"command": "echo scripted", "description": "Print a scripted line"});
         stream(
             out,
@@ -676,6 +764,12 @@ fn answer(
             out,
             json!({"type": "assistant", "message": {"id": message, "content":
                    [{"type": "tool_use", "id": tool, "name": "Bash", "input": input}]}, "parent_tool_use_id": null}),
+        );
+        store(
+            "assistant",
+            json!({"id": message, "role": "assistant", "content":
+                   [{"type": "tool_use", "id": tool, "name": "Bash", "input": input}]}),
+            None,
         );
         let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
         let request = format!("fake-request-{turn}");
@@ -724,8 +818,21 @@ fn answer(
                    [{"type": "tool_result", "tool_use_id": tool, "content": content, "is_error": is_error}]},
                    "parent_tool_use_id": null}),
         );
+        store(
+            "user",
+            json!({"role": "user", "content":
+                   [{"type": "tool_result", "tool_use_id": tool, "content": content, "is_error": is_error}]}),
+            None,
+        );
     }
-    let message = format!("fake-message-{turn}");
+    let message = format!("fake-message-{}-{turn}", std::process::id());
+    let text_record = |text: &str| {
+        store(
+            "assistant",
+            json!({"id": message, "role": "assistant", "content": [{"type": "text", "text": text}]}),
+            None,
+        )
+    };
     stream(
         out,
         json!({"type": "message_start", "message": {"id": message}}),
@@ -738,6 +845,7 @@ fn answer(
     for (i, word) in reply.split(' ').enumerate() {
         let abort = shared.state.lock().unwrap().abort;
         if let Some(abort) = abort {
+            text_record(&sent);
             return aborted(out, &message, &sent, abort);
         }
         let piece = if i == 0 {
@@ -750,12 +858,17 @@ fn answer(
             out,
             json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": piece}}),
         );
+        if i == 0 && text.contains("crash") {
+            text_record(&reply);
+            std::process::exit(3);
+        }
         if i == 0 && !released(shared) {
             emit(
                 out,
                 json!({"type": "assistant", "message": {"id": message, "content":
                        [{"type": "text", "text": sent}]}, "parent_tool_use_id": null}),
             );
+            text_record(&sent);
             return stopped(out);
         }
         thread::sleep(delay);
@@ -766,6 +879,7 @@ fn answer(
             state.abort.is_some() || state.closed
         });
         if let Some(abort) = shared.state.lock().unwrap().abort {
+            text_record(&sent);
             return aborted(out, &message, &sent, abort);
         }
     }
@@ -774,6 +888,7 @@ fn answer(
         json!({"type": "assistant", "message": {"id": message, "content":
                [{"type": "text", "text": sent}]}, "parent_tool_use_id": null}),
     );
+    text_record(&sent);
     stream(out, json!({"type": "content_block_stop", "index": 0}));
     emit(
         out,
@@ -826,6 +941,11 @@ fn released(shared: &Shared) -> bool {
 }
 
 fn stopped(out: &Out) -> &'static str {
+    store(
+        "user",
+        json!({"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}),
+        None,
+    );
     emit(
         out,
         json!({"type": "user", "message": {"role": "user", "content":

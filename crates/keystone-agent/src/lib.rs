@@ -15,6 +15,7 @@ mod item;
 pub mod log;
 pub mod mcp;
 mod profile;
+pub mod recovery;
 mod version;
 pub mod worker;
 

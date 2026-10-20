@@ -6,6 +6,7 @@
 //! [`Conversation::restore`].
 
 use keystone_agent::log::{Entry, Write};
+use keystone_agent::recovery::{Operation, RecoveryBatch, RecoveryReport};
 use keystone_agent::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
 };
@@ -29,6 +30,27 @@ pub enum Row {
         action: String,
         allowed: bool,
     },
+    /// What crash recovery found for the turn before it.
+    Recovery(RecoveryReport),
+}
+
+/// Where crash recovery stands while it holds the next message back.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Recovery {
+    /// A message waits for the saved history, which decides whether to check.
+    Loading,
+    /// Reading the provider's saved conversation.
+    Checking,
+    /// Recovered rows are shown but not confirmed saved; `error` says why saving failed.
+    Saving {
+        report: RecoveryReport,
+        error: Option<String>,
+    },
+    /// A partial or conflicting recovery, shown until the user continues.
+    Review(RecoveryReport),
+    /// The provider's saved conversation could not be read, so this turn's outcome is
+    /// unknown. Nothing was saved for it.
+    Unavailable(String),
 }
 
 #[derive(Default)]
@@ -62,6 +84,16 @@ pub struct Conversation {
     run_start: usize,
     /// While saved history is loading, what happens meanwhile waits here.
     pending: Option<Vec<Pending>>,
+    /// Set while recovery holds the next message back. The app owns it.
+    pub recovery: Option<Recovery>,
+    /// The restored history ends in a turn Keystone never saw end, or in a message it
+    /// never saw the provider take, and no recovery has settled it.
+    uncertain_tail: bool,
+    /// The row restore added to say Keystone closed mid-turn, replaced by recovery.
+    closed_marker: Option<usize>,
+    /// While restore applies saved recovery batches: the log position each row came
+    /// from, so a batch only touches rows logged before it.
+    origins: Option<Vec<usize>>,
     writes: Vec<Write>,
     /// Rows added or changed since [`Conversation::take_changes`].
     changed: BTreeSet<usize>,
@@ -165,13 +197,49 @@ impl Conversation {
         let mut run = None;
         let mut base = 0;
         let mut open_turn = false;
-        for entry in entries {
+        let mut batches = Vec::new();
+        let mut origins: Vec<usize> = Vec::new();
+        // Whether a recovery came after the last row or turn, and the report still
+        // waiting for an acknowledgement: one that no later message followed.
+        let mut settled = false;
+        let mut review = None;
+        let mut last_local = false;
+        let mut exited = false;
+        for (position, entry) in entries.into_iter().enumerate() {
             let (seq, entry_run) = match &entry {
-                Entry::TurnStarted => (None, None),
+                Entry::TurnStarted | Entry::Recovery { .. } | Entry::ProviderExited => (None, None),
                 Entry::Item { seq, run, .. }
                 | Entry::Approval { seq, run, .. }
                 | Entry::TurnEnded { seq, run, .. } => (*seq, *run),
             };
+            match &entry {
+                Entry::ProviderExited => {
+                    exited = true;
+                    continue;
+                }
+                Entry::Recovery { batch } => {
+                    exited = false;
+                    settled = true;
+                    open_turn &= !batch.closes_turn;
+                    review = batch
+                        .report
+                        .needs_acknowledgement()
+                        .then(|| batch.report.clone());
+                    batches.push((position, batch.clone()));
+                    continue;
+                }
+                Entry::TurnStarted => {
+                    settled = false;
+                    exited = false;
+                    review = None;
+                }
+                Entry::Item { item, .. } => {
+                    settled = false;
+                    last_local = item.id.starts_with(LOCAL) && item.kind == ItemKind::UserMessage;
+                }
+                Entry::TurnEnded { .. } => last_local = false,
+                Entry::Approval { .. } => {}
+            }
             if entry_run.is_some() && entry_run != run {
                 // A new run starts after every row before it, and never replaces them.
                 run = entry_run;
@@ -199,6 +267,7 @@ impl Conversation {
                 Entry::Approval {
                     action, allowed, ..
                 } => Some(Row::Decision { action, allowed }),
+                Entry::Recovery { .. } | Entry::ProviderExited => None,
                 Entry::TurnEnded { status, error, .. } => {
                     open_turn = false;
                     ended = true;
@@ -209,23 +278,177 @@ impl Conversation {
                 next = next.max(place + 1);
                 self.rows.push(row);
                 places.push(place);
+                origins.push(position);
             }
             if ended {
                 self.turn_start = self.rows.len();
             }
         }
+        let mut ordered: Vec<(u64, usize, Row)> = places
+            .into_iter()
+            .zip(origins)
+            .zip(self.rows.drain(..))
+            .map(|((place, origin), row)| (place, origin, row))
+            .collect();
+        // Stable, so rows with the same place keep their order in the file.
+        ordered.sort_by_key(|(place, _, _)| *place);
+        let (origins, rows): (Vec<usize>, Vec<Row>) = ordered
+            .into_iter()
+            .map(|(_, origin, row)| (origin, row))
+            .unzip();
+        self.rows = rows;
+        // Each batch applies to the rows logged before it, as it did when it was saved.
+        self.origins = Some(origins);
+        for (position, batch) in &batches {
+            self.apply_batch(batch, *position);
+        }
+        self.origins = None;
         if open_turn {
             self.rows.push(Row::TurnEnded {
                 status: TurnStatus::Interrupted,
                 error: Some("Keystone closed during this turn".into()),
             });
-            places.push(next);
+            self.closed_marker = Some(self.rows.len() - 1);
         }
-        let mut ordered: Vec<(u64, Row)> = places.into_iter().zip(self.rows.drain(..)).collect();
-        // Stable, so rows with the same place keep their order in the file.
-        ordered.sort_by_key(|(place, _)| *place);
-        self.rows = ordered.into_iter().map(|(_, row)| row).collect();
+        self.uncertain_tail = (open_turn || last_local) && !settled || exited;
+        self.recovery = review.map(Recovery::Review);
         self.turn_start = self.rows.len();
+    }
+
+    /// The provider exited during a turn: its outcome is unknown until recovery reads
+    /// what it saved. Logged, so a restart before that check runs it again. While the
+    /// history loads it waits with the turn's other events, so it is logged after them.
+    fn provider_exited(&mut self) {
+        self.uncertain_tail = true;
+        self.write(Entry::ProviderExited, true);
+    }
+
+    /// Checks the last turn again, open or not as the earlier check found it.
+    pub fn recheck(&mut self, open: bool) {
+        self.uncertain_tail = open;
+    }
+
+    /// Whether restored history needs a recovery check before the next message.
+    pub fn needs_recovery(&self) -> bool {
+        self.uncertain_tail && !self.running
+    }
+
+    /// Whether Keystone lost track of the last restored turn.
+    pub fn open_turn(&self) -> bool {
+        self.uncertain_tail
+    }
+
+    /// The items shown, in order, for recovery to match against.
+    pub fn neutral_items(&self) -> Vec<Item> {
+        self.rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) => Some(item.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Shows a recovery's rows and report, and logs the batch so every restore applies
+    /// it the same way.
+    pub fn apply_recovery(&mut self, batch: RecoveryBatch) {
+        let len = self.rows.len();
+        let first = self.apply_batch(&batch, usize::MAX);
+        self.uncertain_tail = false;
+        if !self.running {
+            self.turn_start = self.rows.len();
+        }
+        if let Some(first) = first {
+            self.changed.extend(first..self.rows.len().max(len));
+        }
+        self.write(Entry::Recovery { batch }, true);
+    }
+
+    /// Applies a batch's checked operations and places its report. A replacement whose
+    /// row no longer holds the expected value, or an insertion whose anchor is gone, is
+    /// skipped. Returns the first row changed.
+    fn apply_batch(&mut self, batch: &RecoveryBatch, logged_at: usize) -> Option<usize> {
+        let mut first: Option<usize> = None;
+        let mut touch = |index: usize| first = Some(first.map_or(index, |f| f.min(index)));
+        for operation in &batch.operations {
+            match operation {
+                Operation::Replace { expected, item } => {
+                    if let Some(index) = self.find(logged_at, |old| old == expected) {
+                        self.rows[index] = Row::Item(item.clone());
+                        touch(index);
+                    }
+                }
+                Operation::Insert { after, item } => {
+                    if self.find(logged_at, |old| old.id == item.id).is_some() {
+                        continue;
+                    }
+                    if let Some(index) = self.find(logged_at, |old| old.id == *after) {
+                        self.insert_row(index + 1, Row::Item(item.clone()), logged_at);
+                        touch(index + 1);
+                    }
+                }
+            }
+        }
+        let report = Row::Recovery(batch.report.clone());
+        match batch
+            .closes_turn
+            .then(|| self.closed_marker.take())
+            .flatten()
+        {
+            Some(marker) => {
+                self.rows[marker] = report;
+                touch(marker);
+            }
+            None => {
+                let at = batch
+                    .report_after
+                    .as_deref()
+                    .and_then(|id| self.find(logged_at, |item| item.id == id))
+                    .map_or(self.rows.len(), |index| {
+                        let mut at = index + 1;
+                        while matches!(
+                            self.rows.get(at),
+                            Some(Row::TurnEnded { .. } | Row::Decision { .. })
+                        ) {
+                            at += 1;
+                        }
+                        at
+                    });
+                self.insert_row(at, report, logged_at);
+                touch(at);
+            }
+        }
+        first
+    }
+
+    /// The last item row logged before `logged_at` that `matches`.
+    fn find(&self, logged_at: usize, matches: impl Fn(&Item) -> bool) -> Option<usize> {
+        self.rows.iter().enumerate().rposition(|(index, row)| {
+            matches!(row, Row::Item(item) if matches(item))
+                && self
+                    .origins
+                    .as_ref()
+                    .is_none_or(|origins| origins[index] <= logged_at)
+        })
+    }
+
+    /// Inserts a row, keeping the indexes that point past it on the same rows.
+    fn insert_row(&mut self, at: usize, row: Row, logged_at: usize) {
+        self.rows.insert(at, row);
+        if let Some(origins) = &mut self.origins {
+            origins.insert(at, logged_at);
+        }
+        if at < self.run_start {
+            self.run_start += 1;
+        }
+        if at < self.turn_start {
+            self.turn_start += 1;
+        }
+        if let Some(marker) = &mut self.closed_marker
+            && at <= *marker
+        {
+            *marker += 1;
+        }
     }
 
     /// Shows and logs a sent message at once. Steers are not always echoed back, so
@@ -339,12 +562,16 @@ impl Conversation {
             }
             Event::Warning { message } => self.error = Some(message),
             Event::ProviderNotice { message } => self.provider_notice = message,
+            // Recovery's control events belong to the app, never to the transcript.
+            Event::RecoveryNeeded => self.provider_exited(),
+            Event::HistoryRead { .. } => {}
         }
         None
     }
 
     /// A turn that ends leaves items the provider never completes. Keep what streamed,
-    /// so the partial reply survives a restart. Restored rows finished in an earlier run.
+    /// marked interrupted rather than failed, so the partial reply survives a restart
+    /// and recovery may complete it. Restored rows finished in an earlier run.
     fn settle_unfinished(&mut self) {
         let start = self.run_start;
         let unfinished: Vec<(usize, Item)> = self.rows[start..]
@@ -353,7 +580,7 @@ impl Conversation {
             .map(|(index, row)| (start + index, row))
             .filter_map(|(index, row)| match row {
                 Row::Item(item) if item.status == ItemStatus::InProgress => {
-                    item.status = ItemStatus::Failed;
+                    item.status = ItemStatus::Interrupted;
                     Some((index, item.clone()))
                 }
                 _ => None,
@@ -533,6 +760,135 @@ mod tests {
     }
 
     /// Applies each event and saves what it logged, as the app does.
+    /// A saved recovery batch replays against the rows logged before it, so a later
+    /// turn that reuses an item ID and its partial text is not completed by it.
+    #[test]
+    fn a_saved_recovery_never_completes_a_later_row_with_the_same_id() {
+        use keystone_agent::recovery::{Snapshot, SnapshotTurn, reconcile};
+        let mut log = Log(vec![
+            Entry::Item {
+                item: user("u1", "hi"),
+                seq: Some(0),
+                run: Some(1),
+            },
+            Entry::TurnStarted,
+            Entry::Item {
+                item: message("m", "Hel", ItemStatus::Interrupted),
+                seq: Some(1),
+                run: Some(1),
+            },
+        ]);
+        let mut live = log.restore();
+        assert!(live.needs_recovery());
+        let snapshot = Snapshot {
+            turns: vec![SnapshotTurn {
+                items: vec![
+                    user("u1", "hi"),
+                    message("m", "Hello", ItemStatus::Completed),
+                ],
+                end: Some(TurnStatus::Completed),
+            }],
+            limits: Vec::new(),
+        };
+        let batch = reconcile(&live.neutral_items(), live.open_turn(), &snapshot).unwrap();
+        live.apply_recovery(batch);
+        log.save(&mut live);
+        live.push_local("again");
+        log.save(&mut live);
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::TurnStarted,
+                Event::ItemStarted(message("m", "Hel", ItemStatus::InProgress)),
+                Event::Failed {
+                    message: "Claude exited".into(),
+                },
+            ],
+        );
+        let statuses = |c: &Conversation| -> Vec<(String, ItemStatus)> {
+            c.rows
+                .iter()
+                .filter_map(|row| match row {
+                    Row::Item(item) if item.id == "m" => Some((item.text.clone(), item.status)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            statuses(&live),
+            [
+                ("Hello".to_owned(), ItemStatus::Completed),
+                ("Hel".to_owned(), ItemStatus::Interrupted)
+            ]
+        );
+        assert_eq!(statuses(&log.restore()), statuses(&live));
+    }
+
+    /// A batch whose insertions follow one another restores whole.
+    #[test]
+    fn a_saved_recovery_restores_insertions_anchored_on_its_own_rows() {
+        use keystone_agent::recovery::{Snapshot, SnapshotTurn, reconcile};
+        let mut log = Log(vec![
+            Entry::Item {
+                item: user("u1", "hi"),
+                seq: Some(0),
+                run: Some(1),
+            },
+            Entry::TurnStarted,
+        ]);
+        let mut live = log.restore();
+        let snapshot = Snapshot {
+            turns: vec![SnapshotTurn {
+                items: vec![
+                    user("u1", "hi"),
+                    message("m1", "one", ItemStatus::Completed),
+                    message("m2", "two", ItemStatus::Completed),
+                    message("m3", "three", ItemStatus::Completed),
+                ],
+                end: Some(TurnStatus::Completed),
+            }],
+            limits: Vec::new(),
+        };
+        let batch = reconcile(&live.neutral_items(), live.open_turn(), &snapshot).unwrap();
+        live.apply_recovery(batch);
+        log.save(&mut live);
+        assert_eq!(texts(&live), ["hi", "one", "two", "three"]);
+        assert_eq!(log.restore().rows, live.rows);
+    }
+
+    /// A provider that exits while the history loads is logged after the turn it
+    /// ended, so a restart still knows the check is owed.
+    #[test]
+    fn a_provider_exit_while_history_loads_is_owed_a_check_after_restart() {
+        let mut live = Conversation::loading();
+        live.push_local("hi");
+        for event in [
+            Event::TurnStarted,
+            Event::ItemStarted(message("m", "Hal", ItemStatus::InProgress)),
+            Event::RecoveryNeeded,
+            Event::TurnCompleted {
+                status: TurnStatus::Failed,
+                error: Some("Claude Code stopped".into()),
+                stopped: false,
+            },
+        ] {
+            live.apply(event);
+        }
+        live.restore(Ok(Vec::new()));
+        assert!(live.needs_recovery());
+        let mut log = Log::default();
+        log.save(&mut live);
+        let started = log.0.iter().position(|e| *e == Entry::TurnStarted).unwrap();
+        let exited = log
+            .0
+            .iter()
+            .position(|e| *e == Entry::ProviderExited)
+            .unwrap();
+        assert!(started < exited, "{:?}", log.0);
+        assert!(log.restore().needs_recovery());
+    }
+
     fn feed(live: &mut Conversation, log: &mut Log, events: impl IntoIterator<Item = Event>) {
         for event in events {
             live.apply(event);
@@ -680,7 +1036,7 @@ mod tests {
         });
         assert_eq!(
             live.rows[1],
-            Row::Item(message("m", "Half a", ItemStatus::Failed))
+            Row::Item(message("m", "Half a", ItemStatus::Interrupted))
         );
     }
 
@@ -1071,7 +1427,7 @@ mod tests {
         );
         assert_eq!(
             log.restore().rows[0],
-            Row::Item(message("m", "1\n2", ItemStatus::Failed))
+            Row::Item(message("m", "1\n2", ItemStatus::Interrupted))
         );
     }
 

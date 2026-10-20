@@ -39,6 +39,9 @@ pub enum ItemStatus {
     Completed,
     Failed,
     Declined,
+    /// The turn ended before the item did, so its outcome is unknown: Keystone or the
+    /// provider stopped mid-item, or a tool call has no recorded result.
+    Interrupted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +136,16 @@ pub enum Event {
     ProviderNotice {
         message: Option<String>,
     },
+    /// The provider's stored history, read for crash recovery; `ticket` names the
+    /// request. Never a live event: only the app consumes it.
+    HistoryRead {
+        ticket: u64,
+        result: Result<crate::recovery::Snapshot, String>,
+    },
+    /// The provider process exited during a turn, so its store may hold more than
+    /// streamed. Arrives in the same batch as the turn's end; act on it once the
+    /// whole batch is applied.
+    RecoveryNeeded,
 }
 
 /// Bytes kept from each end of long tool output.

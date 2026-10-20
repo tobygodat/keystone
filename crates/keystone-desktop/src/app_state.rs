@@ -1,6 +1,8 @@
+use crate::conversation::Recovery;
 use crate::presentation::ConversationFolder;
 use crate::*;
 use gpui::EventEmitter;
+use keystone_agent::recovery::{self, Snapshot, TurnEvidence};
 use keystone_agent::{Catalog, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{AccountId, Applied, ProjectId, SavedComposition, WorkingDirectory};
@@ -57,6 +59,24 @@ pub(crate) struct AppState {
     pub(crate) phase: Phase,
     pending: std::collections::VecDeque<PendingSave>,
     orchestrator: Option<orchestrator::Orchestrator>,
+    /// Each session's current recovery request, from its check until its batch saves.
+    recoveries: HashMap<u64, u64>,
+    next_ticket: u64,
+    /// Finished reads of Claude stores: session, ticket and what was read.
+    recovery_reads: Arc<std::sync::Mutex<Vec<ClaudeResult>>>,
+    /// Claude store reads waiting for one of the [`RECOVERY_READERS`].
+    queued_reads: std::collections::VecDeque<ClaudeRead>,
+    /// Reads running now, including any abandoned past their deadline.
+    active_reads: Arc<std::sync::atomic::AtomicUsize>,
+    /// Sessions whose provider exited while their history was loading.
+    recover_after_load: std::collections::HashSet<u64>,
+    /// Reports still waiting for an acknowledgement while Retry checks again.
+    reviewing: HashMap<u64, keystone_agent::recovery::RecoveryReport>,
+    /// Sessions whose user chose to send before their history arrived.
+    send_unloaded: std::collections::HashSet<u64>,
+    /// The default Claude account's config dir, in place of the inherited one.
+    #[cfg(test)]
+    pub(crate) test_claude_home: Option<PathBuf>,
     #[cfg(test)]
     pub(crate) save_calls: usize,
     /// The `codex` and `claude` every new connection runs, in place of the ones found.
@@ -64,6 +84,26 @@ pub(crate) struct AppState {
     pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
 }
 impl EventEmitter<RuntimeChanged> for AppState {}
+
+/// Most Claude store reads at once. A read stuck on a slow disk keeps its slot.
+const RECOVERY_READERS: usize = 2;
+/// How long a recovery check may take before the app stops waiting for it.
+pub(crate) const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+const UNREAD: &str = "Keystone could not read this conversation's saved history, so it cannot tell whether a turn was left open";
+
+const NO_THREAD: &str = "Keystone never saved this conversation's provider ID, so it cannot check what the provider recorded. Sending starts a new provider conversation";
+
+/// A finished Claude store read: session, ticket and what it found.
+type ClaudeResult = (u64, u64, Result<Snapshot, String>);
+
+struct ClaudeRead {
+    session: u64,
+    ticket: u64,
+    root: PathBuf,
+    thread: String,
+    cwd: PathBuf,
+}
 impl AppState {
     pub(crate) fn log_losses(&self) -> impl Iterator<Item = &String> {
         self.log_losses.values()
@@ -684,6 +724,16 @@ impl AppState {
             phase: Phase::Running,
             pending: Default::default(),
             orchestrator: None,
+            recoveries: HashMap::new(),
+            next_ticket: 0,
+            recovery_reads: Arc::default(),
+            queued_reads: Default::default(),
+            active_reads: Arc::default(),
+            recover_after_load: Default::default(),
+            send_unloaded: Default::default(),
+            reviewing: HashMap::new(),
+            #[cfg(test)]
+            test_claude_home: None,
             #[cfg(test)]
             save_calls: 0,
             #[cfg(test)]
@@ -920,6 +970,11 @@ impl AppState {
         }
         self.receive(reports, events, cx);
         self.pump_orchestrator(cx);
+        let reads = std::mem::take(&mut *self.recovery_reads.lock().unwrap());
+        for (session, ticket, result) in reads {
+            self.finish_recovery(session, ticket, result, cx);
+        }
+        self.start_reads();
     }
 
     pub(crate) fn receive(
@@ -936,14 +991,40 @@ impl AppState {
             return;
         }
         let mut sidebar_changed = false;
+        let mut recover = Vec::new();
         for report in reports {
             let session = match report {
                 Report::Loaded { session, entries } => {
+                    let unread = entries.is_err()
+                        && self
+                            .session(session)
+                            .is_some_and(|saved| saved.provider_thread().is_some());
                     if let Some(conversation) = self.conversations.get_mut(&session) {
                         conversation.restore(entries);
+                        if conversation.recovery == Some(Recovery::Loading) {
+                            conversation.recovery = None;
+                        }
+                        // Without the history Keystone cannot tell whether a turn was
+                        // left open, so the next message waits for the user.
+                        if unread && conversation.recovery.is_none() {
+                            conversation.recovery = Some(Recovery::Unavailable(UNREAD.into()));
+                        }
+                        if conversation.needs_recovery() || self.recover_after_load.remove(&session)
+                        {
+                            recover.push(session);
+                        }
                     }
                     // Events held during the load, such as an approval or a turn's
                     // end, apply only now.
+                    sidebar_changed = true;
+                    session
+                }
+                Report::Checkpoint {
+                    session,
+                    ticket,
+                    error,
+                } => {
+                    self.recovery_saved(session, ticket, error);
                     sidebar_changed = true;
                     session
                 }
@@ -965,6 +1046,14 @@ impl AppState {
             self.commit(session);
         }
         for (session, event) in events {
+            match event {
+                Event::HistoryRead { ticket, result } => {
+                    self.finish_recovery(session, ticket, result, cx);
+                    continue;
+                }
+                Event::RecoveryNeeded => recover.push(session),
+                _ => {}
+            }
             let failed = turn_failed(&event);
             match (&event, failed) {
                 (Event::TurnStarted, _) => self.persist(PendingSave::TurnStart(session)),
@@ -991,6 +1080,19 @@ impl AppState {
             }
         }
 
+        // After the batch: an exit's turn end is applied before its check starts.
+        for session in recover {
+            match self.conversations.get(&session) {
+                Some(conversation) if conversation.is_loading() => {
+                    self.recover_after_load.insert(session);
+                }
+                Some(conversation) if !conversation.running && conversation.recovery.is_none() => {
+                    self.start_recovery(session, cx);
+                    sidebar_changed = true;
+                }
+                _ => {}
+            }
+        }
         // Streamed text redraws only this view. The sidebar refreshes when a row changes.
         if sidebar_changed {
             self.refresh(cx);
@@ -1101,6 +1203,327 @@ impl AppState {
         }
     }
 
+    /// Reads what the session's provider saved, from the session's own account, and
+    /// holds the next message until the result is shown and saved. Read only: nothing
+    /// is sent, resumed or answered.
+    pub(crate) fn start_recovery(&mut self, session: u64, cx: &mut Context<Self>) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        let Some(saved) = self.session(session).cloned() else {
+            return;
+        };
+        let Some(thread) = saved.provider_thread().map(str::to_owned) else {
+            self.conversation(session).recovery = Some(Recovery::Unavailable(NO_THREAD.into()));
+            self.commit(session);
+            return;
+        };
+        self.next_ticket += 1;
+        let ticket = self.next_ticket;
+        self.recoveries.insert(session, ticket);
+        self.conversation(session).recovery = Some(Recovery::Checking);
+        self.commit(session);
+        let account = saved.account().cloned();
+        match saved.provider() {
+            Provider::Claude => {
+                let read = self.claude_root(account.as_ref()).and_then(|root| {
+                    match self.conversation_folder(session) {
+                        Some(ConversationFolder::Recorded(directory)) => Ok(ClaudeRead {
+                            session,
+                            ticket,
+                            root,
+                            thread,
+                            cwd: directory.path().to_owned(),
+                        }),
+                        _ => Err("this conversation has no saved folder to check against".into()),
+                    }
+                });
+                match read {
+                    Ok(read) => {
+                        self.queued_reads.push_back(read);
+                        self.start_reads();
+                    }
+                    Err(error) => return self.finish_recovery(session, ticket, Err(error), cx),
+                }
+            }
+            Provider::Codex => {
+                if let Err(error) = self.connection(Provider::Codex, account.as_ref()) {
+                    return self.finish_recovery(session, ticket, Err(error), cx);
+                }
+                if let Some(codex) = self.codex.get(&account) {
+                    codex.read_history(session, thread, ticket);
+                }
+            }
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RECOVERY_DEADLINE).await;
+            let _ = this.update(cx, |this, cx| {
+                let error = "the provider did not answer in time".to_owned();
+                this.finish_recovery(session, ticket, Err(error), cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The config dir of a Claude account: the one Keystone gave it, or for the
+    /// default account the one Claude Code itself uses.
+    fn claude_root(&self, account: Option<&AccountId>) -> Result<PathBuf, String> {
+        self.profile(Provider::Claude, account)?;
+        match account {
+            Some(id) => self
+                .store
+                .workspace()
+                .account(id)
+                .map(|account| account.home().to_owned())
+                .ok_or_else(|| "this session's account is not set up".into()),
+            None => {
+                #[cfg(test)]
+                if let Some(home) = &self.test_claude_home {
+                    return Ok(home.clone());
+                }
+                keystone_agent::default_home(Provider::Claude)
+                    .ok_or_else(|| "Claude Code's config folder is unknown: HOME is not set".into())
+            }
+        }
+    }
+
+    /// Starts queued Claude store reads while a reader is free. Each read runs on a
+    /// thread of its own, so a stuck disk holds up nothing but its slot.
+    fn start_reads(&mut self) {
+        use std::sync::atomic::Ordering;
+        while self.active_reads.load(Ordering::SeqCst) < RECOVERY_READERS
+            && let Some(read) = self.queued_reads.pop_front()
+        {
+            // A read abandoned at its deadline, or replaced by a retry, is not run.
+            if self.recoveries.get(&read.session) != Some(&read.ticket) {
+                continue;
+            }
+            self.active_reads.fetch_add(1, Ordering::SeqCst);
+            let (reads, active, wake) = (
+                self.recovery_reads.clone(),
+                self.active_reads.clone(),
+                self.wake.clone(),
+            );
+            let spawned = std::thread::Builder::new()
+                .name("recovery-read".into())
+                .spawn(move || {
+                    let result = recovery::claude::read(&read.root, &read.thread, &read.cwd);
+                    reads
+                        .lock()
+                        .unwrap()
+                        .push((read.session, read.ticket, result));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    wake();
+                });
+            if let Err(error) = spawned {
+                self.active_reads.fetch_sub(1, Ordering::SeqCst);
+                self.recovery_reads.lock().unwrap().push((
+                    read.session,
+                    read.ticket,
+                    Err(format!("could not start reading: {error}")),
+                ));
+                (self.wake)();
+            }
+        }
+    }
+
+    /// Takes a finished read, if it is still the session's current one, and reconciles
+    /// it with the shown rows off the UI thread.
+    fn finish_recovery(
+        &mut self,
+        session: u64,
+        ticket: u64,
+        result: Result<Snapshot, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Running || self.recoveries.get(&session) != Some(&ticket) {
+            return;
+        }
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        if conversation.recovery != Some(Recovery::Checking) {
+            return;
+        }
+        let snapshot = match result {
+            Ok(snapshot) => snapshot,
+            Err(reason) => {
+                self.recoveries.remove(&session);
+                self.reviewing.remove(&session);
+                conversation.recovery = Some(Recovery::Unavailable(reason));
+                self.commit(session);
+                self.refresh(cx);
+                return;
+            }
+        };
+        let (neutral, open_turn) = (conversation.neutral_items(), conversation.open_turn());
+        cx.spawn(async move |this, cx| {
+            let batch = cx
+                .background_executor()
+                .spawn(async move { recovery::reconcile(&neutral, open_turn, &snapshot) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_reconciled(session, ticket, batch, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Shows and logs what was recovered, then waits for the log to confirm it saved.
+    /// Operations name the exact rows they change, so rows that moved on meanwhile are
+    /// left alone.
+    fn apply_reconciled(
+        &mut self,
+        session: u64,
+        ticket: u64,
+        batch: Option<recovery::RecoveryBatch>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Running || self.recoveries.get(&session) != Some(&ticket) {
+            return;
+        }
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        if conversation.recovery != Some(Recovery::Checking) {
+            return;
+        }
+        // A retry that found nothing new saves nothing and keeps the earlier report.
+        let batch = batch.filter(|batch| {
+            !(self.reviewing.contains_key(&session) && batch.operations.is_empty())
+        });
+        match batch {
+            Some(batch) => {
+                let report = batch.report.clone();
+                conversation.apply_recovery(batch);
+                conversation.recovery = Some(Recovery::Saving {
+                    report,
+                    error: None,
+                });
+                self.commit(session);
+                self.logs.checkpoint(session, ticket);
+            }
+            None => {
+                self.recoveries.remove(&session);
+                conversation.recovery = self.reviewing.remove(&session).map(Recovery::Review);
+                self.commit(session);
+            }
+        }
+        self.refresh(cx);
+    }
+
+    /// The log confirmed, or failed to confirm, a recovery batch.
+    fn recovery_saved(&mut self, session: u64, ticket: u64, error: Option<String>) {
+        if self.recoveries.get(&session) != Some(&ticket) {
+            return;
+        }
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        let Some(Recovery::Saving { report, .. }) = conversation.recovery.clone() else {
+            return;
+        };
+        conversation.recovery = match error {
+            Some(error) => Some(Recovery::Saving {
+                report,
+                error: Some(error),
+            }),
+            None => {
+                self.recoveries.remove(&session);
+                let earlier = self.reviewing.remove(&session);
+                report
+                    .needs_acknowledgement()
+                    .then_some(report)
+                    .or(earlier)
+                    .map(Recovery::Review)
+            }
+        };
+    }
+
+    /// The user read a partial, conflicting or unavailable recovery and lets the next
+    /// message go. It does not send anything.
+    pub(crate) fn continue_after_recovery(&mut self, session: u64, cx: &mut Context<Self>) {
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        if matches!(
+            conversation.recovery,
+            Some(Recovery::Review(_) | Recovery::Unavailable(_))
+        ) {
+            conversation.recovery = None;
+            self.reviewing.remove(&session);
+            if conversation.is_loading() {
+                self.send_unloaded.insert(session);
+            }
+            self.commit(session);
+            self.refresh(cx);
+        }
+    }
+
+    /// Holds Send until the history arrives, which decides whether a check is needed.
+    /// A history that has not arrived by the deadline is reported as unread.
+    fn wait_for_history(&mut self, session: u64, cx: &mut Context<Self>) {
+        self.conversation(session).recovery = Some(Recovery::Loading);
+        self.commit(session);
+        self.publish(cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RECOVERY_DEADLINE).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(conversation) = this.conversations.get_mut(&session)
+                    && conversation.recovery == Some(Recovery::Loading)
+                {
+                    conversation.recovery = Some(Recovery::Unavailable(UNREAD.into()));
+                    this.commit(session);
+                    this.refresh(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Checks again, or retries saving a recovery that could not be saved.
+    pub(crate) fn retry_recovery(&mut self, session: u64, cx: &mut Context<Self>) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        match conversation.recovery.clone() {
+            Some(Recovery::Saving {
+                report,
+                error: Some(_),
+            }) => {
+                conversation.recovery = Some(Recovery::Saving {
+                    report,
+                    error: None,
+                });
+                if let Some(ticket) = self.recoveries.get(&session) {
+                    self.logs.checkpoint(session, *ticket);
+                }
+                self.commit(session);
+                self.refresh(cx);
+            }
+            // Rows still loading are not Keystone's history: the check waits for them.
+            Some(Recovery::Unavailable(_)) if conversation.is_loading() => {
+                self.wait_for_history(session, cx);
+            }
+            Some(Recovery::Unavailable(_)) => {
+                self.start_recovery(session, cx);
+                self.refresh(cx);
+            }
+            Some(Recovery::Review(report)) => {
+                // The turn the report is about is checked again as it was, and the
+                // report keeps waiting for its acknowledgement.
+                conversation.recheck(report.turn != TurnEvidence::Unaffected);
+                self.reviewing.insert(session, report);
+                self.start_recovery(session, cx);
+                self.refresh(cx);
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn flush_logs(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let deadline = std::time::Instant::now() + LOAD_WAIT;
         loop {
@@ -1163,6 +1586,21 @@ impl AppState {
         // Apply anything that already arrived, such as the end of the last turn, so
         // the message is shown in the right turn.
         self.pump(cx);
+        // Recovery holds the message, and the draft stays, until its result is shown,
+        // saved and, when partial, acknowledged. A started conversation also waits for
+        // its history, which decides whether recovery is needed.
+        if let Some(conversation) = self.conversations.get_mut(&id) {
+            if conversation.recovery.is_some() {
+                return false;
+            }
+            if conversation.is_loading()
+                && session.provider_thread().is_some()
+                && !self.send_unloaded.contains(&id)
+            {
+                self.wait_for_history(id, cx);
+                return false;
+            }
+        }
         let Some(directory) = self.dispatch_directory(id, cx) else {
             return false;
         };

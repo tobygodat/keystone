@@ -406,6 +406,21 @@ impl CodexConnection {
         });
     }
 
+    /// Reads `thread`'s stored history for crash recovery, starting the app-server
+    /// first if it is not running. The thread is not resumed or opened, and nothing is
+    /// sent to it. The answer, a failure to start included, arrives as
+    /// [`Event::HistoryRead`] for `session` with `ticket`.
+    pub fn read_history(&self, session: u64, thread: String, ticket: u64) {
+        self.with_driver(
+            session,
+            move |message| Event::HistoryRead {
+                ticket,
+                result: Err(message),
+            },
+            move |driver, _, out| driver.read_history(session, thread, ticket, out),
+        );
+    }
+
     /// Changes the session's approval state at once; see [`Connection::set_approval`].
     pub fn set_approval(&self, session: u64, approval: ApprovalState) {
         self.shared.lock().unwrap().set_approval(session, approval);

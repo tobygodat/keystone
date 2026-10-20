@@ -7,6 +7,7 @@ use gpui::{
     AnyElement, App, ClipboardItem, ElementId, FocusHandle, SharedString, Window, div, prelude::*,
     px,
 };
+use keystone_agent::recovery::{Limit, Outcome, RecoveryReport, TurnEvidence};
 use keystone_agent::{Item, ItemKind, ItemStatus, TurnStatus};
 use keystone_ui::markdown::Document;
 use keystone_ui::prelude::*;
@@ -174,6 +175,14 @@ pub fn row(
                 v_flex()
                     .gap_1()
                     .child(markdown)
+                    .when(item.status == ItemStatus::Interrupted, |d| {
+                        d.child(
+                            h_flex().child(
+                                badge("Interrupted", Color::Muted, cx)
+                                    .automation_id(format!("interrupted-{index}")),
+                            ),
+                        )
+                    })
                     .child(
                         div()
                             .when(item.status == ItemStatus::InProgress, |d| d.invisible())
@@ -221,6 +230,7 @@ pub fn row(
                 let (status, color) = match (item.status, exit_code) {
                     (ItemStatus::InProgress, _) => ("Running".to_owned(), Color::Muted),
                     (ItemStatus::Declined, _) => ("Not run".to_owned(), Color::Muted),
+                    (ItemStatus::Interrupted, _) => ("Interrupted".to_owned(), Color::Muted),
                     (ItemStatus::Failed, None) => ("Stopped".to_owned(), Color::Muted),
                     (_, Some(0)) => ("Exit 0".to_owned(), Color::Success),
                     (_, Some(code)) => (format!("Exit {code}"), Color::Danger),
@@ -283,7 +293,11 @@ pub fn row(
             ItemKind::FileChange { paths } => div()
                 .text_size(TextSize::Ui.px())
                 .text_color(colors.text_muted)
-                .child(format!("Changed {}", paths.join(", ")))
+                .child(format!(
+                    "Changed {}{}",
+                    paths.join(", "),
+                    outcome_note(item.status)
+                ))
                 .into_any_element(),
             ItemKind::Other { .. }
                 if item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX) =>
@@ -322,6 +336,7 @@ pub fn row(
                                             ItemStatus::Completed => "Completed",
                                             ItemStatus::Failed => "Failed",
                                             ItemStatus::Declined => "Declined",
+                                            ItemStatus::Interrupted => "Interrupted",
                                         })
                                         .size(TextSize::Sm)
                                         .color(Color::Muted),
@@ -356,6 +371,37 @@ pub fn row(
                 .color(color)
                 .into_any_element()
         }
+        Row::Recovery(report) => {
+            let summary = recovery_summary(report);
+            v_flex()
+                .automation_id(format!("recovery-report-{index}"))
+                .gap_1()
+                .child(
+                    h_flex()
+                        .items_start()
+                        .gap_2()
+                        .children(
+                            summary
+                                .badges
+                                .iter()
+                                .map(|(text, color)| badge(text, *color, cx)),
+                        )
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Label::new(summary.headline)
+                                    .size(TextSize::Ui)
+                                    .color(Color::Muted),
+                            ),
+                        ),
+                )
+                .children(summary.details.into_iter().map(|line| {
+                    Label::new(line)
+                        .size(TextSize::Sm)
+                        .color(Color::Muted)
+                        .into_any_element()
+                }))
+                .into_any_element()
+        }
         Row::Decision { action, allowed } => Label::new(format!(
             "{} {action}",
             if *allowed { "Allowed:" } else { "Denied:" }
@@ -363,6 +409,171 @@ pub fn row(
         .size(TextSize::Ui)
         .color(Color::Muted)
         .into_any_element(),
+    }
+}
+
+/// A small outlined label beside a row.
+fn badge(text: &str, color: Color, cx: &App) -> gpui::Div {
+    div()
+        .flex_none()
+        .px_1p5()
+        .rounded(radius::CONTROL)
+        .border_1()
+        .border_color(cx.theme().colors.border)
+        .child(Label::new(text.to_owned()).size(TextSize::Sm).color(color))
+}
+
+/// Said after a tool row whose outcome is not the plain one.
+fn outcome_note(status: ItemStatus) -> &'static str {
+    match status {
+        ItemStatus::Interrupted => " · no recorded result",
+        ItemStatus::Failed => " · failed",
+        ItemStatus::Declined => " · not run",
+        _ => "",
+    }
+}
+
+/// How a recovery report reads: badges, one headline, and a line per limitation.
+pub struct RecoverySummary {
+    pub badges: Vec<(&'static str, Color)>,
+    pub headline: String,
+    pub details: Vec<String>,
+}
+
+fn plural(count: u64, one: &str, many: &str) -> String {
+    if count == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{count} {many}")
+    }
+}
+
+pub fn recovery_summary(report: &RecoveryReport) -> RecoverySummary {
+    let mut badges = Vec::new();
+    if report.turn != TurnEvidence::Unaffected {
+        badges.push(("Interrupted", Color::Muted));
+    }
+    match report.outcome {
+        Outcome::Recovered => {}
+        Outcome::Partial => badges.push(("Partial", Color::Warning)),
+        Outcome::Conflict => badges.push(("Conflict", Color::Warning)),
+    }
+    let mut recovered = Vec::new();
+    if report.messages > 0 {
+        recovered.push(plural(report.messages.into(), "message", "messages"));
+    }
+    if report.tools > 0 {
+        recovered.push(plural(report.tools.into(), "tool call", "tool calls"));
+    }
+    let mut parts = Vec::new();
+    if !recovered.is_empty() {
+        parts.push(format!("Recovered {}", recovered.join(" and ")));
+    }
+    if report.extended > 0 {
+        parts.push(format!(
+            "completed {}",
+            plural(report.extended.into(), "partial row", "partial rows")
+        ));
+    }
+    let found = if parts.is_empty() {
+        "Nothing more was recovered from the provider's saved conversation.".to_owned()
+    } else {
+        let mut text = parts.join("; ");
+        text.push_str(" from the provider's saved conversation.");
+        let mut chars = text.chars();
+        chars
+            .next()
+            .map(|c| c.to_uppercase().chain(chars).collect())
+            .unwrap_or(text)
+    };
+    let headline = match report.turn {
+        TurnEvidence::Recorded(TurnStatus::Completed) => {
+            format!("Connection interrupted; the provider recorded this turn as complete. {found}")
+        }
+        TurnEvidence::Recorded(TurnStatus::Interrupted) => format!(
+            "Connection interrupted; the provider recorded this turn as interrupted. {found}"
+        ),
+        TurnEvidence::Recorded(TurnStatus::Failed) => {
+            format!("Connection interrupted; the provider recorded this turn as failed. {found}")
+        }
+        TurnEvidence::Unknown => {
+            format!("Interrupted; this turn's final outcome is unknown. {found}")
+        }
+        TurnEvidence::Unaffected => found,
+    };
+    let mut details: Vec<String> = report
+        .limits
+        .iter()
+        .map(|limit| match limit {
+            Limit::TornTail => "The last saved record was cut off and was left out.".into(),
+            Limit::Malformed { count } => format!(
+                "{} could not be read.",
+                plural(*count, "saved record", "saved records")
+            ),
+            Limit::Unsupported { count } => format!(
+                "{} of kinds Keystone does not show were skipped.",
+                plural(*count, "record", "records")
+            ),
+            Limit::Unstable => "The provider's saved conversation changed while it was read.".into(),
+            Limit::Truncated => "Only part of a long history was checked.".into(),
+            Limit::OlderNotRead => {
+                "Only the newest part of the provider's history was read, and it does not reach back to what is shown here.".into()
+            }
+            Limit::Compacted => {
+                "The provider compacted this conversation, so older parts are summaries.".into()
+            }
+            Limit::ItemsNotLoaded => {
+                "The provider returned summaries instead of some items.".into()
+            }
+            Limit::UnknownOutcome { count } => format!(
+                "{} no recorded result. Any approval that was waiting has expired.",
+                if *count == 1 {
+                    "1 tool call has".to_owned()
+                } else {
+                    format!("{count} tool calls have")
+                }
+            ),
+            Limit::PromptNotRecorded => {
+                "Your last message is not in the provider's record, so it may not have been delivered."
+                    .into()
+            }
+            Limit::EarlierHistoryDiffers { count } => format!(
+                "{} earlier in the provider's record {} not match this transcript and {} left out.",
+                plural(*count, "item", "items"),
+                if *count == 1 { "does" } else { "do" },
+                if *count == 1 { "was" } else { "were" },
+            ),
+            Limit::Branched => {
+                "The provider's record has more than one branch, so nothing was matched.".into()
+            }
+            Limit::IdentityMismatch => {
+                "The provider's record names a different folder, so it was not used.".into()
+            }
+            Limit::ReusedIds => "The provider reuses item IDs, so nothing was matched.".into(),
+            Limit::OrderDiffers => {
+                "Matching items appear in a different order, so nothing was matched.".into()
+            }
+            Limit::NoCommonPoint => {
+                "No part of the provider's record matches this transcript, so nothing was added."
+                    .into()
+            }
+            Limit::ConflictingText { count } => format!(
+                "{} the provider's copy; Keystone's copy was kept.",
+                if *count == 1 {
+                    "1 saved message differs from".to_owned()
+                } else {
+                    format!("{count} saved messages differ from")
+                }
+            ),
+        })
+        .collect();
+    if report.turn == TurnEvidence::Unknown {
+        details.push("Text that was streaming may not have been saved by the provider.".into());
+    }
+    RecoverySummary {
+        badges,
+        headline,
+        details,
     }
 }
 

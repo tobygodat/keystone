@@ -58,6 +58,15 @@ pub enum Entry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run: Option<u64>,
     },
+    /// Rows recovered from the provider's store after Keystone lost track of a turn,
+    /// with the report shown for them. Applied whole on every restore; builds before
+    /// recovery skip it, as they skip any entry they cannot read.
+    Recovery {
+        batch: crate::recovery::RecoveryBatch,
+    },
+    /// The provider exited during a turn, so what it saved must be checked. A later
+    /// `Recovery` or a new turn settles it; until then every restore checks again.
+    ProviderExited,
 }
 
 /// An entry to append. Every SQLite write syncs, even when `sync` is false.
@@ -194,6 +203,13 @@ pub enum Report {
         error: Option<String>,
         retryable: bool,
         lost: u64,
+    },
+    /// Everything queued for `session` before [`Logs::checkpoint`] with `ticket` is
+    /// saved, or `error` says why not.
+    Checkpoint {
+        session: u64,
+        ticket: u64,
+        error: Option<String>,
     },
 }
 
@@ -554,6 +570,44 @@ impl Logs {
             .unwrap_or_else(|_| Err("The log writer stopped before saving completed".into()))
     }
 
+    /// Retries the session's failed writes, then reports [`Report::Checkpoint`]: saved
+    /// once every entry queued before this call is committed. Runs on the writer, so
+    /// it never blocks the caller, and another session's failure does not fail it.
+    pub fn checkpoint(&self, session: u64, ticket: u64) {
+        let (files, budget, reports, wake) = (
+            self.files.clone(),
+            self.budget.clone(),
+            self.reports.clone(),
+            self.wake.clone(),
+        );
+        self.writer.run(move || {
+            let mut files = files.lock().unwrap();
+            let saved = files
+                .sessions
+                .contains_key(&session)
+                .then(|| files.retry(session, &budget))
+                .flatten();
+            let error = files
+                .failing
+                .get(&session)
+                .map(|failure| failure.message.clone())
+                .or_else(|| {
+                    let lost = budget.lock().unwrap().rejected.get(&session)?.entries;
+                    Some(limit_error(session, lost))
+                });
+            drop(files);
+            let mut reports = reports.lock().unwrap();
+            reports.extend(saved);
+            reports.push(Report::Checkpoint {
+                session,
+                ticket,
+                error,
+            });
+            drop(reports);
+            wake();
+        });
+    }
+
     /// Takes every report since the last call.
     pub fn drain(&self) -> Vec<Report> {
         std::mem::take(&mut self.reports.lock().unwrap())
@@ -782,6 +836,76 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    fn checkpoints(rx: &std::sync::mpsc::Receiver<()>, logs: &Logs) -> Vec<(u64, Option<String>)> {
+        loop {
+            let found: Vec<_> = logs
+                .drain()
+                .into_iter()
+                .filter_map(|report| match report {
+                    Report::Checkpoint { ticket, error, .. } => Some((ticket, error)),
+                    _ => None,
+                })
+                .collect();
+            if !found.is_empty() {
+                return found;
+            }
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_reports_a_recovery_batch_saved_only_once_it_commits() {
+        let (logs, rx, dir) = logs();
+        logs.append(1, vec![entry(0)]).unwrap();
+        logs.flush().unwrap();
+        let database = path(&dir.path().join("sessions"), 1);
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let batch = crate::recovery::RecoveryBatch {
+            id: "recovery-1".into(),
+            operations: Vec::new(),
+            report: crate::recovery::RecoveryReport {
+                outcome: crate::recovery::Outcome::Partial,
+                messages: 0,
+                tools: 0,
+                extended: 0,
+                turn: crate::recovery::TurnEvidence::Unknown,
+                limits: vec![crate::recovery::Limit::TornTail],
+            },
+            report_after: None,
+            closes_turn: true,
+        };
+        logs.append(
+            1,
+            vec![Write {
+                entry: Entry::Recovery {
+                    batch: batch.clone(),
+                },
+                sync: true,
+            }],
+        )
+        .unwrap();
+        logs.checkpoint(1, 7);
+        let failed = checkpoints(&rx, &logs);
+        assert!(matches!(&failed[..], [(7, Some(_))]), "{failed:?}");
+        // Another session saving does not clear this session's failure.
+        drop(writer);
+        logs.append(2, vec![entry(1)]).unwrap();
+        logs.checkpoint(2, 8);
+        assert_eq!(checkpoints(&rx, &logs), [(8, None)]);
+        logs.checkpoint(1, 9);
+        assert_eq!(checkpoints(&rx, &logs), [(9, None)]);
+        let entries = read(&dir.path().join("sessions"), 1).unwrap();
+        assert_eq!(entries.last(), Some(&Entry::Recovery { batch }));
+        // A build that predates recovery skips the entry and keeps the rest.
+        let old: Result<Entry, _> = serde_json::from_str(
+            &serde_json::to_string(entries.last().unwrap())
+                .unwrap()
+                .replace("\"recovery\"", "\"unknown\""),
+        );
+        assert!(old.is_err());
     }
 
     fn entry(n: u64) -> Write {

@@ -1114,3 +1114,6 @@ fn an_account_folder_swapped_for_a_link_to_another_never_sends(cx: &mut gpui::Te
         assert!(state.claude.is_empty(), "no process was started");
     });
 }
+
+#[path = "recovery_tests.rs"]
+mod recovery;

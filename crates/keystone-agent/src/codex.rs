@@ -118,6 +118,14 @@ enum Pending {
         epoch: u64,
         strict: bool,
     },
+    /// A read of the session's stored history for crash recovery. `fallback` marks
+    /// the older `thread/read` form.
+    History {
+        session: u64,
+        ticket: u64,
+        thread: String,
+        fallback: bool,
+    },
     Ignore,
 }
 
@@ -398,6 +406,34 @@ impl CodexDriver {
         self.request_catalog_page(session, Vec::new(), 1, None, out);
     }
 
+    /// Reads the stored history of `thread` without resuming it or opening it for
+    /// `session`. The answer arrives as [`Event::HistoryRead`] with `ticket`.
+    pub fn read_history(&mut self, session: u64, thread: String, ticket: u64, out: &mut Outputs) {
+        if let Some(message) = &self.initialization_error {
+            out.event(
+                session,
+                Event::HistoryRead {
+                    ticket,
+                    result: Err(message.clone()),
+                },
+            );
+            return;
+        }
+        let params = json!({"threadId": thread, "limit": crate::recovery::codex::TURNS,
+            "sortDirection": "desc", "itemsView": "full"});
+        let line = self.request(
+            "thread/turns/list",
+            params,
+            Pending::History {
+                session,
+                ticket,
+                thread,
+                fallback: false,
+            },
+        );
+        self.write(line, out);
+    }
+
     fn request_catalog_page(
         &mut self,
         session: u64,
@@ -427,12 +463,25 @@ impl CodexDriver {
     /// unanswered catalog request fails.
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
         for pending in self.pending.values() {
-            if let Pending::Catalog { session, .. } = pending {
-                out.event(*session, Event::Catalog(Catalog::Failed(reason.to_owned())));
+            match pending {
+                Pending::Catalog { session, .. } => {
+                    out.event(*session, Event::Catalog(Catalog::Failed(reason.to_owned())))
+                }
+                Pending::History {
+                    session, ticket, ..
+                } => out.event(
+                    *session,
+                    Event::HistoryRead {
+                        ticket: *ticket,
+                        result: Err(reason.to_owned()),
+                    },
+                ),
+                _ => {}
             }
         }
         for (&session, state) in &mut self.sessions {
             if std::mem::take(&mut state.turn) != Turn::Idle {
+                out.event(session, Event::RecoveryNeeded);
                 out.event(
                     session,
                     Event::TurnCompleted {
@@ -878,6 +927,48 @@ impl CodexDriver {
                     self.send(session, message, out);
                 }
             }
+            Pending::History {
+                session,
+                ticket,
+                thread,
+                fallback,
+            } => {
+                if error.is_some() && !fallback {
+                    // An app-server without turn pagination, or one that will not list
+                    // full items for this thread, pages its newest items instead. Codex
+                    // answers an unknown method with -32600, not -32601.
+                    let line = self.request(
+                        "thread/items/list",
+                        json!({"threadId": thread, "sortDirection": "desc",
+                            "limit": crate::recovery::codex::ITEMS}),
+                        Pending::History {
+                            session,
+                            ticket,
+                            thread,
+                            fallback: true,
+                        },
+                    );
+                    return self.write(line, out);
+                }
+                let result = match error {
+                    Some(error) => Err(format!(
+                        "Codex could not read this conversation's history: {}",
+                        error.message
+                    )),
+                    None => serde_json::from_slice::<Response<Value>>(line)
+                        .ok()
+                        .and_then(|r| r.result)
+                        .ok_or_else(|| "Codex sent no history in its reply".to_owned())
+                        .and_then(|result| {
+                            if fallback {
+                                crate::recovery::codex::decode_items(&result)
+                            } else {
+                                crate::recovery::codex::decode(&result)
+                            }
+                        }),
+                };
+                out.event(session, Event::HistoryRead { ticket, result });
+            }
             Pending::Ignore => {}
         }
     }
@@ -1214,7 +1305,7 @@ struct ApprovalParams {
 /// Every Codex item type in one flat shape. Fields a type does not use stay empty.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-struct WireItem {
+pub(crate) struct WireItem {
     #[serde(rename = "type")]
     kind: String,
     id: String,
@@ -1239,7 +1330,7 @@ struct Change {
 impl WireItem {
     /// `started` items are in progress even when, like agent messages, they carry no
     /// status of their own.
-    fn into_item(self, started: bool) -> Item {
+    pub(crate) fn into_item(self, started: bool) -> Item {
         let status = match self.status.as_deref() {
             Some("inProgress") => ItemStatus::InProgress,
             Some("failed") => ItemStatus::Failed,
