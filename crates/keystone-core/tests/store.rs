@@ -1,5 +1,6 @@
 use keystone_core::WorkingDirectory;
 use keystone_core::{Appearance, ApprovalMode, Density, Preferences, Provider, Store, ThemeMode};
+use rusqlite::Connection;
 use std::fs;
 use tempfile::tempdir;
 
@@ -65,12 +66,15 @@ fn invalid_commands_leave_memory_and_file_unchanged() {
     store
         .create(Provider::Claude, &working_directory(), 1)
         .unwrap();
-    let before = fs::read(&path).unwrap();
+    let before = Store::open(&path).unwrap().saved_snapshot().unwrap();
 
     assert!(store.select(99).is_err());
     assert!(store.set_settled(99, true).is_err());
     assert!(store.set_draft(99, "lost".into()).is_err());
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        Store::open(&path).unwrap().saved_snapshot().unwrap(),
+        before
+    );
     assert_eq!(store.workspace().selected(), Some(1));
     assert!(!store.workspace().sessions()[0].settled());
     assert_eq!(store.workspace().sessions()[0].draft(), "");
@@ -97,8 +101,12 @@ fn invalid_snapshots_are_not_overwritten() {
 #[test]
 fn save_failure_keeps_visible_state_unchanged() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("missing").join("state.json");
+    let path = dir.path().join("state.json");
     let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.path(), path.with_extension("sqlite3"));
+    let before = Store::open(&path).unwrap().saved_snapshot().unwrap();
+    let lock = Connection::open(store.path()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     assert!(
         store
             .create(Provider::Claude, &working_directory(), 1)
@@ -106,8 +114,13 @@ fn save_failure_keeps_visible_state_unchanged() {
     );
     assert!(store.workspace().sessions().is_empty());
     assert_eq!(store.workspace().selected(), None);
+    assert_eq!(store.writes(), 0);
+    assert_eq!(
+        Store::open(&path).unwrap().saved_snapshot().unwrap(),
+        before
+    );
 
-    fs::create_dir(path.parent().unwrap()).unwrap();
+    lock.execute_batch("ROLLBACK").unwrap();
     assert_eq!(
         store
             .create(Provider::Claude, &working_directory(), 1)
@@ -115,13 +128,15 @@ fn save_failure_keeps_visible_state_unchanged() {
             .value,
         1
     );
+    assert_eq!(store.writes(), 1);
     assert_eq!(
         Store::open(&path).unwrap().workspace().sessions()[0].id(),
         1
     );
 
-    fs::remove_file(&path).unwrap();
-    fs::create_dir(&path).unwrap();
+    let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
+    let before = store.workspace().clone();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     assert!(store.set_draft(1, "unwritten".into()).is_err());
     assert_eq!(store.workspace().sessions()[0].draft(), "");
     assert!(store.rename(1, "Unwritten").is_err());
@@ -130,15 +145,16 @@ fn save_failure_keeps_visible_state_unchanged() {
         store.workspace().sessions()[0].title(),
         "New Claude session"
     );
-    assert!(path.is_dir());
-    let before = store.workspace().clone();
+    assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
     assert!(
         store
             .create(Provider::Codex, &working_directory(), 3)
             .is_err()
     );
     assert_eq!(store.workspace(), &before);
-    fs::remove_dir(&path).unwrap();
+    assert_eq!(store.writes(), 1);
+    assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
+    lock.execute_batch("ROLLBACK").unwrap();
     assert_eq!(
         store
             .create(Provider::Codex, &working_directory(), 3)
@@ -146,6 +162,8 @@ fn save_failure_keeps_visible_state_unchanged() {
             .value,
         2
     );
+    assert_eq!(store.writes(), 2);
+    assert_eq!(store.workspace().sessions().len(), 2);
     assert_eq!(Store::open(&path).unwrap().workspace(), store.workspace());
 }
 
@@ -215,10 +233,11 @@ fn provider_thread_survives_restart_and_is_absent_in_older_files() {
         .unwrap()
         .value;
     assert_eq!(store.workspace().sessions()[0].provider_thread(), None);
+    let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
     assert!(
-        !fs::read_to_string(&path)
-            .unwrap()
-            .contains("provider_thread")
+        saved["workspace"]["sessions"][0]
+            .get("provider_thread")
+            .is_none()
     );
 
     store.set_provider_thread(id, "thread-123".into()).unwrap();
@@ -253,8 +272,15 @@ fn approval_mode_defaults_to_provider_settings_and_survives_restart() {
         store.workspace().sessions()[1].approval_mode(),
         ApprovalMode::Provider
     );
-    let saved = fs::read_to_string(&path).unwrap();
-    assert!(!saved.contains("approval_mode") && !saved.contains("approval_overridden"));
+    let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
+    assert!(
+        saved["workspace"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|session| session.get("approval_mode").is_none()
+                && session.get("approval_overridden").is_none())
+    );
 
     store.set_approval_mode(1, ApprovalMode::ReadOnly).unwrap();
     store.set_approval_overridden(1).unwrap();
@@ -305,7 +331,7 @@ fn creation_atomically_records_context_and_restores_it_without_filesystem_lookup
             origin: ContextOrigin::Created,
         }
     );
-    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
     assert_eq!(saved["version"], 1);
     assert_eq!(saved["next_id"], 2);
     assert_eq!(saved["workspace"]["selected"], 1);
@@ -348,7 +374,6 @@ fn missing_and_unsupported_contexts_survive_unrelated_saves_and_refuse_choice() 
     use keystone_core::SessionContext;
     use serde_json::{Value, json};
     let dir = tempdir().unwrap();
-    let path = dir.path().join("state.json");
     let directory = WorkingDirectory::new(dir.path()).unwrap();
     let supported = json!({"version":1,"directory":directory.as_str(),"origin":"created"});
     let cases = [
@@ -364,7 +389,8 @@ fn missing_and_unsupported_contexts_survive_unrelated_saves_and_refuse_choice() 
         json!(false),
         json!({"version":1.5,"directory":"/future","origin":"created"}),
     ];
-    for raw in cases {
+    for (index, raw) in cases.into_iter().enumerate() {
+        let path = dir.path().join(format!("state-{index}.json"));
         let mut snapshot = json!({
             "version":1,"next_id":4,"future_root":{"keep":1},
             "workspace":{
@@ -378,6 +404,7 @@ fn missing_and_unsupported_contexts_survive_unrelated_saves_and_refuse_choice() 
             }
         });
         fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let legacy = fs::read(&path).unwrap();
         let mut store = Store::open(&path).unwrap();
         assert_eq!(
             store.workspace().sessions()[0].context(),
@@ -391,11 +418,14 @@ fn missing_and_unsupported_contexts_survive_unrelated_saves_and_refuse_choice() 
             store.workspace().sessions()[2].context(),
             SessionContext::Recorded { .. }
         ));
-        let before = fs::read(&path).unwrap();
+        let before = Store::open(&path).unwrap().saved_snapshot().unwrap();
         let workspace = store.workspace().clone();
         assert!(store.choose_legacy_directory(2, &directory).is_err());
         assert_eq!(store.workspace(), &workspace);
-        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(
+            Store::open(&path).unwrap().saved_snapshot().unwrap(),
+            before
+        );
         store.set_draft(1, "edited".into()).unwrap();
         store
             .set_appearance(Appearance {
@@ -404,7 +434,7 @@ fn missing_and_unsupported_contexts_survive_unrelated_saves_and_refuse_choice() 
             })
             .unwrap();
         snapshot["workspace"]["sessions"][0]["draft"] = json!("edited");
-        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
         assert_eq!(saved["future_root"], snapshot["future_root"]);
         assert_eq!(
             saved["workspace"]["future_workspace"],
@@ -428,6 +458,7 @@ fn missing_and_unsupported_contexts_survive_unrelated_saves_and_refuse_choice() 
                 .is_none()
         );
         assert_eq!(Store::open(&path).unwrap().workspace(), store.workspace());
+        assert_eq!(fs::read(&path).unwrap(), legacy);
     }
 }
 
@@ -451,6 +482,7 @@ fn legacy_choice_changes_only_context_and_refuses_replacement() {
         .unwrap(),
     )
     .unwrap();
+    let legacy = fs::read(&path).unwrap();
     let mut store = Store::open(&path).unwrap();
     let mut expected: Value = serde_json::to_value(store.workspace()).unwrap();
     store.choose_legacy_directory(1, &directory).unwrap();
@@ -465,25 +497,35 @@ fn legacy_choice_changes_only_context_and_refuses_replacement() {
             origin: ContextOrigin::Chosen
         }
     );
-    let before = fs::read(&path).unwrap();
+    let before = Store::open(&path).unwrap().saved_snapshot().unwrap();
     assert!(store.choose_legacy_directory(99, &directory).is_err());
     store.choose_legacy_directory(1, &directory).unwrap();
     assert_eq!(store.writes(), 1);
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        Store::open(&path).unwrap().saved_snapshot().unwrap(),
+        before
+    );
     assert!(
         store
             .choose_legacy_directory(1, &working_directory())
             .is_err()
     );
     assert_eq!(serde_json::to_value(store.workspace()).unwrap(), expected);
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        Store::open(&path).unwrap().saved_snapshot().unwrap(),
+        before
+    );
     store.create(Provider::Codex, &directory, 10).unwrap();
-    let before = fs::read(&path).unwrap();
+    let before = Store::open(&path).unwrap().saved_snapshot().unwrap();
     let expected = store.workspace().clone();
     assert!(store.choose_legacy_directory(2, &directory).is_err());
     assert_eq!(store.workspace(), &expected);
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        Store::open(&path).unwrap().saved_snapshot().unwrap(),
+        before
+    );
     assert_eq!(Store::open(&path).unwrap().workspace(), store.workspace());
+    assert_eq!(fs::read(&path).unwrap(), legacy);
 }
 
 #[test]
@@ -492,11 +534,12 @@ fn failed_legacy_choice_before_rename_keeps_context_and_retries() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
     fs::write(&path, r#"{"version":1,"next_id":2,"workspace":{"selected":1,"sessions":[{"id":1,"title":"Legacy","provider":"Codex","settled":false,"draft":"keep"}]}}"#).unwrap();
+    let legacy = fs::read(&path).unwrap();
     let mut store = Store::open(&path).unwrap();
     let before = store.workspace().clone();
-    let original = dir.path().join("original.json");
-    fs::rename(&path, &original).unwrap();
-    fs::create_dir(&path).unwrap();
+    let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
+    let lock = Connection::open(store.path()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     assert!(
         store
             .choose_legacy_directory(1, &working_directory())
@@ -508,12 +551,20 @@ fn failed_legacy_choice_before_rename_keeps_context_and_retries() {
         SessionContext::LegacyMissing
     );
     assert_eq!(store.writes(), 0);
-    assert!(path.is_dir());
-    assert_eq!(Store::open(&original).unwrap().workspace(), &before);
-    fs::remove_dir(&path).unwrap();
-    fs::rename(&original, &path).unwrap();
+    assert_eq!(Store::open(&path).unwrap().workspace(), &before);
+    assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
+    assert_eq!(fs::read(&path).unwrap(), legacy);
+    lock.execute_batch("ROLLBACK").unwrap();
     store
         .choose_legacy_directory(1, &working_directory())
         .unwrap();
+    assert_eq!(store.writes(), 1);
     assert_eq!(Store::open(&path).unwrap().workspace(), store.workspace());
+    let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
+    store
+        .choose_legacy_directory(1, &working_directory())
+        .unwrap();
+    assert_eq!(store.writes(), 1);
+    assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
+    assert_eq!(fs::read(&path).unwrap(), legacy);
 }

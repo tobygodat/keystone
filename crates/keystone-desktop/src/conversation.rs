@@ -742,8 +742,11 @@ mod tests {
             r#"{"entry":"turn_ended","status":"completed","error":null}"#,
         ];
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("1.jsonl"), old.join("\n")).unwrap();
-        let mut log = Log(keystone_agent::log::read(dir.path(), 1).unwrap());
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        std::fs::write(sessions.join("1.jsonl"), old.join("\n")).unwrap();
+        keystone_core::Store::open(dir.path().join("workspace.json")).unwrap();
+        let mut log = Log(keystone_agent::log::read(&sessions, 1).unwrap());
         assert_eq!(log.0.len(), old.len());
         let mut live = log.restore();
         assert_eq!(texts(&live), ["Old question", "Old steer", "Old reply"]);

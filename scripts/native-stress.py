@@ -70,10 +70,10 @@ class Stress:
         return self.run.app_pids[-1]
 
     def draft(self):
-        try:
-            workspace = json.loads(self.run.state.read_text())['workspace']
-        except (FileNotFoundError, json.JSONDecodeError):
+        snapshot = driver.read_workspace(self.run.state)
+        if snapshot.get('state_absent'):
             return None
+        workspace = snapshot['workspace']
         sessions = workspace['sessions']
         return sessions[0]['draft'] if sessions else None
 

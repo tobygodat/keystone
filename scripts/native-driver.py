@@ -10,12 +10,14 @@ KEYSTONE_AUTOMATION_PATH, so `click` and `wait_for` can target names.
 import argparse
 import base64
 import copy
+from contextlib import closing
 import hashlib
 import json
 import os
 from pathlib import Path
 import queue
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -87,6 +89,56 @@ def timestamp():
 def digest(path):
     with open(path, 'rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def database_path(state):
+    state = Path(state)
+    header = b''
+    try:
+        if state.is_file():
+            with state.open('rb') as stream:
+                header = stream.read(16)
+                if header == b'SQLite format 3\0':
+                    return state
+                while header and not header.strip():
+                    following = stream.read(16)
+                    if not following:
+                        break
+                    header = following
+    except OSError:
+        header = b''
+    if state.suffix == '.json':
+        return state.with_suffix('.sqlite3')
+    sibling = Path(str(state) + '.sqlite3')
+    if state.suffix in ('.sqlite3', '.sqlite', '.db') and not header.lstrip().startswith(b'{'):
+        if (not state.exists() or state.stat().st_size == 0) and sibling.exists():
+            return sibling
+        return state
+    return sibling
+
+
+def open_database(path):
+    return sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=0.1)
+
+
+def workspace_projection(connection):
+    connection.execute('BEGIN')
+    try:
+        snapshot = json.loads(connection.execute(
+            'SELECT payload FROM workspace WHERE singleton=1').fetchone()[0])
+        snapshot['workspace']['sessions'] = [json.loads(row[0]) for row in connection.execute(
+            'SELECT payload FROM sessions ORDER BY position')]
+        return snapshot
+    finally:
+        connection.rollback()
+
+
+def read_workspace(state):
+    database = database_path(state)
+    if not database.exists():
+        return {'state_absent': True}
+    with closing(open_database(database)) as connection:
+        return workspace_projection(connection)
 
 
 class Run:
@@ -336,9 +388,22 @@ class Run:
 
     def snapshot(self):
         target = self.evidence / f'state-{self.sequence:04d}-{time.time_ns()}.json'
-        if self.state.exists():
-            shutil.copyfile(self.state, target)
-            result = {'path': str(target), 'sha256': digest(target)}
+        database = database_path(self.state)
+        if database.exists():
+            backup = target.with_suffix('.sqlite3')
+            deadline = time.monotonic() + 5
+
+            def progress(status, remaining, total):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('SQLite snapshot backup exceeded five seconds')
+
+            with closing(open_database(database)) as source, \
+                    closing(sqlite3.connect(backup)) as destination:
+                source.backup(destination, pages=256, progress=progress, sleep=0.05)
+                snapshot = workspace_projection(destination)
+            target.write_text(json.dumps(snapshot, indent=2) + '\n')
+            result = {'path': str(target), 'sha256': digest(target),
+                      'database_path': str(backup), 'database_sha256': digest(backup)}
         else:
             result = {'state_absent': True}
         self.record('state_snapshot', result)
@@ -369,7 +434,10 @@ class Run:
                 self.process.kill()
                 self.process.wait()
         if not errors:
-            shutil.rmtree(self.scratch)
+            try:
+                shutil.rmtree(self.scratch)
+            except OSError as error:
+                errors.append(str(error))
         result = {'snapshot': snapshot, 'evidence': str(self.evidence), 'errors': errors,
                   'scratch_retained': str(self.scratch) if errors else None}
         self.record('cleanup', result)
@@ -439,8 +507,9 @@ TOOLS = [
     ('wait_for', 'Wait until a named element is visible, or gone with present=false.',
      schema({'id': ID, 'present': {'type': 'boolean', 'default': True},
              'timeout_ms': {'type': 'integer', 'default': 5000}}, ['id'])),
-    ('workspace', 'Read the real saved workspace file.', schema()),
-    ('snapshot', 'Copy the saved workspace file into the evidence directory.', schema()),
+    ('workspace', 'Read saved SQLite workspace projections in one read-only transaction.', schema()),
+    ('snapshot', 'Back up SQLite including WAL commits and export its workspace JSON into evidence.',
+     schema()),
     ('launch', 'Relaunch the app against the same workspace after it has quit. Never while it runs.',
      schema()),
     ('call', 'Call any computer-use-mcp tool directly, such as windows_list.',
@@ -470,7 +539,8 @@ class Server:
                            self.args.trace_wayland)
             started = self.run.start(arguments.get('width', 1280), arguments.get('height', 900),
                                      arguments.get('headless', True), arguments.get('env'))
-            return {**started, 'evidence': str(evidence), 'state': str(self.run.state)}, None
+            return {**started, 'evidence': str(evidence), 'state': str(self.run.state),
+                    'database': str(database_path(self.run.state))}, None
         run = self.require()
         if name == 'doctor':
             return run.doctor(), None
@@ -512,7 +582,7 @@ class Server:
             return run.wait_for(arguments['id'], arguments.get('present', True),
                                 arguments.get('timeout_ms', 5000)), None
         if name == 'workspace':
-            result = json.loads(run.state.read_text()) if run.state.exists() else {'state_absent': True}
+            result = read_workspace(run.state)
             run.record('workspace', result)
             return result, None
         if name == 'snapshot':

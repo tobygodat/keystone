@@ -1,0 +1,31 @@
+# Workspace storage
+
+Keystone uses one bundled SQLite database for workspace metadata and neutral conversation entries. `Store` decides changes against its retained read model, then commits them synchronously. `Logs` runs transcript commits on its existing worker thread. Neither adds an async runtime.
+
+## Transactions and events
+
+`events.sequence` is a global, monotonically increasing committed cursor. Events contain complete session or workspace replacements and neutral log entries, not streamed deltas. Update/delete triggers make the event table append-only. `sessions`, `workspace` and `log_entries` are the projections the application reads. Workspace metadata excludes session bodies, so changing one session does not serialize every session into the event log.
+
+The event history retains previous saved drafts and session values, even after their projection changes. No event compaction or retention policy is implemented yet, so database size grows with saves. Treat the entire database and its backups as private history, not only the visible transcript.
+
+A workspace transaction obtains the SQLite writer lock, compares the stored workspace revision with the decision's revision, appends events, upserts projections and commits. Only then does Store publish the new in-memory state. A stale writer returns a reload-required error without overwriting the newer workspace. Transcript commits do not advance the workspace revision. Each queued transcript record carries a stable event key; retrying an uncertain successful commit cannot duplicate it.
+
+All disk connections use WAL, synchronous=FULL and foreign keys. Database clones share a timed writer gate around each write's connection open, transaction and close; the gate waits up to 100 ms, and SQLite's busy handler then gets whatever remains of that budget, but never less than 5 ms, so an external lock still gets a retry (worst case about 105 ms of lock waiting before I/O). This avoids racing the app's Store and log worker through SQLite's last-connection checkpoint/cleanup. Fresh connections still preserve path replacement and permission-repair behavior. Reads use independent read-only connections without that gate. In-memory Database/Store constructors serialize on their own connection without filesystem access or the disk gate. A slow filesystem syscall or a large transaction can still stall a synchronous save; this is not a frame-time guarantee.
+
+## Durability, retries and Quit
+
+A successful FULL commit is the database durability boundary; no checkpoint is required for success. A conservative parent-directory sync also confirms database/WAL directory entries. Store retains the existing applied-but-directory-sync-pending result for this barrier. Retrying it does not repeat the SQL transaction. A failed SQL transaction is unapplied instead: memory stays unchanged, and the caller retains the draft or pending update. A revision confirmed once remains confirmed through unrelated later failures.
+
+Busy/locked, full-disk, read-only, permission, open and I/O errors are visible recoverable errors. Transcript failures retain their batch and stable keys; a later append or flush retries it. A committed prefix whose directory barrier failed retries only that barrier, without SQL write access. While that barrier keeps failing, later entries still commit in their own transaction behind it, so SQLite holds them if the process dies. Budget bytes and loss-marker counts retire only after durability is confirmed. The 16 MiB admission budget still bounds retained bytes. Rejected entries are terminal loss, surfaced immediately and recorded by a durable count-bearing gap notice. Ordinary logging stays disabled for that session until restart. Quit blocks until retained writes, draft, metadata and the gap notice are saved; already rejected entries alone cannot veto Quit forever. There is no exit-anyway route. Permission repair must include the database, any `-wal`/`-shm` sidecars, and their parent directory: a read during a read-only period can create read-only sidecars.
+
+SQLite depends on the filesystem and storage device honouring sync requests. It cannot recover in-memory failed writes after a forced kill, or incomplete streamed items that were never submitted for persistence. A blocked filesystem syscall can still delay Quit. Provider-native crash reconciliation is separate work.
+
+## Import, versions and backups
+
+The configured legacy `workspace.json` path maps to `workspace.sqlite3`; other legacy filenames get `.sqlite3` appended, while an existing SQLite header identifies a database directly. The configured path's existing lock stem is retained, so old and new desktop builds cannot run concurrently against it. On first open, one IMMEDIATE transaction creates/upgrades the schema, validates the old workspace, imports session logs in deterministic filename/line order and writes an import-complete marker. Invalid or torn legacy log lines are skipped as before. Missing and nonregular log paths are skipped, including dangling symlinks, directories and FIFOs; symlinks to regular files still import. An unreadable regular log aborts with its path rather than silently completing an incomplete import. An I/O/validation failure or process death before commit rolls the whole import back. Restart retries; after commit, changed legacy files are never imported again. Library callers must create the parent before opening Store; desktop startup already does this.
+
+Old files remain untouched as backups, and old builds never write SQLite. Returning to an old build shows its old backup, not changes saved by the new build. Schema migrations use `PRAGMA user_version` transactionally. A schema newer than this build is refused, never downgraded.
+
+Do not copy only the `.sqlite3` file while the app is running: a committed tail can still be in `-wal`. Use SQLite's backup API (the native verifier's snapshot does this), or quit successfully before copying the database. Keep backups private: transcripts contain user and provider text.
+
+The event/projection transaction model takes design ideas from t3code's event sink, implemented independently in Rust. Future accounts, delivery/idempotency records and client cursors can use forward migrations and the same transaction boundary; none of those orchestration features is implemented here.

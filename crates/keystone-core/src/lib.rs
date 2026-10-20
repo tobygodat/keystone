@@ -4,12 +4,12 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod composition;
+mod database;
 mod layout;
 mod project;
 mod session_context;
@@ -18,6 +18,7 @@ pub use composition::{
     Axis, Child, Component, Composition, Edit, Node, NodePath, Place, Problem, SavedComposition,
     Size, ViewId,
 };
+pub use database::{Database, StoredEvent, database_path};
 pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
 };
@@ -34,7 +35,7 @@ const FORMAT_VERSION: u32 = 1;
 pub struct Applied<T> {
     pub value: T,
     pub durability: Durability,
-    /// The snapshot that holds this change. A no-op names the current snapshot.
+    /// The transaction that holds this change. A no-op names the current revision.
     pub revision: Revision,
 }
 
@@ -431,6 +432,8 @@ struct Snapshot {
 
 pub struct Store {
     path: PathBuf,
+    database: Database,
+    database_revision: i64,
     workspace: Workspace,
     next_id: u64,
     unknown: Map<String, Value>,
@@ -443,26 +446,19 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
-        let path = path.as_ref().to_path_buf();
-        let snapshot: Snapshot = match File::open(&path) {
-            Ok(file) => serde_json::from_reader(file)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    path,
-                    workspace: Workspace::default(),
-                    next_id: 1,
-                    unknown: Map::new(),
-                    pending: None,
-                    writes: 0,
-                    #[cfg(any(test, feature = "test-support"))]
-                    sync_directory: File::sync_all,
-                });
-            }
-            Err(error) => return Err(error.into()),
-        };
-        validate(&snapshot)?;
+        Self::from_database(Database::open(path)?)
+    }
+
+    pub fn in_memory() -> StoreResult<Self> {
+        Self::from_database(Database::in_memory()?)
+    }
+
+    pub fn from_database(database: Database) -> StoreResult<Self> {
+        let (snapshot, database_revision) = database.snapshot()?;
         Ok(Self {
-            path,
+            path: database.path().to_path_buf(),
+            database,
+            database_revision,
             workspace: snapshot.workspace,
             next_id: snapshot.next_id,
             unknown: snapshot.unknown,
@@ -477,12 +473,22 @@ impl Store {
         &self.workspace
     }
 
-    /// The workspace file this store saves to.
+    pub fn database(&self) -> Database {
+        self.database.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn saved_snapshot(&self) -> StoreResult<Value> {
+        let (snapshot, _) = self.database.snapshot()?;
+        Ok(serde_json::to_value(snapshot)?)
+    }
+
+    /// The SQLite database this store saves to.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// How many times this store has written the workspace file since it opened.
+    /// How many workspace transactions this store has committed since it opened.
     #[doc(hidden)]
     pub fn writes(&self) -> u64 {
         self.writes
@@ -789,23 +795,27 @@ impl Store {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let directory = File::open(parent)?;
-        let mut file = NamedTempFile::new_in(parent)?;
-        serde_json::to_writer(&mut file, &snapshot)?;
-        file.flush()?;
-        file.as_file().sync_all()?;
-        file.persist(&self.path)?;
+        let directory = if self.database.is_memory() {
+            None
+        } else {
+            Some(File::open(parent)?)
+        };
+        self.database_revision =
+            self.database
+                .commit(&snapshot, &self.workspace, self.database_revision)?;
         self.writes += 1;
         self.workspace = snapshot.workspace;
         self.next_id = snapshot.next_id;
-        let oldest_unconfirmed = self
-            .pending
-            .take()
-            .map_or(Revision(self.writes), |pending| pending.oldest_unconfirmed);
-        self.pending = Some(PendingSync {
-            directory,
-            oldest_unconfirmed,
-        });
+        if let Some(directory) = directory {
+            let oldest_unconfirmed = self
+                .pending
+                .take()
+                .map_or(Revision(self.writes), |pending| pending.oldest_unconfirmed);
+            self.pending = Some(PendingSync {
+                directory,
+                oldest_unconfirmed,
+            });
+        }
         Ok(self.finish_sync())
     }
 }
@@ -879,13 +889,13 @@ mod tests {
             store.set_draft(1, String::new()).unwrap().durability,
             Durability::DirectorySyncPending(_)
         ));
-        let before_retry = std::fs::read(&path).unwrap();
+        let before_retry = json(&path);
         assert!(store.sync_pending().is_err());
         store.sync_directory = File::sync_all;
         store.sync_pending().unwrap();
         store.sync_pending().unwrap();
         assert!(store.pending.is_none());
-        assert_eq!(std::fs::read(&path).unwrap(), before_retry);
+        assert_eq!(json(&path), before_retry);
         assert_eq!(store.workspace().sessions().len(), 1);
         let next = store
             .create(Provider::Codex, &working_directory(), 3)
@@ -917,7 +927,7 @@ mod tests {
             Store::open(&path).unwrap().workspace().sessions()[0].context(),
             expected
         );
-        let before = std::fs::read(&path).unwrap();
+        let before = json(&path);
         assert!(matches!(
             store
                 .choose_legacy_directory(1, &chosen)
@@ -942,12 +952,11 @@ mod tests {
         );
         assert!(store.pending.is_none());
         assert_eq!(store.writes(), 1);
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(json(&path), before);
     }
 
     #[test]
     fn a_confirmed_choice_stays_confirmed_through_later_unrelated_debt() {
-        use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("state");
         std::fs::create_dir(&state).unwrap();
@@ -984,17 +993,18 @@ mod tests {
         assert!(!store.is_durable(debt.revision));
 
         let writes = store.writes();
-        let before = std::fs::read(&path).unwrap();
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let before = json(&path);
+        let lock = rusqlite::Connection::open(store.path()).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
         let rejected = store.set_provider_thread(1, "rejected-thread".into());
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        lock.execute_batch("ROLLBACK").unwrap();
         assert!(rejected.is_err());
         assert_eq!(
             store.writes(),
             writes,
             "a failure before the rename writes nothing"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(json(&path), before);
         assert!(store.workspace().sessions()[0].provider_thread().is_none());
         assert!(!store.is_durable(debt.revision));
 
@@ -1016,7 +1026,7 @@ mod tests {
         assert_eq!(store.writes(), writes);
         assert!(store.is_durable(debt.revision));
         assert!(store.is_durable(retry.revision));
-        let saved = std::fs::read_to_string(&path).unwrap();
+        let saved = json(&path).to_string();
         assert!(saved.contains(r#""origin":"chosen""#), "{saved}");
         assert!(!saved.contains("rejected-thread"), "{saved}");
         assert_eq!(
@@ -1085,7 +1095,7 @@ mod tests {
 
         // Saving it again writes no invented times.
         store.set_draft(1, "edited".into()).unwrap();
-        let saved = std::fs::read_to_string(&path).unwrap();
+        let saved = json(&path).to_string();
         assert!(!saved.contains("_at"), "{saved}");
         assert!(saved.contains(r#""version":1"#));
     }
@@ -1270,11 +1280,7 @@ mod tests {
         .unwrap();
         let mut store = Store::open(&path).unwrap();
         store.set_draft(1, "typing".into()).unwrap();
-        assert!(
-            !std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("title_source")
-        );
+        assert!(!json(&path).to_string().contains("title_source"));
 
         store.record_message(1, "Port the parser", 1_000).unwrap();
         assert_eq!(
@@ -1303,6 +1309,10 @@ mod tests {
     }
 
     fn seeded(path: &Path, layout: &str) {
+        let database = database_path(path);
+        if database.exists() {
+            std::fs::remove_file(database).unwrap();
+        }
         std::fs::write(
             path,
             format!(
@@ -1313,7 +1323,11 @@ mod tests {
     }
 
     fn json(path: &Path) -> Value {
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        if database_path(path).exists() {
+            Store::open(path).unwrap().saved_snapshot().unwrap()
+        } else {
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        }
     }
 
     fn saved_sidebar(saved: &Value) -> &Value {
@@ -1325,7 +1339,7 @@ mod tests {
     }
 
     fn appearance_keys_saved_once(path: &Path) {
-        let text = std::fs::read_to_string(path).unwrap();
+        let text = json(path).to_string();
         for key in [r#""theme""#, r#""density""#, r#""ui_font""#] {
             assert_eq!(text.matches(key).count(), 1, "{key} in {text}");
         }
@@ -1348,7 +1362,7 @@ mod tests {
         assert!(store.set_model(1, Some("fake-fast".into())).is_err());
         assert!(store.set_provider(1, Provider::Claude).is_err());
         store.set_draft(1, "edited".into()).unwrap();
-        let saved = std::fs::read_to_string(&path).unwrap();
+        let saved = json(&path).to_string();
         assert!(saved.contains(r#""version":1"#));
         assert!(!saved.contains(r#""model":"#), "{saved}");
         assert!(Store::open(&path).unwrap().workspace().sessions()[0].started());
@@ -1365,7 +1379,7 @@ mod tests {
         let session = &store.workspace().sessions()[0];
         assert!(!session.started());
         assert_eq!(session.model_locked(), Some(false));
-        let saved = std::fs::read_to_string(&path).unwrap();
+        let saved = json(&path).to_string();
         assert!(saved.contains(r#""model_locked":false"#), "{saved}");
         store.set_model(1, Some("fake-fast".into())).unwrap();
 
@@ -1591,7 +1605,7 @@ mod tests {
         assert_eq!(preferences.appearance().theme, ThemeMode::Light);
         assert_eq!(preferences.appearance().ui_font.as_deref(), Some("Inter"));
         assert_eq!(reopened.workspace().sessions()[0].draft(), "draft");
-        let saved = std::fs::read_to_string(&path).unwrap();
+        let saved = json(&path).to_string();
         assert!(saved.contains(r#""version":1"#), "{saved}");
         assert!(
             saved.contains(r#""sidebar_layout":{"side":"right","width_px":360}"#),
@@ -1750,18 +1764,17 @@ mod tests {
             Composition::default()
         );
         store.set_draft(1, "edited".into()).unwrap();
-        let before = std::fs::read(&path).unwrap();
+        let before = json(&path);
         let writes = store.writes();
         assert!(store.set_project_layout(&a, Some(tabbed().into())).is_err());
         assert!(store.set_project_layout(&a, None).is_err());
         assert_eq!(store.writes(), writes);
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(json(&path), before);
         assert_eq!(project_layouts(&path), Some(serde_json::json!("wide")));
     }
 
     #[test]
     fn a_project_layout_fails_before_rename_or_warns_after_it() {
-        use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("state");
         std::fs::create_dir(&state).unwrap();
@@ -1788,13 +1801,14 @@ mod tests {
         );
         store.sync_directory = File::sync_all;
 
-        let before = std::fs::read(&path).unwrap();
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let before = json(&path);
+        let lock = rusqlite::Connection::open(store.path()).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
         let failed = store.set_project_layout(&a, None);
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        lock.execute_batch("ROLLBACK").unwrap();
         assert!(failed.is_err());
         assert_eq!(store.workspace().preferences().composition(&a), tabbed());
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(json(&path), before);
     }
 
     #[test]

@@ -49,7 +49,9 @@ use settings_page::SettingsPage;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+#[cfg(all(test, feature = "ui-tests"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use view_state::ViewKey;
@@ -3383,6 +3385,16 @@ mod tests {
     use conversation::Row;
     use keystone_agent::{Event, Item, ItemKind, ItemStatus, TurnStatus};
 
+    pub(super) fn lock_database(path: &Path) -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_with_flags(
+            keystone_core::database_path(path),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        connection
+    }
+
     fn working_directory() -> WorkingDirectory {
         WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
     }
@@ -5038,9 +5050,8 @@ mod tests {
         store
             .create(Provider::Codex, &working_directory(), 1)
             .unwrap();
-        // A file where the sessions directory belongs makes every write fail.
         let sessions = dir.path().join("sessions");
-        std::fs::write(&sessions, "").unwrap();
+        let writer = lock_database(store.path());
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -5070,7 +5081,7 @@ mod tests {
             view.state.read(cx).conversations()[&1].save_error.is_some()
         });
         assert!(cx.debug_bounds("transcript-status").is_some());
-        std::fs::remove_file(&sessions).unwrap();
+        drop(writer);
         turn(&view, cx);
         wait_until(cx, &view, |view, cx| {
             view.state.read(cx).conversations()[&1].save_error.is_none()
@@ -5092,7 +5103,7 @@ mod tests {
             .create(Provider::Codex, &working_directory(), 1)
             .unwrap();
         let sessions = dir.path().join("sessions");
-        std::fs::write(&sessions, "blocked").unwrap();
+        let writer = lock_database(store.path());
         cx.update(keystone_ui::init);
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -5123,7 +5134,7 @@ mod tests {
             assert!(this.state.read(cx).conversations()[&1].save_error.is_some());
         });
         assert!(cx.debug_bounds("transcript-status").is_some());
-        std::fs::remove_file(&sessions).unwrap();
+        drop(writer);
         view.update(cx, |this, cx| {
             this.flush_logs(cx);
             assert!(this.state.read(cx).conversations()[&1].save_error.is_none());
@@ -5413,7 +5424,6 @@ mod tests {
     /// with a mode but no record is not sent while the record cannot be saved.
     #[gpui::test]
     fn an_override_is_recorded_before_it_can_reach_the_provider(cx: &mut gpui::TestAppContext) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let codex = wrapper(
@@ -5464,8 +5474,7 @@ mod tests {
 
         view.update(cx, |view, cx| view.select(1, cx));
         cx.run_until_parked();
-        let readonly = std::fs::Permissions::from_mode(0o555);
-        std::fs::set_permissions(dir.path(), readonly).unwrap();
+        let writer = lock_database(&path);
         send_text(&view, cx, "hello");
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
@@ -5486,7 +5495,7 @@ mod tests {
                 "nothing reached Codex"
             );
         });
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(writer);
         cx.simulate_keystrokes("ctrl-enter");
         assert_eq!(
             setting_of_reply(&view, cx, "You wrote: hello"),
@@ -5688,7 +5697,7 @@ mod tests {
         });
         assert_eq!(connection(&view, cx), auto);
         let before = saved_mode(&view, cx);
-        let file = std::fs::read(&path).unwrap();
+        let file = Store::open(&path).unwrap().saved_snapshot().unwrap();
         for how in ["cancel", "escape", "enter", "outside"] {
             pick_mode(cx, ApprovalMode::FullAccess);
             assert!(asking(&view, cx), "{how}: the dialog shows");
@@ -5711,7 +5720,11 @@ mod tests {
             assert!(!asking(&view, cx), "{how}: the dialog closed");
             assert!(composer_focused(&view, cx), "{how}: focus is back");
             assert_eq!(saved_mode(&view, cx), before, "{how}: nothing saved");
-            assert_eq!(std::fs::read(&path).unwrap(), file, "{how}");
+            assert_eq!(
+                Store::open(&path).unwrap().saved_snapshot().unwrap(),
+                file,
+                "{how}"
+            );
             assert_eq!(connection(&view, cx), auto, "{how}: nothing sent");
         }
         send_text(&view, cx, "second");
@@ -7948,7 +7961,7 @@ mod tests {
         let (view, cx) = open_window(&path, cx);
         click(cx, "new-session");
         click(cx, "new-codex");
-        let before = std::fs::read(&path).unwrap();
+        let before = Store::open(&path).unwrap().saved_snapshot().unwrap();
         let unavailable = dir.path().join("unavailable");
         view.update(cx, |this, cx| {
             this.presentation.project =
@@ -7962,7 +7975,10 @@ mod tests {
             assert_eq!(this.state.read(cx).store().workspace().sessions().len(), 1);
             assert_eq!(this.composer.read(cx).value(), "Keep this draft");
         });
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            Store::open(&path).unwrap().saved_snapshot().unwrap(),
+            before
+        );
     }
 
     #[gpui::test]

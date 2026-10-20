@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::lock_database;
 use app_state::Phase;
 use gpui::{TestAppContext, VisualTestContext};
 use std::os::unix::fs::PermissionsExt;
@@ -264,7 +265,7 @@ fn failed_nonselected_log_barrier_vetoes_close_and_retry_needs_no_send(cx: &mut 
         s.flush_logs(cx).unwrap();
     });
     let sessions = dir.path().join("sessions");
-    std::fs::write(&sessions, "blocked").unwrap();
+    let writer = lock_database(&dir.path().join("workspace.sqlite3"));
     state.update(cx, |s, cx| {
         s.test_conversation(2).push_local("retained exactly once");
         s.commit(2);
@@ -276,11 +277,11 @@ fn failed_nonselected_log_barrier_vetoes_close_and_retry_needs_no_send(cx: &mut 
     assert_eq!(phase(&state, cx), Phase::Running);
     assert!(cx.debug_bounds("shutdown-error").is_some());
     assert!(state.read_with(cx, |s, _| s.conversations()[&2].save_error.is_some()));
-    std::fs::remove_file(sessions).unwrap();
+    drop(writer);
     assert!(!cx.simulate_close());
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Exiting);
-    let entries = keystone_agent::log::read(&dir.path().join("sessions"), 2).unwrap();
+    let entries = keystone_agent::log::read(&sessions, 2).unwrap();
     let texts: Vec<_> = entries
         .iter()
         .filter_map(|e| match e {
@@ -302,7 +303,7 @@ fn terminal_budget_loss_stays_visible_but_repaired_pending_writes_allow_quit(
         state.flush_logs(cx).unwrap();
     });
     let sessions = dir.path().join("sessions");
-    std::fs::write(&sessions, "blocked").unwrap();
+    let writer = lock_database(&dir.path().join("workspace.sqlite3"));
     state.update(cx, |state, cx| {
         state
             .test_conversation(2)
@@ -332,14 +333,13 @@ fn terminal_budget_loss_stays_visible_but_repaired_pending_writes_allow_quit(
     view.read_with(cx, |view, cx| {
         let message = view.status_line(cx).unwrap().0;
         assert!(message.contains("Could not save conversation logs"));
-        let io = std::fs::create_dir_all(&sessions).unwrap_err().to_string();
         assert_eq!(
-            message.matches(&io).count(),
+            message.matches("Session 2: database is locked").count(),
             1,
             "failed Quit must show each storage error once: {message}"
         );
     });
-    std::fs::remove_file(&sessions).unwrap();
+    drop(writer);
     cx.simulate_keystrokes("ctrl-q");
     cx.run_until_parked();
     assert_eq!(
@@ -450,7 +450,7 @@ fn directory_sync_failure_vetoes_title_bar_close_until_explicit_retry(cx: &mut T
 fn failed_nonselected_provider_metadata_is_replayed_before_quit(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (view, state, cx) = open(dir.path(), cx);
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let writer = lock_database(&dir.path().join("workspace.sqlite3"));
     state.update(cx, |s, cx| {
         s.receive(
             vec![],
@@ -478,7 +478,7 @@ fn failed_nonselected_provider_metadata_is_replayed_before_quit(cx: &mut TestApp
             "failed Quit must show each metadata error once: {message}"
         )
     });
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(writer);
     cx.update(|_, cx| request_quit(cx));
     assert_eq!(phase(&state, cx), Phase::Exiting);
     let restored = Store::open(dir.path().join("workspace.json")).unwrap();

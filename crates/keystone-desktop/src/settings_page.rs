@@ -584,8 +584,7 @@ mod tests {
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
         keys(cx, "ctrl-,");
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
+        let writer = crate::tests::lock_database(&path);
         click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
         view.read_with(cx, |view, cx| {
@@ -607,7 +606,7 @@ mod tests {
             );
         });
         assert!(shown(cx, "settings-error"), "the page shows the save error");
-        std::fs::remove_dir(&path).unwrap();
+        drop(writer);
         click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
         assert_eq!(saved(&path).theme, ThemeMode::Light);

@@ -21,24 +21,22 @@ fn open(
     std::fs::create_dir(dir.path().join("b")).unwrap();
     std::fs::create_dir(dir.path().join("state")).unwrap();
     let path = dir.path().join("state/workspace.json");
-    let mut store = Store::open(&path).unwrap();
+    let mut store = Store::in_memory().unwrap();
     let directory = WorkingDirectory::new(&dir.path().join("a")).unwrap();
     store.create(Provider::Codex, &directory, 1).unwrap();
     store.create(Provider::Claude, &directory, 2).unwrap();
     store.select(1).unwrap();
+    let mut value = store.saved_snapshot().unwrap();
     if !contexts {
-        drop(store);
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         value["workspace"]["sessions"][0]
             .as_object_mut()
             .unwrap()
             .remove("execution_context");
         value["workspace"]["sessions"][1]["execution_context"] =
             serde_json::json!({"version": 700, "extra": [null, "keep"]});
-        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        store = Store::open(&path).unwrap();
     }
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let store = Store::open(&path).unwrap();
     cx.update(keystone_ui::init);
     cx.executor().allow_parking();
     let (view, cx) = cx.add_window_view(|window, cx| {
@@ -468,7 +466,7 @@ fn legacy_choice_saves_without_send_and_unsupported_data_cannot_be_replaced(
         assert!(this.state.read(cx).test_codex().is_none());
         assert!(this.state.read(cx).conversations()[&1].rows.is_empty());
         this.select(2, cx);
-        let before = std::fs::read(this.state.read(cx).store().path()).unwrap();
+        let before = this.state.read(cx).store().saved_snapshot().unwrap();
         this.choose_legacy_folder(2, cx);
         this.send_message(
             crate::ComposerDraft {
@@ -484,7 +482,7 @@ fn legacy_choice_saves_without_send_and_unsupported_data_cannot_be_replaced(
             Some(ConversationFolder::Unsupported)
         );
         assert_eq!(
-            std::fs::read(this.state.read(cx).store().path()).unwrap(),
+            this.state.read(cx).store().saved_snapshot().unwrap(),
             before
         );
     });
@@ -605,16 +603,15 @@ fn refuse_directory_sync(this: &mut Keystone, cx: &mut Context<Keystone>) {
 
 #[gpui::test]
 fn folder_success_keeps_an_unresolved_provider_thread_error(cx: &mut TestAppContext) {
-    use std::os::unix::fs::PermissionsExt;
     let (dir, view, cx) = open(cx, false);
     let state = dir.path().join("state");
     view.update(cx, |this, cx| {
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let writer = crate::tests::lock_database(&state.join("workspace.sqlite3"));
         let ready = Event::ThreadReady {
             thread_id: "rejected-thread".into(),
         };
         this.receive(vec![], vec![(1, ready)], cx);
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(writer);
         let unresolved = |this: &Keystone, cx: &App| {
             this.state
                 .read(cx)
@@ -630,7 +627,13 @@ fn folder_success_keeps_an_unresolved_provider_thread_error(cx: &mut TestAppCont
             Some(ConversationFolder::Recorded(_))
         ));
         assert!(unresolved(this, cx), "{:?}", this.error);
-        let saved = std::fs::read_to_string(this.state.read(cx).store().path()).unwrap();
+        let saved = this
+            .state
+            .read(cx)
+            .store()
+            .saved_snapshot()
+            .unwrap()
+            .to_string();
         assert!(saved.contains(r#""origin":"chosen""#), "{saved}");
         assert!(!saved.contains("rejected-thread"), "{saved}");
     });
@@ -738,7 +741,13 @@ fn first_send_lock_waits_for_the_send_barrier_when_its_sync_is_pending(cx: &mut 
             "{:?}",
             this.state.read(cx).conversations()[&1].error
         );
-        let saved = std::fs::read_to_string(this.state.read(cx).store().path()).unwrap();
+        let saved = this
+            .state
+            .read(cx)
+            .store()
+            .saved_snapshot()
+            .unwrap()
+            .to_string();
         assert!(saved.contains(r#""model_locked":true"#), "{saved}");
         assert!(this.state.read(cx).store().workspace().sessions()[0].started());
     });
@@ -1025,7 +1034,11 @@ fn a_400px_composer_keeps_a_model_target_and_every_action_through_a_turn(cx: &mu
     cx.simulate_resize(gpui::size(px(400.), px(800.)));
     let window = gpui::Bounds::new(gpui::point(px(0.), px(0.)), gpui::size(px(400.), px(800.)));
     for session in [1, 2] {
-        view.update(cx, |this, cx| this.select(session, cx));
+        view.update(cx, |this, cx| {
+            this.select(session, cx);
+            this.state
+                .update(cx, |state, cx| state.flush_logs(cx).unwrap());
+        });
         cx.run_until_parked();
         let check = |cx: &mut VisualTestContext, actions: &[&'static str]| {
             let selector = cx.debug_bounds("model-selector").unwrap();

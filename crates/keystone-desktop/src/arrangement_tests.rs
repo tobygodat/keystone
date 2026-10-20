@@ -275,8 +275,8 @@ fn header_only_conversation_does_not_observe_until_transcript_is_visible(cx: &mu
 fn failed_observation_waits_for_deliberate_activation_before_retry(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx);
     unread(&view, cx);
-    let path = dir.path().join("workspace.json");
-    let backup = dir.path().join("backup.json");
+    let path = dir.path().join("workspace.sqlite3");
+    let backup = dir.path().join("backup.sqlite3");
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     click(cx, "conversation");
@@ -449,8 +449,8 @@ fn a_tab_choice_that_cannot_be_saved_leaves_focus_where_it_was(cx: &mut TestAppC
     let (dir, view, cx) = open(cx);
     use_layout(&view, cx, tabbed(0));
     click(cx, "conversation");
-    let path = dir.path().join("workspace.json");
-    let backup = dir.path().join("backup.json");
+    let path = dir.path().join("workspace.sqlite3");
+    let backup = dir.path().join("backup.sqlite3");
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     click(cx, "surface-tabs-0-tab-1");
@@ -662,8 +662,8 @@ fn a_files_shortcut_that_cannot_save_keeps_focus_on_the_displayed_conversation(
     let (dir, view, cx) = open(cx);
     use_layout(&view, cx, tabbed_with_files());
     click(cx, "conversation");
-    let path = dir.path().join("workspace.json");
-    let backup = dir.path().join("backup.json");
+    let path = dir.path().join("workspace.sqlite3");
+    let backup = dir.path().join("backup.sqlite3");
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     toggle_files(cx);
@@ -691,8 +691,8 @@ fn a_files_menu_insert_that_cannot_save_does_not_focus_an_absent_tree(cx: &mut T
     let (dir, view, cx) = open(cx);
     use_layout(&view, cx, tabbed(0));
     click(cx, "conversation");
-    let path = dir.path().join("workspace.json");
-    let backup = dir.path().join("backup.json");
+    let path = dir.path().join("workspace.sqlite3");
+    let backup = dir.path().join("backup.sqlite3");
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     click(cx, "surface-add");
@@ -928,10 +928,13 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     cx.simulate_resize(gpui::size(px(400.), px(900.)));
     cx.run_until_parked();
     let path = dir.path().join("workspace.json");
-    let original = std::fs::read(&path).unwrap();
+    let original = Store::open(&path).unwrap().saved_snapshot().unwrap();
     click(cx, "fitted-tab-3");
     assert!(cx.debug_bounds("conversation-view-3").is_some());
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(
+        Store::open(&path).unwrap().saved_snapshot().unwrap(),
+        original
+    );
     click(cx, "customize-toggle");
     view.update(cx, |this, cx| {
         let saved = this.saved_composition(cx);
@@ -992,10 +995,13 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
     cx.run_until_parked();
     assert!(cx.debug_bounds("conversation").is_some());
     assert!(cx.debug_bounds("conversation-view-3").is_none());
-    let applied = std::fs::read(&path).unwrap();
+    let applied = Store::open(&path).unwrap().saved_snapshot().unwrap();
     click(cx, "fitted-tab-3");
     assert!(cx.debug_bounds("conversation-view-3").is_some());
-    assert_eq!(std::fs::read(&path).unwrap(), applied);
+    assert_eq!(
+        Store::open(&path).unwrap().saved_snapshot().unwrap(),
+        applied
+    );
     click(cx, "customize-discard");
     assert!(cx.debug_bounds("conversation-view-3").is_some());
     click(cx, "fitted-tab-0");
@@ -1046,7 +1052,10 @@ fn fitting_uses_the_first_displayed_preferred_pane_and_refits_to_it_again(cx: &m
     assert!(cx.debug_bounds("conversation-view-3").is_some());
     assert!(cx.debug_bounds("conversation").is_none());
     assert!(cx.debug_bounds("conversation-view-4").is_none());
-    let saved = std::fs::read(dir.path().join("workspace.json")).unwrap();
+    let saved = Store::open(dir.path().join("workspace.json"))
+        .unwrap()
+        .saved_snapshot()
+        .unwrap();
     click(cx, "fitted-tab-4");
     assert!(cx.debug_bounds("conversation-view-4").is_some());
     cx.simulate_resize(gpui::size(px(1200.), px(900.)));
@@ -1061,7 +1070,10 @@ fn fitting_uses_the_first_displayed_preferred_pane_and_refits_to_it_again(cx: &m
     );
     assert!(cx.debug_bounds("conversation-view-4").is_none());
     assert_eq!(
-        std::fs::read(dir.path().join("workspace.json")).unwrap(),
+        Store::open(dir.path().join("workspace.json"))
+            .unwrap()
+            .saved_snapshot()
+            .unwrap(),
         saved
     );
 }

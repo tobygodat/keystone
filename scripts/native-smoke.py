@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Requires the installed Hyprland Lua API, not legacy dispatch names."""
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('native_driver', ROOT / 'scripts/native-driver.py')
+driver = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(driver)
 ARTIFACTS = Path(os.environ.get("KEYSTONE_CAPTURE_DIR", ROOT / ".audit" / "native-smoke"))
 DRAFT = "Native smoke draft survives restart."
 KEY_DELAY = os.environ.get("KEYSTONE_KEY_DELAY_MS", "100")
@@ -96,9 +101,7 @@ def run(result):
                 input_keys(*args)
 
             def workspace():
-                if not state_path.exists():
-                    return {"sessions": [], "selected": None}
-                return json.loads(state_path.read_text())["workspace"]
+                return driver.read_workspace(state_path).get("workspace", {"sessions": [], "selected": None})
 
             def expect(name, predicate):
                 def matching_state():
@@ -150,30 +153,30 @@ def run(result):
                 shortcut("s", shift=True)
                 expect("restarted app loaded selected Codex", lambda s: len(s["sessions"]) == 2 and s["sessions"][1]["settled"] and s["sessions"][1]["draft"] == DRAFT)
                 if os.environ.get("KEYSTONE_TEST_CLOSE") == "1":
-                    saved_path = state_path.with_suffix(".saved")
-                    state_path.rename(saved_path)
-                    state_path.mkdir()
-                    shortcut("l")
-                    time.sleep(0.3)
-                    shortcut("a")
-                    input_keys("-d", KEY_DELAY, "--", "Unsaved draft must survive native close")
-                    if json.loads(command("hyprctl", "activewindow", "-j")).get("pid") != process.pid:
-                        raise RuntimeError("Focus moved before native close; refusing dispatch")
-                    command("hyprctl", "dispatch", "hl.dsp.window.close()")
-                    time.sleep(0.5)
-                    if process.poll() is not None or not any(c.get("pid") == process.pid for c in clients()):
-                        raise RuntimeError("Native close discarded an unsaved draft")
-                    capture("blocked-close")
-                    state_path.rmdir()
-                    saved_path.rename(state_path)
+                    writer = sqlite3.connect(driver.database_path(state_path), timeout=0.1)
+                    try:
+                        writer.execute("BEGIN IMMEDIATE")
+                        shortcut("l")
+                        time.sleep(0.3)
+                        shortcut("a")
+                        input_keys("-d", KEY_DELAY, "--", "Unsaved draft must survive native close")
+                        if json.loads(command("hyprctl", "activewindow", "-j")).get("pid") != process.pid:
+                            raise RuntimeError("Focus moved before native close; refusing dispatch")
+                        command("hyprctl", "dispatch", "hl.dsp.window.close()")
+                        time.sleep(0.5)
+                        if process.poll() is not None or not any(c.get("pid") == process.pid for c in clients()):
+                            raise RuntimeError("Native close discarded an unsaved draft")
+                        capture("blocked-close")
+                    finally:
+                        writer.close()
                     shortcut("s", shift=True)
                     expect("native close preserved unsaved draft for retry", lambda s: s["sessions"][1]["draft"] == "Unsaved draft must survive native close")
-                (ARTIFACTS / "persisted-state.json").write_text(state_path.read_text())
+                (ARTIFACTS / "persisted-state.json").write_text(json.dumps(driver.read_workspace(state_path), indent=2))
                 result["status"] = "passed"
             except Exception:
                 result["process_exit"] = process.poll() if process else None
-                if state_path.is_file():
-                    (ARTIFACTS / "failure-state.json").write_text(state_path.read_text())
+                if driver.database_path(state_path).is_file():
+                    (ARTIFACTS / "failure-state.json").write_text(json.dumps(driver.read_workspace(state_path), indent=2))
                 if process is not None and process.poll() is None:
                     capture("failure")
                     if os.environ.get("KEYSTONE_DEBUG_HANG") == "1":

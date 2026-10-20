@@ -277,10 +277,10 @@ fn block_the_next_snapshot(directory: &std::fs::File) -> std::io::Result<()> {
     directory.sync_all()?;
     let dir = directory_path(directory)?;
     std::fs::rename(
-        dir.join("workspace.json"),
-        dir.join("workspace-before-failed-draft.json"),
+        dir.join("workspace.sqlite3"),
+        dir.join("workspace-before-failed-draft.sqlite3"),
     )?;
-    std::fs::create_dir(dir.join("workspace.json"))
+    std::fs::create_dir(dir.join("workspace.sqlite3"))
 }
 
 #[gpui::test]
@@ -308,10 +308,10 @@ fn successful_send_reports_a_failed_final_empty_draft_snapshot_without_changed(
     state.update(cx, |state, _| {
         state.test_sync_directory(std::fs::File::sync_all)
     });
-    std::fs::remove_dir(dir.path().join("workspace.json")).unwrap();
+    std::fs::remove_dir(dir.path().join("workspace.sqlite3")).unwrap();
     std::fs::rename(
-        dir.path().join("workspace-before-failed-draft.json"),
-        dir.path().join("workspace.json"),
+        dir.path().join("workspace-before-failed-draft.sqlite3"),
+        dir.path().join("workspace.sqlite3"),
     )
     .unwrap();
     view.update(cx, |view, cx| assert!(view.save_draft(cx)));
@@ -353,10 +353,10 @@ fn autosave_supersedes_the_last_failed_queued_draft_but_keeps_shutdown_feedback(
         );
         state.test_sync_directory(std::fs::File::sync_all);
     });
-    std::fs::remove_dir(dir.path().join("workspace.json")).unwrap();
+    std::fs::remove_dir(dir.path().join("workspace.sqlite3")).unwrap();
     std::fs::rename(
-        dir.path().join("workspace-before-failed-draft.json"),
-        dir.path().join("workspace.json"),
+        dir.path().join("workspace-before-failed-draft.sqlite3"),
+        dir.path().join("workspace.sqlite3"),
     )
     .unwrap();
     view.update(cx, |view, cx| {

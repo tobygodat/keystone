@@ -64,7 +64,7 @@ Completed items never change, so their layout can be cached. The transcript uses
 
 ### 3. Storage: the provider owns the conversation; Keystone keeps a neutral log
 
-**Decide.** Each session gets one append-only file, `sessions/<id>.log`, holding completed items, approval decisions, turn boundaries, and usage. Nothing is written per delta. Each completed item is appended once, and the file is synced at turn end and after every approval decision. Tool output is kept with a cap: the first and last 32 KB plus the byte count. The existing `workspace.json` stays the small index of sessions and preferences.
+**Decide.** One workspace SQLite database holds neutral completed items, approval decisions and turn boundaries alongside sessions and preferences. A global append-only event sequence accompanies the read projections. Nothing is written per streamed delta. The log worker commits completed batches atomically with WAL and synchronous=FULL; workspace changes use guarded transactions. Existing `workspace.json` and `sessions/*.jsonl` are imported once, together, and left untouched. See [storage](storage.md) for transaction, retry and migration guarantees. Tool output is kept with a cap: the first and last 32 KB plus the byte count.
 
 Why keep a log when the providers keep transcripts:
 - Claude's transcript format is "internal … and changes between versions" according to its own docs, so Keystone cannot depend on it at runtime.
@@ -77,11 +77,11 @@ Provider transcripts are still the source of truth for the conversation itself. 
 
 **Off the UI thread.** The desktop's conversation state does no IO. It collects entries in an outbox, and `log::Logs` writes them on one worker thread for all sessions, in the order they were queued, so a session's entries stay in order. Each history load reads on a thread of its own, so a read that never returns, such as from a FIFO or a stalled network disk, holds up neither writes nor other sessions' loads. A session's history is requested once, the first time it is needed, before anything is written for it, and arrives as a report; events and sent messages that arrive meanwhile wait and are applied after the history. If the read fails, the conversation goes on without the history and shows a warning for the rest of the session; what was sent meanwhile is shown and saved. A message sent meanwhile has already gone to the provider, so the turn shows as running, with Stop, at once. A write failure is reported to the conversation and shown until a later write succeeds; the next write reopens the file. Quitting and closing the window first wait up to two seconds for history still loading and apply it, so messages waiting on it are logged. A history that has not arrived by then is given up, which logs what was waiting on it; the read is left running and is not joined. Then they wait for every queued write, without a bound, so a disk that stalls writes still holds up quitting. `worker::Worker` is the general piece and does not know about Codex.
 
-On startup, a session whose log has no turn end is marked interrupted. When the user resumes it, Keystone reconciles: it asks Codex for items after the last logged one (`thread/items/list`) or reads the tail of Claude's transcript. That reconciliation tolerates format changes because it is best effort and only fills gaps.
+On startup, a session whose log has no turn end is marked interrupted. A later crash-reconciliation unit will ask Codex for items after the last logged one or read the tail of Claude's transcript; SQLite does not itself recover unfinished provider output.
 
 Import of existing sessions reuses the same readers. It is a versioned, best-effort, one-time conversion into a Keystone log, never a live dependency.
 
-No SQLite and no CRDT. Both add build time and solve problems Keystone does not have, namely concurrent writers and sync.
+SQLite is synchronous and bundled through rusqlite, without an async runtime. Its global sequence leaves a cursor for a future client, but remote sync, delivery orchestration and a CRDT are not part of storage.
 
 ### 4. Turns end only when the provider says so
 

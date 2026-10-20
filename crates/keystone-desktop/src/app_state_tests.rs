@@ -163,6 +163,46 @@ fn completed(state: &AppState, session: u64) -> bool {
 }
 
 #[gpui::test]
+fn runtime_logs_share_the_store_database_for_custom_paths_and_memory(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.executor().allow_parking();
+    for mut store in [
+        Store::open(dir.path().join("custom.json")).unwrap(),
+        Store::in_memory().unwrap(),
+    ] {
+        store
+            .create(
+                Provider::Codex,
+                &WorkingDirectory::new(dir.path()).unwrap(),
+                1,
+            )
+            .unwrap();
+        let database = store.database();
+        let state = cx.new(|cx| AppState::new(store, cx));
+        state.update(cx, |state, cx| {
+            state.ensure_history(1);
+            state.flush_logs(cx).unwrap();
+            state
+                .conversations
+                .get_mut(&1)
+                .unwrap()
+                .push_local("shared log");
+            state.commit(1);
+            state.flush_logs(cx).unwrap();
+        });
+        let entries = database.read_logs(1).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            serde_json::from_str::<Entry>(&entries[0]).unwrap(),
+            Entry::Item { item, .. } if item.text == "shared log"
+        ));
+    }
+    assert!(!dir.path().join("workspace.sqlite3").exists());
+}
+
+#[gpui::test]
 fn global_runtime_loads_sends_answers_and_logs_both_providers_without_a_view(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -633,7 +673,7 @@ fn recovered_provider_metadata_invalidates_the_cached_sidebar(cx: &mut gpui::Tes
         state.ensure_history(1);
         state.flush_logs(cx).unwrap();
     });
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let writer = crate::tests::lock_database(&dir.path().join("workspace.sqlite3"));
     state.update(cx, |state, cx| {
         state.persist(PendingSave::Message(
             1,
@@ -643,7 +683,7 @@ fn recovered_provider_metadata_invalidates_the_cached_sidebar(cx: &mut gpui::Tes
         state.publish(cx);
     });
     state.read_with(cx, |state, _| assert!(state.error.is_some()));
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(writer);
     seen.borrow_mut().clear();
     state.update(cx, |state, cx| {
         state.receive(

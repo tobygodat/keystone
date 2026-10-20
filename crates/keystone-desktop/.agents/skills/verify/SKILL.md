@@ -50,12 +50,12 @@ Prefer names and waits over coordinates and sleeps:
 - `input` takes driver actions: `{"actions":[{"action":"keypress","keys":["ctrl","l"]}]}`, `{"action":"type","text":"Verification draft"}`, and `{"action":"wait","duration_ms":500}`.
 - `wheel` takes a fresh named target and signed whole notch counts: `{"id":"conversation","vertical":-3}` scrolls upward three notches. Positive vertical scrolls down; positive horizontal scrolls right. It uses the same upstream `input` path as raw `scroll`, whose units remain axis distances (15 per notch). Read actual row/pixel movement, not only a successful input response. See [wheel and maximize](features/wheel-and-maximize.md) for the native acceptance journey.
 - `screenshot` returns the PNG and saves it as evidence.
-- `workspace` reads the real saved file. `snapshot` copies it into the evidence directory.
+- `workspace` reads saved SQLite workspace and session projections in one read-only transaction. `snapshot` uses SQLite's backup API, including committed WAL contents, and preserves both the database and a matching JSON projection in the evidence directory. Its `path` remains the JSON export; `database_path` names the self-contained backup.
 - `call` reaches any upstream tool, such as `{"tool":"windows_list"}`.
 
 A named click proves where the input went, not what it did. Confirm each step through the visible result and the saved state. Re-observe after state changes rather than batching across them. The feature map lists mouse and keyboard entry points; proving one does not prove the others.
 
-To restart, press Ctrl+Q through `input`, wait until `windows_list` is empty and the tracked PID has exited, then call `launch`. A graceful quit has exit code 0 in `doctor`; a crash during quit also removes the window. Launch reuses the run's state file. Run `doctor` again and inspect the restored UI. Never launch twice against a running instance.
+To restart, press Ctrl+Q through `input`, wait until `windows_list` is empty and the tracked PID has exited, then call `launch`. A graceful quit has exit code 0 in `doctor`; a crash during quit also removes the window. Launch reuses the run's SQLite database. The configured `state` path is the legacy JSON import location; `start` also returns the live `database` path. Run `doctor` again and inspect the restored UI. Never launch twice against a running instance.
 
 ## Evidence
 

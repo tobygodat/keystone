@@ -505,11 +505,7 @@ impl AppState {
         let wake: Wake = Arc::new(move || {
             let _ = wake_tx.unbounded_send(());
         });
-        let sessions_dir = store
-            .path()
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("sessions");
+        let logs = Logs::with_database(store.database(), wake.clone());
         Self {
             store,
             error: None,
@@ -518,7 +514,7 @@ impl AppState {
             claude: None,
             conversations: HashMap::new(),
             catalogs: Catalogs::default(),
-            logs: Logs::new(sessions_dir, wake.clone()),
+            logs,
             log_losses: Default::default(),
             wake,
             changes: RuntimeChanged::default(),

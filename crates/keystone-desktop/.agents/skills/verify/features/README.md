@@ -8,7 +8,7 @@ Drive the app through the `keystone-verify` MCP server. Call `start` for a priva
 
 Prefer named elements. Call `click` with `{"id":"..."}`, then `wait_for` the element that should appear or disappear. `elements` lists the named elements in the latest frame. Its `visible` bounds exclude clipping but not overlap by menus or popovers. A named click does not prove the visual result. Inspect a screenshot after each step. Unnamed controls, such as the window controls, still need coordinates from a fresh screenshot. Never click using stale coordinates.
 
-Read state with `workspace`. Preserve it with `snapshot`. These tools only observe the real state file. After every mutation, wait for the visible result and saved state. A wait alone is not proof.
+Read state with `workspace`. Preserve it with `snapshot`. These tools observe the real SQLite projections read-only, including committed WAL contents. Snapshots retain a self-contained database backup and its matching JSON workspace export. After every mutation, wait for the visible result and saved state. A wait alone is not proof.
 
 ## Features
 
