@@ -336,6 +336,7 @@ fn source_preview(source: &str, mono: SharedString, color: gpui::Hsla) -> gpui::
         .p_3()
         .whitespace_nowrap()
         .font_family(mono)
+        .font_features(gpui::FontFeatures::default())
         .text_size(TextSize::Ui.px())
         .line_height(px(18.))
         .text_color(color)

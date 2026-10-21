@@ -430,7 +430,7 @@ impl Keystone {
         });
         let mut controls = h_flex()
             .gap(px(14.))
-            .font_family(cx.theme().fonts.ui.clone())
+            .font_ui(cx)
             .text_size(TextSize::Base.px())
             .child(provider)
             .child(div().w_px().flex_none())

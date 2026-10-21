@@ -1,4 +1,5 @@
 use crate::color::Color;
+use crate::styled_ext::StyledExt;
 use crate::theme::ActiveTheme;
 use crate::tokens::TextSize;
 use gpui::{
@@ -15,6 +16,7 @@ pub struct Label {
     weight: FontWeight,
     truncate: bool,
     mono: bool,
+    tabular: bool,
 }
 
 impl Label {
@@ -26,6 +28,7 @@ impl Label {
             weight: FontWeight::NORMAL,
             truncate: false,
             mono: false,
+            tabular: false,
         }
     }
 
@@ -54,6 +57,12 @@ impl Label {
         self.mono = true;
         self
     }
+
+    /// Equal-width figures, for numbers that line up in a column.
+    pub fn tabular(mut self) -> Self {
+        self.tabular = true;
+        self
+    }
 }
 
 impl RenderOnce for Label {
@@ -62,7 +71,14 @@ impl RenderOnce for Label {
             .text_size(self.size.px())
             .text_color(self.color.to_hsla(cx))
             .font_weight(self.weight)
-            .when(self.mono, |d| d.font_family(cx.theme().fonts.mono.clone()))
+            .when(
+                self.size == TextSize::Title && self.weight >= FontWeight::SEMIBOLD,
+                |d| d.font_family(cx.theme().fonts.display.clone()),
+            )
+            .when(self.tabular, |d| {
+                d.font_features(cx.theme().fonts.tabular())
+            })
+            .when(self.mono, |d| d.font_mono(cx))
             .map(|d| {
                 if self.truncate {
                     d.min_w_0()

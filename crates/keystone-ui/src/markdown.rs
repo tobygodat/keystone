@@ -19,9 +19,9 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, TextSize};
 use crate::tooltip::Tooltip;
 use gpui::{
-    AnyElement, App, ClipboardItem, ElementId, Entity, FocusHandle, FontStyle, FontWeight,
-    HighlightStyle, InteractiveText, IntoElement, RenderOnce, SharedString, StrikethroughStyle,
-    TextStyle, UnderlineStyle, Window, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, ElementId, Entity, FocusHandle, FontFeatures, FontStyle,
+    FontWeight, HighlightStyle, InteractiveText, IntoElement, RenderOnce, SharedString,
+    StrikethroughStyle, TextStyle, UnderlineStyle, Window, div, prelude::*, px,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
@@ -724,6 +724,7 @@ impl RenderOnce for Markdown {
         let base = TextStyle {
             color: theme.colors.text,
             font_family: theme.fonts.ui.clone(),
+            font_features: theme.fonts.features.clone(),
             ..Default::default()
         };
         let mut ctx = Ctx {
@@ -779,6 +780,11 @@ fn render_block(block: &Block, ctx: &mut Ctx, window: &mut Window, cx: &mut App)
             };
             let style = TextStyle {
                 font_weight: FontWeight::SEMIBOLD,
+                font_family: if *level == 1 {
+                    cx.theme().fonts.display.clone()
+                } else {
+                    ctx.base.font_family.clone()
+                },
                 ..ctx.base.clone()
             };
             div()
@@ -880,9 +886,13 @@ fn table(
     let columns = header
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    let body_style = TextStyle {
+        font_features: cx.theme().fonts.tabular(),
+        ..ctx.base.clone()
+    };
     let head_style = TextStyle {
         color: colors.text_muted,
-        ..ctx.base.clone()
+        ..body_style.clone()
     };
     let mut table = v_flex()
         .surface(Elevation::Raised, cx)
@@ -893,11 +903,7 @@ fn table(
         .chain(rows.iter().map(Vec::as_slice))
         .enumerate()
     {
-        let style = if index == 0 {
-            &head_style
-        } else {
-            &ctx.base.clone()
-        };
+        let style = if index == 0 { &head_style } else { &body_style };
         let mut row = h_flex().items_start().when(index > 0, |d| d.hairline_t(cx));
         for column in 0..columns {
             let cell = div().flex_1().min_w_0().px_3().py_2();
@@ -929,6 +935,7 @@ fn code_block(
     let mono = cx.theme().fonts.mono.clone();
     let code_style = TextStyle {
         font_family: mono.clone(),
+        font_features: FontFeatures::default(),
         color: colors.code_text,
         ..ctx.base.clone()
     };
@@ -1020,6 +1027,7 @@ fn code_block(
                         .flex_shrink_0()
                         .whitespace_nowrap()
                         .font_family(mono)
+                        .font_features(FontFeatures::default())
                         .text_size(TextSize::Ui.px())
                         .line_height(px(18.))
                         .text_color(colors.code_text)
@@ -1042,6 +1050,7 @@ fn inline_text(inline: &Inline, base: &TextStyle, ctx: &mut Ctx, cx: &App) -> An
         let mut text_style = base.clone();
         if style.code {
             text_style.font_family = theme.fonts.mono.clone();
+            text_style.font_features = FontFeatures::default();
         }
         let highlight = HighlightStyle {
             color: if style.link {

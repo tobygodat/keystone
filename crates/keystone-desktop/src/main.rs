@@ -2106,7 +2106,6 @@ impl Keystone {
     ) -> Option<AnyElement> {
         let session = key.session;
         let colors = cx.theme().colors;
-        let mono = cx.theme().fonts.mono.clone();
         let mut view = v_flex().gap_4();
         let mut empty = true;
         if let Some(approval) = conversation.approvals.first() {
@@ -2133,7 +2132,7 @@ impl Keystone {
                     )
                     .child(
                         div()
-                            .font_family(mono.clone())
+                            .font_mono(cx)
                             .text_size(TextSize::Ui.px())
                             .child(approval.action.clone()),
                     )
@@ -2591,7 +2590,10 @@ impl SessionSidebar {
                                     // The Settle button takes this slot while it shows.
                                     .when_some(time.filter(|_| !show_settle), |d, time| {
                                         d.child(
-                                            Label::new(time).size(TextSize::Sm).color(Color::Faint),
+                                            Label::new(time)
+                                                .size(TextSize::Sm)
+                                                .color(Color::Faint)
+                                                .tabular(),
                                         )
                                     }),
                             )
@@ -2809,11 +2811,7 @@ impl Render for Keystone {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.focus_project_transition(window, cx);
         let theme = cx.theme();
-        let (background, text, ui_font) = (
-            theme.colors.background,
-            theme.colors.text,
-            theme.fonts.ui.clone(),
-        );
+        let (background, text) = (theme.colors.background, theme.colors.text);
         let current = self
             .state
             .read(cx)
@@ -2840,7 +2838,7 @@ impl Render for Keystone {
             .id("keystone-root")
             .size_full()
             .bg(background)
-            .font_family(ui_font)
+            .font_ui(cx)
             .text_color(text)
             .text_size(TextSize::Base.px())
             .track_focus(&self.focus)

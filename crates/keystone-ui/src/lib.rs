@@ -51,8 +51,35 @@ pub use tooltip::Tooltip;
 pub use tree::{NodeId, NodeKind, Tree, TreeEntry, TreeModel, TreeState};
 pub use virtual_list::{VirtualList, VirtualListState};
 
-/// Installs the dark theme and component key bindings. Call once before opening a window.
+/// Inter 4.1, embedded so the default interface font is Inter whether or not it is
+/// installed. Provenance and license are in `vendor/inter`.
+const BUNDLED_FONTS: [&[u8]; 7] = [
+    include_bytes!("../vendor/inter/Inter-Regular.ttf"),
+    include_bytes!("../vendor/inter/Inter-Medium.ttf"),
+    include_bytes!("../vendor/inter/Inter-SemiBold.ttf"),
+    include_bytes!("../vendor/inter/Inter-Italic.ttf"),
+    include_bytes!("../vendor/inter/Inter-SemiBoldItalic.ttf"),
+    include_bytes!("../vendor/inter/InterDisplay-SemiBold.ttf"),
+    include_bytes!("../vendor/inter/InterDisplay-SemiBoldItalic.ttf"),
+];
+
+/// Adds the bundled fonts to `text_system`, after the installed ones. Where an installed
+/// Inter has a face of the same weight and style, that face wins; the bundle fills the
+/// rest. The text system skips data it cannot parse without an error, so the unit test
+/// below is what guards the bytes.
+pub fn register_fonts(text_system: &gpui::TextSystem) -> anyhow::Result<()> {
+    text_system.add_fonts(
+        BUNDLED_FONTS
+            .iter()
+            .map(|font| std::borrow::Cow::Borrowed(*font))
+            .collect(),
+    )
+}
+
+/// Registers the bundled fonts and installs the dark theme and component key bindings.
+/// Call once before opening a window.
 pub fn init(cx: &mut gpui::App) {
+    register_fonts(cx.text_system()).expect("the bundled fonts load");
     set_theme(Theme::dark(), cx);
     virtual_list::bind_keys(cx);
     command_palette::bind_keys(cx);
@@ -81,4 +108,75 @@ pub mod prelude {
     pub use crate::{Select, Slider, Switch};
     pub use crate::{Split, SplitState};
     pub use crate::{VirtualList, VirtualListState};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{FontStyle, FontWeight, PlatformTextSystem, font, px};
+    use gpui_wgpu::CosmicTextSystem;
+    use std::sync::Arc;
+
+    #[test]
+    fn bundled_inter_resolves_when_no_font_is_installed() {
+        let platform = Arc::new(CosmicTextSystem::new_without_system_fonts("Inter"));
+        let text_system = gpui::TextSystem::new(platform.clone());
+        assert!(text_system.all_font_names().is_empty());
+        register_fonts(&text_system).unwrap();
+        let names = text_system.all_font_names();
+        assert_eq!(names, ["Inter", "Inter Display"]);
+
+        let fonts = Fonts::default();
+        let (ui, display) = (&fonts.ui, &fonts.display);
+        for (family, weight, style, expected) in [
+            (ui, FontWeight::NORMAL, FontStyle::Normal, 400.),
+            (ui, FontWeight::MEDIUM, FontStyle::Normal, 500.),
+            (ui, FontWeight::SEMIBOLD, FontStyle::Normal, 600.),
+            (ui, FontWeight::BOLD, FontStyle::Normal, 600.),
+            (ui, FontWeight::NORMAL, FontStyle::Italic, 400.),
+            (ui, FontWeight::SEMIBOLD, FontStyle::Italic, 600.),
+            (display, FontWeight::SEMIBOLD, FontStyle::Normal, 600.),
+            (display, FontWeight::SEMIBOLD, FontStyle::Italic, 600.),
+        ] {
+            let mut requested = font(family.clone());
+            requested.weight = weight;
+            requested.style = style;
+            requested.features = fonts.features.clone();
+            let id = platform.font_id(&requested).unwrap();
+            let (found, found_style) = platform.font_weight_and_style(id).unwrap();
+            assert_eq!(found, FontWeight(expected), "{family} {weight:?} {style:?}");
+            assert_eq!(found_style, style, "{family} {weight:?} {style:?}");
+        }
+
+        let shape = |text: &str, features: gpui::FontFeatures| {
+            let mut requested = font(fonts.ui.clone());
+            requested.features = features;
+            let id = platform.font_id(&requested).unwrap();
+            let run = gpui::FontRun {
+                len: text.len(),
+                font_id: id,
+            };
+            let layout = platform.layout_line(text, px(13.), &[run]);
+            let glyphs = &layout.runs[0].glyphs;
+            let ids: Vec<_> = glyphs.iter().map(|glyph| glyph.id).collect();
+            let advances: Vec<_> = glyphs
+                .windows(2)
+                .map(|pair| pair[1].position.x - pair[0].position.x)
+                .collect();
+            (ids, advances)
+        };
+        let plain = |text| shape(text, Default::default()).0;
+        let inter = |text| shape(text, fonts.features.clone()).0;
+        assert_ne!(inter("1"), plain("1"), "cv01 reached the shaper");
+        assert_ne!(inter(","), plain(","), "ss03 reached the shaper");
+        assert_ne!(
+            shape("1", fonts.tabular()).0,
+            inter("1"),
+            "tnum reached the shaper"
+        );
+        let (_, proportional) = shape("1101", fonts.features.clone());
+        let (_, tabular) = shape("1101", fonts.tabular());
+        assert_ne!(proportional[1], proportional[2], "{proportional:?}");
+        assert!(tabular.iter().all(|w| *w == tabular[0]), "{tabular:?}");
+    }
 }

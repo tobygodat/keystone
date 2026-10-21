@@ -1,6 +1,6 @@
 use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, radius};
-use gpui::{App, BoxShadow, Div, Styled, div, point, px};
+use gpui::{App, BoxShadow, Div, FontFeatures, Styled, div, point, px};
 
 pub fn h_flex() -> Div {
     div().flex().flex_row().items_center()
@@ -51,6 +51,20 @@ pub trait StyledExt: Styled + Sized {
 
     fn hairline_r(self, cx: &App) -> Self {
         self.border_r_1().border_color(cx.theme().colors.border)
+    }
+
+    /// The code font, without the interface font's OpenType features, whose tags mean
+    /// something else in a code font.
+    fn font_mono(self, cx: &App) -> Self {
+        self.font_family(cx.theme().fonts.mono.clone())
+            .font_features(FontFeatures::default())
+    }
+
+    /// The interface font with its OpenType features, as the window root sets them.
+    fn font_ui(self, cx: &App) -> Self {
+        let fonts = &cx.theme().fonts;
+        self.font_family(fonts.ui.clone())
+            .font_features(fonts.features.clone())
     }
 }
 

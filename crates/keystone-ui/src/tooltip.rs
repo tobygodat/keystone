@@ -36,8 +36,9 @@ impl Tooltip {
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The margin keeps the card clear of the pointer.
-        div().pl_2().pt_2().child(
+        // The margin keeps the card clear of the pointer. GPUI draws tooltips as their own
+        // root, so they do not inherit the window root's font.
+        div().pl_2().pt_2().font_ui(cx).child(
             h_flex()
                 .max_w(px(320.))
                 .gap_2()

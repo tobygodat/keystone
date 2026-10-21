@@ -1,6 +1,6 @@
 # Third-party notices
 
-Keystone includes code adapted from the projects below.
+Keystone includes code and fonts adapted from or bundled with the projects below.
 
 ## Pele
 
@@ -8,6 +8,14 @@ Keystone includes code adapted from the projects below.
 under the MIT license, including Lucide icon data under ISC. The full upstream
 licenses and exact bundle provenance are in
 [`crates/keystone-ui/vendor/pele`](crates/keystone-ui/vendor/pele/README.md).
+
+## Inter
+
+`crates/keystone-ui/vendor/inter` holds seven unmodified static faces of Inter 4.1
+by The Inter Project Authors (https://github.com/rsms/inter), which Keystone embeds
+as its default interface font. Inter is licensed under the SIL Open Font License 1.1;
+the full license and the exact provenance are in
+[`crates/keystone-ui/vendor/inter`](crates/keystone-ui/vendor/inter/README.md).
 
 ## Zeron
 

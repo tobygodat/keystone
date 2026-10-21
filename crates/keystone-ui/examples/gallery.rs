@@ -76,6 +76,7 @@ impl Render for TabPreview {
             .px_3()
             .py_1()
             .surface(Elevation::Overlay, cx)
+            .font_ui(cx)
             .child(Label::new("Tab").size(TextSize::Ui))
     }
 }
@@ -214,10 +215,9 @@ impl Gallery {
 impl Render for Gallery {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (background, text, ui_font, theme_appearance, theme_density) = (
+        let (background, text, theme_appearance, theme_density) = (
             theme.colors.background,
             theme.colors.text,
-            theme.fonts.ui.clone(),
             theme.appearance,
             theme.density,
         );
@@ -520,7 +520,7 @@ impl Render for Gallery {
             .id("gallery")
             .size_full()
             .bg(background)
-            .font_family(ui_font)
+            .font_ui(cx)
             .text_color(text)
             .text_size(TextSize::Base.px())
             .track_focus(&self.focus)

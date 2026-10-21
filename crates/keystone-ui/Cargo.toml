@@ -30,6 +30,7 @@ required-features = ["ui-tests"]
 
 [dev-dependencies]
 resvg = "0.46"
+gpui_wgpu = { package = "gpui-pre-wgpu", git = "https://github.com/tobygodat/tGPUI", rev = "766668f691fa78b37460b1dda3b162e9bb80a3ad" }
 gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "766668f691fa78b37460b1dda3b162e9bb80a3ad", features = ["wayland", "x11"] }
 
 [[test]]

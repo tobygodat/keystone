@@ -2881,6 +2881,7 @@ dependencies = [
  "futures-util",
  "gpui-pre",
  "gpui-pre-platform",
+ "gpui-pre-wgpu",
  "pulldown-cmark",
  "resvg",
  "roxmltree 0.21.1",

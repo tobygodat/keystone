@@ -118,7 +118,6 @@ pub fn row(
         selection_start,
     } = controls;
     let colors = cx.theme().colors;
-    let mono = cx.theme().fonts.mono.clone();
     match row {
         Row::Item(item) => match &item.kind {
             ItemKind::UserMessage => h_flex()
@@ -256,7 +255,7 @@ pub fn row(
                             .py_1()
                             .gap_2()
                             .hairline_b(cx)
-                            .font_family(mono.clone())
+                            .font_mono(cx)
                             .text_size(TextSize::Ui.px())
                             .child(div().flex_1().min_w_0().child(format!("$ {command}")))
                             .child(Label::new(status).size(TextSize::Sm).color(color))
@@ -282,7 +281,7 @@ pub fn row(
                                 .automation_id(body_selector)
                                 .px_3()
                                 .py_2()
-                                .font_family(mono)
+                                .font_mono(cx)
                                 .text_size(TextSize::Ui.px())
                                 .text_color(colors.text_muted)
                                 .child(output.to_owned()),

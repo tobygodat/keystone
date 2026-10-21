@@ -12,7 +12,7 @@ pub const DEFAULT_TEXT_SIZE: u8 = 13;
 pub const TEXT_SIZES: std::ops::RangeInclusive<u8> = 11..=16;
 
 /// Interface fonts offered in the settings page when they are installed. The default,
-/// Inter, is listed separately as "Default".
+/// the bundled Inter, is listed separately as "Default".
 const FONT_CANDIDATES: [&str; 8] = [
     "Adwaita Sans",
     "Cantarell",
@@ -52,7 +52,7 @@ pub fn theme_for(saved: &SavedAppearance, window: &Window, cx: &App) -> Theme {
     };
     let mut fonts = Fonts::default();
     if let Some(font) = &saved.ui_font {
-        fonts.ui = font.clone().into();
+        fonts = fonts.with_ui(font.clone());
     }
     if let Some(font) = &saved.mono_font {
         fonts.mono = font.clone().into();

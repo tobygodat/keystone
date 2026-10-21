@@ -406,6 +406,7 @@ impl Render for TabDragPreview {
             .h(height)
             .px(TAB_PAD_L)
             .surface(Elevation::Overlay, cx)
+            .font_ui(cx)
             .child(Label::new(self.label.clone()).size(TextSize::Ui))
     }
 }

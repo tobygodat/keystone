@@ -1,4 +1,5 @@
-use gpui::{App, Global, Hsla, Pixels, SharedString, hsla, px, rgb, rgba};
+use gpui::{App, FontFeatures, Global, Hsla, Pixels, SharedString, hsla, px, rgb, rgba};
+use std::sync::Arc;
 
 /// The only file allowed to contain color literals. `scripts/check.sh` enforces it.
 pub struct Theme {
@@ -116,15 +117,48 @@ pub struct Colors {
 #[derive(Clone)]
 pub struct Fonts {
     pub ui: SharedString,
+    /// SemiBold text at [`crate::TextSize::Title`] and top-level Markdown headings. Inter
+    /// Display for the bundled Inter, whose tighter spacing suits large sizes, otherwise
+    /// the interface font. Only its SemiBold faces are bundled.
+    pub display: SharedString,
     pub mono: SharedString,
+    /// OpenType features for interface text. Only the bundled Inter has any.
+    pub features: FontFeatures,
 }
 
 impl Default for Fonts {
     fn default() -> Self {
         Self {
             ui: "Inter".into(),
+            display: "Inter Display".into(),
             mono: "GeistMono Nerd Font Mono".into(),
+            // The plain-footed 1 and Linear's pair of Inter alternates.
+            features: FontFeatures(Arc::new(vec![("cv01".into(), 1), ("ss03".into(), 1)])),
         }
+    }
+}
+
+impl Fonts {
+    /// Uses `font` for interface text and titles. Inter's features are kept only for
+    /// Inter, since another font's stylistic sets mean something else.
+    pub fn with_ui(self, font: impl Into<SharedString>) -> Self {
+        let font = font.into();
+        if font == self.ui {
+            return self;
+        }
+        Self {
+            display: font.clone(),
+            ui: font,
+            features: FontFeatures::default(),
+            ..self
+        }
+    }
+
+    /// [`Self::features`] with tabular figures, for numbers that line up in a column.
+    pub fn tabular(&self) -> FontFeatures {
+        let mut features = self.features.0.as_ref().clone();
+        features.push(("tnum".into(), 1));
+        FontFeatures(Arc::new(features))
     }
 }
 
@@ -257,5 +291,23 @@ impl Colors {
             selection: rgba(0x3a6ea540).into(),
             caret: rgb(0x262626).into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn another_interface_font_drops_inter_display_and_features() {
+        let inter = Fonts::default();
+        assert_eq!(inter.clone().with_ui("Inter").features, inter.features);
+
+        let other = Fonts::default().with_ui("Noto Sans");
+        assert_eq!(other.ui.as_ref(), "Noto Sans");
+        assert_eq!(other.display.as_ref(), "Noto Sans");
+        assert_eq!(other.mono, inter.mono);
+        assert!(other.features.tag_value_list().is_empty());
+        assert_eq!(other.tabular().tag_value_list(), [("tnum".to_owned(), 1)]);
     }
 }
