@@ -1535,7 +1535,7 @@ impl Keystone {
     fn composer(
         &self,
         current: Option<(u64, Provider)>,
-        window_width: Pixels,
+        viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let colors = cx.theme().colors;
@@ -1609,7 +1609,7 @@ impl Keystone {
                     .presentation
                     .current
                     .arrangement
-                    .narrows_composer(window_width);
+                    .narrows_composer(viewport.width);
                 let toolbar = h_flex()
                     .gap(px(14.))
                     .child(
@@ -1617,7 +1617,7 @@ impl Keystone {
                             .flex_shrink(1.)
                             .min_w(model_selector::MIN_WIDTH)
                             .gap(px(7.))
-                            .child(self.model_selector(session, provider, window_width, cx))
+                            .child(self.model_selector(session, provider, viewport, cx))
                             .when(!narrow, |d| {
                                 d.child(
                                     div()
@@ -1730,7 +1730,7 @@ impl Keystone {
             .pb(px(12.))
             .gap(px(14.))
             .relative()
-            .children(current.and_then(|_| self.slash_menu(window_width, cx)))
+            .children(current.and_then(|_| self.slash_menu(viewport.width, cx)))
             .child(field)
             .child(toolbar)
     }
@@ -1773,7 +1773,7 @@ impl Keystone {
         &self,
         session: u64,
         provider: Provider,
-        window_width: Pixels,
+        viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selection = self.model_selection(session, provider, cx);
@@ -1803,7 +1803,7 @@ impl Keystone {
             })),
         };
         let open = self.model_menu == Some(session);
-        model_selector::render(selection, open, handlers, window_width, cx)
+        model_selector::render(selection, open, handlers, viewport, cx)
     }
 
     /// A provider chosen in the model menu. The session's model returns to the

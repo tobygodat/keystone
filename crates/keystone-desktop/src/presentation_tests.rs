@@ -1259,3 +1259,230 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
     }
     at_boundary(cx, "the provider's report");
 }
+
+/// A catalog that lands while the menu is open moves no provider row: a press on
+/// Claude Code that the catalog's arrival splits still chooses Claude Code.
+#[gpui::test]
+fn a_catalog_arriving_mid_click_keeps_the_provider_row_under_the_pointer(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+    let key = |provider| CatalogKey {
+        provider,
+        account: None,
+        directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+    };
+    view.update(cx, |this, cx| {
+        this.state.update(cx, |state, _cx| {
+            state.test_catalogs_mut().ask(key(Provider::Codex), 1);
+            state.test_catalogs_mut().ask(key(Provider::Claude), 1);
+        });
+        this.model_menu = Some(1);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("model-loading").is_some());
+    let claude = cx.debug_bounds("provider-claude").unwrap();
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: claude.center(),
+        modifiers: gpui::Modifiers::none(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+    view.update(cx, |this, cx| {
+        this.state.update(cx, |state, _cx| {
+            state.test_catalogs_mut().apply(
+                Provider::Codex,
+                None,
+                1,
+                keystone_agent::Catalog::Ready {
+                    models: ["one", "two", "three", "four", "five"]
+                        .map(|model| keystone_agent::ModelInfo {
+                            model: model.into(),
+                            label: model.into(),
+                            resolved: None,
+                        })
+                        .into(),
+                    default_model: None,
+                },
+            )
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("model-five").is_some());
+    assert_eq!(cx.debug_bounds("provider-claude"), Some(claude));
+    cx.simulate_event(gpui::MouseUpEvent {
+        position: claude.center(),
+        modifiers: gpui::Modifiers::none(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+    });
+    assert_eq!(
+        view.read_with(cx, |this, cx| this.provider(1, cx)),
+        Some(Provider::Claude)
+    );
+    assert!(cx.debug_bounds("model-loading").is_some());
+    assert_eq!(cx.debug_bounds("provider-claude"), Some(claude));
+}
+
+/// The model choices keep one height through every catalog state and both providers,
+/// in a short window and at Spacious density too. A failure message of any length
+/// scrolls inside them and leaves Retry in view, and the whole menu stays in the window.
+#[gpui::test]
+fn the_model_choices_keep_one_height_and_retry_stays_in_view(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    let key = |provider| CatalogKey {
+        provider,
+        account: None,
+        directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+    };
+    let show = |catalog: Option<keystone_agent::Catalog>, cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _cx| {
+                let catalogs = state.test_catalogs_mut();
+                catalogs.clear(&key(Provider::Codex));
+                catalogs.ask(key(Provider::Codex), 1);
+                catalogs.ask(key(Provider::Claude), 1);
+                if let Some(catalog) = catalog {
+                    catalogs.apply(Provider::Codex, None, 1, catalog);
+                }
+            });
+            this.model_menu = Some(1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.debug_bounds("model-column").unwrap()
+    };
+    let long = "Codex stopped before it listed its models: ".to_owned()
+        + &"a line of stderr that keeps going ".repeat(120);
+    let models: Vec<_> = (0..12)
+        .map(|n| keystone_agent::ModelInfo {
+            model: format!("model-{n}"),
+            label: format!("Model {n}"),
+            resolved: None,
+        })
+        .collect();
+    for (width, height, spacious) in [
+        (1280., 900., false),
+        (400., 800., false),
+        (1280., 360., false),
+        (1280., 360., true),
+    ] {
+        view.update_in(cx, |this, window, cx| {
+            this.update_appearance(
+                |appearance| {
+                    appearance.density = if spacious {
+                        keystone_core::Density::Spacious
+                    } else {
+                        keystone_core::Density::Default
+                    }
+                },
+                window,
+                cx,
+            );
+            this.state
+                .update(cx, |state, cx| state.set_provider(1, Provider::Codex, cx))
+                .unwrap();
+        });
+        cx.simulate_resize(gpui::size(px(width), px(height)));
+        let at = format!("{width}x{height} spacious {spacious}");
+        let window = gpui::Bounds::new(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(width), px(height)),
+        );
+        let loading = show(None, cx);
+        let footer = cx.debug_bounds("model-footer").unwrap();
+        assert!(inside(loading, window), "{at}: {loading:?}");
+        let failed = show(Some(keystone_agent::Catalog::Failed(long.clone())), cx);
+        assert_eq!(failed, loading, "{at}: a long failure");
+        assert_eq!(cx.debug_bounds("model-footer"), Some(footer), "{at}");
+        let retry = cx.debug_bounds("model-retry").unwrap();
+        assert!(
+            inside(retry, loading) && retry.bottom() <= footer.top(),
+            "{at}: Retry at {retry:?}, footer {footer:?}"
+        );
+        let ready = show(
+            Some(keystone_agent::Catalog::Ready {
+                models: models.clone(),
+                default_model: None,
+            }),
+            cx,
+        );
+        assert_eq!(ready, loading, "{at}: a long catalog");
+        let claude = cx.debug_bounds("provider-claude").unwrap();
+        cx.simulate_click(claude.center(), gpui::Modifiers::none());
+        assert_eq!(
+            view.read_with(cx, |this, cx| this.provider(1, cx)),
+            Some(Provider::Claude),
+            "{at}"
+        );
+        assert_eq!(
+            cx.debug_bounds("model-column"),
+            Some(loading),
+            "{at}: Claude"
+        );
+    }
+}
+
+/// Many accounts fit a short window too: their list scrolls inside the menu instead of
+/// pushing the menu past the window's edge, and the last account scrolls into view.
+#[gpui::test]
+fn many_accounts_scroll_inside_a_short_window(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    let last = view.update(cx, |this, cx| {
+        this.state.update(cx, |state, cx| {
+            (0..7)
+                .map(|n| {
+                    let folder = dir.path().join(format!("accounts/codex-{n}"));
+                    state
+                        .add_account(
+                            Provider::Codex,
+                            &format!("Account {n}"),
+                            folder.to_str().unwrap(),
+                            cx,
+                        )
+                        .unwrap()
+                        .value
+                })
+                .last()
+                .unwrap()
+        })
+    });
+    for spacious in [false, true] {
+        view.update_in(cx, |this, window, cx| {
+            this.update_appearance(
+                |appearance| {
+                    appearance.density = if spacious {
+                        keystone_core::Density::Spacious
+                    } else {
+                        keystone_core::Density::Default
+                    }
+                },
+                window,
+                cx,
+            );
+            this.model_menu = Some(1);
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(1280.), px(360.)));
+        cx.run_until_parked();
+        let window =
+            gpui::Bounds::new(gpui::point(px(0.), px(0.)), gpui::size(px(1280.), px(360.)));
+        let list = cx.debug_bounds("provider-list").unwrap();
+        let column = cx.debug_bounds("model-column").unwrap();
+        assert!(inside(list, window), "spacious {spacious}: {list:?}");
+        assert!(inside(column, window), "spacious {spacious}: {column:?}");
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: list.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10000.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let account = cx.debug_bounds(format!("account-{last}").leak()).unwrap();
+        assert!(
+            inside(account, list),
+            "spacious {spacious}: {account:?} in {list:?}"
+        );
+    }
+}

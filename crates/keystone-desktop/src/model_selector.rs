@@ -4,7 +4,7 @@
 
 use gpui::{
     Anchor, App, Div, ElementId, FontWeight, IntoElement, ParentElement, Pixels, SharedString,
-    Stateful, Styled, Window, div, prelude::*, px,
+    Size, Stateful, Styled, Window, div, prelude::*, px,
 };
 use keystone_agent::{Catalog, Commands, ModelInfo};
 use keystone_core::{Account, AccountId, Provider, WorkingDirectory};
@@ -18,6 +18,12 @@ pub const MIN_WIDTH: Pixels = px(28.);
 /// The space the menu leaves around itself and inside its card: the window margin it
 /// snaps to on both sides, and the card's padding and border.
 const MENU_INSET: Pixels = px(26.);
+
+/// The rows of height the model choices keep whatever their catalog holds, so a
+/// catalog arriving, failing or switched to while the menu is open moves no row of the
+/// menu, which opens upward. The half row shows a longer catalog scrolls. A short window
+/// keeps at most a third of its height for them, and for the providers and accounts.
+const CHOICE_ROWS: f32 = 6.5;
 
 /// What is known about one catalog in this run of the app.
 pub enum CatalogState {
@@ -264,12 +270,12 @@ fn accounts_of(provider: Provider, accounts: &[Account]) -> Vec<(Option<&Account
 }
 
 /// The selector for one session: the button, and the menu while `open`, which fits
-/// within `window_width`.
+/// within `viewport`.
 pub fn render(
     selection: Selection,
     open: bool,
     on: Handlers,
-    window_width: Pixels,
+    viewport: Size<Pixels>,
     cx: &App,
 ) -> impl IntoElement {
     let (trigger, tooltip) = trigger(selection, open, cx);
@@ -298,10 +304,12 @@ pub fn render(
                     div()
                         .flex()
                         .flex_row()
-                        .max_w(window_width - MENU_INSET)
-                        .child(provider_column(provider, account, accounts, &on, cx))
+                        .max_w(viewport.width - MENU_INSET)
+                        .child(provider_column(
+                            provider, account, accounts, &on, viewport, cx,
+                        ))
                         .child(div().flex_none().w_px().ml(px(7.)).bg(colors.border))
-                        .child(model_column(provider, model, choices, &on, cx)),
+                        .child(model_column(provider, model, choices, &on, viewport, cx)),
                 ),
         )
         .into_any_element()
@@ -389,6 +397,7 @@ fn provider_column(
     account: Option<&AccountId>,
     accounts: &[Account],
     on: &Handlers,
+    viewport: Size<Pixels>,
     cx: &App,
 ) -> impl IntoElement {
     v_flex()
@@ -399,7 +408,7 @@ fn provider_column(
             v_flex()
                 .id("provider-list")
                 .debug_selector(|| "provider-list".into())
-                .max_h(px(360.))
+                .max_h(px(360.).min(viewport.height / 3.))
                 .overflow_y_scroll()
                 .children([Provider::Claude, Provider::Codex].map(|provider| {
                     let choose = on.choose_provider.clone();
@@ -455,6 +464,7 @@ fn model_column(
     chosen: Option<&str>,
     choices: Choices,
     on: &Handlers,
+    viewport: Size<Pixels>,
     cx: &App,
 ) -> impl IntoElement {
     let row = |id: ElementId, selector: String, label: SharedString, model: Option<String>| {
@@ -478,30 +488,36 @@ fn model_column(
             "Provider default".into(),
             None,
         ));
-    let column = match choices {
-        Choices::Unavailable(reason) => {
-            column.child(note("model-unavailable", reason, Color::Muted))
-        }
-        Choices::Loading => column.child(note("model-loading", "Loading choices…", Color::Muted)),
-        Choices::Ready(models) => column.child(
-            v_flex()
-                .id("model-list")
-                .max_h(px(360.))
-                .overflow_y_scroll()
-                .children(models.iter().enumerate().map(|(index, model)| {
-                    row(
-                        ("model", index).into(),
-                        format!("model-{}", model.model),
-                        model.label.clone().into(),
-                        Some(model.model.clone()),
-                    )
-                })),
+    let list = v_flex()
+        .id("model-list")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll();
+    let (list, retry) = match choices {
+        Choices::Unavailable(reason) => (
+            list.child(note("model-unavailable", reason, Color::Muted)),
+            None,
+        ),
+        Choices::Loading => (
+            list.child(note("model-loading", "Loading choices…", Color::Muted)),
+            None,
+        ),
+        Choices::Ready(models) => (
+            list.children(models.iter().enumerate().map(|(index, model)| {
+                row(
+                    ("model", index).into(),
+                    format!("model-{}", model.model),
+                    model.label.clone().into(),
+                    Some(model.model.clone()),
+                )
+            })),
+            None,
         ),
         Choices::Failed(message) => {
             let retry = on.retry.clone();
-            column
-                .child(note("model-failed", message.to_owned(), Color::Danger))
-                .child(
+            (
+                list.child(note("model-failed", message.to_owned(), Color::Danger)),
+                Some(
                     choice_row(
                         "model-retry",
                         "model-retry".into(),
@@ -515,25 +531,33 @@ fn model_column(
                         cx.stop_propagation();
                         retry(&provider, window, cx)
                     }),
-                )
+                ),
+            )
         }
     };
-    column.child(
-        div()
-            .id("model-footer")
-            .automation_id("model-footer")
-            .px(px(8.))
-            .pt(px(6.))
-            .pb(px(4.))
-            .child(
-            Label::new(format!(
-                "Choices reported by {}. The provider may reject an unavailable model when you send.",
-                provider_name(provider)
-            ))
-            .size(TextSize::Sm)
-            .color(Color::Muted),
-        ),
-    )
+    column
+        .child(
+            v_flex()
+                .flex_none()
+                .h((cx.theme().density.control(px(36.)) * CHOICE_ROWS).min(viewport.height / 3.))
+                .child(list)
+                .children(retry),
+        )
+        .child(
+            div()
+                .id("model-footer")
+                .automation_id("model-footer")
+                .px(px(8.))
+                .pt(px(6.))
+                .pb(px(4.))
+                .child(
+                    Label::new(
+                        "Choices reported by the provider, which may reject an unavailable model when you send.",
+                    )
+                    .size(TextSize::Sm)
+                    .color(Color::Muted),
+                ),
+        )
 }
 
 fn choice_row(

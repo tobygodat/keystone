@@ -597,8 +597,8 @@ impl Keystone {
                             }
                         }))
                 })))
-                .child(div().flex_1().min_h_0().overflow_hidden().child(self.arrangement_view(selected, &c, false, viewport.width, cx)))
-                .child(div().flex_none().w_full().child(self.arrangement_view(composer, &c, true, viewport.width, cx)));
+                .child(div().flex_1().min_h_0().overflow_hidden().child(self.arrangement_view(selected, &c, false, viewport, cx)))
+                .child(div().flex_none().w_full().child(self.arrangement_view(composer, &c, true, viewport, cx)));
             if self.presentation.current.arrangement.sidebar_overlay {
                 if let Some((id, _)) = c.views().find(|(_, k)| *k == Component::SessionList) {
                     body = body.child(
@@ -611,13 +611,13 @@ impl Keystone {
                                 f32::from(keystone_core::SidebarWidth::DEFAULT.px()),
                             ))))
                             .occlude()
-                            .child(self.arrangement_view(id, &c, false, viewport.width, cx)),
+                            .child(self.arrangement_view(id, &c, false, viewport, cx)),
                     );
                 }
             }
             body.into_any_element()
         } else {
-            self.arrangement_node(c.root(), &c, NodePath::default(), false, viewport.width, cx)
+            self.arrangement_node(c.root(), &c, NodePath::default(), false, viewport, cx)
         };
         let displayed: Vec<_> = c
             .views()
@@ -653,7 +653,7 @@ impl Keystone {
         c: &Composition,
         path: NodePath,
         auto: bool,
-        window_width: Pixels,
+        viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
@@ -663,12 +663,10 @@ impl Keystone {
                         && Self::has_session_tabs(c)
                         && !self.presentation.current.customization.is_open()) =>
             {
-                self.surface_group(std::slice::from_ref(id), 0, c, window_width, cx)
+                self.surface_group(std::slice::from_ref(id), 0, c, viewport, cx)
             }
-            Node::View { id } => self.arrangement_view(*id, c, auto, window_width, cx),
-            Node::Tabs { selected, views } => {
-                self.surface_group(views, *selected, c, window_width, cx)
-            }
+            Node::View { id } => self.arrangement_view(*id, c, auto, viewport, cx),
+            Node::Tabs { selected, views } => self.surface_group(views, *selected, c, viewport, cx),
             Node::Split { axis, children } => {
                 if *axis == Axis::Column
                     && children.len() == 2
@@ -687,14 +685,13 @@ impl Keystone {
                         .justify_center()
                         .gap_3()
                         .pb(px(60.))
-                        .child(div().h(px(110.)).w_full().child(self.arrangement_view(
-                            first,
-                            c,
-                            false,
-                            window_width,
-                            cx,
-                        )))
-                        .child(self.arrangement_view(second, c, true, window_width, cx))
+                        .child(
+                            div()
+                                .h(px(110.))
+                                .w_full()
+                                .child(self.arrangement_view(first, c, false, viewport, cx)),
+                        )
+                        .child(self.arrangement_view(second, c, true, viewport, cx))
                         .into_any_element();
                 }
                 let axis = *axis;
@@ -769,7 +766,7 @@ impl Keystone {
                         c,
                         child_path,
                         child.size == Size::Auto,
-                        window_width,
+                        viewport,
                         cx,
                     );
                     split = split.child(
@@ -840,7 +837,7 @@ impl Keystone {
         views: &[ViewId],
         selected: usize,
         c: &Composition,
-        window_width: Pixels,
+        viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (select, close, order, insert) =
@@ -974,7 +971,7 @@ impl Keystone {
                 views[selected],
                 c,
                 false,
-                window_width,
+                viewport,
                 cx,
             )))
             .into_any_element()
@@ -1128,7 +1125,7 @@ impl Keystone {
         id: ViewId,
         c: &Composition,
         auto: bool,
-        window_width: Pixels,
+        viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let component = c.component(id).unwrap();
@@ -1208,7 +1205,7 @@ impl Keystone {
                     .items_center()
                     .justify_end()
                     .p_3()
-                    .child(self.composer(current, window_width, cx))
+                    .child(self.composer(current, viewport, cx))
                     .children(self.error_line(cx));
             }
             Component::Files => {

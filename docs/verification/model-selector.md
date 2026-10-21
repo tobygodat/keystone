@@ -12,7 +12,9 @@ The composer has one provider and model button. Open it before the first Send to
 6. Hover over the model button after the reply. It reports the model named by the running provider. Clicking the started button opens no menu.
 7. Quit with **Ctrl+Q** and reopen the same session. The requested choice remains fixed. Until the provider reports again, the label is muted and its tooltip says the model is requested and not yet reported.
 
-If catalog discovery fails, **Provider default** remains available. **Retry** requests the catalog again. A failed first launch still fixes the session's choice. Start a new session to choose another provider or model.
+The model choices keep one height whatever the catalog holds: six and a half rows, or a third of a short window's height. Loading, a failure, an unavailable folder, a long catalog and either provider all use it, so a catalog that lands while the menu is open never moves a row from under the pointer. The menu opens upward, so any growth would move every row above the button. Longer catalogs scroll inside it, and the half row shows there is more. A short window also keeps the provider and account list to a third of its height, so many accounts scroll instead of pushing the menu past the window's edge.
+
+If catalog discovery fails, **Provider default** remains available. **Retry** requests the catalog again and stays in view below the message, which scrolls when it is long. A failed first launch still fixes the session's choice. Start a new session to choose another provider or model.
 
 ![The native model menu with Claude Code selected](https://github.com/tobygodat/keystone/blob/pr-assets/TOB-32/model-menu.png?raw=true)
 
@@ -32,6 +34,6 @@ The complete core checks passed. The final build, formatting check, UI suite, an
 
 ## Limits
 
-The scripted replies are test data. They prove Keystone's provider handling without a model call. Live provider catalogs and real model execution were not repeated in this final pass. Light theme, long model lists, and the host file-manager action were not exercised. Laptop delivery remains with the workspace arrangement owner.
+The scripted replies are test data. They prove Keystone's provider handling without a model call. Live provider catalogs and real model execution were not repeated in this final pass. Light theme, long model lists, and the host file-manager action were not exercised. The fixed-height choices (TOB-43) were checked natively at 1280 by 900 with Codex ready, Claude loading and Claude ready. GPUI tests cover a long catalog's layout, short windows, Spacious density and scrolling a long account list. Scrolling a long catalog natively and choosing a model below the fold were not exercised. Laptop delivery remains with the workspace arrangement owner.
 
 The provider marks use the Claude browser extension's `claude_icon.svg` and the OpenAI Blossom from the OpenAI brand kit. The approved Paper screenshots supplied the visual reference. The code also uses these marks on the welcome buttons, which were outside the approved model screenshots.
