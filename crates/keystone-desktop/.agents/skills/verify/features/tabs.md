@@ -10,7 +10,7 @@ Sessions open as tabs, and each window splits into panes, its own tabs and selec
 - `tabs-activate` makes a view active with a click on its tab or anywhere in its transcript, or by moving focus into it with F6, Shift+F6, Tab or Ctrl+Shift+T. The active pane's strip has an accent underline.
 - `tabs-cycle` moves through every conversation tab in layout order with Ctrl+Tab and Ctrl+Shift+Tab, and wraps.
 - `tabs-close` closes the active tab with Ctrl+W, or any tab with its close button or a middle click. A pane closes with its last tab and its split collapses. The last conversation view never closes; Ctrl+W there releases its tab so it follows the selection again.
-- `tabs-drag` drags a tab within its strip to reorder, onto another pane's strip to move it there, or onto a pane's edge (`pane-drop-{ViewId}-left/right/above/below`, drawn only during a drag) to split it out beside that pane.
+- `tabs-drag` drags a tab within its strip to reorder, onto another pane's strip to move it there, or onto a pane's edge (`pane-drop-{ViewId}-left/right/above/below`, drawn only during a drag) to split it out beside that pane. The same drops work from another window on the same project (see `windows-move-tab`).
 - `tabs-restore` brings back the panes, tab order, active tabs, divider positions and selection after Quit and relaunch, and after a SIGKILL. Each session keeps its own draft.
 
 Per-session state follows the session, not the pane: a running session's tab shows the working dot, a recovery card shows in the pane that holds its session and takes keyboard focus there, an idle-evicted Claude session reloads its history when its tab is drawn and resumes on Send, and orchestrator child sessions appear in the sidebar without changing any pane until opened.

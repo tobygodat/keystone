@@ -116,6 +116,17 @@ impl SavedWindows {
     }
 }
 
+/// What one window shows of one project: its layout when it changes, which session each
+/// conversation view holds, and its selection.
+#[derive(Clone, Debug)]
+pub struct WindowView {
+    pub window: WindowId,
+    pub project: ProjectId,
+    pub layout: Option<Composition>,
+    pub tabs: SessionTabs,
+    pub selected: Option<u64>,
+}
+
 /// Where one window keeps its layouts, its tabs and its selection.
 pub(crate) struct Shown<'a> {
     pub(crate) layouts: &'a mut ProjectLayouts,
@@ -249,22 +260,49 @@ impl Workspace {
     fn exists(&self, session: u64) -> bool {
         self.sessions.iter().any(|s| s.id == session)
     }
-}
 
-impl Store {
-    /// Saves a new window showing `selected`, or nothing, in one write, and returns its
-    /// id. Fails without writing when the saved windows are from a newer version.
-    pub fn open_window(
+    /// Records what `view.window` shows. Tabs holding a session that no longer exists are
+    /// dropped, and tabs this version cannot read are kept until a view holds a session
+    /// again.
+    pub(crate) fn show(&mut self, view: WindowView) -> StoreResult<()> {
+        let WindowView {
+            window,
+            project,
+            layout,
+            mut tabs,
+            selected,
+        } = view;
+        if let Some(id) = selected.filter(|&id| !self.exists(id)) {
+            return Err(invalid(format!("unknown session ID {id}")).into());
+        }
+        let sessions: Vec<u64> = self.sessions.iter().map(|s| s.id).collect();
+        tabs.retain(|_, session| sessions.contains(&session));
+        let shown = self.shown_mut(window)?;
+        if let Some(layout) = layout {
+            shown.layouts.set(&project, Some(layout.into()))?;
+        }
+        let unreadable = matches!(shown.tabs.get(&project), Some(SavedTabs::Unsupported(_)));
+        if !(unreadable && tabs.is_empty()) {
+            shown.tabs.set(
+                &project,
+                (!tabs.is_empty()).then_some(SavedTabs::Supported(tabs)),
+            )?;
+        }
+        *shown.selected = selected;
+        Ok(())
+    }
+
+    /// Adds a window showing `selected`, or nothing, and returns its id.
+    fn add_window(
         &mut self,
         project: Option<&ProjectId>,
         selected: Option<u64>,
         placement: Option<Placement>,
-    ) -> StoreResult<Applied<WindowId>> {
-        if let Some(id) = selected.filter(|&id| !self.workspace.exists(id)) {
+    ) -> StoreResult<WindowId> {
+        if let Some(id) = selected.filter(|&id| !self.exists(id)) {
             return Err(invalid(format!("unknown session ID {id}")).into());
         }
-        let mut next = self.workspace.clone();
-        let windows = next.preferences.windows.list_mut()?;
+        let windows = self.preferences.windows.list_mut()?;
         let id = windows
             .iter()
             .map(|w| w.id.0)
@@ -279,6 +317,56 @@ impl Store {
             selected,
             ..SavedWindow::new(id)
         });
+        Ok(id)
+    }
+}
+
+impl Store {
+    /// Saves a new window showing `selected`, or nothing, in one write, and returns its
+    /// id. Fails without writing when the saved windows are from a newer version.
+    pub fn open_window(
+        &mut self,
+        project: Option<&ProjectId>,
+        selected: Option<u64>,
+        placement: Option<Placement>,
+    ) -> StoreResult<Applied<WindowId>> {
+        let mut next = self.workspace.clone();
+        let id = next.add_window(project, selected, placement)?;
+        let applied = self.commit(next, self.next_id)?;
+        Ok(Applied {
+            value: id,
+            durability: applied.durability,
+            revision: applied.revision,
+        })
+    }
+
+    /// Saves what two windows show after a tab moved from `from.window` to `to.window`, in
+    /// one write, so a crash leaves the session's tab in exactly one of them.
+    pub fn move_tab(&mut self, from: WindowView, to: WindowView) -> StoreResult<Applied<()>> {
+        if from.window == to.window {
+            return Err(invalid("a tab moves between two windows").into());
+        }
+        let mut next = self.workspace.clone();
+        next.show(from)?;
+        next.show(to)?;
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
+    }
+
+    /// Saves what `from.window` shows once a tab left it and a new window showing
+    /// `session`, in one write, and returns the new window's id.
+    pub fn move_tab_to_new_window(
+        &mut self,
+        from: WindowView,
+        session: u64,
+        placement: Option<Placement>,
+    ) -> StoreResult<Applied<WindowId>> {
+        let mut next = self.workspace.clone();
+        let project = from.project.clone();
+        next.show(from)?;
+        let id = next.add_window(Some(&project), Some(session), placement)?;
         let applied = self.commit(next, self.next_id)?;
         Ok(Applied {
             value: id,

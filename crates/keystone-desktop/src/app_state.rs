@@ -8,7 +8,7 @@ use keystone_agent::{Catalog, Commands, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{
     AccountId, AccountUsage, Applied, Composition, LimitWindow, Placement, ProjectId,
-    SavedComposition, SessionTabs, ViewId, WindowId, WorkingDirectory,
+    SavedComposition, SessionTabs, ViewId, WindowId, WindowView, WorkingDirectory,
 };
 use std::collections::BTreeMap;
 
@@ -851,6 +851,41 @@ impl AppState {
             return Err(std::io::Error::other("Keystone is quitting.").into());
         }
         self.store.open_window(project, selected, placement)
+    }
+
+    /// Saves both windows a tab moved between in one write. See
+    /// [`keystone_core::Store::move_tab`].
+    pub(crate) fn move_tab(
+        &mut self,
+        from: WindowView,
+        to: WindowView,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        let result = self.store.move_tab(from, to);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Saves the window a tab left and a new window holding it in one write. See
+    /// [`keystone_core::Store::move_tab_to_new_window`].
+    pub(crate) fn move_tab_to_new_window(
+        &mut self,
+        from: WindowView,
+        session: u64,
+        placement: Option<Placement>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<WindowId>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        let result = self.store.move_tab_to_new_window(from, session, placement);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
     }
 
     pub(crate) fn set_window_project(

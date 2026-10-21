@@ -569,3 +569,371 @@ fn the_last_window_stays_open_mid_turn_when_its_place_cannot_be_saved(cx: &mut T
             .is_some_and(|e| e.contains("Window not closed"))
     );
 }
+
+/// The sessions `view` shows: its tabs and its selection.
+fn shown(view: &Entity<Keystone>, cx: &mut TestAppContext) -> Vec<u64> {
+    cx.read(|cx| {
+        let view = view.read(cx);
+        let mut shown: Vec<u64> = view.session_tabs(cx).iter().map(|(_, s)| s).collect();
+        shown.extend(view.selected(cx));
+        shown.sort();
+        shown.dedup();
+        shown
+    })
+}
+
+fn move_from_palette(view: &Entity<Keystone>, row: &str, cx: &mut TestAppContext) {
+    let window = handle(view, cx);
+    let vcx = &mut VisualTestContext::from_window(window, cx);
+    view.update_in(vcx, |this, window, cx| this.focus.focus(window, cx));
+    vcx.simulate_keystrokes("ctrl-alt-m");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("palette").is_some(), "the palette opens");
+    vcx.simulate_input(row);
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_palette_moves_the_active_tab_to_another_window(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    new_window(&first, Some(2), cx);
+    let second = view_in(WindowId(1), cx);
+
+    move_from_palette(&first, "Keystone 2", cx);
+
+    assert_eq!(shown(&first, cx), Vec::<u64>::new(), "the tab left");
+    assert_eq!(shown(&second, cx), vec![1, 2]);
+    assert_eq!(selected(&second, cx), Some(1), "and is shown where it went");
+    cx.read(|cx| {
+        let w = state.read(cx).store().workspace();
+        assert_eq!(w.selected_in(WindowId::FIRST), None);
+        assert_eq!(w.selected_in(WindowId(1)), Some(1));
+    });
+    assert!(cx.read(|cx| first.read(cx).error.is_none() && second.read(cx).error.is_none()));
+}
+
+#[gpui::test]
+fn the_palette_moves_the_active_tab_to_a_new_window(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+
+    move_from_palette(&first, "New window", cx);
+
+    assert_eq!(cx.windows().len(), 2);
+    let second = view_in(WindowId(1), cx);
+    assert_eq!(shown(&first, cx), Vec::<u64>::new());
+    assert_eq!(shown(&second, cx), vec![1]);
+    cx.read(|cx| {
+        let w = state.read(cx).store().workspace();
+        assert_eq!(w.selected_in(WindowId(1)), Some(1));
+    });
+}
+
+#[gpui::test]
+fn a_tab_from_a_later_window_drops_into_an_earlier_one(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    new_window(&first, Some(2), cx);
+    let second = view_in(WindowId(1), cx);
+    {
+        let window = handle(&second, cx);
+        let vcx = &mut VisualTestContext::from_window(window, cx);
+        vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        second.update_in(vcx, |this, window, cx| {
+            this.focus.focus(window, cx);
+            this.select(3, cx);
+        });
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("ctrl-t");
+        vcx.run_until_parked();
+    }
+    let before = shown(&second, cx);
+    let drag = cx.read(|cx| {
+        let this = second.read(cx);
+        let (bar_id, views) = this
+            .presentation
+            .current
+            .arrangement
+            .bars
+            .first()
+            .expect("a tab strip")
+            .clone();
+        keystone_ui::DraggedTab {
+            window: this.handle.window_id(),
+            bar_id,
+            index: views.len() - 1,
+        }
+    });
+    let leaving = cx.read(|cx| {
+        let this = second.read(cx);
+        this.view_session(this.dragged_view(&drag).unwrap(), cx)
+            .unwrap()
+    });
+
+    first.update(cx, |this, cx| this.receive_tab(&drag, Landing::Active, cx));
+    cx.run_until_parked();
+
+    assert!(shown(&first, cx).contains(&leaving));
+    assert!(!shown(&second, cx).contains(&leaving));
+    assert_eq!(shown(&second, cx).len(), before.len() - 1);
+}
+
+/// Starts dragging the last tab of `view`'s first strip, out past the window's left edge.
+fn drag_tab_out(view: &Entity<Keystone>, vcx: &mut VisualTestContext) -> u64 {
+    vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    view.update_in(vcx, |this, window, cx| this.focus.focus(window, cx));
+    vcx.simulate_keystrokes("ctrl-t");
+    vcx.run_until_parked();
+    let (bar, last) = view.read_with(vcx, |this, _| {
+        let (bar, views) = this
+            .presentation
+            .current
+            .arrangement
+            .bars
+            .first()
+            .expect("a tab strip")
+            .clone();
+        (bar, views.len() - 1)
+    });
+    let leaving = view.read_with(vcx, |this, cx| {
+        let views = &this.presentation.current.arrangement.bars[0].1;
+        this.view_session(views[last], cx).unwrap()
+    });
+    let gpui::ElementId::Name(bar) = bar else {
+        panic!("strip id {bar:?}")
+    };
+    let tab_id: &'static str = format!("{bar}-tab-{last}").leak();
+    let tab = vcx.debug_bounds(tab_id).expect("the tab").center();
+    vcx.simulate_mouse_down(tab, MouseButton::Left, Modifiers::none());
+    for x in [tab.x + px(20.), px(200.), px(-40.)] {
+        vcx.simulate_mouse_move(
+            gpui::point(x, tab.y + px(10.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        vcx.run_until_parked();
+    }
+    leaving
+}
+
+#[gpui::test]
+fn a_tab_dropped_on_the_desktop_opens_in_a_new_window(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    let window = handle(&first, cx);
+    cx.set_start_external_drag_result(window, true);
+    let vcx = &mut VisualTestContext::from_window(window, cx);
+    let leaving = drag_tab_out(&first, vcx);
+    assert!(
+        !vcx.update(|_, cx| cx.has_active_drag()),
+        "the platform carries it"
+    );
+    vcx.simulate_event(gpui::FileDropEvent::AppDragDroppedOutside);
+    vcx.run_until_parked();
+
+    assert_eq!(cx.windows().len(), 2);
+    assert!(!shown(&first, cx).contains(&leaving));
+    assert_eq!(shown(&view_in(WindowId(1), cx), cx), vec![leaving]);
+}
+
+#[gpui::test]
+fn a_release_outside_a_window_that_kept_the_drag_changes_nothing(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    let window = handle(&first, cx);
+    let vcx = &mut VisualTestContext::from_window(window, cx);
+    drag_tab_out(&first, vcx);
+    let before = view_in_shown(&first, vcx);
+    vcx.simulate_mouse_up(
+        gpui::point(px(-40.), px(60.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+
+    assert_eq!(cx.windows().len(), 1, "it may have been over another app");
+    assert_eq!(shown(&first, cx), before);
+}
+
+fn view_in_shown(view: &Entity<Keystone>, vcx: &mut VisualTestContext) -> Vec<u64> {
+    view.read_with(vcx, |this, cx| {
+        let mut shown: Vec<u64> = this.session_tabs(cx).iter().map(|(_, s)| s).collect();
+        shown.extend(this.selected(cx));
+        shown.sort();
+        shown.dedup();
+        shown
+    })
+}
+
+#[gpui::test]
+fn a_tab_dragged_onto_another_windows_pane_edge_splits_it_there(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    new_window(&first, Some(2), cx);
+    let second = view_in(WindowId(1), cx);
+    let target = active_view(&second, cx);
+    let window = handle(&first, cx);
+    cx.set_start_external_drag_result(window, true);
+    let leaving = {
+        let vcx = &mut VisualTestContext::from_window(window, cx);
+        drag_tab_out(&first, vcx)
+    };
+    let window = handle(&second, cx);
+    let vcx = &mut VisualTestContext::from_window(window, cx);
+    vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    vcx.run_until_parked();
+    vcx.simulate_event(gpui::FileDropEvent::AppDragEntered {
+        position: gpui::point(px(900.), px(400.)),
+    });
+    vcx.run_until_parked();
+    let zone: &'static str = format!("pane-drop-{}-right", target.0).leak();
+    let edge = vcx
+        .debug_bounds(zone)
+        .expect("another window's tab shows the pane edges")
+        .center();
+    vcx.simulate_event(gpui::FileDropEvent::Pending { position: edge });
+    vcx.simulate_event(gpui::FileDropEvent::Submit { position: edge });
+    vcx.run_until_parked();
+
+    assert!(!shown(&first, cx).contains(&leaving));
+    assert!(shown(&second, cx).contains(&leaving));
+    let panes = cx.read(|cx| {
+        crate::session_tabs::conversations(&second.read(cx).saved_composition(cx)).len()
+    });
+    assert_eq!(panes, 2, "beside the pane it was dropped on");
+}
+
+#[gpui::test]
+fn escape_cancels_a_tab_drag(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    let before = shown(&first, cx);
+    let window = handle(&first, cx);
+    let vcx = &mut VisualTestContext::from_window(window, cx);
+    drag_tab_out(&first, vcx);
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(
+        !vcx.update(|_, cx| cx.has_active_drag()),
+        "Esc ends the drag"
+    );
+    vcx.simulate_mouse_up(
+        gpui::point(px(-40.), px(60.)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+
+    assert_eq!(cx.windows().len(), 1, "no window opens");
+    assert_eq!(
+        shown(&first, cx).len(),
+        before.len() + 1,
+        "only the new tab joined"
+    );
+}
+
+fn active_view(view: &Entity<Keystone>, cx: &mut TestAppContext) -> ViewId {
+    cx.read(|cx| view.read(cx).active_view(cx))
+        .expect("an active view")
+}
+
+fn writes(state: &Entity<AppState>, cx: &mut TestAppContext) -> u64 {
+    cx.read(|cx| state.read(cx).store().writes())
+}
+
+#[gpui::test]
+fn a_tab_moving_in_keeps_what_the_destination_was_typing(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    new_window(&first, Some(2), cx);
+    let second = view_in(WindowId(1), cx);
+    second.update(cx, |this, cx| {
+        this.composer
+            .update(cx, |input, cx| input.set_value("not saved yet".into(), cx));
+    });
+    let view = active_view(&first, cx);
+
+    cx.update(|cx| {
+        move_tab(
+            &first,
+            view,
+            Destination::Window(second.clone(), Landing::Active),
+            &second,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+
+    assert_eq!(selected(&second, cx), Some(1));
+    let draft = cx.read(|cx| {
+        state
+            .read(cx)
+            .store()
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| s.id() == 2)
+            .unwrap()
+            .draft()
+            .to_owned()
+    });
+    assert_eq!(draft, "not saved yet");
+}
+
+#[gpui::test]
+fn a_tab_moving_to_where_its_session_has_a_hidden_tab_brings_it_forward_in_one_write(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    first.update(cx, |this, cx| this.select(2, cx));
+    cx.run_until_parked();
+    new_window(&first, Some(2), cx);
+    let second = view_in(WindowId(1), cx);
+    {
+        let window = handle(&second, cx);
+        let vcx = &mut VisualTestContext::from_window(window, cx);
+        vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
+        second.update_in(vcx, |this, window, cx| this.focus.focus(window, cx));
+        vcx.simulate_keystrokes("ctrl-t");
+        vcx.run_until_parked();
+    }
+    assert_ne!(selected(&second, cx), Some(2), "session 2's tab is behind");
+    let hidden = cx
+        .read(|cx| second.read(cx).session_tabs(cx).view_of(2))
+        .unwrap();
+    let view = active_view(&first, cx);
+    first.update(cx, |this, cx| this.save_draft(cx));
+    second.update(cx, |this, cx| this.save_draft(cx));
+    let before = writes(&state, cx);
+
+    cx.update(|cx| {
+        move_tab(
+            &first,
+            view,
+            Destination::Window(second.clone(), Landing::Active),
+            &second,
+            cx,
+        )
+    });
+    let moved = writes(&state, cx);
+    cx.run_until_parked();
+    let window = handle(&second, cx);
+    VisualTestContext::from_window(window, cx).run_until_parked();
+
+    assert_eq!(selected(&second, cx), Some(2));
+    assert_eq!(active_view(&second, cx), hidden, "its tab comes forward");
+    assert_eq!(writes(&state, cx), moved, "nothing saves after the move");
+    assert_eq!(moved - before, 1, "the move is one write");
+}

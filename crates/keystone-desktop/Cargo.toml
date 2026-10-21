@@ -8,8 +8,8 @@ publish.workspace = true
 keystone-agent = { path = "../keystone-agent" }
 keystone-core = { path = "../keystone-core" }
 keystone-ui = { path = "../keystone-ui" }
-gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev = "766668f691fa78b37460b1dda3b162e9bb80a3ad" }
-gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "766668f691fa78b37460b1dda3b162e9bb80a3ad", features = ["wayland", "x11"] }
+gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0" }
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0", features = ["wayland", "x11"] }
 anyhow = "1"
 futures = "0.3"
 ignore = "0.4.33"

@@ -38,7 +38,7 @@ use tabs::SavedTabs;
 pub use tabs::SessionTabs;
 pub use usage::{AccountUsage, LimitWindow, Reading};
 use windows::SavedWindows;
-pub use windows::{Placement, WindowId};
+pub use windows::{Placement, WindowId, WindowView};
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
@@ -925,27 +925,17 @@ impl Store {
         project: &ProjectId,
         window: WindowId,
         layout: Option<Composition>,
-        mut tabs: SessionTabs,
+        tabs: SessionTabs,
         selected: Option<u64>,
     ) -> StoreResult<Applied<()>> {
-        let exists = |id: u64| self.workspace.sessions.iter().any(|s| s.id == id);
-        if let Some(id) = selected.filter(|&id| !exists(id)) {
-            return Err(invalid(format!("unknown session ID {id}")).into());
-        }
-        tabs.retain(|_, session| exists(session));
         let mut next = self.workspace.clone();
-        let shown = next.shown_mut(window)?;
-        if let Some(layout) = layout {
-            shown.layouts.set(project, Some(layout.into()))?;
-        }
-        let unreadable = matches!(shown.tabs.get(project), Some(SavedTabs::Unsupported(_)));
-        if !(unreadable && tabs.is_empty()) {
-            shown.tabs.set(
-                project,
-                (!tabs.is_empty()).then_some(SavedTabs::Supported(tabs)),
-            )?;
-        }
-        *shown.selected = selected;
+        next.show(WindowView {
+            window,
+            project: project.clone(),
+            layout,
+            tabs,
+            selected,
+        })?;
         if next == self.workspace {
             return Ok(self.finish_sync());
         }

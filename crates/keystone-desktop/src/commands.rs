@@ -6,7 +6,7 @@ use crate::files::ToggleFiles;
 use crate::handoff::HandOff;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
-use crate::windows::{CloseWindow, NewWindow, OpenInNewWindow};
+use crate::windows::{self, CloseWindow, Destination, MoveTabToWindow, NewWindow, OpenInNewWindow};
 use crate::{
     ContinueRecovery, FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, OpenSettings,
     Quit, RenameSession, RetryRecovery, ToggleSettle, ToggleSidebar,
@@ -15,6 +15,7 @@ use gpui::{
     Action, AppContext, Context, DummyKeyboardMapper, Entity, FocusHandle, Focusable, IntoElement,
     KeyBinding, KeyBindingContextPredicate, Window,
 };
+use keystone_core::ViewId;
 use keystone_ui::{CommandPalette, CommandPaletteState, PaletteItem};
 
 pub(crate) struct Command {
@@ -209,6 +210,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         action: || Box::new(OpenInNewWindow),
     },
     Command {
+        id: "move-tab-to-window",
+        label: "Move tab to window…",
+        keys: &["ctrl-alt-m"],
+        context: Some(APP),
+        action: || Box::new(MoveTabToWindow),
+    },
+    Command {
         id: "transcript-previous-row",
         label: "Transcript: previous row",
         keys: &["up"],
@@ -339,7 +347,12 @@ fn kbd_text(keys: &str) -> String {
 pub(crate) struct Palette {
     pub(crate) state: Entity<CommandPaletteState>,
     restore: Option<FocusHandle>,
+    /// The tab whose destination the palette lists, instead of commands.
+    moving: Option<ViewId>,
 }
+
+/// The palette row that moves a tab into a new window.
+const NEW_WINDOW_ROW: &str = "move-to-new-window";
 
 impl Keystone {
     pub(crate) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -350,11 +363,54 @@ impl Keystone {
         self.filter_menu = false;
         self.approval_menu = false;
         self.model_menu = None;
+        self.open_palette(palette_items(), None, window, cx);
+    }
+
+    fn open_palette(
+        &mut self,
+        items: Vec<PaletteItem>,
+        moving: Option<ViewId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let restore = window.focused(cx);
-        let state = cx.new(|cx| CommandPaletteState::new(palette_items(), cx));
+        let state = cx.new(|cx| CommandPaletteState::new(items, cx));
         state.focus_handle(cx).focus(window, cx);
-        self.palette = Some(Palette { state, restore });
+        self.palette = Some(Palette {
+            state,
+            restore,
+            moving,
+        });
         self.refresh(cx);
+    }
+
+    /// Lists the windows the active tab can move to: every other window on this project,
+    /// and a new one.
+    pub(crate) fn open_move_tab_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        let Some(view) = self
+            .active_view(cx)
+            .filter(|&view| self.view_session(view, cx).is_some())
+        else {
+            self.error = Some("Tab not moved. No session is open here.".into());
+            return self.refresh(cx);
+        };
+        let this = cx.entity();
+        let project = self.presentation.project.as_ref().ok();
+        let mut items: Vec<PaletteItem> = crate::open_windows(cx)
+            .into_iter()
+            .filter(|other| *other != this)
+            .map(|other| other.read(cx))
+            .filter(|other| other.presentation.project.as_ref().ok() == project)
+            .map(|other| {
+                PaletteItem::new(
+                    format!("move-to-window-{}", other.window_id.0),
+                    windows::title(other.window_id),
+                )
+            })
+            .collect();
+        items.push(PaletteItem::new(NEW_WINDOW_ROW, "New window"));
+        self.open_palette(items, Some(view), window, cx);
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -370,6 +426,25 @@ impl Keystone {
 
     /// Closes first so the action reaches the restored focus, as its shortcut would.
     fn confirm_palette(&mut self, item: &PaletteItem, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.palette.as_ref().and_then(|palette| palette.moving) {
+            self.close_palette(window, cx);
+            let source = cx.entity();
+            let destination = if item.id == NEW_WINDOW_ROW {
+                Some(Destination::NewWindow)
+            } else {
+                crate::open_windows(cx)
+                    .into_iter()
+                    .filter(|other| *other != source)
+                    .find(|other| {
+                        format!("move-to-window-{}", other.read(cx).window_id.0) == item.id
+                    })
+                    .map(|target| Destination::Window(target, windows::Landing::Active))
+            };
+            if let Some(destination) = destination {
+                cx.defer(move |cx| windows::move_tab(&source, view, destination, &source, cx));
+            }
+            return;
+        }
         let action = action(&item.id);
         self.close_palette(window, cx);
         if let Some(action) = action {

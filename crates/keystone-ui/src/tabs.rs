@@ -10,15 +10,18 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, TextSize, radius};
 use crate::{Color, StyledExt, h_flex};
 use gpui::{
-    App, Context, ElementId, InteractiveElement, IntoElement, Pixels, Point, Render, RenderOnce,
-    ScrollHandle, SharedString, Styled, Window, div, prelude::*, px,
+    App, Context, ElementId, ExternalDragPayload, InteractiveElement, IntoElement, Pixels, Point,
+    Render, RenderOnce, ScrollHandle, SharedString, Styled, Window, WindowId, div, prelude::*, px,
 };
 use std::rc::Rc;
 
 /// The payload of a tab drag. Any drop target can accept it with
-/// `on_drop::<DraggedTab>`; `bar_id` tells it which bar the tab left.
+/// `on_drop::<DraggedTab>`; `window` and `bar_id` tell it which bar the tab left. A drag
+/// leaving its window goes on as an app-private platform drag, so another window of the app
+/// can take it and no other application can.
 #[derive(Clone, Debug)]
 pub struct DraggedTab {
+    pub window: WindowId,
     pub bar_id: ElementId,
     pub index: usize,
 }
@@ -185,12 +188,12 @@ impl Drops {
     /// `slot` is the tab count, if a handler takes it and it changes the order.
     fn landing(
         &self,
-        bar: &ElementId,
+        (window, bar): (WindowId, &ElementId),
         drag: &DraggedTab,
         slot: usize,
         count: usize,
     ) -> Option<Landing> {
-        if drag.bar_id == *bar {
+        if drag.window == window && drag.bar_id == *bar {
             let to = slot.min(count.saturating_sub(1));
             (self.on_move.is_some() && drag.index != to).then_some(Landing::Move(drag.index, to))
         } else {
@@ -211,6 +214,7 @@ impl Drops {
     fn target<E: InteractiveElement + 'static>(
         &self,
         el: E,
+        window_id: WindowId,
         bar: &ElementId,
         slot: usize,
         count: usize,
@@ -222,7 +226,7 @@ impl Drops {
         let (over, drops, bar_over, bar_drop) =
             (self.clone(), self.clone(), bar.clone(), bar.clone());
         el.drag_over::<DraggedTab>(move |s, drag, _, cx| {
-            let Some(landing) = over.landing(&bar_over, drag, slot, count) else {
+            let Some(landing) = over.landing((window_id, &bar_over), drag, slot, count) else {
                 return s;
             };
             let accent = cx.theme().colors.accent;
@@ -234,7 +238,7 @@ impl Drops {
             }
         })
         .on_drop::<DraggedTab>(move |drag, window, cx| {
-            if let Some(landing) = drops.landing(&bar_drop, drag, slot, count) {
+            if let Some(landing) = drops.landing((window_id, &bar_drop), drag, slot, count) {
                 drops.drop(landing, drag, window, cx)
             }
         })
@@ -273,6 +277,7 @@ impl RenderOnce for TabBar {
         let tab_height = theme.density.control(px(26.));
         let group = SharedString::from(format!("{id}-tab"));
         let count = self.tabs.len();
+        let window_id = window.window_handle().window_id();
 
         let tabs = self.tabs.into_iter().enumerate().map(|(ix, tab)| {
             let selected = self.selected == Some(ix);
@@ -365,6 +370,7 @@ impl RenderOnce for TabBar {
                     let label = tab.label.clone();
                     d.on_drag(
                         DraggedTab {
+                            window: window_id,
                             bar_id: id.clone(),
                             index: ix,
                         },
@@ -373,10 +379,11 @@ impl RenderOnce for TabBar {
                             cx.new(|_| TabDragPreview { label })
                         },
                     )
+                    .external_drag_payload(|_: &DraggedTab, _, _| Some(ExternalDragPayload::App))
                 });
             let el = self
                 .drops
-                .target(el, &id, ix, count, (TAB_PAD_L, TAB_PAD_R));
+                .target(el, window_id, &id, ix, count, (TAB_PAD_L, TAB_PAD_R));
             crate::automation::tag(el, selector)
         });
         let tabs: Vec<_> = tabs.collect();
@@ -389,7 +396,7 @@ impl RenderOnce for TabBar {
             .pl(px(MARKER));
         let end = self
             .drops
-            .target(end, &id, count, count, (px(MARKER), px(0.)));
+            .target(end, window_id, &id, count, count, (px(MARKER), px(0.)));
 
         let bar = h_flex()
             .id(id.clone())

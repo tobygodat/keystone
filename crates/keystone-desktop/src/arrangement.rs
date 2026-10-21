@@ -1,5 +1,6 @@
 use crate::arrangement_editor::Action;
 use crate::customization::label;
+use crate::windows::Landing;
 use crate::{Keystone, ViewKey, arch_mark, model_selector, now_ms};
 use gpui::{
     Anchor, AnyElement, App, AvailableSpace, Bounds, Context, Empty, Focusable, FontWeight,
@@ -41,7 +42,7 @@ pub struct Arrangement {
     pub focused: Option<ViewId>,
     /// Each drawn tab strip's id and its views, so a tab dropped from another strip can
     /// be found.
-    bars: Vec<(gpui::ElementId, Vec<ViewId>)>,
+    pub(crate) bars: Vec<(gpui::ElementId, Vec<ViewId>)>,
     /// Pane sizes being dragged outside Customize, shown until the drop saves them.
     pane_resize: Option<(NodePath, Vec<Size>)>,
     /// The fitted tab row's scroll, and the tab it last scrolled into view.
@@ -274,6 +275,20 @@ impl Keystone {
             self.focus_view(shown, window, cx);
         }
         self.refresh(cx);
+    }
+
+    /// The view the tab `drag` left holds, when it left this window.
+    pub(crate) fn dragged_view(&self, drag: &keystone_ui::DraggedTab) -> Option<ViewId> {
+        if drag.window != self.handle.window_id() {
+            return None;
+        }
+        self.presentation
+            .current
+            .arrangement
+            .bars
+            .iter()
+            .find(|(id, _)| *id == drag.bar_id)
+            .and_then(|(_, views)| views.get(drag.index).copied())
     }
 
     /// The view on screen where `closed` was: the rest of its tab group, or whatever
@@ -919,16 +934,14 @@ impl Keystone {
                 .on_insert(self.scoped_listener(
                     cx,
                     move |this, (drag, at): &(DraggedTab, usize), _, cx| {
-                        let moved = this
-                            .presentation
-                            .current
-                            .arrangement
-                            .bars
-                            .iter()
-                            .find(|(id, _)| *id == drag.bar_id)
-                            .and_then(|(_, views)| views.get(drag.index).copied());
-                        if let Some(view) = moved {
+                        if let Some(view) = this.dragged_view(drag) {
                             this.move_tab(view, insert, *at, cx);
+                        } else {
+                            let landing = Landing::Strip {
+                                anchor: insert,
+                                index: *at,
+                            };
+                            this.receive_tab(drag, landing, cx);
                         }
                     },
                 ));
@@ -1423,9 +1436,12 @@ impl Keystone {
                 }
             }
         }
+        let tab_from_elsewhere = cx
+            .active_drag_value::<DraggedTab>()
+            .is_some_and(|drag| drag.window != self.handle.window_id());
         if !editing
             && component == Component::Conversation
-            && Self::has_session_tabs(c)
+            && (Self::has_session_tabs(c) || tab_from_elsewhere)
             && cx.has_active_drag()
         {
             pane = pane.children(
@@ -1527,16 +1543,15 @@ impl Keystone {
             })
             .on_drop(
                 self.scoped_listener(cx, move |this, drag: &DraggedTab, window, cx| {
-                    let dragged = this
-                        .presentation
-                        .current
-                        .arrangement
-                        .bars
-                        .iter()
-                        .find(|(id, _)| *id == drag.bar_id)
-                        .and_then(|(_, views)| views.get(drag.index).copied());
-                    if let Some(view) = dragged {
+                    if let Some(view) = this.dragged_view(drag) {
                         this.split_with_tab(view, target, axis, after, window, cx);
+                    } else {
+                        let landing = Landing::Beside {
+                            target,
+                            axis,
+                            after,
+                        };
+                        this.receive_tab(drag, landing, cx);
                     }
                 }),
             )

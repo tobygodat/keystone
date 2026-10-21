@@ -1190,3 +1190,24 @@ fn a_multiline_draft_grows_the_auto_row_instead_of_overflowing_it(cx: &mut TestA
 fn working_directory() -> WorkingDirectory {
     WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
+
+#[gpui::test]
+fn escape_leaves_a_resize_drag_running(cx: &mut TestAppContext) {
+    let (_dir, _view, cx) = open(cx);
+    let from = cx.debug_bounds("split-grip-[]-0").unwrap().center();
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    for dx in [20., 40.] {
+        cx.simulate_mouse_move(
+            point(from.x + px(dx), from.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+    }
+    assert!(cx.update(|_, cx| cx.has_active_drag()));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| cx.has_active_drag()),
+        "Esc cancels only tab drags"
+    );
+}

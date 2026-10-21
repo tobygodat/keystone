@@ -556,3 +556,110 @@ fn closing_the_first_window_keeps_its_layouts_when_the_heirs_cannot_be_read() {
     assert_eq!(preferences.session_tabs(&other), tabs);
     assert_eq!(preferences.composition(&project), Composition::default());
 }
+
+#[test]
+fn a_tab_moved_to_another_window_leaves_the_first_in_the_same_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, project) = three_sessions(directory.path());
+    let second = store.open_window(Some(&project), None, None).unwrap().value;
+    let mut tabs = SessionTabs::default();
+    tabs.hold(ViewId::MAIN, 1);
+    tabs.hold(ViewId(3), 2);
+    store
+        .show_in(&project, WindowId::FIRST, Some(split()), tabs, Some(2))
+        .unwrap();
+    let writes = store.writes();
+
+    let mut left = SessionTabs::default();
+    left.hold(ViewId::MAIN, 1);
+    let mut arrived = SessionTabs::default();
+    arrived.hold(ViewId(3), 2);
+    let from = WindowView {
+        window: WindowId::FIRST,
+        project: project.clone(),
+        layout: Some(Composition::default()),
+        tabs: left.clone(),
+        selected: Some(1),
+    };
+    let to = WindowView {
+        window: second,
+        project: project.clone(),
+        layout: Some(split()),
+        tabs: arrived.clone(),
+        selected: Some(2),
+    };
+    assert!(store.move_tab(from.clone(), from.clone()).is_err());
+    assert!(
+        store
+            .move_tab(
+                from.clone(),
+                WindowView {
+                    selected: Some(99),
+                    ..to.clone()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(store.writes(), writes, "a refused move writes nothing");
+    store.move_tab(from, to).unwrap();
+    assert_eq!(store.writes(), writes + 1);
+
+    let reopened = Store::open(directory.path().join("state.json")).unwrap();
+    let workspace = reopened.workspace();
+    let preferences = workspace.preferences();
+    assert_eq!(preferences.session_tabs_in(&project, WindowId::FIRST), left);
+    assert_eq!(
+        preferences.composition_in(&project, WindowId::FIRST),
+        Composition::default()
+    );
+    assert_eq!(workspace.selected_in(WindowId::FIRST), Some(1));
+    assert_eq!(preferences.session_tabs_in(&project, second), arrived);
+    assert_eq!(preferences.composition_in(&project, second), split());
+    assert_eq!(workspace.selected_in(second), Some(2));
+}
+
+#[test]
+fn a_tab_moved_to_a_new_window_opens_it_in_the_same_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, project) = three_sessions(directory.path());
+    let mut tabs = SessionTabs::default();
+    tabs.hold(ViewId::MAIN, 1);
+    tabs.hold(ViewId(3), 2);
+    store
+        .show_in(&project, WindowId::FIRST, Some(split()), tabs, Some(2))
+        .unwrap();
+    let writes = store.writes();
+    let mut left = SessionTabs::default();
+    left.hold(ViewId::MAIN, 1);
+    let from = WindowView {
+        window: WindowId::FIRST,
+        project: project.clone(),
+        layout: Some(Composition::default()),
+        tabs: left.clone(),
+        selected: Some(1),
+    };
+
+    assert!(
+        store
+            .move_tab_to_new_window(from.clone(), 99, None)
+            .is_err()
+    );
+    assert_eq!(store.writes(), writes);
+    let opened = store
+        .move_tab_to_new_window(from, 2, Some(placement(60.)))
+        .unwrap()
+        .value;
+    assert_eq!(store.writes(), writes + 1);
+
+    let reopened = Store::open(directory.path().join("state.json")).unwrap();
+    let workspace = reopened.workspace();
+    let preferences = workspace.preferences();
+    assert_eq!(
+        preferences.windows(),
+        [(WindowId::FIRST, None), (opened, Some(placement(60.)))]
+    );
+    assert_eq!(preferences.window_project(opened), Some(project.clone()));
+    assert_eq!(workspace.selected_in(opened), Some(2));
+    assert_eq!(preferences.session_tabs_in(&project, WindowId::FIRST), left);
+    assert_eq!(workspace.selected_in(WindowId::FIRST), Some(1));
+}

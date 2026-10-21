@@ -23,11 +23,32 @@ gpui::actions!(
 /// A layout, when it changes, and the tabs, to save with a selection.
 pub(crate) type Shown = (Option<Composition>, SessionTabs);
 
-fn conversations(c: &Composition) -> Vec<ViewId> {
+pub(crate) fn conversations(c: &Composition) -> Vec<ViewId> {
     ordered_views(c.root())
         .into_iter()
         .filter(|&view| c.component(view) == Some(Component::Conversation))
         .collect()
+}
+
+/// The conversation view that takes over from `closed` once `after` replaced `before`: the
+/// rest of its tab group, else the view before it.
+pub(crate) fn replacement(
+    before: &Composition,
+    after: &Composition,
+    closed: ViewId,
+) -> Option<ViewId> {
+    let index = conversations(before)
+        .iter()
+        .position(|&v| v == closed)
+        .unwrap_or(0);
+    tabs_holding(before.root(), closed)
+        .and_then(|(group, _)| group.iter().copied().find(|&v| v != closed))
+        .map(|sibling| match tabs_holding(after.root(), sibling) {
+            Some((group, shown)) => group[shown],
+            None => sibling,
+        })
+        .filter(|&v| after.component(v) == Some(Component::Conversation))
+        .or_else(|| conversations(after).get(index.saturating_sub(1)).copied())
 }
 
 /// A conversation view that holds no tab and so follows the selection, preferring one
@@ -47,7 +68,7 @@ fn free_view(c: &Composition, tabs: &SessionTabs, views: &[ViewId]) -> Option<Vi
 }
 
 /// The layout with `view` brought forward in its tab group, when another tab hides it.
-fn bring_forward(c: &Composition, view: ViewId) -> Option<Composition> {
+pub(crate) fn bring_forward(c: &Composition, view: ViewId) -> Option<Composition> {
     tabs_holding(c.root(), view)
         .is_some_and(|(views, shown)| views[shown] != view)
         .then(|| c.edit(Edit::SelectTab(view)).ok())
@@ -467,7 +488,6 @@ impl Keystone {
             return;
         }
         let was_active = self.active_view(cx) == Some(view);
-        let index = views.iter().position(|&v| v == view).unwrap_or(0);
         let focused = self.view_contains_focus(view, window, cx);
         let after = match before.edit(Edit::Close(view)) {
             Ok(after) => after,
@@ -476,18 +496,7 @@ impl Keystone {
                 return self.refresh(cx);
             }
         };
-        let replacement = tabs_holding(before.root(), view)
-            .and_then(|(group, _)| group.iter().copied().find(|&v| v != view))
-            .map(|sibling| match tabs_holding(after.root(), sibling) {
-                Some((group, shown)) => group[shown],
-                None => sibling,
-            })
-            .filter(|&v| after.component(v) == Some(Component::Conversation))
-            .or_else(|| {
-                let left = conversations(&after);
-                left.get(index.saturating_sub(1)).copied()
-            })
-            .filter(|_| was_active);
+        let replacement = replacement(&before, &after, view).filter(|_| was_active);
         let tabs = self.session_tabs(cx);
         let saved = match replacement {
             Some(replacement) => self.commit_view(Some(after), tabs, replacement, cx),

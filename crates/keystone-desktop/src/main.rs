@@ -3262,10 +3262,44 @@ impl Render for Keystone {
                     cx.stop_propagation();
                 }
             }))
+            // A tab dropped over the desktop, which the platform reports as a release
+            // outside the window it left, opens in a new window. A plain release outside,
+            // where the platform never carried the drag, may be over another app.
+            .on_mouse_up_out(
+                MouseButton::Left,
+                self.scoped_listener(cx, |this, _: &gpui::MouseUpEvent, _, cx| {
+                    if !cx.active_drag_returned_from_platform() {
+                        return;
+                    }
+                    let Some(view) = cx
+                        .active_drag_value::<DraggedTab>()
+                        .and_then(|drag| this.dragged_view(drag))
+                    else {
+                        return;
+                    };
+                    let source = cx.entity();
+                    cx.defer(move |cx| {
+                        windows::move_tab(
+                            &source,
+                            view,
+                            windows::Destination::NewWindow,
+                            &source,
+                            cx,
+                        )
+                    });
+                }),
+            )
             // Capture runs before the focused input, so Escape closes an open menu first.
             .capture_key_down(self.scoped_listener(
                 cx,
                 |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape"
+                        && cx.active_drag_value::<DraggedTab>().is_some()
+                        && cx.stop_active_drag(window)
+                    {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if event.keystroke.key != "escape"
                         || this.renaming.is_some()
                         || this.confirm_full_access.is_some()
@@ -3493,6 +3527,12 @@ impl Render for Keystone {
                     });
                 }),
             )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &windows::MoveTabToWindow, window, cx| {
+                    this.open_move_tab_palette(window, cx)
+                },
+            ))
             .on_action(self.scoped_listener(
                 cx,
                 |this, _: &windows::OpenInNewWindow, window, cx| {
