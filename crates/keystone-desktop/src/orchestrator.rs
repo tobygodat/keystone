@@ -407,10 +407,15 @@ impl AppState {
             "session_read" => {
                 let read: Read = decode(arguments)?;
                 self.target(read.session, project)?;
+                let handed_off_from = self
+                    .session(read.session)
+                    .and_then(|session| session.handed_off_from())
+                    .map(|session| json!({"session":session}));
                 let conversation = self.conversation(read.session);
                 if conversation.is_loading() {
                     return Ok(
-                        json!({"session":read.session,"loading":true,"running":conversation.running,"rows":[],"next":read.after}),
+                        json!({"session":read.session,"loading":true,"running":conversation.running,"rows":[],"next":read.after,
+                        "handed_off_from":handed_off_from}),
                     );
                 }
                 let begin = match read.after {
@@ -483,7 +488,8 @@ impl AppState {
                     json!({"session":read.session,"loading":false,"running":running,"rows":rows,
                     "next":next,"has_more":begin.saturating_add(rows.len())<total,
                     "error":error,"load_error":load_error,"save_error":save_error,
-                    "created_by":created_by.map(|session|json!({"session":session}))}),
+                    "created_by":created_by.map(|session|json!({"session":session})),
+                    "handed_off_from":handed_off_from}),
                 )
             }
             "session_wait" => {

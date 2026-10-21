@@ -151,6 +151,33 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
         let other_id = state.create(Provider::Codex, &other, 1, cx).unwrap().value;
         let refused = state.orchestrate(caller, "session_read", json!({"session":other_id}), cx);
         assert!(refused.unwrap_err().contains("project"));
+        // The log worker may hold SQLite's writer for a moment under a loaded test run.
+        let handed = (0..50)
+            .find_map(|_| {
+                let result = state.hand_off(
+                    1,
+                    Provider::Claude,
+                    "context".into(),
+                    1,
+                    WindowId::FIRST,
+                    None,
+                    cx,
+                );
+                if result.is_err() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                result.ok()
+            })
+            .expect("the handoff saved")
+            .value;
+        let linked = state
+            .orchestrate(caller, "session_read", json!({"session":handed}), cx)
+            .unwrap();
+        assert_eq!(linked["handed_off_from"], json!({"session":1}));
+        let unlinked = state
+            .orchestrate(caller, "session_read", json!({"session":2}), cx)
+            .unwrap();
+        assert_eq!(unlinked["handed_off_from"], Value::Null);
         let wrong_generation = Caller {
             generation: caller.generation + 100,
             ..caller

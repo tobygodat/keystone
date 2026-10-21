@@ -1067,3 +1067,48 @@ fn new_tab_still_starts_a_session_when_saved_tabs_cannot_be_changed(cx: &mut Tes
         "{error:?}"
     );
 }
+
+#[gpui::test]
+fn a_handoff_opens_in_a_tab_beside_its_source(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path(), |store| {
+        split_layout(store);
+        for id in 1..=3 {
+            store.lock_model(id).unwrap();
+        }
+    });
+    let (view, cx) = open(&path, cx);
+    click(cx, "conversation");
+    let (source_view, source) = active(&view, cx).unwrap();
+    let source = source.unwrap();
+    let before = panes(&view, cx);
+    let writes = view.read_with(cx, |this, cx| this.state.read(cx).store().writes());
+    keys(cx, "ctrl-shift-h");
+    assert_eq!(
+        view.read_with(cx, |this, cx| this.state.read(cx).store().writes()),
+        writes + 1,
+        "the session, its tab and the selection are one write"
+    );
+    let saved = Store::open(&path).unwrap();
+    let new = saved.workspace().selected().unwrap();
+    assert_eq!(
+        saved
+            .workspace()
+            .sessions()
+            .last()
+            .unwrap()
+            .handed_off_from(),
+        Some(source)
+    );
+    let tabs = saved.workspace().preferences().session_tabs(&project());
+    assert_eq!(
+        tabs.get(source_view),
+        Some(source),
+        "the source keeps its tab"
+    );
+    assert!(tabs.view_of(new).is_some());
+    let shown = panes(&view, cx);
+    assert_eq!(shown.len(), before.len() + 1);
+    assert!(shown.contains(&(source_view, Some(source))));
+    assert_eq!(active(&view, cx).unwrap().1, Some(new));
+}

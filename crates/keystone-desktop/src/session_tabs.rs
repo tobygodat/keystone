@@ -342,7 +342,7 @@ impl Keystone {
 
     /// The saved layout and tabs, with the active view held to the session it shows so
     /// a tab or pane opened beside it leaves it in place. `None` while Customize is open.
-    fn layout_for_change(&self, cx: &App) -> Option<(Composition, SessionTabs, ViewId)> {
+    pub(crate) fn layout_for_change(&self, cx: &App) -> Option<(Composition, SessionTabs, ViewId)> {
         if self.presentation.current.customization.is_open() {
             return None;
         }
@@ -357,7 +357,7 @@ impl Keystone {
         Some((self.saved_composition(cx), tabs, active))
     }
 
-    fn open_view(
+    pub(crate) fn open_view(
         &mut self,
         c: &Composition,
         at: Place,

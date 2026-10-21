@@ -7,6 +7,7 @@ mod conversation;
 mod customization;
 mod customization_agent;
 mod files;
+mod handoff;
 mod model_selector;
 mod notifications;
 mod presentation;
@@ -932,6 +933,27 @@ impl Keystone {
                 return;
             }
         };
+        let project = self.presentation.project.as_ref().ok().cloned();
+        let show = show.and_then(|(layout, tabs, view)| {
+            project
+                .as_ref()
+                .map(|project| (project, layout, tabs, view))
+        });
+        let window = self.window_id;
+        self.create_with(cx, |state, cx| {
+            state.create_showing(provider, &directory, now_ms(), window, show, cx)
+        });
+    }
+
+    /// Saves the draft, then creates and selects the session `create` makes.
+    fn create_with(
+        &mut self,
+        cx: &mut Context<Self>,
+        create: impl FnOnce(
+            &mut AppState,
+            &mut Context<AppState>,
+        ) -> Result<keystone_core::Applied<u64>, Box<dyn std::error::Error>>,
+    ) {
         if !self.save_draft(cx) {
             return;
         }
@@ -940,15 +962,7 @@ impl Keystone {
             self.invalidate(left, ranges(rows), false, cx);
         }
         let previous = self.selected(cx);
-        let project = self.presentation.project.as_ref().ok().cloned();
-        let show = show.and_then(|(layout, tabs, view)| {
-            project
-                .as_ref()
-                .map(|project| (project, layout, tabs, view))
-        });
-        self.error = match self.state.update(cx, |state, cx| {
-            state.create_showing(provider, &directory, now_ms(), self.window_id, show, cx)
-        }) {
+        self.error = match self.state.update(cx, create) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
@@ -1205,6 +1219,7 @@ impl Keystone {
                     .when(settled, |d| {
                         d.child(Label::new("Settled").color(Color::Muted))
                     })
+                    .child(self.own_press(handoff::button(), cx))
             })
             .child(div().flex_1())
             .when(self.settings.is_none(), |d| {
@@ -3407,6 +3422,11 @@ impl Render for Keystone {
             .on_action(
                 self.scoped_listener(cx, |this, _: &RenameSession, window, cx| {
                     this.open_rename(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &handoff::HandOff, window, cx| {
+                    this.hand_off(window, cx)
                 }),
             )
             .on_action(
@@ -9053,6 +9073,11 @@ mod tests {
 
     /// A window over a saved workspace with one selected Codex session, focused the
     /// way `main` focuses it.
+    mod handoff {
+        use super::*;
+        include!("handoff_tests.rs");
+    }
+
     fn open_with_session<'a>(
         dir: &Path,
         cx: &'a mut gpui::TestAppContext,

@@ -772,6 +772,48 @@ impl IntoElement for TextElement {
     }
 }
 
+/// How many rows `text` wraps to at `width`, counting no further than `limit`, which
+/// is all a field capped at `limit` rows needs to know for its height. It reads only
+/// the wrap boundaries GPUI caches between frames: building every row's position, as
+/// [`shape_layout`] does to paint, costs a scan of the line per row, which for a long
+/// draft in a 1px layout pass took most of a second each frame.
+fn wrapped_rows(
+    text: &str,
+    width: Pixels,
+    style: &TextStyle,
+    limit: usize,
+    window: &mut Window,
+) -> usize {
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    let mut rows = 0;
+    for paragraph in text.split('\n') {
+        if rows >= limit {
+            break;
+        }
+        let runs = [TextRun {
+            len: paragraph.len(),
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }];
+        rows += window
+            .text_system()
+            .shape_text(
+                paragraph.to_owned().into(),
+                font_size,
+                &runs,
+                Some(width),
+                None,
+            )
+            .unwrap()
+            .first()
+            .map_or(1, |line| line.wrap_boundaries.len() + 1);
+    }
+    rows.min(limit)
+}
+
 fn shape_layout(
     input: &TextInput,
     text: &str,
@@ -901,19 +943,10 @@ impl Element for TextElement {
                     _ => px(400.),
                 })
                 .max(px(1.));
-            let placeholder = cx.theme().colors.text_placeholder;
             let input = input.read(cx);
-            let layout = shape_layout(
-                input,
-                &input.content,
-                width,
-                &measured_style,
-                line_height,
-                placeholder,
-                window,
-            );
             let height = if input.mode == InputMode::Multiline {
-                layout.height().min(line_height * 8).max(px(28.))
+                let rows = wrapped_rows(&input.content, width, &measured_style, 8, window);
+                (line_height * rows).max(px(28.))
             } else {
                 line_height
             };
@@ -1219,6 +1252,49 @@ mod tests {
                 input.replace_text_in_range(Some(2..4), "界", window, cx);
                 assert_eq!(input.value(), "a\n界z");
             })
+        });
+    }
+
+    #[gpui::test]
+    fn measured_rows_match_the_shaped_layout_up_to_the_cap(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let (input, cx) =
+            cx.add_window_view(|_, cx| TextInput::new("Draft", InputMode::Multiline, cx));
+        let long = format!("{}\n\n{}", "word ".repeat(3_000), "x".repeat(400));
+        let texts = [
+            "",
+            "WWW",
+            "one line",
+            "a\nb\n\nc",
+            "abc ".repeat(40).as_str(),
+            &long,
+        ]
+        .map(str::to_owned);
+        cx.update(|window, cx| {
+            let style = window.text_style();
+            let line_height = window.line_height();
+            for text in &texts {
+                for width in [px(1.), px(30.), px(400.), px(602.)] {
+                    let shaped = shape_layout(
+                        input.read(cx),
+                        text,
+                        width,
+                        &style,
+                        line_height,
+                        style.color,
+                        window,
+                    );
+                    assert_eq!(
+                        wrapped_rows(text, width, &style, 8, window),
+                        shaped.rows.len().min(8),
+                        "{} bytes at {width:?}",
+                        text.len()
+                    );
+                }
+            }
+            assert_eq!(wrapped_rows(&long, px(602.), &style, 8, window), 8);
+            assert_eq!(wrapped_rows("a\nb\n\nc", px(602.), &style, 8, window), 4);
+            assert_eq!(wrapped_rows("one line", px(602.), &style, 8, window), 1);
         });
     }
 

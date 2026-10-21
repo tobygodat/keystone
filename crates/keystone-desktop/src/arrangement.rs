@@ -1323,7 +1323,7 @@ impl Keystone {
                         .conversations()
                         .get(&session)
                         .is_some_and(|c| !c.is_loading() && c.is_empty());
-                    pane = pane.child(
+                    pane = pane.children(self.handoff_links(key, cx)).child(
                         div()
                             .id(selector("conversation", id))
                             .automation_id(selector("conversation", id))

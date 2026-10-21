@@ -798,6 +798,30 @@ impl AppState {
         result
     }
 
+    /// Hands `source` off in `window`, saving `show` with the new session. See
+    /// [`keystone_core::Store::hand_off`].
+    pub(crate) fn hand_off(
+        &mut self,
+        source: u64,
+        provider: Provider,
+        draft: String,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+
+        let result = self
+            .store
+            .hand_off(source, provider, draft, now, window, show);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
     /// Creates a session an agent starts, selected in no window.
     pub(crate) fn create_unselected(
         &mut self,

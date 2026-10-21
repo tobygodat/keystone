@@ -186,6 +186,10 @@ pub struct Session {
     /// the provider and model, once the session has started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account: Option<AccountId>,
+    /// The session this one continues: a handoff carried its context here in a new
+    /// session, leaving that one unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handed_off_from: Option<u64>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -249,6 +253,31 @@ impl ApprovalMode {
 }
 
 impl Session {
+    /// A session not yet sent from, with a placeholder title and an empty draft.
+    fn new(id: u64, provider: Provider, directory: &WorkingDirectory, now: u64) -> Self {
+        Session {
+            id,
+            title: format!("New {provider} session"),
+            title_source: TitleSource::Placeholder,
+            provider,
+            execution_context: SavedSessionContext::recorded(directory, ContextOrigin::Created),
+            settled: false,
+            draft: String::new(),
+            provider_thread: None,
+            created_at: Some(now),
+            updated_at: Some(now),
+            viewed_at: Some(now),
+            last_turn: None,
+            approval_mode: ApprovalMode::default(),
+            approval_overridden: false,
+            model: None,
+            model_locked: Some(false),
+            account: None,
+            handed_off_from: None,
+            unknown: Map::new(),
+        }
+    }
+
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -296,6 +325,11 @@ impl Session {
     /// The account the session runs under, or `None` for its provider's default.
     pub fn account(&self) -> Option<&AccountId> {
         self.account.as_ref()
+    }
+
+    /// The session this one was handed off from, if any.
+    pub fn handed_off_from(&self) -> Option<u64> {
+        self.handed_off_from
     }
 
     /// Whether the session has sent anything to its provider. The provider and model
@@ -629,31 +663,71 @@ impl Store {
         window: Option<WindowId>,
         show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
     ) -> StoreResult<Applied<u64>> {
+        self.add_session(
+            |id| Session::new(id, provider, directory, now),
+            window,
+            show,
+        )
+    }
+
+    /// Creates a session that continues `source` on `provider`'s default account and
+    /// selects it in `window`, in one save: the same folder, `source`'s title (or, for
+    /// a placeholder, one naming `source`), a link back to it, and `draft` in its
+    /// composer, saving `show` with it as [`Store::create_showing`] does. `source`
+    /// itself is not changed. The new session has not started, so its provider,
+    /// account and model can still change.
+    pub fn hand_off(
+        &mut self,
+        source: u64,
+        provider: Provider,
+        draft: String,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
+        let from = self
+            .workspace
+            .sessions
+            .iter()
+            .find(|session| session.id == source)
+            .ok_or_else(|| invalid(format!("unknown session ID {source}")))?;
+        let SessionContext::Recorded { directory, .. } = from.context() else {
+            return Err(invalid("choose this session's folder before handing it off").into());
+        };
+        let directory = directory.clone();
+        // A placeholder would give way to the handoff text's first words on Send.
+        let title = match from.title_source {
+            TitleSource::Placeholder => format!("Continued from session {source}"),
+            _ => from.title.clone(),
+        };
+        self.add_session(
+            |id| {
+                let mut session = Session::new(id, provider, &directory, now);
+                session.title = title;
+                session.title_source = TitleSource::FirstMessage;
+                session.draft = draft;
+                session.handed_off_from = Some(source);
+                session
+            },
+            Some(window),
+            show,
+        )
+    }
+
+    /// Adds the session `make` builds with the next ID, selecting it in `window` and
+    /// saving `show` there as [`Store::create_showing`] does.
+    fn add_session(
+        &mut self,
+        make: impl FnOnce(u64) -> Session,
+        window: Option<WindowId>,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
         let id = self.next_id;
         let next_id = id
             .checked_add(1)
             .ok_or_else(|| invalid("session ID exhausted"))?;
         let mut next = self.workspace.clone();
-        next.sessions.push(Session {
-            id,
-            title: format!("New {provider} session"),
-            title_source: TitleSource::Placeholder,
-            provider,
-            execution_context: SavedSessionContext::recorded(directory, ContextOrigin::Created),
-            settled: false,
-            draft: String::new(),
-            provider_thread: None,
-            created_at: Some(now),
-            updated_at: Some(now),
-            viewed_at: Some(now),
-            last_turn: None,
-            approval_mode: ApprovalMode::default(),
-            approval_overridden: false,
-            model: None,
-            model_locked: Some(false),
-            account: None,
-            unknown: Map::new(),
-        });
+        next.sessions.push(make(id));
         let sessions: HashSet<u64> = next.sessions.iter().map(|s| s.id).collect();
         if let Some(window) = window {
             let shown = next.shown_mut(window)?;
@@ -2560,5 +2634,126 @@ mod tests {
         std::fs::create_dir(&lossy).unwrap();
         let lossy = ProjectId::new(&lossy).unwrap_err();
         assert_eq!(lossy.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_handoff_is_a_new_linked_session_and_leaves_its_source_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        let folder = working_directory();
+        let source = store.create(Provider::Claude, &folder, 1).unwrap().value;
+        store
+            .record_message(source, "Fix the login bug", 2)
+            .unwrap();
+        store.set_draft(source, "half a thought".into()).unwrap();
+        let home = directory.path().join("codex-work");
+        let work = store
+            .add_account(Provider::Codex, "Work", home, &[])
+            .unwrap()
+            .value;
+        let before = store.workspace().sessions()[0].clone();
+
+        let handed = store
+            .hand_off(
+                source,
+                Provider::Codex,
+                "context".into(),
+                5,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap()
+            .value;
+        store
+            .set_provider_account(handed, Provider::Codex, Some(work.clone()))
+            .unwrap();
+
+        assert_ne!(handed, source);
+        assert_eq!(store.workspace().selected(), Some(handed));
+        assert_eq!(store.workspace().sessions()[0], before);
+        let reopened = Store::open(&path).unwrap();
+        let sessions = reopened.workspace().sessions();
+        assert_eq!(sessions[0], before);
+        assert_eq!(sessions[0].handed_off_from(), None);
+        let new = &sessions[1];
+        assert_eq!(new.handed_off_from(), Some(source));
+        assert_eq!(new.provider(), Provider::Codex);
+        assert_eq!(new.account(), Some(&work));
+        assert_eq!(new.draft(), "context");
+        assert_eq!(new.title(), "Fix the login bug");
+        assert!(!new.started());
+        assert_eq!(new.model(), None);
+        assert_eq!(
+            new.context(),
+            SessionContext::Recorded {
+                directory: &folder,
+                origin: ContextOrigin::Created,
+            }
+        );
+
+        store.record_message(handed, "Carry on", 6).unwrap();
+        assert_eq!(store.workspace().sessions()[1].title(), "Fix the login bug");
+        store.set_provider(handed, Provider::Claude).ok();
+        assert_eq!(
+            store.workspace().sessions()[1].handed_off_from(),
+            Some(source)
+        );
+    }
+
+    #[test]
+    fn a_handoff_is_refused_without_a_folder_and_names_its_source_for_a_placeholder_title() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(&path, r#"{"version":1,"next_id":2,"workspace":{"selected":1,"sessions":[{"id":1,"title":"Legacy","provider":"Codex","settled":false,"draft":""}]}}"#).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        let refused = store
+            .hand_off(
+                1,
+                Provider::Claude,
+                "context".into(),
+                1,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap_err();
+        assert!(refused.to_string().contains("folder"), "{refused}");
+        let writes = store.writes();
+        assert!(
+            store
+                .hand_off(9, Provider::Claude, String::new(), 1, WindowId::FIRST, None)
+                .is_err()
+        );
+        assert_eq!(store.writes(), writes);
+
+        let placeholder = store
+            .create(Provider::Claude, &working_directory(), 2)
+            .unwrap()
+            .value;
+        let handed = store
+            .hand_off(
+                placeholder,
+                Provider::Codex,
+                String::new(),
+                4,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap()
+            .value;
+        let new = store.workspace().sessions().last().unwrap();
+        assert_eq!(new.id(), handed);
+        assert_eq!(new.title(), format!("Continued from session {placeholder}"));
+        assert_eq!(new.account(), None);
+        store.record_message(handed, "Continuing from…", 5).unwrap();
+        assert_eq!(
+            store.workspace().sessions().last().unwrap().title(),
+            format!("Continued from session {placeholder}")
+        );
+        store.rename(handed, "Pick this up").unwrap();
+        assert_eq!(
+            store.workspace().sessions().last().unwrap().title(),
+            "Pick this up"
+        );
     }
 }

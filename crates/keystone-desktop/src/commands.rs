@@ -3,6 +3,7 @@
 
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
+use crate::handoff::HandOff;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
 use crate::windows::{CloseWindow, NewWindow, OpenInNewWindow};
@@ -80,6 +81,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["f2"],
         context: Some(APP),
         action: || Box::new(RenameSession),
+    },
+    Command {
+        id: "hand-off",
+        label: "Hand off…",
+        keys: &["ctrl-shift-h"],
+        context: Some(APP),
+        action: || Box::new(HandOff),
     },
     Command {
         id: "settle-session",

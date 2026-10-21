@@ -22,6 +22,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Settings](settings.md) covers the settings page: opening, sections, theme, fonts, density, text size, and restart.
 - [Files](files.md) covers the sidebar's Sessions and Files toggle, lazy folder listing that respects `.gitignore`, opening files in an external editor, Copy path, and the spawn error row.
 - [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, choosing the provider and model before the first Send, and restoring a conversation.
+- [Handoff](handoff.md) covers handing a session off to a new linked session on another provider, account or model: the handoff text and budget, the selector, Send on the chosen account, link rows both ways, and restart.
 - [Claude idle shutdown](provider-idle.md) covers proven-idle eviction of a scripted Claude, lazy resume with the same thread, folder, flags, account and requested model, and held work that keeps its process.
 - [Keyboard transcript actions](transcript-keyboard.md) covers virtual row/action navigation, exact copy bytes, occurrence-scoped Jump and hidden-focus transitions.
 - [Tabs and split panes](tabs.md) covers session tabs, Split right, opening from the sidebar, cycling, closing and collapsing, dragging tabs between strips and to pane edges, pane dividers, and restoring all of it after Quit or a crash.
