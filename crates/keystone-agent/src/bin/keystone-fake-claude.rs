@@ -87,6 +87,13 @@
 //! exists; and "hold tool" keeps a Bash call running until `.fake-claude-release-tool`
 //! exists. A `child` setting of `1` starts a `sleep` child at launch and appends its
 //! ID to `.fake-claude-children`, so a test can check the whole tree ends.
+//!
+//! `mcp_set_servers` takes Keystone's `keystone` HTTP server and its `keystone_ui` SDK
+//! server, as Claude Code 2.1.301 does. For the SDK server it then sends `initialize`,
+//! `notifications/initialized` and `tools/list` as `mcp_message` control requests, and
+//! a prompt that asks for a widget (see `support/widgets.rs`) calls `show_ui`: it asks
+//! permission with `can_use_tool`, sends `tools/call` with the tool use ID in `_meta`,
+//! waits for the answer, and replies with what each call returned.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -99,6 +106,8 @@ use std::time::{Duration, Instant};
 
 #[path = "support/orchestrator.rs"]
 mod orchestrator;
+#[path = "support/widgets.rs"]
+mod widgets;
 
 type Out = Arc<Mutex<io::Stdout>>;
 
@@ -212,6 +221,11 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     mcp: Mutex<Option<orchestrator::Server>>,
+    /// Whether the `keystone_ui` server answered `tools/list` with `show_ui`, or `None`
+    /// while it is connecting.
+    widgets: Mutex<Option<bool>>,
+    /// Control requests this process sent that wait for an answer, by request ID.
+    calls: Mutex<std::collections::HashMap<String, Sender<Value>>>,
     /// The permission mode, and whether the process may enter `bypassPermissions`.
     mode: Mutex<String>,
     /// The mode approving `ExitPlanMode` returns to.
@@ -470,6 +484,8 @@ fn main() {
     let shared = Arc::new(Shared {
         state: Mutex::default(),
         mcp: Mutex::default(),
+        widgets: Mutex::new(Some(false)),
+        calls: Mutex::default(),
         bypass: launch_mode.as_deref() == Some("bypassPermissions"),
         before_plan: Mutex::new(if mode == "plan" {
             user_mode.clone()
@@ -606,15 +622,40 @@ fn main() {
                         }
                     }
                     Some("mcp_set_servers") => {
-                        let config = &message["request"]["servers"]["keystone"];
-                        let server = orchestrator::Server::from_config(config, "headers");
-                        let accepted = config["type"] == "http" && server.is_some();
-                        *shared.mcp.lock().unwrap() = if accepted { server } else { None };
-                        reply(if accepted {
-                            json!({"added":["keystone"],"removed":[],"errors":{}})
-                        } else {
-                            json!({"added":[],"removed":[],"errors":{"keystone":"Invalid loopback MCP configuration"}})
-                        });
+                        let servers = &message["request"]["servers"];
+                        let mut added = Vec::new();
+                        let mut errors = serde_json::Map::new();
+                        let config = &servers["keystone"];
+                        if !config.is_null() {
+                            let server = orchestrator::Server::from_config(config, "headers");
+                            let accepted = config["type"] == "http" && server.is_some();
+                            *shared.mcp.lock().unwrap() = if accepted { server } else { None };
+                            if accepted {
+                                added.push("keystone");
+                            } else {
+                                errors.insert(
+                                    "keystone".into(),
+                                    json!("Invalid loopback MCP configuration"),
+                                );
+                            }
+                        }
+                        let ui = &servers["keystone_ui"];
+                        if !ui.is_null() {
+                            if ui["type"] == "sdk" && ui["name"] == "keystone_ui" {
+                                added.push("keystone_ui");
+                            } else {
+                                errors.insert(
+                                    "keystone_ui".into(),
+                                    json!("Invalid SDK MCP configuration"),
+                                );
+                            }
+                        }
+                        reply(json!({"added": added, "removed": [], "errors": errors}));
+                        if added.contains(&"keystone_ui") {
+                            *shared.widgets.lock().unwrap() = None;
+                            let (out, shared) = (out.clone(), shared.clone());
+                            thread::spawn(move || connect_widgets(&out, &shared));
+                        }
                     }
                     Some("set_permission_mode") => {
                         thread::sleep(hold_mode);
@@ -664,6 +705,10 @@ fn main() {
                 let id = message["response"]["request_id"]
                     .as_str()
                     .unwrap_or_default();
+                if let Some(tx) = shared.calls.lock().unwrap().remove(id) {
+                    let _ = tx.send(message["response"].clone());
+                    continue;
+                }
                 let allow = message["response"]["response"]["behavior"] == "allow";
                 let mut state = shared.state.lock().unwrap();
                 let applied = state
@@ -935,6 +980,133 @@ fn work(
     }
 }
 
+/// Sends a control request and waits for its answer, or `None` if the turn is
+/// stopped first, after withdrawing the request as Claude does.
+fn ask(out: &Out, shared: &Shared, id: &str, request: Value) -> Option<Value> {
+    let (tx, rx) = mpsc::channel();
+    shared.calls.lock().unwrap().insert(id.to_owned(), tx);
+    emit(
+        out,
+        json!({"type": "control_request", "request_id": id, "request": request}),
+    );
+    loop {
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(answer) => return Some(answer),
+            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => {
+                let state = shared.state.lock().unwrap();
+                if state.abort == Some(Abort::Stop) || state.closed {
+                    drop(state);
+                    shared.calls.lock().unwrap().remove(id);
+                    emit(
+                        out,
+                        json!({"type": "control_cancel_request", "request_id": id}),
+                    );
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+fn mcp_message(message: Value) -> Value {
+    json!({"subtype": "mcp_message", "server_name": "keystone_ui", "message": message})
+}
+
+/// Connects to the `keystone_ui` SDK server as Claude Code does once it is added.
+fn connect_widgets(out: &Out, shared: &Shared) {
+    let pid = std::process::id();
+    let handshake = [
+        json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "claude-code", "version": VERSION}}}),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    ];
+    let mut listed = Value::Null;
+    for (n, message) in handshake.into_iter().enumerate() {
+        let id = format!("fake-mcp-{pid}-{n}");
+        let Some(answer) = ask(out, shared, &id, mcp_message(message)) else {
+            return;
+        };
+        listed = answer["response"]["mcp_response"].clone();
+    }
+    *shared.widgets.lock().unwrap() = Some(
+        listed["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "show_ui")),
+    );
+}
+
+/// One `show_ui` call: the tool use, its permission check, `tools/call`, and its
+/// result. Returns the result text, or `None` when the turn was stopped.
+fn show_ui(out: &Out, shared: &Shared, turn: u64, n: usize, arguments: Value) -> Option<String> {
+    let pid = std::process::id();
+    let message = format!("fake-ui-{pid}-{turn}-{n}");
+    let tool = format!("fake-ui-toolu-{pid}-{turn}-{n}");
+    let name = "mcp__keystone_ui__show_ui";
+    stream(
+        out,
+        json!({"type": "message_start", "message": {"id": message}}),
+    );
+    stream(
+        out,
+        json!({"type": "content_block_start", "index": 0, "content_block":
+               {"type": "tool_use", "id": tool, "name": name, "input": {}}}),
+    );
+    let content = json!([{"type": "tool_use", "id": tool, "name": name, "input": arguments}]);
+    emit(
+        out,
+        json!({"type": "assistant", "message": {"id": message, "content": content},
+               "parent_tool_use_id": null}),
+    );
+    store(
+        "assistant",
+        json!({"id": message, "role": "assistant", "content": content}),
+        None,
+    );
+    let permission = format!("fake-ui-permission-{pid}-{turn}-{n}");
+    let allowed = ask(
+        out,
+        shared,
+        &permission,
+        json!({"subtype": "can_use_tool", "tool_name": name, "display_name": "show_ui",
+               "input": arguments, "tool_use_id": tool}),
+    )?;
+    let (text, is_error) = if allowed["response"]["behavior"] == "allow" {
+        let id = format!("fake-ui-call-{pid}-{turn}-{n}");
+        let answer = ask(
+            out,
+            shared,
+            &id,
+            mcp_message(
+                json!({"jsonrpc": "2.0", "id": 2 + n, "method": "tools/call", "params": {
+                    "name": "show_ui", "arguments": arguments,
+                    "_meta": {"claudecode/toolUseId": tool}}}),
+            ),
+        )?;
+        let result = &answer["response"]["mcp_response"]["result"];
+        (
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            result["isError"] == true,
+        )
+    } else {
+        ("The user denied this in Keystone.".to_owned(), true)
+    };
+    let result = json!([{"type": "tool_result", "tool_use_id": tool,
+        "content": [{"type": "text", "text": text}], "is_error": is_error}]);
+    emit(
+        out,
+        json!({"type": "user", "message": {"role": "user", "content": result},
+               "parent_tool_use_id": null}),
+    );
+    store("user", json!({"role": "user", "content": result}), None);
+    Some(text)
+}
+
 /// Runs one message's turn and returns its lifecycle end state.
 #[allow(clippy::too_many_arguments)]
 fn answer(
@@ -1079,6 +1251,27 @@ fn answer(
                    [{"type": "tool_result", "tool_use_id": tool, "content": content, "is_error": is_error}]}),
             None,
         );
+    }
+    let calls = widgets::calls(text);
+    if !calls.is_empty() {
+        // A turn waits for the server to connect, as Claude Code does.
+        let started = Instant::now();
+        let widgets = loop {
+            match *shared.widgets.lock().unwrap() {
+                Some(widgets) => break widgets,
+                None if started.elapsed() > Duration::from_secs(5) => break false,
+                None => {}
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        let mut results = Vec::new();
+        for (n, arguments) in calls.into_iter().enumerate().filter(|_| widgets) {
+            match show_ui(out, shared, turn, n, arguments) {
+                Some(result) => results.push(result),
+                None => return stopped(out),
+            }
+        }
+        reply = widgets::reply(&results);
     }
     let message = format!("fake-message-{}-{turn}", std::process::id());
     let text_record = |text: &str| {

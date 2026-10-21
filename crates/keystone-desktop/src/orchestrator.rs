@@ -385,6 +385,7 @@ impl AppState {
                         text: launch.message,
                     },
                     Some(caller),
+                    true,
                     cx,
                 );
                 Ok(json!({"session":id,"sent":sent,"created_by":{"session":caller.session}}))
@@ -450,6 +451,11 @@ impl AppState {
                         Row::Recovery(report) => {
                             json!({"position":index,"recovery":report,"truncated":false})
                         }
+                        // What the user did in it, not how it is drawn.
+                        Row::Surface(surface) => json!({"position":index,"surface":{
+                            "call":surface.call,"surface_id":surface.surface_id,
+                            "status":surface.status,"data":surface.data,
+                            "last_action":surface.last_action},"truncated":false}),
                     };
                     let mut size = serde_json::to_vec(&shown_row).unwrap().len();
                     if size > BUDGET {

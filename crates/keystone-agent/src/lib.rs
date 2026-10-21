@@ -18,6 +18,7 @@ pub mod log;
 pub mod mcp;
 mod profile;
 pub mod recovery;
+pub mod surface;
 mod version;
 pub mod worker;
 

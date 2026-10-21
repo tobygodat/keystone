@@ -68,6 +68,15 @@ pub enum Entry {
     /// The provider exited during a turn, so what it saved must be checked. A later
     /// `Recovery` or a new turn settles it; until then every restore checks again.
     ProviderExited,
+    /// An agent-built widget, whole, saved each time it changes. The latest entry for
+    /// a `call` replaces earlier ones; `seq` and `run` place its row as for an item.
+    Surface {
+        surface: crate::surface::Surface,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<u64>,
+    },
 }
 
 /// An entry to append. Every SQLite write syncs, even when `sync` is false.
@@ -368,7 +377,8 @@ impl Gap {
         let (seq, run) = match entry {
             Entry::Item { seq, run, .. }
             | Entry::Approval { seq, run, .. }
-            | Entry::TurnEnded { seq, run, .. } => (*seq, *run),
+            | Entry::TurnEnded { seq, run, .. }
+            | Entry::Surface { seq, run, .. } => (*seq, *run),
             _ => (None, None),
         };
         let count = match entry {

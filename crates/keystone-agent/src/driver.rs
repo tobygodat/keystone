@@ -38,6 +38,13 @@ pub enum Command {
         request: RequestId,
         allow: bool,
     },
+    /// Returns a widget's action as the result of the `show_ui` call that waits for
+    /// it, or reports [`crate::Event::ActionUndelivered`] when none does.
+    Act {
+        session: u64,
+        call: String,
+        text: String,
+    },
     /// Sets the approval mode for the session's next turns, including a message that
     /// waits to start one. `overridden` is read only before the session opens.
     Configure {

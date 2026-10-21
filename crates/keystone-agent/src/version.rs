@@ -17,6 +17,8 @@ struct Policy {
     highest_tested: (u32, u32, u32),
     incompatible_through: (u32, u32, u32),
     missing: &'static str,
+    /// The first version checked to host Keystone's `show_ui` tool.
+    widgets_from: (u32, u32, u32),
 }
 
 impl Provider {
@@ -28,6 +30,7 @@ impl Provider {
                 highest_tested: (2, 1, 301),
                 incompatible_through: (0, 2, 9),
                 missing: "stream-json input and the stdio control protocol",
+                widgets_from: (2, 1, 300),
             },
             Self::Codex => Policy {
                 name: "Codex",
@@ -35,6 +38,7 @@ impl Provider {
                 highest_tested: (0, 163, 0),
                 incompatible_through: (0, 20, 0),
                 missing: "the app-server command",
+                widgets_from: (0, 163, 0),
             },
         }
     }
@@ -43,6 +47,8 @@ impl Provider {
 pub(crate) struct Compatibility {
     pub notice: Option<String>,
     pub cancel_queued: bool,
+    /// Whether to offer the `show_ui` tool. A version Keystone cannot read gets none.
+    pub widgets: bool,
 }
 
 #[derive(Default)]
@@ -121,6 +127,7 @@ fn assess(provider: Provider, output: &str, success: bool) -> Result<Compatibili
             )
         }),
         cancel_queued: parsed.is_some_and(|(version, _)| version >= policy.minimum_supported),
+        widgets: parsed.is_some_and(|(version, _)| version >= policy.widgets_from),
     })
 }
 

@@ -93,6 +93,8 @@ pub enum LastTurn {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Attention {
     Approval,
+    /// An agent-built widget waits for the user to answer it.
+    Input,
     Failed,
     Replied,
 }
@@ -318,10 +320,16 @@ impl Session {
         self.viewed_at = Some(self.updated_at.map_or(now, |updated| updated.max(now)));
     }
 
-    /// What the session needs from the user, if anything. `awaiting_approval` and
-    /// `running` describe the live provider in this process. A turn saved as running
-    /// that no live provider runs was cut off when Keystone closed, so it failed.
-    pub fn attention(&self, awaiting_approval: bool, running: bool) -> Option<Attention> {
+    /// What the session needs from the user, if anything. `awaiting_approval`,
+    /// `awaiting_input` (a widget waits for an answer) and `running` describe the live
+    /// provider in this process. A turn saved as running that no live provider runs was
+    /// cut off when Keystone closed, so it failed.
+    pub fn attention(
+        &self,
+        awaiting_approval: bool,
+        awaiting_input: bool,
+        running: bool,
+    ) -> Option<Attention> {
         let failed = match self.last_turn {
             Some(LastTurn::Failed) => true,
             Some(LastTurn::Running) => !running,
@@ -332,6 +340,8 @@ impl Session {
             .is_some_and(|updated| self.viewed_at.is_none_or(|viewed| updated > viewed));
         if awaiting_approval {
             Some(Attention::Approval)
+        } else if awaiting_input {
+            Some(Attention::Input)
         } else if failed {
             Some(Attention::Failed)
         } else if running {
@@ -1406,15 +1416,18 @@ mod tests {
         assert_eq!(store.workspace().sessions()[0].viewed_at(), Some(1_000));
         store.record_message(1, "hi", 5_000).unwrap();
         assert_eq!(store.workspace().sessions()[0].viewed_at(), Some(1_000));
-        assert_eq!(store.workspace().sessions()[0].attention(false, true), None);
+        assert_eq!(
+            store.workspace().sessions()[0].attention(false, false, true),
+            None
+        );
         store.record_turn_end(1, false, 6_000).unwrap();
         assert_eq!(
-            store.workspace().sessions()[0].attention(false, false),
+            store.workspace().sessions()[0].attention(false, false, false),
             Some(Attention::Replied)
         );
         store.mark_viewed(1, 7_000).unwrap();
         assert_eq!(
-            store.workspace().sessions()[0].attention(false, false),
+            store.workspace().sessions()[0].attention(false, false, false),
             None
         );
         assert_eq!(
@@ -1452,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_prefers_approval_then_failure_then_an_unseen_reply() {
+    fn attention_prefers_approval_then_a_waiting_widget_then_failure_then_an_unseen_reply() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("state.json")).unwrap();
         store
@@ -1462,7 +1475,7 @@ mod tests {
             .create(Provider::Codex, &working_directory(), 2_000)
             .unwrap();
         let attention = |store: &Store, approval, running| {
-            store.workspace().sessions()[0].attention(approval, running)
+            store.workspace().sessions()[0].attention(approval, false, running)
         };
         assert_eq!(attention(&store, false, false), None);
 
@@ -1471,6 +1484,13 @@ mod tests {
         store.record_turn_end(1, true, 4_000).unwrap();
         assert_eq!(attention(&store, false, false), Some(Attention::Failed));
         assert_eq!(attention(&store, true, true), Some(Attention::Approval));
+        // A widget waiting on the user comes after an approval, before anything else.
+        let session = &store.workspace().sessions()[0];
+        assert_eq!(session.attention(false, true, true), Some(Attention::Input));
+        assert_eq!(
+            session.attention(true, true, true),
+            Some(Attention::Approval)
+        );
 
         // Viewing a failure does not clear it. The next message does.
         store.select(1).unwrap();
@@ -1487,7 +1507,7 @@ mod tests {
                 .unwrap()
                 .workspace()
                 .sessions()[0]
-                .attention(false, false),
+                .attention(false, false, false),
             Some(Attention::Failed)
         );
     }
@@ -1503,7 +1523,7 @@ mod tests {
             .create(Provider::Codex, &working_directory(), 2_000)
             .unwrap();
         store.record_turn_end(1, false, 3_000).unwrap();
-        let first = |store: &Store| store.workspace().sessions()[0].attention(false, false);
+        let first = |store: &Store| store.workspace().sessions()[0].attention(false, false, false);
 
         store.select(1).unwrap();
         assert_eq!(first(&store), Some(Attention::Replied));
@@ -1532,7 +1552,7 @@ mod tests {
         store.select(2).unwrap();
         store.mark_viewed(1, 9_500).unwrap();
         assert_eq!(
-            store.workspace().sessions()[0].attention(false, false),
+            store.workspace().sessions()[0].attention(false, false, false),
             None
         );
     }
@@ -1654,7 +1674,7 @@ mod tests {
         store.record_turn_start(1).unwrap();
         let reopened = Store::open(&path).unwrap();
         assert_eq!(
-            reopened.workspace().sessions()[0].attention(false, false),
+            reopened.workspace().sessions()[0].attention(false, false, false),
             Some(Attention::Failed)
         );
     }

@@ -77,6 +77,8 @@ pub(crate) struct AppState {
     reviewing: HashMap<u64, keystone_agent::recovery::RecoveryReport>,
     /// Sessions whose user chose to send before their history arrived.
     send_unloaded: std::collections::HashSet<u64>,
+    /// Sessions with widget edits waiting for [`WIDGET_SAVE_DELAY`] to log them.
+    widget_saves: std::collections::HashSet<u64>,
     /// Idle processes waiting for their session's log to save, by session: the log
     /// checkpoint's ticket and the provider's candidate.
     idle_saves: HashMap<u64, (u64, IdleCandidate)>,
@@ -96,6 +98,10 @@ impl EventEmitter<RuntimeChanged> for AppState {}
 
 /// Most Claude store reads at once. A read stuck on a slow disk keeps its slot.
 const RECOVERY_READERS: usize = 2;
+
+/// How long a widget edit waits before it is logged, so typing logs the widget once
+/// rather than at every key.
+const WIDGET_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
 /// How long a recovery check may take before the app stops waiting for it.
 pub(crate) const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -609,15 +615,12 @@ impl AppState {
         }
 
         if settled
-            && self
+            && let Some(reason) = self
                 .conversations
                 .get(&id)
-                .is_some_and(Conversation::awaiting_approval)
+                .and_then(Conversation::settle_blocker)
         {
-            return Err(std::io::Error::other(
-                "Answer the approval request before settling this session.",
-            )
-            .into());
+            return Err(std::io::Error::other(reason).into());
         }
         let result = self.store.set_settled(id, settled);
         self.changes.sidebar = true;
@@ -784,6 +787,7 @@ impl AppState {
             queued_reads: Default::default(),
             active_reads: Arc::default(),
             recover_after_load: Default::default(),
+            widget_saves: Default::default(),
             send_unloaded: Default::default(),
             idle_saves: HashMap::new(),
             #[cfg(test)]
@@ -1070,6 +1074,7 @@ impl AppState {
         }
         let mut sidebar_changed = false;
         let mut recover = Vec::new();
+        let mut undelivered = Vec::new();
         for report in reports {
             let session = match report {
                 Report::Loaded { session, entries } => {
@@ -1149,6 +1154,10 @@ impl AppState {
                     self.offer_idle(session, candidate);
                     continue;
                 }
+                Event::ActionUndelivered { call, text } => {
+                    undelivered.push((session, call, text));
+                    continue;
+                }
                 _ => {}
             }
             let failed = turn_failed(&event);
@@ -1160,7 +1169,9 @@ impl AppState {
             sidebar_changed |= failed.is_some()
                 || matches!(
                     event,
-                    Event::ApprovalRequested(_) | Event::ApprovalResolved { .. }
+                    Event::ApprovalRequested(_)
+                        | Event::ApprovalResolved { .. }
+                        | Event::SurfaceShown { .. }
                 );
             let thread = self.conversation(session).apply(event);
             self.commit(session);
@@ -1189,6 +1200,18 @@ impl AppState {
                 }
                 _ => {}
             }
+        }
+        // A press the provider no longer waited for goes as a message, after this batch
+        // so it lands after the turn's end.
+        if !undelivered.is_empty() {
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    for (session, call, text) in undelivered {
+                        this.send_widget_action(session, &call, &text, cx);
+                    }
+                });
+            })
+            .detach();
         }
         // Streamed text redraws only this view. The sidebar refreshes when a row changes.
         if sidebar_changed {
@@ -1757,19 +1780,128 @@ impl AppState {
                 break;
             }
         }
+        let edited: Vec<u64> = self.widget_saves.drain().collect();
+        for session in edited {
+            self.save_widgets(session);
+        }
         let result = self.logs.flush_pending();
         self.receive(self.logs.drain(), Vec::new(), cx);
         result.map_err(|error| format!("Could not save conversation logs before closing. {error}"))
     }
 
     pub(crate) fn send_message(&mut self, draft: ComposerDraft, cx: &mut Context<Self>) -> bool {
-        self.send_message_from(draft, None, cx)
+        self.send_message_from(draft, None, true, cx)
+    }
+
+    /// Writes an input's value into a widget. The widget is logged a moment later, so
+    /// typing logs it once.
+    pub(crate) fn edit_widget(
+        &mut self,
+        session: u64,
+        call: &str,
+        pointer: &str,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        match conversation.edit_surface(call, pointer, value) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                conversation.error = Some(format!("Not kept: {error}."));
+                self.commit(session);
+                self.publish(cx);
+                return;
+            }
+        }
+        self.commit(session);
+        if self.widget_saves.insert(session) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(WIDGET_SAVE_DELAY).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.widget_saves.remove(&session);
+                    this.save_widgets(session);
+                    this.publish(cx);
+                });
+            })
+            .detach();
+        }
+        self.publish(cx);
+    }
+
+    fn save_widgets(&mut self, session: u64) {
+        if let Some(conversation) = self.conversations.get_mut(&session) {
+            conversation.save_surfaces();
+            self.commit(session);
+        }
+    }
+
+    /// Presses a widget's Button. The action goes back as the tool's result while the
+    /// provider's call waits for it, and as a message otherwise.
+    pub(crate) fn press_widget(
+        &mut self,
+        session: u64,
+        call: &str,
+        component: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        let Some(press) = self
+            .conversations
+            .get_mut(&session)
+            .and_then(|conversation| conversation.press(call, component, now_ms()))
+        else {
+            return;
+        };
+        self.commit(session);
+        match self.started(session).filter(|_| press.waiting) {
+            Some(connection) => connection.command(Command::Act {
+                session,
+                call: press.call,
+                text: press.action,
+            }),
+            None => self.send_widget_action(session, &press.call, &press.action, cx),
+        }
+        self.refresh(cx);
+    }
+
+    /// Sends a widget's action as a message: a steer while a turn runs, otherwise a new
+    /// turn. The composer's draft is left as it is.
+    fn send_widget_action(
+        &mut self,
+        session: u64,
+        call: &str,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let draft = ComposerDraft {
+            session,
+            text: keystone_agent::surface::message_for(call, action),
+        };
+        if self.send_message_from(draft, None, false, cx) {
+            return;
+        }
+        let conversation = self.conversation(session);
+        if conversation.error.is_none() {
+            conversation.error =
+                Some("The widget's answer was not sent. Press its button again to retry.".into());
+        }
+        self.commit(session);
+        self.publish(cx);
     }
 
     fn send_message_from(
         &mut self,
         draft: ComposerDraft,
         caller: Option<keystone_agent::mcp::Caller>,
+        clear_draft: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.phase != Phase::Running {
@@ -1907,7 +2039,9 @@ impl AppState {
         self.conversation(id).push_local(&text);
         self.commit(id);
         self.persist(PendingSave::Message(id, text.clone(), now_ms()));
-        self.persist(PendingSave::Draft(id, String::new()));
+        if clear_draft {
+            self.persist(PendingSave::Draft(id, String::new()));
+        }
         self.refresh(cx);
         true
     }

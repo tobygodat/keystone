@@ -16,6 +16,7 @@ use crate::item::{
     cap_output,
 };
 use crate::mcp::{Caller, Issuer};
+use crate::surface;
 use keystone_core::ApprovalMode;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -160,9 +161,17 @@ struct Turn {
     written: bool,
 }
 
+/// How long Claude lets a `show_ui` call wait for the user before failing it.
+const WIDGET_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+
 enum Request {
     Initialize,
-    Mcp,
+    /// `mcp_set_servers`; whether it registers the widget server, and whether it
+    /// follows one that did, which may have added the orchestrator's already.
+    Mcp {
+        widgets: bool,
+        retry: bool,
+    },
     Interrupt,
     /// A `set_permission_mode` for the selection with this version.
     SetMode {
@@ -233,9 +242,16 @@ pub struct ClaudeDriver {
     version: u64,
     /// Whether Claude answered `initialize`. No message is written before.
     initialized: bool,
+    /// The orchestrator server's configuration, until Claude accepts it.
     mcp_request: Option<Value>,
     mcp_ready: bool,
     mcp_enabled: bool,
+    /// Whether the `show_ui` server is offered: the version allows it and Claude has
+    /// not refused it.
+    widgets: bool,
+    /// `show_ui` calls that wait for a Button press, by tool call ID: Claude's control
+    /// request ID and the JSON-RPC ID the answer names.
+    ui_calls: HashMap<String, (Value, Value)>,
     /// The permission mode Claude last confirmed: in its `initialize` answer, an
     /// answer to `set_permission_mode`, or a `system` report.
     confirmed: Option<String>,
@@ -329,6 +345,8 @@ impl ClaudeDriver {
             mcp_request: None,
             mcp_ready: true,
             mcp_enabled: false,
+            widgets: false,
+            ui_calls: HashMap::new(),
             confirmed: None,
             changed: false,
             leaving_plan: false,
@@ -356,13 +374,58 @@ impl ClaudeDriver {
     }
 
     pub(crate) fn set_mcp(&mut self, url: String, token: String) {
-        self.mcp_request = Some(
-            json!({"subtype": "mcp_set_servers", "servers": {"keystone": {
-                "type": "http", "url": url, "headers": {"Authorization": format!("Bearer {token}")}
-            }}}),
-        );
+        self.mcp_request = Some(json!({
+            "type": "http", "url": url, "headers": {"Authorization": format!("Bearer {token}")}
+        }));
         self.mcp_ready = false;
         self.mcp_enabled = true;
+    }
+
+    /// Offers the `show_ui` tool as an SDK-hosted MCP server once Claude answers
+    /// `initialize`. Messages wait until Claude accepts or refuses it; a refusal only
+    /// leaves the tool out. Set before the process answers anything.
+    pub fn set_widgets(&mut self, enabled: bool) {
+        if self.launch != Launch::Chat || self.initialized {
+            return;
+        }
+        self.widgets = enabled;
+        self.mcp_ready = !enabled && self.mcp_request.is_none();
+    }
+
+    /// Asks Claude to add Keystone's servers: the orchestrator's and the widget server.
+    fn request_servers(&mut self, retry: bool, out: &mut Outputs) {
+        let mut servers = serde_json::Map::new();
+        if let Some(server) = &self.mcp_request {
+            servers.insert("keystone".into(), server.clone());
+        }
+        if self.widgets {
+            servers.insert(
+                surface::SERVER.into(),
+                json!({"type": "sdk", "name": surface::SERVER, "timeout": WIDGET_TIMEOUT_MS,
+                    "disableAutoBackground": true}),
+            );
+        }
+        if servers.is_empty() {
+            return;
+        }
+        let widgets = self.widgets;
+        let line = self.request(
+            json!({"subtype": "mcp_set_servers", "servers": servers}),
+            Request::Mcp { widgets, retry },
+        );
+        out.writes.push(line);
+    }
+
+    /// Claude answered nothing usable for a request with the widget server. The
+    /// orchestrator's is asked for alone; without one, messages go on with no
+    /// `show_ui` tool.
+    fn drop_widgets(&mut self, out: &mut Outputs) {
+        self.widgets = false;
+        if self.mcp_request.is_some() {
+            return self.request_servers(true, out);
+        }
+        self.mcp_ready = true;
+        self.pump(out);
     }
 
     pub(crate) fn send_from(
@@ -474,6 +537,10 @@ impl ClaudeDriver {
     /// the process is not usable: nothing more is written to it, and the messages
     /// waiting for it fail.
     pub fn request_timed_out(&mut self, id: &str, out: &mut Outputs) {
+        if let Some(Request::Mcp { widgets: true, .. }) = self.requests.get(id) {
+            self.requests.remove(id);
+            return self.drop_widgets(out);
+        }
         let reason = match self.requests.get(id) {
             Some(Request::Initialize) => {
                 "Claude Code did not start in time, so nothing was sent. Send again to restart it."
@@ -481,7 +548,7 @@ impl ClaudeDriver {
             Some(Request::SetMode { .. }) => {
                 "Claude Code did not confirm the approval mode in time, so nothing was sent. Send again to restart it."
             }
-            Some(Request::Mcp) => {
+            Some(Request::Mcp { .. }) => {
                 "Claude Code did not configure Keystone tools in time, so nothing was sent. Send again to restart it."
             }
             _ => return,
@@ -525,6 +592,14 @@ impl ClaudeDriver {
                 self.pump(out);
             }
             Command::Send { text, .. } => self.send(text, out),
+            Command::Act { call, text, .. } => match self.ui_calls.remove(&call) {
+                Some((request_id, id)) => out.writes.push(mcp_response(
+                    &request_id,
+                    json!({"jsonrpc": "2.0", "id": id, "result":
+                        {"content": [{"type": "text", "text": text}]}}),
+                )),
+                None => out.event(self.session, Event::ActionUndelivered { call, text }),
+            },
             Command::Interrupt { .. } => {
                 // Nothing reached Claude yet, so the turn ends here.
                 if let Some(turn) = &mut self.turn
@@ -619,6 +694,8 @@ impl ClaudeDriver {
             ("control_request", _) => self.on_control_request(line, out),
             ("control_cancel_request", _) => {
                 if let Ok(cancel) = serde_json::from_slice::<CancelRequest>(line) {
+                    self.ui_calls
+                        .retain(|_, (request_id, _)| *request_id != cancel.request_id);
                     let request = self.request_id(&cancel.request_id);
                     if self.approvals.remove(&request).is_some() {
                         out.event(self.session, Event::ApprovalResolved { request });
@@ -637,6 +714,7 @@ impl ClaudeDriver {
     /// with it.
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
         self.mcp_request = None;
+        self.ui_calls.clear();
         if self.turn.is_some() {
             out.event(self.session, Event::RecoveryNeeded);
             self.finish(TurnStatus::Failed, Some(reason.to_owned()), out);
@@ -684,6 +762,7 @@ impl ClaudeDriver {
             (self.turn.is_some(), "a turn is running"),
             (!self.approvals.is_empty(), "an approval is waiting"),
             (!self.tools.is_empty(), "a tool call is running"),
+            (!self.ui_calls.is_empty(), "a widget waits for the user"),
             (!self.hooks.is_empty(), "a hook is running"),
             (
                 self.session_state.as_deref().is_some_and(|s| s != "idle"),
@@ -867,7 +946,7 @@ impl ClaudeDriver {
     fn request(&mut self, request: Value, purpose: Request) -> String {
         self.next_request += 1;
         let id = format!("keystone-{}", self.next_request);
-        if let Request::Initialize | Request::Mcp | Request::SetMode { .. } = purpose {
+        if let Request::Initialize | Request::Mcp { .. } | Request::SetMode { .. } = purpose {
             self.timed.push(id.clone());
         }
         let line =
@@ -1113,6 +1192,7 @@ impl ClaudeDriver {
         self.message = None;
         self.blocks.clear();
         self.tools.clear();
+        self.ui_calls.clear();
         self.api_error = None;
         // Requests from this turn can no longer be answered.
         for request in std::mem::take(&mut self.approvals).into_keys() {
@@ -1462,6 +1542,18 @@ impl ClaudeDriver {
             return self.unknown += 1;
         };
         let request = control.request;
+        if request.subtype == "mcp_message" {
+            return self.on_mcp_message(control.request_id, request, out);
+        }
+        // Showing a widget changes nothing but Keystone's own transcript.
+        if request.subtype == "can_use_tool"
+            && self.widgets
+            && request.tool_name.as_deref() == Some(surface::CLAUDE_TOOL)
+        {
+            out.writes
+                .push(mcp_allow(&control.request_id, request.input));
+            return;
+        }
         if request.subtype == "can_use_tool"
             && self.mcp_enabled
             && self.mcp_ready
@@ -1481,7 +1573,8 @@ impl ClaudeDriver {
                     )
                 })
         {
-            out.writes.push(json!({"type":"control_response", "response":{"subtype":"success", "request_id":control.request_id, "response":{"behavior":"allow", "updatedInput":request.input.unwrap_or(Value::Null)}}}).to_string());
+            out.writes
+                .push(mcp_allow(&control.request_id, request.input));
             return;
         }
         if request.subtype == "can_use_tool"
@@ -1563,6 +1656,87 @@ impl ClaudeDriver {
         );
     }
 
+    /// One MCP message for the widget server, answered at once except a `show_ui` call
+    /// that waits for a Button press.
+    fn on_mcp_message(&mut self, request_id: Value, request: ControlBody, out: &mut Outputs) {
+        if request.server_name.as_deref() != Some(surface::SERVER) {
+            out.writes.push(
+                json!({"type": "control_response", "response": {"subtype": "error",
+                    "request_id": request_id,
+                    "error": format!("Keystone hosts no SDK MCP server named {}",
+                        request.server_name.as_deref().unwrap_or("(none)"))}})
+                .to_string(),
+            );
+            return;
+        }
+        let message = request.message.unwrap_or_default();
+        let Some(id) = message.get("id").cloned() else {
+            // A notification: its answer is an empty result.
+            return out.writes.push(mcp_response(
+                &request_id,
+                json!({"jsonrpc": "2.0", "id": 0, "result": {}}),
+            ));
+        };
+        let params = message.get("params").cloned().unwrap_or_default();
+        let result = match message["method"].as_str().unwrap_or_default() {
+            "initialize" => Ok(json!({
+                "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": surface::SERVER, "version": env!("CARGO_PKG_VERSION")}})),
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({"tools": [surface::mcp_tool()]})),
+            "tools/call" if params["name"] == surface::TOOL => {
+                return self.on_show_ui(request_id, id, &params, out);
+            }
+            "tools/call" => Err((-32602, "Unknown tool")),
+            _ => Err((-32601, "Method not found")),
+        };
+        let rpc = match result {
+            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            Err((code, message)) => {
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+            }
+        };
+        out.writes.push(mcp_response(&request_id, rpc));
+    }
+
+    fn on_show_ui(&mut self, request_id: Value, id: Value, params: &Value, out: &mut Outputs) {
+        let call = params["_meta"]["claudecode/toolUseId"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                let id = request_id
+                    .as_str()
+                    .map_or_else(|| request_id.to_string(), str::to_owned);
+                format!("keystone-ui-{id}")
+            });
+        let arguments = params.get("arguments").cloned().unwrap_or_default();
+        let text = |text: String| json!({"content": [{"type": "text", "text": text}]});
+        match surface::parse(&call, &arguments) {
+            Err(invalid) => {
+                let mut result = text(invalid.to_message());
+                result["isError"] = json!(true);
+                out.writes.push(mcp_response(
+                    &request_id,
+                    json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                ));
+            }
+            Ok(surface) => {
+                let waiting = surface.waiting();
+                if waiting {
+                    self.ui_calls.insert(call, (request_id, id));
+                } else {
+                    out.writes.push(mcp_response(
+                        &request_id,
+                        json!({"jsonrpc": "2.0", "id": id, "result":
+                            text(surface::shown_message(&surface))}),
+                    ));
+                }
+                out.event(self.session, Event::SurfaceShown { surface, waiting });
+            }
+        }
+    }
+
     fn on_control_response(&mut self, line: &[u8], out: &mut Outputs) {
         let Ok(control) = serde_json::from_slice::<ControlResponse>(line) else {
             return self.unknown += 1;
@@ -1577,20 +1751,37 @@ impl ClaudeDriver {
             return;
         };
         let failed = match purpose {
-            Request::Mcp => {
-                let ready = response.subtype == "success"
-                    && response.response.as_ref().is_some_and(|answer| {
-                        answer
-                            .added
-                            .as_ref()
-                            .is_some_and(|added| added.iter().any(|name| name == "keystone"))
-                            && answer.errors.as_ref().is_some_and(|errors| {
-                                errors.as_object().is_some_and(|errors| errors.is_empty())
-                            })
-                    });
-                if ready {
+            Request::Mcp { widgets, retry } => {
+                // Each server is judged on its own: a refused widget server only leaves
+                // `show_ui` out. Claude lists only the servers a request changed, so a
+                // retry may find the orchestrator's added already.
+                let answer = response
+                    .response
+                    .as_ref()
+                    .filter(|_| response.subtype == "success");
+                let added = |name: &str| {
+                    answer
+                        .and_then(|a| a.added.as_ref())
+                        .is_some_and(|added| added.iter().any(|a| a == name))
+                };
+                let errors: Option<Vec<&String>> = answer
+                    .and_then(|a| a.errors.as_ref()?.as_object())
+                    .map(|errors| errors.keys().collect());
+                let orchestrator = self.mcp_request.is_none()
+                    || (errors
+                        .as_ref()
+                        .is_some_and(|errors| errors.iter().all(|name| *name == surface::SERVER))
+                        && (retry || added("keystone")));
+                if orchestrator {
+                    let widgets_added = errors.as_ref().is_some_and(|errors| errors.is_empty())
+                        && added(surface::SERVER);
+                    self.widgets = widgets && widgets_added;
+                    self.mcp_request = None;
                     self.mcp_ready = true;
                     return self.pump(out);
+                }
+                if widgets && answer.is_none() {
+                    return self.drop_widgets(out);
                 }
                 self.untrusted = true;
                 self.fail_held(
@@ -1639,10 +1830,7 @@ impl ClaudeDriver {
                     .response
                     .and_then(|r| r.current_permission_mode)
                     .or_else(|| permission_mode(self.launched).map(str::to_owned));
-                if let Some(request) = self.mcp_request.take() {
-                    let line = self.request(request, Request::Mcp);
-                    out.writes.push(line);
-                }
+                self.request_servers(false, out);
                 return self.pump(out);
             }
             Request::Initialize => "Claude Code did not start",
@@ -1812,9 +2000,26 @@ pub fn message_uuid(seed: u64, n: u64) -> String {
     )
 }
 
+/// The answer to an `mcp_message` control request.
+fn mcp_response(request_id: &Value, rpc: Value) -> String {
+    json!({"type": "control_response", "response": {"subtype": "success",
+        "request_id": request_id, "response": {"mcp_response": rpc}}})
+    .to_string()
+}
+
+fn mcp_allow(request_id: &Value, input: Option<Value>) -> String {
+    json!({"type": "control_response", "response": {"subtype": "success",
+        "request_id": request_id, "response": {"behavior": "allow",
+        "updatedInput": input.unwrap_or(Value::Null)}}})
+    .to_string()
+}
+
 pub(crate) fn tool_kind(name: &str, input: &Value) -> ItemKind {
     let text = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_owned);
     match name {
+        surface::CLAUDE_TOOL => ItemKind::Tool {
+            name: surface::TOOL.into(),
+        },
         "Bash" | "PowerShell" => ItemKind::Command {
             command: text("command").unwrap_or_default(),
             exit_code: None,
@@ -2000,6 +2205,8 @@ struct ControlBody {
     description: Option<String>,
     blocked_path: Option<String>,
     tool_use_id: Option<String>,
+    server_name: Option<String>,
+    message: Option<Value>,
 }
 
 #[derive(Deserialize)]

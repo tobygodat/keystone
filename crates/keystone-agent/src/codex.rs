@@ -12,12 +12,13 @@ use crate::item::{
     cap_output,
 };
 use crate::mcp::{Caller, Issuer};
+use crate::surface;
 use keystone_core::ApprovalMode;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const CATALOG_PAGES: u32 = 20;
 
@@ -96,6 +97,9 @@ enum Pending {
         session: u64,
         resume: bool,
         injected: bool,
+        /// The same `thread/start` without `dynamicTools`, to send if Codex refuses
+        /// the tool.
+        without_tools: Option<Value>,
     },
     TurnStart {
         session: u64,
@@ -165,6 +169,10 @@ struct Session {
     epoch: u64,
     /// Open approval requests and the decision that denies each one.
     approvals: HashMap<RequestId, &'static str>,
+    /// `show_ui` calls that wait for a Button press: Codex's request ID by call ID.
+    ui_calls: HashMap<String, RequestId>,
+    /// Every `show_ui` call ID the running turn made, answered or not.
+    ui_seen: HashSet<String>,
     cwd: String,
     /// The model the thread is opened with. `None` leaves the choice to Codex.
     model: Option<String>,
@@ -193,6 +201,8 @@ pub struct CodexDriver {
     /// The user's own approval policy and sandbox, per working directory.
     baselines: HashMap<String, Baseline>,
     mcp: HashMap<u64, Value>,
+    /// Whether new threads get the `show_ui` dynamic tool. Off once Codex refuses it.
+    widgets: bool,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -200,7 +210,17 @@ pub struct CodexDriver {
 impl CodexDriver {
     /// Starts the handshake. Write `out.writes` before anything else.
     pub fn new(client_version: &str, out: &mut Outputs) -> Self {
-        let params = json!({"clientInfo": {"name": "keystone", "title": "Keystone", "version": client_version}, "capabilities": {"optOutNotificationMethods": OPT_OUT}});
+        Self::with_widgets(client_version, false, out)
+    }
+
+    /// Starts the handshake, offering the `show_ui` dynamic tool to new threads when
+    /// `widgets` is set. The field is experimental in Codex, so the handshake opts into
+    /// experimental API; a refusal leaves the tool out.
+    pub fn with_widgets(client_version: &str, widgets: bool, out: &mut Outputs) -> Self {
+        let mut params = json!({"clientInfo": {"name": "keystone", "title": "Keystone", "version": client_version}, "capabilities": {"optOutNotificationMethods": OPT_OUT}});
+        if widgets {
+            params["capabilities"]["experimentalApi"] = json!(true);
+        }
         let mut driver = Self {
             initialize_params: params.clone(),
             initialization_error: None,
@@ -212,6 +232,7 @@ impl CodexDriver {
             threads: HashMap::new(),
             baselines: HashMap::new(),
             mcp: HashMap::new(),
+            widgets,
             unknown: 0,
         };
         let line = driver.request("initialize", params, Pending::Initialize);
@@ -365,6 +386,24 @@ impl CodexDriver {
                 out,
             ),
             Command::Interrupt { session } => self.interrupt(session, out),
+            Command::Act {
+                session,
+                call,
+                text,
+            } => {
+                match self
+                    .sessions
+                    .get_mut(&session)
+                    .and_then(|state| state.ui_calls.remove(&call))
+                {
+                    Some(request) => out.writes.push(format!(
+                        r#"{{"id":{},"result":{}}}"#,
+                        request.0,
+                        json!({"contentItems": [{"type": "inputText", "text": text}], "success": true})
+                    )),
+                    None => out.event(session, Event::ActionUndelivered { call, text }),
+                }
+            }
             Command::Answer {
                 session,
                 request,
@@ -560,6 +599,7 @@ impl CodexDriver {
             ),
             None => ("thread/start", json!({"cwd": cwd})),
         };
+        // A resumed thread keeps the tools it started with.
         if let Some(model) = self.sessions.get(&session).and_then(|s| s.model.clone()) {
             params["model"] = json!(model);
         }
@@ -569,6 +609,11 @@ impl CodexDriver {
         } else {
             false
         };
+        let without_tools = (self.widgets && resume.is_none()).then(|| {
+            let plain = params.clone();
+            params["dynamicTools"] = json!([surface::codex_tool()]);
+            plain
+        });
         let line = self.request(
             method,
             params,
@@ -576,6 +621,7 @@ impl CodexDriver {
                 session,
                 resume: resume.is_some(),
                 injected,
+                without_tools,
             },
         );
         self.write(line, out);
@@ -767,6 +813,8 @@ impl CodexDriver {
                             .as_object_mut()
                             .unwrap()
                             .remove("capabilities");
+                        // The experimental opt-in went with it.
+                        self.widgets = false;
                         let line = self.request(
                             "initialize",
                             self.initialize_params.clone(),
@@ -815,10 +863,33 @@ impl CodexDriver {
                 session,
                 resume,
                 injected,
+                without_tools,
             } => {
-                let result = serde_json::from_slice::<Response<ThreadResult>>(line)
-                    .ok()
-                    .and_then(|r| r.result);
+                let response = serde_json::from_slice::<Response<ThreadResult>>(line).ok();
+                let refused_tools = response
+                    .as_ref()
+                    .and_then(|r| r.error.as_ref()?.get("message")?.as_str())
+                    .is_some_and(|message| message.contains("dynamicTools"));
+                let result = response.and_then(|r| r.result);
+                // Codex refused the experimental tool: start the thread without it. Any
+                // other error is the thread's own and keeps the tool for later threads.
+                if result.is_none()
+                    && refused_tools
+                    && let Some(params) = without_tools
+                {
+                    self.widgets = false;
+                    let line = self.request(
+                        "thread/start",
+                        params,
+                        Pending::Thread {
+                            session,
+                            resume,
+                            injected,
+                            without_tools: None,
+                        },
+                    );
+                    return self.write(line, out);
+                }
                 // A new thread has no override yet, so it reports the user's settings.
                 if !resume
                     && let Some(cwd) = self.sessions.get(&session).map(|s| s.cwd.clone())
@@ -1053,6 +1124,8 @@ impl CodexDriver {
                         state.turn = Turn::Idle;
                         state.stop_requested = false;
                         stopped = std::mem::take(&mut state.stopped);
+                        state.ui_calls.clear();
+                        state.ui_seen.clear();
                         // Requests from this turn can no longer be answered.
                         for request in state.approvals.drain().map(|(r, _)| r) {
                             out.event(session, Event::ApprovalResolved { request });
@@ -1116,6 +1189,7 @@ impl CodexDriver {
                     let request = RequestId(note.request_id.to_string());
                     if let Some(state) = self.sessions.get_mut(&session) {
                         state.approvals.remove(&request);
+                        state.ui_calls.retain(|_, waiting| *waiting != request);
                     }
                     out.event(session, Event::ApprovalResolved { request });
                 }
@@ -1141,6 +1215,9 @@ impl CodexDriver {
 
     fn on_server_request(&mut self, method: &str, id: Value, line: &[u8], out: &mut Outputs) {
         let request = RequestId(id.to_string());
+        if method == "item/tool/call" {
+            return self.on_tool_call(request, line, out);
+        }
         let approval = match method {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                 params::<ApprovalParams>(line)
@@ -1195,6 +1272,62 @@ impl CodexDriver {
     }
 }
 
+impl CodexDriver {
+    /// A dynamic tool call. `show_ui` is answered at once unless its surface waits
+    /// for a Button press; any other tool is refused.
+    fn on_tool_call(&mut self, request: RequestId, line: &[u8], out: &mut Outputs) {
+        let answer = |text: String, success: bool| {
+            format!(
+                r#"{{"id":{},"result":{}}}"#,
+                request.0,
+                json!({"contentItems": [{"type": "inputText", "text": text}], "success": success})
+            )
+        };
+        let Some(call) = params::<ToolCallParams>(line) else {
+            self.unknown += 1;
+            return out.writes.push(answer(
+                "Keystone could not read this tool call".into(),
+                false,
+            ));
+        };
+        let session = self.session_for(&call.thread_id);
+        let (Some(session), true) = (session, call.tool == surface::TOOL) else {
+            return out.writes.push(answer(
+                format!("Keystone has no tool named {}", call.tool),
+                false,
+            ));
+        };
+        // Only the running turn's calls are shown; a late or repeated one has no turn
+        // to answer it.
+        let current = self.sessions.get_mut(&session).is_some_and(|state| {
+            matches!(&state.turn, Turn::Running(turn)
+                if call.turn_id.as_ref().is_none_or(|id| id == turn))
+                && state.ui_seen.insert(call.call_id.clone())
+        });
+        if !current {
+            return out.writes.push(answer(
+                "Keystone shows widgets only for the running turn".into(),
+                false,
+            ));
+        }
+        match surface::parse(&call.call_id, &call.arguments) {
+            Err(invalid) => out.writes.push(answer(invalid.to_message(), false)),
+            Ok(surface) => {
+                let waiting = surface.waiting();
+                if waiting {
+                    if let Some(state) = self.sessions.get_mut(&session) {
+                        state.ui_calls.insert(call.call_id, request);
+                    }
+                } else {
+                    out.writes
+                        .push(answer(surface::shown_message(&surface), true));
+                }
+                out.event(session, Event::SurfaceShown { surface, waiting });
+            }
+        }
+    }
+}
+
 fn text_input(text: &str) -> Value {
     json!([{"type": "text", "text": text}])
 }
@@ -1234,6 +1367,8 @@ struct Params<T> {
 #[derive(Deserialize)]
 struct Response<T> {
     result: Option<T>,
+    #[serde(default)]
+    error: Option<Value>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1332,6 +1467,18 @@ struct ErrorNote {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ToolCallParams {
+    thread_id: String,
+    #[serde(default)]
+    turn_id: Option<String>,
+    call_id: String,
+    tool: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ApprovalParams {
     thread_id: String,
     item_id: Option<String>,
@@ -1359,6 +1506,7 @@ pub(crate) struct WireItem {
     changes: Vec<Change>,
     server: Option<String>,
     tool: Option<String>,
+    content_items: Option<Vec<Value>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1404,6 +1552,12 @@ impl WireItem {
                     ),
                 },
                 String::new(),
+            ),
+            "dynamicToolCall" => (
+                ItemKind::Tool {
+                    name: self.tool.unwrap_or_default(),
+                },
+                cap_output(&join_text(&self.content_items.unwrap_or_default())),
             ),
             other => (
                 ItemKind::Other {

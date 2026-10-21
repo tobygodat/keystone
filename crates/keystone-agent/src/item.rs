@@ -150,6 +150,18 @@ pub enum Event {
     /// streamed. Arrives in the same batch as the turn's end; act on it once the
     /// whole batch is applied.
     RecoveryNeeded,
+    /// An agent showed a widget through `show_ui`. `waiting` says the provider's tool
+    /// call waits for a Button press as its result ([`crate::Command::Act`]).
+    SurfaceShown {
+        surface: crate::surface::Surface,
+        waiting: bool,
+    },
+    /// A press could not be returned as the tool's result, because the provider no
+    /// longer waits for it. `text` is the action, to send as a steer or new message.
+    ActionUndelivered {
+        call: String,
+        text: String,
+    },
     /// The session's process is proven idle. The app saves everything it got before
     /// this, then may end the process with [`crate::Connection::evict_idle`]. Never a
     /// transcript event.

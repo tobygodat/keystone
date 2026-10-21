@@ -130,7 +130,14 @@ fn scripted_versions_warn_or_refuse_before_sending_and_gate_optional_fields() {
         if fixture.provider == "codex" {
             let init: Value = serde_json::from_slice(&std::fs::read(log).unwrap()).unwrap();
             assert!(init.get("capabilities").is_some());
-            assert!(init["capabilities"].get("experimentalApi").is_none());
+            // Only versions checked to take the experimental `dynamicTools` field opt in.
+            let widgets = matches!(fixture.version.as_str(), "0.163.0" | "0.163.1");
+            assert_eq!(
+                init["capabilities"].get("experimentalApi").is_some(),
+                widgets,
+                "{}",
+                fixture.version
+            );
             conn.send(
                 2,
                 dir.path().to_str().unwrap(),

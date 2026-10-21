@@ -27,6 +27,8 @@ pub struct RowControls {
     pub selected: bool,
     pub activity: Option<ActivityControl>,
     pub selection_start: Option<Box<dyn Fn(&mut Window, &mut App) -> Option<FocusHandle>>>,
+    /// What a widget row's inputs and Buttons do.
+    pub widget: Option<crate::widget::WidgetControl>,
 }
 
 pub fn activity_name(item: &Item) -> Option<String> {
@@ -116,6 +118,7 @@ pub fn row(
         selected,
         activity,
         selection_start,
+        widget,
     } = controls;
     let colors = cx.theme().colors;
     match row {
@@ -368,6 +371,10 @@ pub fn row(
             recovery_summary(recovery),
             cx,
         ),
+        Row::Surface(surface) => {
+            crate::widget::SurfaceView::new(surface.clone(), widget.expect("widget controls"))
+                .into_any_element()
+        }
         Row::Decision { action, allowed } => Label::new(format!(
             "{} {action}",
             if *allowed { "Allowed:" } else { "Denied:" }

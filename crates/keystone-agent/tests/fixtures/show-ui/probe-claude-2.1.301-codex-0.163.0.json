@@ -1,0 +1,1277 @@
+{
+ "results": {
+  "claude": {
+   "sdk-only": {
+    "initializeOk": "success",
+    "setServers": {
+     "type": "control_response",
+     "response": {
+      "subtype": "success",
+      "request_id": "set-servers",
+      "response": {
+       "added": [
+        "keystone_ui"
+       ],
+       "removed": [],
+       "errors": {}
+      }
+     }
+    },
+    "status": {
+     "type": "control_response",
+     "response": {
+      "subtype": "success",
+      "request_id": "status",
+      "response": {
+       "mcpServers": [
+        {
+         "name": "keystone_ui",
+         "status": "connected",
+         "serverInfo": {
+          "name": "keystone_ui",
+          "version": "probe"
+         },
+         "scope": "dynamic",
+         "source": "sdk",
+         "tools": [
+          {
+           "name": "show_ui",
+           "annotations": {}
+          }
+         ]
+        }
+       ]
+      }
+     }
+    }
+   },
+   "sdk-and-http": {
+    "initializeOk": "success",
+    "setServers": {
+     "type": "control_response",
+     "response": {
+      "subtype": "success",
+      "request_id": "set-servers",
+      "response": {
+       "added": [
+        "keystone_ui",
+        "keystone"
+       ],
+       "removed": [],
+       "errors": {
+        "keystone": "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"
+       }
+      }
+     }
+    },
+    "status": {
+     "type": "control_response",
+     "response": {
+      "subtype": "success",
+      "request_id": "status",
+      "response": {
+       "mcpServers": [
+        {
+         "name": "keystone",
+         "status": "failed",
+         "error": "ECONNREFUSED: Unable to connect. Is the computer able to access the url?",
+         "config": {
+          "type": "http",
+          "url": "http://127.0.0.1:9/mcp",
+          "headers": {
+           "Authorization": "Bearer <probe-bearer>"
+          }
+         },
+         "scope": "dynamic",
+         "source": "dynamic"
+        },
+        {
+         "name": "keystone_ui",
+         "status": "connected",
+         "serverInfo": {
+          "name": "keystone_ui",
+          "version": "probe"
+         },
+         "scope": "dynamic",
+         "source": "sdk",
+         "tools": [
+          {
+           "name": "show_ui",
+           "annotations": {}
+          }
+         ]
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  "codex": {
+   "experimental": {
+    "initialize": true,
+    "threadStart": {
+     "error": null,
+     "thread": true
+    }
+   },
+   "stable": {
+    "initialize": true,
+    "threadStart": {
+     "error": {
+      "code": -32600,
+      "message": "thread/start.dynamicTools requires experimentalApi capability"
+     },
+     "thread": false
+    }
+   }
+  }
+ },
+ "events": [
+  {
+   "phase": "claude-sdk-only",
+   "kind": "spawn",
+   "cli": "claude",
+   "args": [
+    "$HOME/.local/share/mise/installs/claude/2.1.301/claude",
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--replay-user-messages",
+    "--permission-prompts",
+    "host",
+    "--permission-prompt-tool",
+    "stdio",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--settings",
+    "{\"disableAllHooks\":true}"
+   ]
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_request",
+    "request_id": "initialize",
+    "request": {
+     "subtype": "initialize"
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "system",
+    "subtype": "ui_invalidate",
+    "elided": true
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "initialize",
+     "response": {
+      "elided": "Claude's initialize answer lists the user's own commands, agents and account; not needed here"
+     },
+     "pending_permission_requests": [],
+     "pending_user_dialog_requests": []
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_request",
+    "request_id": "set-servers",
+    "request": {
+     "subtype": "mcp_set_servers",
+     "servers": {
+      "keystone_ui": {
+       "type": "sdk",
+       "name": "keystone_ui",
+       "timeout": 86400000,
+       "disableAutoBackground": true
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "set-servers",
+     "response": {
+      "added": [
+       "keystone_ui"
+      ],
+      "removed": [],
+      "errors": {}
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_request",
+    "request_id": "509a67a1-14f6-4a6d-836b-fe2b2db8b4f1",
+    "request": {
+     "subtype": "mcp_message",
+     "server_name": "keystone_ui",
+     "message": {
+      "method": "initialize",
+      "params": {
+       "protocolVersion": "2025-11-25",
+       "capabilities": {},
+       "clientInfo": {
+        "name": "claude-code",
+        "title": "Claude Code",
+        "description": "Anthropic's agentic coding tool",
+        "websiteUrl": "https://claude.com/claude-code",
+        "version": "2.1.301"
+       }
+      },
+      "jsonrpc": "2.0",
+      "id": 0
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "509a67a1-14f6-4a6d-836b-fe2b2db8b4f1",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 0,
+       "result": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {
+         "tools": {}
+        },
+        "serverInfo": {
+         "name": "keystone_ui",
+         "version": "probe"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "509a67a1-14f6-4a6d-836b-fe2b2db8b4f1",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 0,
+       "result": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {
+         "tools": {}
+        },
+        "serverInfo": {
+         "name": "keystone_ui",
+         "version": "probe"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_request",
+    "request_id": "83eb0218-f006-46c4-ac19-f0a143348dc2",
+    "request": {
+     "subtype": "mcp_message",
+     "server_name": "keystone_ui",
+     "message": {
+      "jsonrpc": "2.0",
+      "method": "notifications/initialized"
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "83eb0218-f006-46c4-ac19-f0a143348dc2",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 0,
+       "result": {}
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "83eb0218-f006-46c4-ac19-f0a143348dc2",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 0,
+       "result": {}
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_request",
+    "request_id": "f7b067f1-02fd-4e6c-8423-469e425c6490",
+    "request": {
+     "subtype": "mcp_message",
+     "server_name": "keystone_ui",
+     "message": {
+      "method": "tools/list",
+      "jsonrpc": "2.0",
+      "id": 1
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "f7b067f1-02fd-4e6c-8423-469e425c6490",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 1,
+       "result": {
+        "tools": [
+         {
+          "name": "show_ui",
+          "description": "Probe fixture; never call",
+          "inputSchema": {
+           "type": "object",
+           "properties": {
+            "messages": {
+             "type": "array"
+            }
+           },
+           "required": [
+            "messages"
+           ]
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "f7b067f1-02fd-4e6c-8423-469e425c6490",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 1,
+       "result": {
+        "tools": [
+         {
+          "name": "show_ui",
+          "description": "Probe fixture; never call",
+          "inputSchema": {
+           "type": "object",
+           "properties": {
+            "messages": {
+             "type": "array"
+            }
+           },
+           "required": [
+            "messages"
+           ]
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_request",
+    "request_id": "status",
+    "request": {
+     "subtype": "mcp_status"
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-only",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "status",
+     "response": {
+      "mcpServers": [
+       {
+        "name": "keystone_ui",
+        "status": "connected",
+        "serverInfo": {
+         "name": "keystone_ui",
+         "version": "probe"
+        },
+        "scope": "dynamic",
+        "source": "sdk",
+        "tools": [
+         {
+          "name": "show_ui",
+          "annotations": {}
+         }
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "spawn",
+   "cli": "claude",
+   "args": [
+    "$HOME/.local/share/mise/installs/claude/2.1.301/claude",
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--replay-user-messages",
+    "--permission-prompts",
+    "host",
+    "--permission-prompt-tool",
+    "stdio",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--settings",
+    "{\"disableAllHooks\":true}"
+   ]
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_request",
+    "request_id": "initialize",
+    "request": {
+     "subtype": "initialize"
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "system",
+    "subtype": "ui_invalidate",
+    "elided": true
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "initialize",
+     "response": {
+      "elided": "Claude's initialize answer lists the user's own commands, agents and account; not needed here"
+     },
+     "pending_permission_requests": [],
+     "pending_user_dialog_requests": []
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_request",
+    "request_id": "set-servers",
+    "request": {
+     "subtype": "mcp_set_servers",
+     "servers": {
+      "keystone": {
+       "type": "http",
+       "url": "http://127.0.0.1:9/mcp",
+       "headers": {
+        "Authorization": "Bearer <probe-bearer>"
+       }
+      },
+      "keystone_ui": {
+       "type": "sdk",
+       "name": "keystone_ui",
+       "timeout": 86400000,
+       "disableAutoBackground": true
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "set-servers",
+     "response": {
+      "added": [
+       "keystone_ui",
+       "keystone"
+      ],
+      "removed": [],
+      "errors": {
+       "keystone": "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_request",
+    "request_id": "3ffab1a8-2f23-44d8-9f0f-cdff9d6fd684",
+    "request": {
+     "subtype": "mcp_message",
+     "server_name": "keystone_ui",
+     "message": {
+      "method": "initialize",
+      "params": {
+       "protocolVersion": "2025-11-25",
+       "capabilities": {},
+       "clientInfo": {
+        "name": "claude-code",
+        "title": "Claude Code",
+        "description": "Anthropic's agentic coding tool",
+        "websiteUrl": "https://claude.com/claude-code",
+        "version": "2.1.301"
+       }
+      },
+      "jsonrpc": "2.0",
+      "id": 0
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "3ffab1a8-2f23-44d8-9f0f-cdff9d6fd684",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 0,
+       "result": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {
+         "tools": {}
+        },
+        "serverInfo": {
+         "name": "keystone_ui",
+         "version": "probe"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "3ffab1a8-2f23-44d8-9f0f-cdff9d6fd684",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 0,
+       "result": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {
+         "tools": {}
+        },
+        "serverInfo": {
+         "name": "keystone_ui",
+         "version": "probe"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_request",
+    "request_id": "c1aca7f4-314d-49de-a92f-79a7480ac9c1",
+    "request": {
+     "subtype": "mcp_message",
+     "server_name": "keystone_ui",
+     "message": {
+      "jsonrpc": "2.0",
+      "method": "notifications/initialized"
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "c1aca7f4-314d-49de-a92f-79a7480ac9c1",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 0,
+       "result": {}
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "c1aca7f4-314d-49de-a92f-79a7480ac9c1",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 0,
+       "result": {}
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_request",
+    "request_id": "b17fd4f1-e704-4c53-b707-6f044ad519f8",
+    "request": {
+     "subtype": "mcp_message",
+     "server_name": "keystone_ui",
+     "message": {
+      "method": "tools/list",
+      "jsonrpc": "2.0",
+      "id": 1
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "b17fd4f1-e704-4c53-b707-6f044ad519f8",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 1,
+       "result": {
+        "tools": [
+         {
+          "name": "show_ui",
+          "description": "Probe fixture; never call",
+          "inputSchema": {
+           "type": "object",
+           "properties": {
+            "messages": {
+             "type": "array"
+            }
+           },
+           "required": [
+            "messages"
+           ]
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "b17fd4f1-e704-4c53-b707-6f044ad519f8",
+     "response": {
+      "mcp_response": {
+       "jsonrpc": "2.0",
+       "id": 1,
+       "result": {
+        "tools": [
+         {
+          "name": "show_ui",
+          "description": "Probe fixture; never call",
+          "inputSchema": {
+           "type": "object",
+           "properties": {
+            "messages": {
+             "type": "array"
+            }
+           },
+           "required": [
+            "messages"
+           ]
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_input",
+   "cli": "claude",
+   "message": {
+    "type": "control_request",
+    "request_id": "status",
+    "request": {
+     "subtype": "mcp_status"
+    }
+   }
+  },
+  {
+   "phase": "claude-sdk-and-http",
+   "kind": "cli_output",
+   "cli": "claude",
+   "stream": "stdout",
+   "message": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "status",
+     "response": {
+      "mcpServers": [
+       {
+        "name": "keystone",
+        "status": "failed",
+        "error": "ECONNREFUSED: Unable to connect. Is the computer able to access the url?",
+        "config": {
+         "type": "http",
+         "url": "http://127.0.0.1:9/mcp",
+         "headers": {
+          "Authorization": "Bearer <probe-bearer>"
+         }
+        },
+        "scope": "dynamic",
+        "source": "dynamic"
+       },
+       {
+        "name": "keystone_ui",
+        "status": "connected",
+        "serverInfo": {
+         "name": "keystone_ui",
+         "version": "probe"
+        },
+        "scope": "dynamic",
+        "source": "sdk",
+        "tools": [
+         {
+          "name": "show_ui",
+          "annotations": {}
+         }
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "phase": "codex-experimental",
+   "kind": "spawn",
+   "cli": "codex-experimental",
+   "args": [
+    "$HOME/.local/share/mise/installs/codex/0.163.0/bin/codex",
+    "app-server",
+    "--listen",
+    "stdio://",
+    "-c",
+    "model_provider=\"keystone-probe\"",
+    "-c",
+    "model_providers.keystone-probe={name=\"Offline probe\",base_url=\"http://127.0.0.1:9/disabled-model-api\",wire_api=\"responses\",requires_openai_auth=false,supports_websockets=false}"
+   ]
+  },
+  {
+   "phase": "codex-experimental",
+   "kind": "cli_input",
+   "cli": "codex-experimental",
+   "message": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+     "clientInfo": {
+      "name": "keystone-probe",
+      "title": "Keystone Probe",
+      "version": "0"
+     },
+     "capabilities": {
+      "experimentalApi": true
+     }
+    }
+   }
+  },
+  {
+   "phase": "codex-experimental",
+   "kind": "cli_output",
+   "cli": "codex-experimental",
+   "stream": "stdout",
+   "message": {
+    "id": 1,
+    "result": {
+     "userAgent": "<elided>",
+     "codexHome": "<private-root>/codex/codex",
+     "platformFamily": "unix",
+     "platformOs": "linux"
+    }
+   }
+  },
+  {
+   "phase": "codex-experimental",
+   "kind": "cli_output",
+   "cli": "codex-experimental",
+   "stream": "stdout",
+   "message": {
+    "method": "remoteControl/status/changed",
+    "params": {
+     "elided": true
+    },
+    "emittedAtMs": 1792547091342
+   }
+  },
+  {
+   "phase": "codex-experimental",
+   "kind": "cli_input",
+   "cli": "codex-experimental",
+   "message": {
+    "method": "initialized"
+   }
+  },
+  {
+   "phase": "codex-experimental",
+   "kind": "cli_input",
+   "cli": "codex-experimental",
+   "message": {
+    "id": 2,
+    "method": "thread/start",
+    "params": {
+     "cwd": "<private-root>/codex/cwd",
+     "dynamicTools": [
+      {
+       "name": "show_ui",
+       "description": "Probe fixture; never call",
+       "inputSchema": {
+        "type": "object",
+        "properties": {
+         "messages": {
+          "type": "array"
+         }
+        },
+        "required": [
+         "messages"
+        ]
+       },
+       "type": "function"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "phase": "codex-experimental",
+   "kind": "cli_output",
+   "cli": "codex-experimental",
+   "stream": "stdout",
+   "message": {
+    "id": 2,
+    "result": {
+     "thread": {
+      "id": "01a15c21-f392-7600-8d4e-518ebbb0dfa8",
+      "environments": [
+       {
+        "environmentId": "local",
+        "cwd": "<private-root>/codex/cwd",
+        "runtimeWorkspaceRoots": [
+         "<private-root>/codex/cwd"
+        ]
+       }
+      ],
+      "extra": null,
+      "sessionId": "01a15c21-f392-7600-8d4e-518ebbb0dfa8",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "keystone-probe",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": null,
+      "createdAt": 1792547091,
+      "updatedAt": 1792547091,
+      "recencyAt": 1792547091,
+      "status": {
+       "type": "idle"
+      },
+      "path": "<private-root>/codex/codex/sessions/2026/10/20/rollout-2026-10-20T21-44-51-01a15c21-f392-7600-8d4e-518ebbb0dfa8.jsonl",
+      "cwd": "<private-root>/codex/cwd",
+      "cliVersion": "0.163.0",
+      "originator": "keystone-probe",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": null,
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "daybreakEnabled": null,
+      "turns": []
+     },
+     "model": "gpt-6.1-sol",
+     "modelProvider": "keystone-probe",
+     "serviceTier": null,
+     "disabledPluginIds": [],
+     "cwd": "<private-root>/codex/cwd",
+     "runtimeWorkspaceRoots": [
+      "<private-root>/codex/cwd"
+     ],
+     "instructionSources": [],
+     "approvalPolicy": "on-request",
+     "approvalsReviewer": "user",
+     "sandbox": {
+      "type": "readOnly",
+      "networkAccess": false
+     },
+     "activePermissionProfile": {
+      "id": ":read-only",
+      "extends": null
+     },
+     "reasoningEffort": null,
+     "multiAgentMode": "explicitRequestOnly"
+    }
+   }
+  },
+  {
+   "phase": "codex-experimental",
+   "kind": "cli_output",
+   "cli": "codex-experimental",
+   "stream": "stdout",
+   "message": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "id": "01a15c21-f392-7600-8d4e-518ebbb0dfa8",
+      "environments": [
+       {
+        "environmentId": "local",
+        "cwd": "<private-root>/codex/cwd",
+        "runtimeWorkspaceRoots": [
+         "<private-root>/codex/cwd"
+        ]
+       }
+      ],
+      "extra": null,
+      "sessionId": "01a15c21-f392-7600-8d4e-518ebbb0dfa8",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "keystone-probe",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": null,
+      "createdAt": 1792547091,
+      "updatedAt": 1792547091,
+      "recencyAt": 1792547091,
+      "status": {
+       "type": "idle"
+      },
+      "path": "<private-root>/codex/codex/sessions/2026/10/20/rollout-2026-10-20T21-44-51-01a15c21-f392-7600-8d4e-518ebbb0dfa8.jsonl",
+      "cwd": "<private-root>/codex/cwd",
+      "cliVersion": "0.163.0",
+      "originator": "keystone-probe",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": null,
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "daybreakEnabled": null,
+      "turns": []
+     }
+    },
+    "emittedAtMs": 1792547091351
+   }
+  },
+  {
+   "phase": "codex-stable",
+   "kind": "spawn",
+   "cli": "codex-stable",
+   "args": [
+    "$HOME/.local/share/mise/installs/codex/0.163.0/bin/codex",
+    "app-server",
+    "--listen",
+    "stdio://",
+    "-c",
+    "model_provider=\"keystone-probe\"",
+    "-c",
+    "model_providers.keystone-probe={name=\"Offline probe\",base_url=\"http://127.0.0.1:9/disabled-model-api\",wire_api=\"responses\",requires_openai_auth=false,supports_websockets=false}"
+   ]
+  },
+  {
+   "phase": "codex-stable",
+   "kind": "cli_input",
+   "cli": "codex-stable",
+   "message": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+     "clientInfo": {
+      "name": "keystone-probe",
+      "title": "Keystone Probe",
+      "version": "0"
+     },
+     "capabilities": {}
+    }
+   }
+  },
+  {
+   "phase": "codex-stable",
+   "kind": "cli_output",
+   "cli": "codex-stable",
+   "stream": "stdout",
+   "message": {
+    "id": 1,
+    "result": {
+     "userAgent": "<elided>",
+     "codexHome": "<private-root>/codex/codex",
+     "platformFamily": "unix",
+     "platformOs": "linux"
+    }
+   }
+  },
+  {
+   "phase": "codex-stable",
+   "kind": "cli_output",
+   "cli": "codex-stable",
+   "stream": "stdout",
+   "message": {
+    "method": "remoteControl/status/changed",
+    "params": {
+     "elided": true
+    },
+    "emittedAtMs": 1792547091441
+   }
+  },
+  {
+   "phase": "codex-stable",
+   "kind": "cli_input",
+   "cli": "codex-stable",
+   "message": {
+    "method": "initialized"
+   }
+  },
+  {
+   "phase": "codex-stable",
+   "kind": "cli_input",
+   "cli": "codex-stable",
+   "message": {
+    "id": 2,
+    "method": "thread/start",
+    "params": {
+     "cwd": "<private-root>/codex/cwd",
+     "dynamicTools": [
+      {
+       "name": "show_ui",
+       "description": "Probe fixture; never call",
+       "inputSchema": {
+        "type": "object",
+        "properties": {
+         "messages": {
+          "type": "array"
+         }
+        },
+        "required": [
+         "messages"
+        ]
+       },
+       "type": "function"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "phase": "codex-stable",
+   "kind": "cli_output",
+   "cli": "codex-stable",
+   "stream": "stdout",
+   "message": {
+    "error": {
+     "code": -32600,
+     "message": "thread/start.dynamicTools requires experimentalApi capability"
+    },
+    "id": 2
+   }
+  }
+ ]
+}

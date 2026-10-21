@@ -1,5 +1,6 @@
 use super::*;
 use crate::mcp::{Credentials, Server};
+use crate::surface;
 use serde_json::{Value, json};
 
 fn server() -> Server {
@@ -1087,4 +1088,79 @@ fn current_target_and_caller_modes_are_checked_under_connection_locks() {
         );
         connection.interrupt_from(7, identity).unwrap();
     }
+}
+
+/// A Claude driver with both Keystone servers asked for, and the message held for them.
+fn claude_with_both_servers() -> (ClaudeDriver, Value) {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+    driver.set_mcp("http://127.0.0.1/mcp".into(), "synthetic-token".into());
+    driver.set_widgets(true);
+    driver.command(
+        Command::Send {
+            session: 7,
+            text: "hello".into(),
+        },
+        &mut out,
+    );
+    out = Outputs::default();
+    claude_init(&mut driver, &mut out);
+    let set = wire(&out.writes[0]);
+    assert_eq!(set["request"]["subtype"], "mcp_set_servers");
+    assert!(set["request"]["servers"]["keystone"].is_object());
+    assert!(set["request"]["servers"][surface::SERVER].is_object());
+    (driver, set)
+}
+
+fn sent_hello(out: &Outputs) -> bool {
+    out.writes
+        .iter()
+        .any(|line| wire(line)["message"]["content"] == "hello")
+}
+
+/// A refused widget server leaves the orchestrator's in place: the message goes with
+/// no second request and no failure.
+#[test]
+fn claude_refusing_only_the_widget_server_keeps_the_orchestrator_and_sends() {
+    let (mut driver, set) = claude_with_both_servers();
+    let mut out = Outputs::default();
+    driver.on_line(
+        json!({"type":"control_response","response":{"subtype":"success",
+            "request_id": set["request_id"],
+            "response":{"added":["keystone"],"removed":[],"errors":{"keystone_ui":"refused"}}}})
+        .to_string()
+        .as_bytes(),
+        &mut out,
+    );
+    assert!(sent_hello(&out), "{:?}", out.writes);
+    assert!(out.events.is_empty(), "{:?}", out.events);
+    assert!(!driver.credentials_failed());
+}
+
+/// A request with both servers that goes unanswered is retried with the
+/// orchestrator's alone. If the first request added it after all, Claude lists it as
+/// unchanged, and that is still ready.
+#[test]
+fn claude_widget_timeout_with_the_orchestrator_retries_it_alone_and_sends() {
+    let (mut driver, _) = claude_with_both_servers();
+    let timed = driver.take_timed_requests();
+    let mut out = Outputs::default();
+    driver.request_timed_out(timed.last().unwrap(), &mut out);
+    let retry = wire(&out.writes[0]);
+    assert_eq!(retry["request"]["subtype"], "mcp_set_servers");
+    assert!(retry["request"]["servers"]["keystone"].is_object());
+    assert!(retry["request"]["servers"][surface::SERVER].is_null());
+    assert!(out.events.is_empty(), "{:?}", out.events);
+    let mut out = Outputs::default();
+    driver.on_line(
+        json!({"type":"control_response","response":{"subtype":"success",
+            "request_id": retry["request_id"],
+            "response":{"added":[],"removed":[],"errors":{}}}})
+        .to_string()
+        .as_bytes(),
+        &mut out,
+    );
+    assert!(sent_hello(&out), "{:?}", out.writes);
+    assert!(out.events.is_empty(), "{:?}", out.events);
+    assert!(!driver.credentials_failed());
 }

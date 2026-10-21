@@ -19,6 +19,7 @@ mod slash_menu;
 mod transcript;
 mod transcript_keyboard;
 mod view_state;
+mod widget;
 use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
@@ -743,14 +744,14 @@ impl Keystone {
     /// Settles or un-settles one session. Selection does not change.
     fn settle(&mut self, id: u64, settled: bool, cx: &mut Context<Self>) {
         if settled
-            && self
+            && let Some(reason) = self
                 .state
                 .read(cx)
                 .conversations()
                 .get(&id)
-                .is_some_and(Conversation::awaiting_approval)
+                .and_then(Conversation::settle_blocker)
         {
-            self.error = Some("Answer the approval request before settling this session.".into());
+            self.error = Some(reason.into());
             self.refresh(cx);
             return;
         }
@@ -2016,6 +2017,28 @@ impl Keystone {
         })
     }
 
+    /// What a widget's inputs and Buttons do: write to its data model, or press, in the
+    /// session the view shows.
+    fn widget_control(&self, key: ViewKey, index: usize, call: &str) -> widget::WidgetControl {
+        let session = key.session;
+        let state = self.state.downgrade();
+        let (edit_call, press_call) = (call.to_owned(), call.to_owned());
+        let press_state = state.clone();
+        widget::WidgetControl {
+            on_edit: Rc::new(move |pointer, value, cx| {
+                let _ = state.update(cx, |state, cx| {
+                    state.edit_widget(session, &edit_call, pointer, value, cx)
+                });
+            }),
+            on_press: Rc::new(move |component, cx| {
+                let _ = press_state.update(cx, |state, cx| {
+                    state.press_widget(session, &press_call, component, cx)
+                });
+            }),
+            selector: arrangement::selector(&format!("widget-{index}"), key.view).to_string(),
+        }
+    }
+
     /// One list entry: a row, or after the last row, the turn's status. Each entry is
     /// laid out on its own, so it carries the transcript's width and text style.
     fn transcript_entry(
@@ -2095,6 +2118,10 @@ impl Keystone {
                 } else {
                     None
                 };
+                let widget = match row {
+                    Row::Surface(surface) => Some(self.widget_control(key, index, &surface.call)),
+                    _ => None,
+                };
                 Some(transcript::row(
                     row,
                     index,
@@ -2104,6 +2131,7 @@ impl Keystone {
                         selected: focused,
                         activity,
                         selection_start,
+                        widget,
                     },
                     cx,
                 ))
@@ -2538,6 +2566,7 @@ impl Section {
 fn attention_reason(attention: Attention) -> (&'static str, Color) {
     match attention {
         Attention::Approval => ("Waiting for approval", Color::Warning),
+        Attention::Input => ("Waiting for your answer", Color::Warning),
         Attention::Failed => ("Turn failed", Color::Warning),
         Attention::Replied => ("New reply", Color::Default),
     }
@@ -2837,6 +2866,7 @@ impl SessionSidebar {
                 selected: Some(session.id()) == workspace.selected(),
                 attention: session.attention(
                     live.is_some_and(|c| !c.approvals.is_empty()),
+                    live.is_some_and(Conversation::awaiting_widget),
                     live.is_some_and(|c| c.running),
                 ),
                 time: session
@@ -7262,7 +7292,10 @@ mod tests {
         view.read_with(cx, |this, cx| {
             let session = &this.state.read(cx).store().workspace().sessions()[0];
             assert_eq!(session.last_turn(), Some(keystone_core::LastTurn::Failed));
-            assert_eq!(session.attention(false, false), Some(Attention::Failed));
+            assert_eq!(
+                session.attention(false, false, false),
+                Some(Attention::Failed)
+            );
         });
     }
 
@@ -7375,7 +7408,7 @@ mod tests {
         click(cx, "session-2");
         assert!(y(cx, "session-1") < y(cx, "working-section"));
         assert_eq!(
-            Store::open(&path).unwrap().workspace().sessions()[0].attention(false, false),
+            Store::open(&path).unwrap().workspace().sessions()[0].attention(false, false, false),
             Some(Attention::Replied)
         );
     }
@@ -8079,6 +8112,256 @@ mod tests {
         start.is_some_and(|start| start < row) && end.is_none_or(|end| row < end)
     }
 
+    /// A scripted agent shows a checklist: it waits in Needs action, settling does not
+    /// answer it, a tick writes its data model, and the press reaches the agent as the
+    /// tool's result.
+    fn widget_round_trip(provider: Provider, cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(provider, &working_directory(), 1).unwrap();
+        store.select(1).unwrap();
+        let program = match provider {
+            Provider::Claude => claude_script(dir.path(), ""),
+            Provider::Codex => wrapper(
+                dir.path(),
+                "keystone-fake-codex",
+                "KEYSTONE_FAKE_CODEX_DELAY_MS=2 KEYSTONE_FAKE_CODEX_VERSION=0.163.0",
+            ),
+        };
+        cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _| match provider {
+                Provider::Claude => state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(program),
+                    state.test_wake().clone(),
+                ))),
+                Provider::Codex => state.test_set_codex(Some(CodexConnection::new(
+                    Some(program),
+                    "test",
+                    state.test_wake().clone(),
+                ))),
+            })
+        });
+        let widget = |view: &Keystone, cx: &App| {
+            view.state.read(cx).conversations()[&1]
+                .rows
+                .iter()
+                .enumerate()
+                .find_map(|(index, row)| match row {
+                    Row::Surface(surface) => Some((index, surface.clone())),
+                    _ => None,
+                })
+        };
+
+        send_text(&view, cx, "show a widget checklist");
+        wait_until(cx, &view, |view, cx| {
+            widget(view, cx).is_some_and(|(_, surface)| surface.waiting())
+        });
+        cx.run_until_parked();
+        assert!(in_section(cx, "session-1", Section::Attention));
+        view.update(cx, |this, cx| this.settle(1, true, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.error.as_deref(),
+                Some("Answer the widget before settling this session.")
+            );
+            assert!(!view.state.read(cx).store().workspace().sessions()[0].settled());
+            assert!(
+                widget(view, cx).unwrap().1.waiting(),
+                "settling never answers it"
+            );
+        });
+
+        let index = view.read_with(cx, |view, cx| widget(view, cx).unwrap().0);
+        click(cx, format!("widget-{index}-tests-unchecked").leak());
+        wait_until(cx, &view, |view, cx| {
+            widget(view, cx).unwrap().1.value("/items/tests") == Some(&serde_json::json!(true))
+        });
+        click(cx, format!("widget-{index}-send-button").leak());
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "Widget results", cx).is_some()
+        });
+        view.read_with(cx, |view, cx| {
+            let reply = reply_with(view, "Widget results", cx).unwrap();
+            assert!(
+                reply.contains(
+                    r#""context":{"items":{"changelog":false,"docs":true,"tests":true}}"#
+                ),
+                "{reply}"
+            );
+            let (_, surface) = widget(view, cx).unwrap();
+            assert_eq!(surface.status, keystone_agent::surface::Status::Answered);
+            assert_eq!(surface.last_action.as_deref(), Some("submit"));
+        });
+    }
+
+    /// After the turn that asked is stopped, a press goes as a new message that names
+    /// the call, and the draft stays.
+    #[gpui::test]
+    fn a_press_after_its_turn_ends_is_sent_as_a_message(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store.select(1).unwrap();
+        let script = claude_script(dir.path(), "");
+        cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _| {
+                state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(script),
+                    state.test_wake().clone(),
+                )))
+            })
+        });
+        let widget = |view: &Keystone, cx: &App| {
+            view.state.read(cx).conversations()[&1]
+                .rows
+                .iter()
+                .enumerate()
+                .find_map(|(index, row)| match row {
+                    Row::Surface(surface) => Some((index, surface.clone())),
+                    _ => None,
+                })
+        };
+        send_text(&view, cx, "show a widget checklist");
+        wait_until(cx, &view, |view, cx| {
+            widget(view, cx).is_some_and(|(_, surface)| surface.waiting())
+        });
+        view.update_in(cx, |this, window, cx| this.stop_turn(1, window, cx));
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].running
+        });
+        let (index, surface) = view.read_with(cx, |view, cx| widget(view, cx).unwrap());
+        assert_eq!(surface.status, keystone_agent::surface::Status::Stopped);
+        view.update(cx, |view, cx| {
+            view.composer
+                .update(cx, |input, cx| input.set_value("my draft".into(), cx))
+        });
+        click(cx, format!("widget-{index}-skip-button").leak());
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "Keystone widget action", cx).is_some()
+        });
+        view.read_with(cx, |view, cx| {
+            let rows = &view.state.read(cx).conversations()[&1].rows;
+            assert!(rows.iter().any(|row| matches!(row, Row::Item(item)
+                if item.kind == ItemKind::UserMessage
+                    && item.text.contains(&format!("show_ui call {}", surface.call))
+                    && item.text.contains(r#""name":"skip""#))));
+            assert_eq!(view.composer.read(cx).value(), "my draft");
+        });
+    }
+
+    /// A click in a widget's text field focuses the field, not the conversation, so
+    /// what the user types lands in the widget's data model.
+    #[gpui::test]
+    fn typing_in_a_widget_text_field_writes_its_value(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap();
+        store.select(1).unwrap();
+        let codex = wrapper(
+            dir.path(),
+            "keystone-fake-codex",
+            "KEYSTONE_FAKE_CODEX_DELAY_MS=2 KEYSTONE_FAKE_CODEX_VERSION=0.163.0",
+        );
+        cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex),
+                    "test",
+                    state.test_wake().clone(),
+                )))
+            })
+        });
+        let widget = |view: &Keystone, cx: &App| {
+            view.state.read(cx).conversations()[&1]
+                .rows
+                .iter()
+                .enumerate()
+                .find_map(|(index, row)| match row {
+                    Row::Surface(surface) => Some((index, surface.clone())),
+                    _ => None,
+                })
+        };
+        send_text(&view, cx, "show a widget form");
+        wait_until(cx, &view, |view, cx| {
+            widget(view, cx).is_some_and(|(_, surface)| surface.waiting())
+        });
+        let index = view.read_with(cx, |view, cx| widget(view, cx).unwrap().0);
+        click(cx, format!("widget-{index}-summary-field").leak());
+        cx.simulate_input("Sidebar flickers");
+        wait_until(cx, &view, |view, cx| {
+            widget(view, cx).unwrap().1.value("/summary")
+                == Some(&serde_json::json!("Sidebar flickers"))
+        });
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.composer.read(cx).value(),
+                "",
+                "nothing went to the composer"
+            );
+        });
+
+        // A change from elsewhere, such as another view of the session, reaches the
+        // field once it is not being typed in, so its next keystroke builds on it.
+        click(cx, "composer-field");
+        let call = view.read_with(cx, |view, cx| widget(view, cx).unwrap().1.call);
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, cx| {
+                state.edit_widget(1, &call, "/summary", serde_json::json!("Changed"), cx)
+            })
+        });
+        cx.run_until_parked();
+        click(cx, format!("widget-{index}-summary-field").leak());
+        cx.simulate_input("!");
+        wait_until(cx, &view, |view, cx| {
+            widget(view, cx).unwrap().1.value("/summary") == Some(&serde_json::json!("Changed!"))
+        });
+    }
+
+    #[gpui::test]
+    fn a_claude_widget_round_trips_its_answer(cx: &mut gpui::TestAppContext) {
+        widget_round_trip(Provider::Claude, cx);
+    }
+
+    #[gpui::test]
+    fn a_codex_widget_round_trips_its_answer(cx: &mut gpui::TestAppContext) {
+        widget_round_trip(Provider::Codex, cx);
+    }
+
     #[gpui::test]
     fn claude_sessions_move_between_working_and_needs_action(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -8149,7 +8432,10 @@ mod tests {
         assert!(in_section(cx, "session-1", Section::Attention));
         view.read_with(cx, |this, cx| {
             let session = &this.state.read(cx).store().workspace().sessions()[0];
-            assert_eq!(session.attention(false, false), Some(Attention::Replied));
+            assert_eq!(
+                session.attention(false, false, false),
+                Some(Attention::Replied)
+            );
         });
     }
 

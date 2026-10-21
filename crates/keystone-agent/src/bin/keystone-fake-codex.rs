@@ -35,6 +35,11 @@
 //! `KEYSTONE_FAKE_CODEX_METHOD_LOG` names a file that gets every method received, one
 //! per line. A prompt containing "crash" records its whole reply as completed after
 //! the first streamed word, then exits, as a Codex that dies mid-stream after saving.
+//!
+//! A thread started with a `show_ui` entry in `dynamicTools` calls it through
+//! `item/tool/call` when the prompt asks (see `support/widgets.rs`), waits for the
+//! answer, and replies with what each call returned. `dynamicTools` is refused, as
+//! Codex 0.163 refuses it, unless `initialize` opted into `experimentalApi`.
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -46,6 +51,8 @@ use std::time::Duration;
 
 #[path = "support/orchestrator.rs"]
 mod orchestrator;
+#[path = "support/widgets.rs"]
+mod widgets;
 
 type Out = Arc<Mutex<io::Stdout>>;
 
@@ -175,7 +182,8 @@ struct Turn {
     silent: AtomicBool,
     end_on_steer: bool,
     steer: Mutex<Option<String>>,
-    answers: Mutex<Option<Sender<String>>>,
+    /// Where the client's answer to the turn's open server request goes.
+    answers: Mutex<Option<Sender<Value>>>,
 }
 
 /// With `KEYSTONE_FAKE_ENV_RECEIPT` naming a file, appends one JSON line per process:
@@ -256,6 +264,8 @@ fn main() {
     let mut servers: std::collections::HashMap<String, orchestrator::Server> =
         std::collections::HashMap::new();
     let no_catalog = std::env::var("KEYSTONE_FAKE_CODEX_NO_CATALOG").is_ok_and(|v| v == "1");
+    let mut experimental = false;
+    let mut widget_threads: std::collections::HashSet<String> = Default::default();
 
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -265,14 +275,10 @@ fn main() {
         let id = message.get("id").cloned();
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let Some(method) = message.get("method").and_then(Value::as_str) else {
-            // A response to one of our approval requests.
-            let decision = message["result"]["decision"]
-                .as_str()
-                .unwrap_or("cancel")
-                .to_owned();
+            // A response to one of our approval or tool requests.
             for turn in turns.lock().unwrap().values() {
                 if let Some(tx) = turn.answers.lock().unwrap().as_ref() {
-                    let _ = tx.send(decision.clone());
+                    let _ = tx.send(message.clone());
                 }
             }
             continue;
@@ -337,6 +343,7 @@ fn main() {
                 if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CODEX_INITIALIZE_LOG") {
                     let _ = std::fs::write(path, params.to_string());
                 }
+                experimental = params["capabilities"]["experimentalApi"] == true;
                 if params.get("capabilities").is_some()
                     && std::env::var("KEYSTONE_FAKE_CODEX_NO_NOTIFICATION_FILTER")
                         .is_ok_and(|value| value == "1")
@@ -350,9 +357,20 @@ fn main() {
                 reply(json!({"userAgent": "keystone-fake-codex"}));
             }
             "initialized" => {}
+            "thread/start" if params.get("dynamicTools").is_some() && !experimental => emit(
+                &out,
+                json!({"id": id, "error": {"code": -32600,
+                    "message": "thread/start.dynamicTools requires experimentalApi capability"}}),
+            ),
             "thread/start" => {
                 let n = next.fetch_add(1, Ordering::Relaxed);
                 let thread = format!("fake-thread-{n}");
+                if params["dynamicTools"]
+                    .as_array()
+                    .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "show_ui"))
+                {
+                    widget_threads.insert(thread.clone());
+                }
                 let (approval, sandbox) = defaults();
                 let model = thread_model(&mut models, &thread, &params);
                 thread_server(&mut servers, &thread, &params);
@@ -420,6 +438,7 @@ fn main() {
                     .cloned()
                     .unwrap_or_else(|| "fake-default".into());
                 let server = servers.get(&thread).cloned();
+                let widgets = widget_threads.contains(&thread);
                 // Unique per process, like real Codex IDs, so a restart never reuses one.
                 let turn_id = format!(
                     "fake-turn-{}-{}",
@@ -446,6 +465,7 @@ fn main() {
                         &policy,
                         &model,
                         server.as_ref(),
+                        widgets,
                         &turn,
                         delay,
                     );
@@ -548,6 +568,7 @@ fn run_turn(
     policy: &str,
     model: &str,
     server: Option<&orchestrator::Server>,
+    widgets: bool,
     turn: &Turn,
     delay: Duration,
 ) {
@@ -581,7 +602,7 @@ fn run_turn(
             "item/started",
             with(json!({"item": item("inProgress", Value::Null, Value::Null)})),
         );
-        let (tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel();
+        let (tx, rx): (Sender<Value>, Receiver<Value>) = mpsc::channel();
         *turn.answers.lock().unwrap() = Some(tx);
         let request = next.fetch_add(1, Ordering::Relaxed) + 1000;
         emit(
@@ -590,7 +611,11 @@ fn run_turn(
                          "params": with(json!({"itemId": item_id, "command": command, "cwd": "/tmp",
                                                "availableDecisions": ["accept", "decline", "cancel"]}))}),
         );
-        let decision = rx.recv().unwrap_or_else(|_| "cancel".into());
+        let decision = rx
+            .recv()
+            .ok()
+            .and_then(|answer| answer["result"]["decision"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "cancel".into());
         *turn.answers.lock().unwrap() = None;
         notify(
             out,
@@ -620,7 +645,71 @@ fn run_turn(
         }
     }
 
-    let words = orchestrator::reply(text, server, turn_id).or_else(|| std::env::var("KEYSTONE_FAKE_CODEX_REPLY").ok()).unwrap_or_else(|| {
+    let calls = widgets::calls(text);
+    let mut results = Vec::new();
+    for (n, arguments) in calls.iter().enumerate().filter(|_| widgets) {
+        let call_id = format!("call-ui-{turn_id}-{n}");
+        let item = |status: &str, success: Value, content: Value| {
+            json!({"type": "dynamicToolCall", "id": call_id, "tool": "show_ui",
+                "arguments": arguments, "status": status, "success": success,
+                "contentItems": content})
+        };
+        notify(
+            out,
+            "item/started",
+            with(json!({"item": item("inProgress", Value::Null, Value::Null)})),
+        );
+        let (tx, rx): (Sender<Value>, Receiver<Value>) = mpsc::channel();
+        *turn.answers.lock().unwrap() = Some(tx);
+        let request = next.fetch_add(1, Ordering::Relaxed) + 1000;
+        emit(
+            out,
+            json!({"id": request, "method": "item/tool/call", "params": with(json!({
+                "callId": call_id, "tool": "show_ui", "arguments": arguments}))}),
+        );
+        let answer = loop {
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(answer) => break Some(answer),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+                Err(mpsc::RecvTimeoutError::Timeout) if turn.interrupt.load(Ordering::Relaxed) => {
+                    break None;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
+        *turn.answers.lock().unwrap() = None;
+        let Some(answer) = answer else {
+            notify(
+                out,
+                "serverRequest/resolved",
+                json!({"threadId": thread, "requestId": request}),
+            );
+            notify(
+                out,
+                "item/completed",
+                with(json!({"item": item("failed", json!(false), json!([]))})),
+            );
+            return finish(out, thread, turn_id, "interrupted");
+        };
+        let result = &answer["result"];
+        notify(
+            out,
+            "item/completed",
+            with(json!({"item": item(
+                if result["success"] == true { "completed" } else { "failed" },
+                result["success"].clone(),
+                result["contentItems"].clone(),
+            )})),
+        );
+        results.push(
+            result["contentItems"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    let widget_reply = (!calls.is_empty()).then(|| widgets::reply(&results));
+    let words = widget_reply.or_else(|| orchestrator::reply(text, server, turn_id)).or_else(|| std::env::var("KEYSTONE_FAKE_CODEX_REPLY").ok()).unwrap_or_else(|| {
         format!(
             "Scripted Codex reply (test data, no model call). You wrote: {text}. \
              This reply streams one word at a time so streaming, steering, and stopping can be checked. \

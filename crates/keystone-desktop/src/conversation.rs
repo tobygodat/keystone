@@ -7,6 +7,7 @@
 
 use keystone_agent::log::{Entry, Write, lost_count, with_lost_count};
 use keystone_agent::recovery::{Operation, RecoveryBatch, RecoveryReport};
+use keystone_agent::surface::{self, Status, Surface};
 use keystone_agent::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
 };
@@ -32,6 +33,17 @@ pub enum Row {
     },
     /// What crash recovery found for the turn before it.
     Recovery(RecoveryReport),
+    /// An agent-built widget and the user's state in it.
+    Surface(Surface),
+}
+
+/// A Button press on a widget: what to send the agent, and whether the provider's
+/// tool call still waits for it as its result.
+#[derive(Debug, PartialEq)]
+pub struct Press {
+    pub call: String,
+    pub action: String,
+    pub waiting: bool,
 }
 
 /// Where crash recovery stands while it holds the next message back.
@@ -100,6 +112,8 @@ pub struct Conversation {
     writes: Vec<Write>,
     /// Rows added or changed since [`Conversation::take_changes`].
     changed: BTreeSet<usize>,
+    /// Widgets edited since they were last logged, by the call that showed them.
+    unsaved_surfaces: BTreeSet<String>,
 }
 
 /// Identifies a run of the app in the log. Each conversation takes a new one, unique
@@ -159,6 +173,35 @@ impl Conversation {
             }
         }
         !waiting.is_empty()
+    }
+
+    /// Why the session cannot be settled now: a request or widget still waits for the
+    /// user, and settling never answers either.
+    pub fn settle_blocker(&self) -> Option<&'static str> {
+        if self.awaiting_approval() {
+            Some("Answer the approval request before settling this session.")
+        } else if self.awaiting_widget() {
+            Some("Answer the widget before settling this session.")
+        } else {
+            None
+        }
+    }
+
+    /// Whether a widget waits for the user to answer it, counting widgets that arrived
+    /// while the history loads.
+    pub fn awaiting_widget(&self) -> bool {
+        let mut waiting = self
+            .rows
+            .iter()
+            .any(|row| matches!(row, Row::Surface(surface) if surface.waiting()));
+        for pending in self.pending.iter().flatten() {
+            match pending {
+                Pending::Event(Event::SurfaceShown { waiting: true, .. }) => waiting = true,
+                Pending::Event(Event::TurnCompleted { .. }) => waiting = false,
+                _ => {}
+            }
+        }
+        waiting
     }
 
     /// Rebuilds the rows from the session's log, in the order they were first shown,
@@ -229,7 +272,8 @@ impl Conversation {
                 Entry::TurnStarted | Entry::Recovery { .. } | Entry::ProviderExited => (None, None),
                 Entry::Item { seq, run, .. }
                 | Entry::Approval { seq, run, .. }
-                | Entry::TurnEnded { seq, run, .. } => (*seq, *run),
+                | Entry::TurnEnded { seq, run, .. }
+                | Entry::Surface { seq, run, .. } => (*seq, *run),
             };
             match &entry {
                 Entry::ProviderExited => {
@@ -261,7 +305,7 @@ impl Conversation {
                     last_local = item.id.starts_with(LOCAL) && item.kind == ItemKind::UserMessage;
                 }
                 Entry::TurnEnded { .. } => last_local = false,
-                Entry::Approval { .. } => {}
+                Entry::Approval { .. } | Entry::Surface { .. } => {}
             }
             if entry_run.is_some() && entry_run != run {
                 // A new run starts after every row before it, and never replaces them.
@@ -294,6 +338,19 @@ impl Conversation {
                 Entry::Approval {
                     action, allowed, ..
                 } => Some(Row::Decision { action, allowed }),
+                Entry::Surface { mut surface, .. } => {
+                    // The tool call that waited for it ended with the run that showed it.
+                    if surface.status == Status::Waiting {
+                        surface.status = Status::Stopped;
+                    }
+                    match self.surface_row(&surface.call) {
+                        Some(index) => {
+                            self.rows[index] = Row::Surface(surface);
+                            None
+                        }
+                        None => Some(Row::Surface(surface)),
+                    }
+                }
                 Entry::Recovery { .. } | Entry::ProviderExited => None,
                 Entry::TurnEnded { status, error, .. } => {
                     open_turn = false;
@@ -595,6 +652,17 @@ impl Conversation {
             }
             Event::ApprovalRequested(approval) => self.approvals.push(approval),
             Event::ApprovalResolved { request } => self.approvals.retain(|a| a.request != request),
+            Event::SurfaceShown { surface, .. } => {
+                let index = match self.surface_row(&surface.call) {
+                    Some(index) => {
+                        self.rows[index] = Row::Surface(surface);
+                        self.mark(index);
+                        index
+                    }
+                    None => self.push(Row::Surface(surface)),
+                };
+                self.log_surface(index);
+            }
             Event::TurnCompleted { status, error, .. } => {
                 self.running = false;
                 self.approvals.clear();
@@ -622,9 +690,91 @@ impl Conversation {
             Event::ProviderNotice { message } => self.provider_notice = message,
             // Recovery's control events belong to the app, never to the transcript.
             Event::RecoveryNeeded => self.provider_exited(),
-            Event::HistoryRead { .. } | Event::IdleCandidate(_) => {}
+            // An undelivered widget action is the app's to send.
+            Event::HistoryRead { .. }
+            | Event::IdleCandidate(_)
+            | Event::ActionUndelivered { .. } => {}
         }
         None
+    }
+
+    /// The row of the widget tool call `call` showed.
+    fn surface_row(&self, call: &str) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| matches!(row, Row::Surface(surface) if surface.call == call))
+    }
+
+    /// Writes an input's value into the widget `call` showed. It is logged later, with
+    /// [`Conversation::save_surfaces`], so typing does not log every key. Returns
+    /// whether the widget changed, or why it refused the value.
+    pub fn edit_surface(
+        &mut self,
+        call: &str,
+        pointer: &str,
+        value: serde_json::Value,
+    ) -> Result<bool, String> {
+        let Some(index) = self.surface_row(call) else {
+            return Ok(false);
+        };
+        let Row::Surface(surface) = &mut self.rows[index] else {
+            return Ok(false);
+        };
+        if surface.value(pointer) == Some(&value) {
+            return Ok(false);
+        }
+        surface.set_value(pointer, value)?;
+        self.mark(index);
+        self.unsaved_surfaces.insert(call.to_owned());
+        Ok(true)
+    }
+
+    /// Logs every widget edited since it was last logged.
+    pub fn save_surfaces(&mut self) {
+        for call in std::mem::take(&mut self.unsaved_surfaces) {
+            if let Some(index) = self.surface_row(&call) {
+                self.log_surface(index);
+            }
+        }
+    }
+
+    /// Presses Button `component` on the widget `call` showed: records it and returns
+    /// what to send the agent.
+    pub fn press(&mut self, call: &str, component: &str, timestamp_ms: u64) -> Option<Press> {
+        let index = self.surface_row(call)?;
+        let Row::Surface(surface) = &mut self.rows[index] else {
+            return None;
+        };
+        let action = surface.action(component, timestamp_ms)?;
+        let waiting = surface.waiting();
+        surface.record_action(component);
+        self.mark(index);
+        self.unsaved_surfaces.remove(call);
+        self.log_surface(index);
+        Some(Press {
+            call: call.to_owned(),
+            action,
+            waiting,
+        })
+    }
+
+    /// Saves the widget in row `index` whole, in place for a restore.
+    fn log_surface(&mut self, index: usize) {
+        let Some(Row::Surface(surface)) = self.rows.get(index) else {
+            return;
+        };
+        // A widget restored from an earlier run keeps its place; this run logs it anew.
+        let (seq, run) = if index >= self.run_start {
+            (Some(self.seq(index)), Some(self.run.0))
+        } else {
+            (None, None)
+        };
+        let entry = Entry::Surface {
+            surface: surface.clone(),
+            seq,
+            run,
+        };
+        self.write(entry, true);
     }
 
     /// A turn that ends leaves items the provider never completes. Keep what streamed,
@@ -647,6 +797,20 @@ impl Conversation {
         for (index, item) in unfinished {
             self.mark(index);
             self.log_item(index, item);
+        }
+        // The tool call that waited for a widget ends with its turn.
+        let waiting: Vec<usize> = (start..self.rows.len())
+            .filter(
+                |&index| matches!(&self.rows[index], Row::Surface(surface) if surface.waiting()),
+            )
+            .collect();
+        for index in waiting {
+            if let Row::Surface(surface) = &mut self.rows[index] {
+                surface.status = Status::Stopped;
+                self.unsaved_surfaces.remove(&surface.call);
+            }
+            self.mark(index);
+            self.log_surface(index);
         }
     }
 
@@ -744,7 +908,15 @@ impl Conversation {
 
 /// Whether a row has anything to show. Reasoning without a summary is skipped.
 pub fn visible(row: &Row) -> bool {
-    !matches!(row, Row::Item(item) if item.kind == ItemKind::Reasoning && item.text.is_empty())
+    match row {
+        Row::Item(item) => match &item.kind {
+            ItemKind::Reasoning => !item.text.is_empty(),
+            // The widget's own row stands for its tool call.
+            ItemKind::Tool { name } => name != surface::TOOL,
+            _ => true,
+        },
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -1812,5 +1984,205 @@ mod tests {
                 error: Some(_)
             })
         ));
+    }
+
+    fn checklist(call: &str) -> keystone_agent::surface::Surface {
+        keystone_agent::surface::parse(call, &keystone_agent::surface::examples::checklist())
+            .unwrap()
+    }
+
+    fn surface_rows(conversation: &Conversation) -> Vec<&keystone_agent::surface::Surface> {
+        conversation
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Surface(surface) => Some(surface),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_widget_waits_until_pressed_and_its_state_survives_a_restore() {
+        let mut live = Conversation::default();
+        live.apply(Event::TurnStarted);
+        live.apply(Event::ItemStarted(Item {
+            id: "toolu_1".into(),
+            kind: ItemKind::Tool {
+                name: keystone_agent::surface::TOOL.into(),
+            },
+            text: String::new(),
+            status: ItemStatus::InProgress,
+        }));
+        live.apply(Event::SurfaceShown {
+            surface: checklist("toolu_1"),
+            waiting: true,
+        });
+        // The widget stands for its tool call, whose own row is not shown.
+        assert!(!visible(&live.rows[0]));
+        assert!(live.awaiting_widget());
+        assert_eq!(
+            live.settle_blocker(),
+            Some("Answer the widget before settling this session.")
+        );
+        let shown = live.take_writes();
+        assert!(matches!(
+            &shown[..],
+            [
+                _,
+                Write {
+                    entry: Entry::Surface { .. },
+                    sync: true
+                }
+            ]
+        ));
+
+        // Edits wait to be logged, so typing logs the widget once.
+        assert_eq!(
+            live.edit_surface("toolu_1", "/items/tests", serde_json::json!(true)),
+            Ok(true)
+        );
+        assert_eq!(
+            live.edit_surface("toolu_1", "/items/tests", serde_json::json!(true)),
+            Ok(false)
+        );
+        assert!(live.take_writes().is_empty());
+        live.save_surfaces();
+        assert_eq!(live.take_writes().len(), 1);
+
+        let press = live.press("toolu_1", "send", 1_760_000_000_000).unwrap();
+        assert!(press.waiting);
+        let action: serde_json::Value = serde_json::from_str(&press.action).unwrap();
+        assert_eq!(
+            action["action"]["context"]["items"],
+            serde_json::json!({"docs": true, "tests": true, "changelog": false})
+        );
+        assert!(!live.awaiting_widget());
+        assert_eq!(live.settle_blocker(), None);
+        // A second press is no longer the tool's result.
+        assert!(!live.press("toolu_1", "skip", 1).unwrap().waiting);
+
+        let mut entries: Vec<Entry> = shown.into_iter().map(|write| write.entry).collect();
+        entries.extend(live.take_writes().into_iter().map(|write| write.entry));
+        let mut restored = Conversation::loading();
+        restored.restore(Ok(entries));
+        let surfaces = surface_rows(&restored);
+        assert_eq!(surfaces.len(), 1, "the latest entry replaces earlier ones");
+        assert_eq!(
+            surfaces[0].status,
+            keystone_agent::surface::Status::Answered
+        );
+        assert_eq!(surfaces[0].last_action.as_deref(), Some("skip"));
+        assert_eq!(
+            surfaces[0].value("/items/tests"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ends_stops_its_waiting_widget_and_so_does_a_restart() {
+        let mut live = Conversation::default();
+        live.apply(Event::TurnStarted);
+        live.apply(Event::SurfaceShown {
+            surface: checklist("call-1"),
+            waiting: true,
+        });
+        let mut entries: Vec<Entry> = live.take_writes().into_iter().map(|w| w.entry).collect();
+        // Keystone closed with the widget waiting: no live call can take its answer.
+        let mut restored = Conversation::loading();
+        restored.restore(Ok(entries.clone()));
+        assert!(!restored.awaiting_widget());
+        assert_eq!(
+            surface_rows(&restored)[0].status,
+            keystone_agent::surface::Status::Stopped
+        );
+        assert!(!restored.press("call-1", "send", 1).unwrap().waiting);
+
+        live.apply(Event::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            error: None,
+            stopped: true,
+        });
+        assert!(!live.awaiting_widget());
+        entries.extend(live.take_writes().into_iter().map(|w| w.entry));
+        assert!(entries.iter().any(|entry| matches!(entry,
+            Entry::Surface { surface, .. } if surface.status == keystone_agent::surface::Status::Stopped)));
+    }
+
+    /// A recovery that inserts rows above a widget being edited still logs the edit.
+    #[test]
+    fn a_recovery_above_an_edited_widget_keeps_its_pending_save() {
+        use keystone_agent::recovery::{Snapshot, SnapshotTurn, reconcile};
+        let log = Log(vec![
+            Entry::Item {
+                item: user("u1", "hi"),
+                seq: Some(0),
+                run: Some(1),
+            },
+            Entry::TurnStarted,
+            Entry::Surface {
+                surface: checklist("call-1"),
+                seq: Some(1),
+                run: Some(1),
+            },
+        ]);
+        let mut live = log.restore();
+        assert!(live.needs_recovery());
+        assert_eq!(
+            live.edit_surface("call-1", "/items/tests", serde_json::json!(true)),
+            Ok(true)
+        );
+        let snapshot = Snapshot {
+            turns: vec![SnapshotTurn {
+                items: vec![
+                    user("u1", "hi"),
+                    message("m", "Hello", ItemStatus::Completed),
+                ],
+                end: Some(TurnStatus::Completed),
+            }],
+            limits: Vec::new(),
+        };
+        let batch = reconcile(&live.neutral_items(), live.open_turn(), &snapshot).unwrap();
+        live.apply_recovery(batch);
+        live.take_writes();
+        live.save_surfaces();
+        let writes = live.take_writes();
+        assert!(
+            writes.iter().any(|write| matches!(&write.entry,
+                Entry::Surface { surface, .. }
+                    if surface.value("/items/tests") == Some(&serde_json::json!(true)))),
+            "the edited widget is logged"
+        );
+    }
+
+    /// A widget that waited during a turn that ended while the history loads no
+    /// longer blocks settling.
+    #[test]
+    fn a_widget_whose_turn_ended_while_history_loads_does_not_block_settling() {
+        let mut loading = Conversation::loading();
+        loading.apply(Event::TurnStarted);
+        loading.apply(Event::SurfaceShown {
+            surface: checklist("call-1"),
+            waiting: true,
+        });
+        loading.apply(Event::TurnCompleted {
+            status: TurnStatus::Completed,
+            error: None,
+            stopped: false,
+        });
+        assert!(!loading.awaiting_widget());
+        assert_eq!(loading.settle_blocker(), None);
+    }
+
+    #[test]
+    fn a_widget_shown_while_history_loads_still_needs_the_user() {
+        let mut loading = Conversation::loading();
+        loading.apply(Event::SurfaceShown {
+            surface: checklist("call-1"),
+            waiting: true,
+        });
+        assert!(loading.awaiting_widget());
+        loading.restore(Ok(Vec::new()));
+        assert!(loading.awaiting_widget());
     }
 }

@@ -147,7 +147,8 @@ fn command_session(command: &Command) -> u64 {
         | Command::Send { session, .. }
         | Command::Interrupt { session }
         | Command::Answer { session, .. }
-        | Command::Configure { session, .. } => *session,
+        | Command::Configure { session, .. }
+        | Command::Act { session, .. } => *session,
     }
 }
 
@@ -606,7 +607,11 @@ impl Starter {
             let mut shared = self.shared.lock().unwrap();
             if !shared.closed && shared.generation == generation {
                 let mut out = Outputs::default();
-                shared.driver = Some(CodexDriver::new(&self.client_version, &mut out));
+                shared.driver = Some(CodexDriver::with_widgets(
+                    &self.client_version,
+                    compatibility.widgets,
+                    &mut out,
+                ));
                 shared.notice = compatibility.notice;
                 deliver(&mut shared, &self.inbox, out);
             }
@@ -1044,8 +1049,9 @@ enum Job {
     /// A message, with the directory, saved conversation, and model to start a process
     /// with.
     Message(PathBuf, Option<String>, Option<String>, Option<Caller>),
-    /// Stop or an answer: nothing to start.
-    Command,
+    /// Stop or an answer: nothing to start. The event, if any, is reported when no
+    /// process is there to take it, as for a widget action no call waits for.
+    Command(Option<Event>),
     /// Replaces a process that cannot run the waiting turn's approval mode.
     Replace,
     /// Sends the quiescence check the idle phase waits for.
@@ -1263,8 +1269,15 @@ impl ClaudeConnection {
     /// to stop or answer.
     pub fn command(&self, command: Command) {
         let session = command_session(&command);
+        let missed = match &command {
+            Command::Act { call, text, .. } => Some(Event::ActionUndelivered {
+                call: call.clone(),
+                text: text.clone(),
+            }),
+            _ => None,
+        };
         self.starter
-            .queue(session, Job::Command, move |driver, out| {
+            .queue(session, Job::Command(missed), move |driver, out| {
                 driver.command(command, out)
             });
     }
@@ -1611,7 +1624,11 @@ impl ClaudeStarter {
             job => job,
         };
         let message = matches!(job, Job::Message(..));
-        let command = matches!(job, Job::Command);
+        let command = matches!(job, Job::Command(_));
+        let missed = match &job {
+            Job::Command(missed) => missed.clone(),
+            _ => None,
+        };
         let mut start = match job {
             Job::Message(cwd, resume, model, _) => Some((cwd, resume, model)),
             _ => None,
@@ -1657,6 +1674,9 @@ impl ClaudeStarter {
                 self.start(shared, session, &cwd, resume, model, message, act);
             } else {
                 drop(shared);
+                if let Some(event) = missed {
+                    push(&self.inbox, &self.wake, session, event);
+                }
             }
             if lost {
                 (self.wake)();
@@ -1850,7 +1870,8 @@ impl ClaudeStarter {
             let mut shared = self.shared.lock().unwrap();
             match shared.live.get_mut(&session) {
                 Some(live) if live.generation == generation => {
-                    live.driver.set_cancel_queued(compatibility.cancel_queued)
+                    live.driver.set_cancel_queued(compatibility.cancel_queued);
+                    live.driver.set_widgets(compatibility.widgets);
                 }
                 _ => {}
             }
