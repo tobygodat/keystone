@@ -44,13 +44,14 @@ enum Section {
     Fonts,
     Notifications,
     Accounts,
+    Integrations,
 }
 
 /// A section's rows, each a label and its control.
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 4] = [
+const SECTIONS: [(Section, &str, &str, Rows); 5] = [
     (
         Section::Appearance,
         "Appearance",
@@ -87,6 +88,12 @@ const SECTIONS: [(Section, &str, &str, Rows); 4] = [
         "settings-section-accounts",
         &[],
     ),
+    (
+        Section::Integrations,
+        "Integrations",
+        "settings-section-integrations",
+        &[],
+    ),
 ];
 
 /// The open settings page: the section it shows and a focus handle per tab stop. Only
@@ -101,6 +108,7 @@ pub(crate) struct SettingsPage {
     density: [FocusHandle; DENSITIES.len()],
     text_size: FocusHandle,
     pub(crate) accounts: crate::settings_accounts::AccountsPage,
+    pub(crate) integrations: crate::integrations::IntegrationsPage,
 }
 
 impl SettingsPage {
@@ -116,6 +124,7 @@ impl SettingsPage {
             density: std::array::from_fn(|_| stop()),
             text_size: stop(),
             accounts: crate::settings_accounts::AccountsPage::new(cx),
+            integrations: crate::integrations::IntegrationsPage::new(cx),
         }
     }
 
@@ -240,8 +249,12 @@ impl Keystone {
         let Some(page) = &mut self.settings else {
             return;
         };
+        let opened = page.section != SECTIONS[at].0;
         page.section = SECTIONS[at].0;
         window.focus(&page.sections[at], cx);
+        if opened && page.section == Section::Integrations {
+            self.read_integrations(cx);
+        }
         cx.notify();
     }
 
@@ -285,7 +298,11 @@ impl Keystone {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(560.))
+                    .max_w(px(if page.section == Section::Integrations {
+                        720.
+                    } else {
+                        560.
+                    }))
                     .p(spacing::XL)
                     .child(
                         div().pb(spacing::SM).child(
@@ -298,6 +315,9 @@ impl Keystone {
                     .children(rows)
                     .when(page.section == Section::Accounts, |d| {
                         d.child(self.accounts_section(page, cx))
+                    })
+                    .when(page.section == Section::Integrations, |d| {
+                        d.child(self.integrations_section(page, cx))
                     })
                     .children(self.error_line(cx).map(|error| {
                         div()
@@ -1129,9 +1149,9 @@ mod tests {
         keys(cx, "up");
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
-        // Appearance's row holds focus; next come Fonts, Notifications, Accounts, Theme,
-        // then Compact.
-        keys(cx, "tab tab tab tab tab");
+        // Appearance's row holds focus; next come Fonts, Notifications, Accounts,
+        // Integrations, Theme, then Compact.
+        keys(cx, "tab tab tab tab tab tab");
         press(cx, "space");
         assert_eq!(saved(&path).density, Density::Compact);
         keys(cx, "right");
@@ -1145,11 +1165,11 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, Theme, Accounts, Notifications, Fonts, and
-        // Appearance to Back.
+        // From Default back past Compact, Theme, Integrations, Accounts, Notifications,
+        // Fonts, and Appearance to Back.
         keys(
             cx,
-            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
+            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
         );
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
@@ -1162,9 +1182,9 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        // Fonts' row holds focus; Notifications' and Accounts' rows come before the
-        // first font menu.
-        keys(cx, "ctrl-, down tab tab tab down");
+        // Fonts' row holds focus; Notifications', Accounts' and Integrations' rows come
+        // before the first font menu.
+        keys(cx, "ctrl-, down tab tab tab tab down");
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");

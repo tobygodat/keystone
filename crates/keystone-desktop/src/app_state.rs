@@ -90,6 +90,12 @@ pub(crate) struct AppState {
     /// Readings waiting to be saved off the UI thread, the newest per account, and
     /// whether a save is running.
     usage_saves: Arc<std::sync::Mutex<(BTreeMap<String, AccountUsage>, bool)>>,
+    /// Where providers keep each account's files, for Settings → Integrations. The
+    /// inherited environment, except in tests, which start with none and name fixture
+    /// folders, so no test reads the user's own config.
+    pub(crate) config_env: keystone_agent::ConfigEnv,
+    /// What each session last reported about its MCP servers. Kept for the run only.
+    mcp_status: BTreeMap<u64, SessionMcpStatus>,
     /// Idle eviction for new Claude connections, in place of the debug-build setting.
     #[cfg(test)]
     pub(crate) test_idle: Option<IdlePolicy>,
@@ -117,6 +123,23 @@ pub(crate) const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::f
 const UNREAD: &str = "Keystone could not read this conversation's saved history, so it cannot tell whether a turn was left open";
 
 const NO_THREAD: &str = "Keystone never saved this conversation's provider ID, so it cannot check what the provider recorded. Sending starts a new provider conversation";
+
+/// An MCP server's status and when Keystone received it, in unix milliseconds.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ReportedStatus {
+    pub status: keystone_core::integrations::ServerStatus,
+    pub at_ms: u64,
+}
+
+/// One session's last MCP report: the connection it came from, the session's folder,
+/// and when Keystone received it, in unix milliseconds.
+struct SessionMcpStatus {
+    provider: Provider,
+    account: Option<AccountId>,
+    folder: Option<PathBuf>,
+    servers: Vec<keystone_core::integrations::ServerStatus>,
+    at_ms: u64,
+}
 
 /// A finished Claude store read: session, ticket and what it found.
 type ClaudeResult = (u64, u64, Result<Snapshot, String>);
@@ -1034,6 +1057,11 @@ impl AppState {
                 })
                 .collect(),
             usage_saves: Arc::default(),
+            #[cfg(not(test))]
+            config_env: keystone_agent::ConfigEnv::inherited(),
+            #[cfg(test)]
+            config_env: keystone_agent::ConfigEnv::default(),
+            mcp_status: BTreeMap::new(),
             #[cfg(test)]
             test_idle: None,
             reviewing: HashMap::new(),
@@ -1288,6 +1316,9 @@ impl AppState {
                     Event::Usage(windows) => {
                         self.record_usage(provider, account.as_ref(), windows, cx)
                     }
+                    Event::McpStatus(servers) => {
+                        self.record_mcp_status(provider, account.as_ref(), session, servers, cx)
+                    }
                     Event::ProviderNotice { .. }
                         if self.route(session) != Some((provider, account.clone())) => {}
                     event => events.push((session, event)),
@@ -1485,6 +1516,77 @@ impl AppState {
         account: Option<&AccountId>,
     ) -> Option<&AccountUsage> {
         self.usage.get(&usage_key(provider, account))
+    }
+
+    /// Keeps what a session of the account reported about its MCP servers, in place
+    /// of what it reported before.
+    pub(crate) fn record_mcp_status(
+        &mut self,
+        provider: Provider,
+        account: Option<&AccountId>,
+        session: u64,
+        servers: Vec<keystone_core::integrations::ServerStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        let folder = match self.conversation_folder(session) {
+            Some(ConversationFolder::Recorded(directory)) => Some(directory.path().to_owned()),
+            _ => None,
+        };
+        self.mcp_status.insert(
+            session,
+            SessionMcpStatus {
+                provider,
+                account: account.cloned(),
+                folder,
+                servers,
+                at_ms: now_ms(),
+            },
+        );
+        cx.notify();
+    }
+
+    /// The MCP servers the account's open sessions in `project` last reported, by name,
+    /// each from the newest report that names it. A session in a subfolder may load
+    /// other servers of the same names, so it is left out, and so is one whose
+    /// conversation has closed, since its servers stopped with it.
+    pub(crate) fn mcp_status(
+        &self,
+        provider: Provider,
+        account: Option<&AccountId>,
+        project: &std::path::Path,
+    ) -> BTreeMap<String, ReportedStatus> {
+        let key = account.cloned();
+        let open = |session: u64| match provider {
+            Provider::Codex => self.codex.get(&key).is_some_and(|c| c.is_open(session)),
+            Provider::Claude => self
+                .claude
+                .get(&key)
+                .is_some_and(|c| c.pid(session).is_some()),
+        };
+        let mut reported = BTreeMap::<String, ReportedStatus>::new();
+        let reports = self.mcp_status.iter().filter(|(session, report)| {
+            report.provider == provider
+                && report.account == key
+                && report.folder.as_deref() == Some(project)
+                && open(**session)
+        });
+        for (_, report) in reports {
+            for status in &report.servers {
+                if reported
+                    .get(&status.name)
+                    .is_none_or(|known| known.at_ms <= report.at_ms)
+                {
+                    reported.insert(
+                        status.name.clone(),
+                        ReportedStatus {
+                            status: status.clone(),
+                            at_ms: report.at_ms,
+                        },
+                    );
+                }
+            }
+        }
+        reported
     }
 
     pub(crate) fn has_usage(&self) -> bool {

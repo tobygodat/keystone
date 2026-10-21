@@ -1,6 +1,7 @@
 use super::*;
 use crate::mcp::{Credentials, Server};
 use crate::surface;
+use keystone_core::integrations::Health;
 use serde_json::{Value, json};
 
 fn server() -> Server {
@@ -1163,4 +1164,141 @@ fn claude_widget_timeout_with_the_orchestrator_retries_it_alone_and_sends() {
     assert!(sent_hello(&out), "{:?}", out.writes);
     assert!(out.events.is_empty(), "{:?}", out.events);
     assert!(!driver.credentials_failed());
+}
+
+fn mcp_status(out: &Outputs) -> Vec<Vec<(String, Health)>> {
+    out.events
+        .iter()
+        .filter_map(|(_, event)| match event {
+            Event::McpStatus(servers) => {
+                Some(servers.iter().map(|s| (s.name.clone(), s.health)).collect())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn claude_reports_init_mcp_servers_without_keystones_own() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+    driver.set_mcp("http://127.0.0.1/mcp".into(), "synthetic-token".into());
+    driver.command(
+        Command::Send {
+            session: 7,
+            text: "hello".into(),
+        },
+        &mut out,
+    );
+    claude_init(&mut driver, &mut out);
+    claude_mcp_ready(&mut driver, &mut out);
+    out = Outputs::default();
+    driver.on_line(br#"{"type":"system","subtype":"init","session_id":"c","mcp_servers":[{"name":"keystone","status":"connected"},{"name":"fixture-ok","status":"connected"},{"name":"fixture-bad","status":"failed"},{"name":"remote","status":"needs-auth"},{"name":"odd","status":"novel"}]}"#, &mut out);
+    assert_eq!(
+        mcp_status(&out),
+        [vec![
+            ("fixture-ok".into(), Health::Connected),
+            ("fixture-bad".into(), Health::Failed),
+            ("remote".into(), Health::NeedsAuth),
+        ]]
+    );
+}
+
+#[test]
+fn claude_init_with_odd_mcp_servers_still_starts_the_session() {
+    for servers in [
+        r#"[{"name":3,"status":"connected"},{"name":"fixture-ok","status":null},{"name":"good","status":"connected"},"x"]"#,
+        r#""not a list""#,
+    ] {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+        driver.on_line(
+            format!(r#"{{"type":"system","subtype":"init","session_id":"c","model":"m","mcp_servers":{servers}}}"#)
+                .as_bytes(),
+            &mut out,
+        );
+        assert!(
+            out.events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ThreadReady { thread_id } if thread_id == "c")),
+            "{servers}: {:?}",
+            out.events
+        );
+        let expected: Vec<Vec<(String, Health)>> = if servers.starts_with('[') {
+            vec![vec![("good".into(), Health::Connected)]]
+        } else {
+            vec![]
+        };
+        assert_eq!(mcp_status(&out), expected, "{servers}");
+    }
+}
+
+#[test]
+fn claude_without_keystones_server_reports_a_user_server_named_keystone() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+    driver.on_line(br#"{"type":"system","subtype":"init","session_id":"c","mcp_servers":[{"name":"keystone","status":"pending"}]}"#, &mut out);
+    assert_eq!(
+        mcp_status(&out),
+        [vec![("keystone".into(), Health::Pending)]]
+    );
+}
+
+#[test]
+fn codex_reports_each_threads_mcp_startup_as_one_list() {
+    let mut out = Outputs::default();
+    let mut driver = CodexDriver::new("test", &mut out);
+    let opt_out =
+        wire(&out.writes[0])["params"]["capabilities"]["optOutNotificationMethods"].clone();
+    assert!(
+        !opt_out
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "mcpServer/startupStatus/updated")
+    );
+    driver.set_mcp(7, "http://127.0.0.1/mcp".into(), "synthetic-token".into());
+    codex_open(&mut driver, None, &mut out);
+    codex_initialized(&mut driver, &mut out);
+    codex_thread_ready(&mut driver, &mut out);
+    out = Outputs::default();
+    for (name, status, error, reason) in [
+        ("keystone", "ready", None, None),
+        ("fixture-ok", "starting", None, None),
+        (
+            "fixture-bad",
+            "failed",
+            Some(
+                "error sending request for url (https://u:fixture-secret@host/mcp?token=fixture-secret)",
+            ),
+            None,
+        ),
+        ("fixture-ok", "ready", None, None),
+        (
+            "remote",
+            "failed",
+            Some("sign in"),
+            Some("reauthenticationRequired"),
+        ),
+    ] {
+        driver.on_line(
+            json!({"method": "mcpServer/startupStatus/updated", "params": {"threadId": "thread", "name": name, "status": status, "error": error, "failureReason": reason}})
+                .to_string()
+                .as_bytes(),
+            &mut out,
+        );
+    }
+    driver.on_line(br#"{"method":"mcpServer/startupStatus/updated","params":{"threadId":"other","name":"x","status":"ready"}}"#, &mut out);
+    let reports = mcp_status(&out);
+    assert_eq!(reports.len(), 4, "{reports:?}");
+    assert_eq!(
+        reports[3],
+        [
+            ("fixture-bad".into(), Health::Failed),
+            ("fixture-ok".into(), Health::Connected),
+            ("remote".into(), Health::NeedsAuth),
+        ]
+    );
+    let events = format!("{:?}", out.events);
+    assert!(!events.contains("fixture-secret"), "{events}");
 }

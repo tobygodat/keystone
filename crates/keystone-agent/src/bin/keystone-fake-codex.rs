@@ -41,6 +41,9 @@
 //! answer, and replies with what each call returned. `dynamicTools` is refused, as
 //! Codex 0.163 refuses it, unless `initialize` opted into `experimentalApi`.
 //!
+//! `thread/start` and `thread/resume` are followed by `mcpServer/startupStatus/updated`
+//! for each MCP server the thread gets (see [`start_mcp_servers`]).
+//!
 //! A prompt containing "usage NN" ends its turn with synthetic, labelled
 //! `account/rateLimits/updated` (the 5-hour window at NN%) and `thread/tokenUsage/updated`
 //! notifications.
@@ -103,6 +106,65 @@ fn skills(cwd: &str) -> Vec<Value> {
         "path": "/fake/system/SKILL.md", "scope": "system", "enabled": true, "pluginId": null}),
     );
     listed
+}
+
+/// Reports starting each MCP server the thread gets, as Codex 0.163.0 does after
+/// answering `thread/start` or `thread/resume`: Keystone's own when the thread's config
+/// adds it, then, with `CODEX_HOME` set, every server the account and the thread's
+/// folder turn on, as Keystone's inventory reads them, when `KEYSTONE_FAKE_MCP_CONFIG=1`
+/// says `CODEX_HOME` is a fixture. A stdio server whose command is `false` fails; every
+/// other one is ready. Otherwise only Keystone's, so a test run from a shell with a real
+/// `CODEX_HOME` never reads it.
+fn start_mcp_servers(out: &Out, thread: &str, params: &Value) {
+    use keystone_core::integrations::{Detail, Location, State, Transport, read};
+    let mut servers: Vec<(String, bool)> = Vec::new();
+    if params["config"]["mcp_servers"].get("keystone").is_some() {
+        servers.push(("keystone".into(), false));
+    }
+    let fixture = std::env::var("KEYSTONE_FAKE_MCP_CONFIG").is_ok_and(|v| v == "1");
+    if let (true, Some(home), Some(cwd)) = (
+        fixture,
+        std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
+        params["cwd"].as_str(),
+    ) {
+        let location = Location::Codex {
+            home,
+            user_home: None,
+        };
+        let inventory = read(
+            &keystone_core::AccountId::new("fake"),
+            &location,
+            std::path::Path::new(cwd),
+        );
+        for item in inventory
+            .items
+            .iter()
+            .filter(|item| item.state == State::On && item.overridden_by.is_none())
+        {
+            if let Detail::McpServer(server) = &item.detail {
+                let failed = matches!(&server.transport,
+                    Transport::Stdio { command, .. } if command == "false");
+                servers.push((item.name.clone(), failed));
+            }
+        }
+    }
+    let note = |name: &str, status: &str, error: Option<&str>| {
+        json!({"method": "mcpServer/startupStatus/updated", "params": {"threadId": thread,
+            "name": name, "status": status, "error": error, "failureReason": null}})
+    };
+    for (name, _) in &servers {
+        emit(out, note(name, "starting", None));
+    }
+    for (name, failed) in &servers {
+        emit(
+            out,
+            if *failed {
+                note(name, "failed", Some("scripted MCP startup failure"))
+            } else {
+                note(name, "ready", None)
+            },
+        );
+    }
 }
 
 fn emit(out: &Out, message: Value) {
@@ -380,6 +442,7 @@ fn main() {
                 thread_server(&mut servers, &thread, &params);
                 reply(json!({"thread": {"id": thread},
                     "approvalPolicy": approval, "sandbox": sandbox, "model": model}));
+                start_mcp_servers(&out, &thread, &params);
             }
             "thread/resume" => {
                 let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
@@ -388,6 +451,7 @@ fn main() {
                 thread_server(&mut servers, &thread, &params);
                 reply(json!({"thread": {"id": thread},
                     "approvalPolicy": approval, "sandbox": sandbox, "model": model}));
+                start_mcp_servers(&out, &thread, &params);
             }
             "model/list" if no_catalog => emit(
                 &out,

@@ -8,6 +8,7 @@ mod customization;
 mod customization_agent;
 mod files;
 mod handoff;
+mod integrations;
 mod model_selector;
 mod notifications;
 mod presentation;

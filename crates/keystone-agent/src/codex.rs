@@ -14,20 +14,20 @@ use crate::item::{
 };
 use crate::mcp::{Caller, Issuer};
 use crate::surface;
+use keystone_core::integrations::{Health, ServerStatus};
 use keystone_core::{ApprovalMode, LimitWindow};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const CATALOG_PAGES: u32 = 20;
 
 /// Notifications Keystone does not show. Codex skips sending them.
-const OPT_OUT: [&str; 4] = [
+const OPT_OUT: [&str; 3] = [
     "remoteControl/status/changed",
     "account/updated",
-    "mcpServer/startupStatus/updated",
     "thread/status/changed",
 ];
 
@@ -200,6 +200,10 @@ pub struct CodexDriver {
     /// The user's own approval policy and sandbox, per working directory.
     baselines: HashMap<String, Baseline>,
     mcp: HashMap<u64, Value>,
+    /// Each session's MCP servers as its thread last reported starting them.
+    mcp_status: HashMap<u64, BTreeMap<String, ServerStatus>>,
+    /// Sessions whose threads were given Keystone's own `keystone` server.
+    injected: HashSet<u64>,
     /// Whether new threads get the `show_ui` dynamic tool. Off once Codex refuses it.
     widgets: bool,
     /// Messages Keystone did not recognize. Never fatal.
@@ -231,6 +235,8 @@ impl CodexDriver {
             threads: HashMap::new(),
             baselines: HashMap::new(),
             mcp: HashMap::new(),
+            mcp_status: HashMap::new(),
+            injected: HashSet::new(),
             widgets,
             unknown: 0,
         };
@@ -604,8 +610,10 @@ impl CodexDriver {
         }
         let injected = if let Some(config) = self.mcp.remove(&session) {
             params["config"] = config;
+            self.injected.insert(session);
             true
         } else {
+            self.injected.remove(&session);
             false
         };
         let without_tools = (self.widgets && resume.is_none()).then(|| {
@@ -1085,6 +1093,7 @@ impl CodexDriver {
 
     fn thread_ready(&mut self, session: u64, thread: String, out: &mut Outputs) {
         self.threads.insert(thread.clone(), session);
+        self.mcp_status.remove(&session);
         let state = self.sessions.entry(session).or_default();
         state.opening = false;
         state.thread = Some(thread.clone());
@@ -1217,6 +1226,39 @@ impl CodexDriver {
                         },
                     );
                 }
+            }
+            // A thread starts each MCP server as it opens. Keystone's own server is left
+            // out; every other server's latest state goes out as one list.
+            "mcpServer/startupStatus/updated" => {
+                let Some(note) = params::<McpStartupNote>(line) else {
+                    return self.unknown += 1;
+                };
+                let Some(session) = note.thread_id.as_deref().and_then(|t| self.session_for(t))
+                else {
+                    return;
+                };
+                if note.name == "keystone" && self.injected.contains(&session) {
+                    return;
+                }
+                let health = match (note.status.as_str(), note.failure_reason.as_deref()) {
+                    ("starting", _) => Health::Pending,
+                    ("ready", _) => Health::Connected,
+                    (_, Some("reauthenticationRequired")) => Health::NeedsAuth,
+                    ("failed" | "cancelled", _) => Health::Failed,
+                    _ => return self.unknown += 1,
+                };
+                let servers = self.mcp_status.entry(session).or_default();
+                servers.insert(
+                    note.name.clone(),
+                    ServerStatus {
+                        name: note.name,
+                        health,
+                    },
+                );
+                out.event(
+                    session,
+                    Event::McpStatus(servers.values().cloned().collect()),
+                );
             }
             "error" => {
                 // `willRetry` errors are transient; the final failure arrives with
@@ -1441,6 +1483,15 @@ impl ThreadResult {
 #[derive(Clone, Deserialize)]
 struct Named {
     id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpStartupNote {
+    thread_id: Option<String>,
+    name: String,
+    status: String,
+    failure_reason: Option<String>,
 }
 
 #[derive(Deserialize)]

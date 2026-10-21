@@ -286,7 +286,16 @@ class Run:
         self.process.stdin.flush()
         session = self.call('session_start', {'width': width, 'height': height, 'xwayland': True,
                                               'sandbox': False, 'headless': headless})
-        self.env = app_env(env)
+        # HOME, and each provider folder the driver was not itself started with, start
+        # empty, so a run that names no fixture never reads or shows the user's own
+        # provider config or skills.
+        homes = {key: self.scratch / folder for key, folder in
+                 (('CLAUDE_CONFIG_DIR', 'claude-config'), ('CODEX_HOME', 'codex-home'),
+                  ('HOME', 'home'))
+                 if key == 'HOME' or key not in os.environ}
+        for folder in homes.values():
+            folder.mkdir(exist_ok=True)
+        self.env = {**{key: str(folder) for key, folder in homes.items()}, **app_env(env)}
         self.start_bus()
         return {'session': session.get('structuredContent'), 'bus': self.bus_address,
                 'launch': self.launch()}
@@ -534,7 +543,8 @@ def read_exit(path):
 # Variables a run may pass to the app. The state and automation paths stay owned by the run.
 APP_ENV = {'KEYSTONE_CODEX_PATH', 'KEYSTONE_CLAUDE_PATH', 'KEYSTONE_PROJECT_DIR',
            'KEYSTONE_FAKE_CODEX_DELAY_MS', 'KEYSTONE_FAKE_CLAUDE_DELAY_MS',
-           'KEYSTONE_VISUAL_FIXTURE', 'KEYSTONE_TEST_CLAUDE_IDLE_MS', 'KEYSTONE_TEST_LOG_BUDGET_BYTES', 'VISUAL', 'EDITOR'}
+           'KEYSTONE_VISUAL_FIXTURE', 'KEYSTONE_TEST_CLAUDE_IDLE_MS', 'KEYSTONE_TEST_LOG_BUDGET_BYTES', 'VISUAL', 'EDITOR',
+           'KEYSTONE_FAKE_MCP_CONFIG', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'HOME'}
 
 
 def app_env(env):

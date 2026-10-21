@@ -165,6 +165,9 @@ pub enum Event {
     /// The account's usage-limit windows, as far as this report covers them. Belongs to
     /// the connection's account, whatever session carries it.
     Usage(Vec<keystone_core::LimitWindow>),
+    /// The session's MCP servers and how each one's connection stands, as the provider
+    /// last reported them: the whole list, without the servers Keystone itself adds.
+    McpStatus(Vec<keystone_core::integrations::ServerStatus>),
     /// How much of the model's context window the conversation now fills, in tokens.
     ContextUsage {
         used: u64,

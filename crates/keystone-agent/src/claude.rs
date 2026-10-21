@@ -17,6 +17,7 @@ use crate::item::{
 };
 use crate::mcp::{Caller, Issuer};
 use crate::surface;
+use keystone_core::integrations::{Health, ServerStatus};
 use keystone_core::{ApprovalMode, LimitWindow};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -1289,6 +1290,33 @@ impl ClaudeDriver {
                 },
             );
         }
+        if let Some(servers) = init.mcp_servers.as_ref().and_then(Value::as_array)
+            && self.launch == Launch::Chat
+        {
+            let ours = |name: &str| {
+                (name == "keystone" && self.mcp_enabled)
+                    || (name == surface::SERVER && self.widgets)
+            };
+            let servers = servers
+                .iter()
+                .filter_map(|server| {
+                    let name = server["name"].as_str().filter(|name| !ours(name))?;
+                    let health = match server["status"].as_str()? {
+                        "connected" => Health::Connected,
+                        "pending" => Health::Pending,
+                        "needs-auth" => Health::NeedsAuth,
+                        "failed" => Health::Failed,
+                        "disabled" => Health::Disabled,
+                        _ => return None,
+                    };
+                    Some(ServerStatus {
+                        name: name.to_owned(),
+                        health,
+                    })
+                })
+                .collect();
+            out.event(self.session, Event::McpStatus(servers));
+        }
         if let Some(model) = init.model
             && self.model.as_deref() != Some(model.as_str())
         {
@@ -2105,6 +2133,7 @@ struct Init {
     session_id: String,
     #[serde(default)]
     capabilities: Vec<String>,
+    mcp_servers: Option<Value>,
     #[serde(rename = "permissionMode")]
     permission_mode: Option<String>,
     model: Option<String>,

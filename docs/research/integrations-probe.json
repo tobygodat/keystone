@@ -1,0 +1,778 @@
+{
+ "versions": {
+  "claude": "2.1.301 (Claude Code)",
+  "codex": "codex-cli 0.163.0"
+ },
+ "claude": {
+  "cli": {
+   "mcp add -s user": [
+    "File modified: <root>/claude-config/.claude.json"
+   ],
+   "mcp add -s local": [
+    "File modified: <root>/claude-config/.claude.json [project: <root>/project]"
+   ],
+   "mcp add -s project": [
+    "File modified: <root>/project/.mcp.json"
+   ],
+   "plugin marketplace add": [
+    "Adding marketplace\u2026\u2714 Successfully added marketplace: fixture-market (declared in user settings)"
+   ],
+   "plugin install -s user": [
+    "Installing plugin \"fixture-plugin@fixture-market\"...\u2714 Successfully installed plugin: fixture-plugin@fixture-market (scope: user)"
+   ],
+   "plugin install -s local": [
+    "Installing plugin \"fixture-plugin@fixture-market\"...\u2714 Successfully installed plugin: fixture-plugin@fixture-market (scope: local)"
+   ],
+   "plugin disable -s user": [
+    "\u2714 Successfully disabled plugin: fixture-plugin (scope: user)"
+   ]
+  },
+  "files": {
+   "claude-config/.claude.json": {
+    "firstStartTime": "2026-10-21T06:58:43.469Z",
+    "firstStartVersion": "2.1.301",
+    "machineID": "<scrubbed>",
+    "opusProMigrationComplete": true,
+    "sonnet1m45MigrationComplete": true,
+    "seenNotifications": {},
+    "hasResetAutoModeOptInForDefaultOffer": true,
+    "migrationVersion": 14,
+    "userID": "<scrubbed>",
+    "mcpServers": {
+     "fixture-ok": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+       "<root>/server.py"
+      ],
+      "env": {
+       "FIXTURE_TOKEN": "fixture-secret"
+      }
+     }
+    },
+    "projects": {
+     "<root>/project": {
+      "allowedTools": [],
+      "mcpContextUris": [],
+      "mcpServers": {
+       "fixture-http": {
+        "type": "http",
+        "url": "http://127.0.0.1:9/mcp",
+        "headers": {
+         "Authorization": "Bearer fixture-secret"
+        }
+       }
+      },
+      "enabledMcpjsonServers": [],
+      "disabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": false,
+      "hasClaudeMdExternalIncludesApproved": false,
+      "hasClaudeMdExternalIncludesWarningShown": false
+     }
+    }
+   },
+   "claude-config/plugins/installed_plugins.json": {
+    "version": 2,
+    "plugins": {
+     "fixture-plugin@fixture-market": [
+      {
+       "scope": "user",
+       "installPath": "<root>/claude-config/plugins/cache/fixture-market/fixture-plugin/1.0.0",
+       "version": "1.0.0",
+       "installedAt": "2026-10-21T06:58:43.942Z",
+       "lastUpdated": "2026-10-21T06:58:43.942Z"
+      },
+      {
+       "scope": "local",
+       "installPath": "<root>/claude-config/plugins/cache/fixture-market/fixture-plugin/1.0.0",
+       "version": "1.0.0",
+       "installedAt": "2026-10-21T06:58:44.094Z",
+       "lastUpdated": "2026-10-21T06:58:44.094Z",
+       "projectPath": "<root>/project"
+      }
+     ]
+    }
+   },
+   "claude-config/plugins/known_marketplaces.json": {
+    "fixture-market": {
+     "source": {
+      "source": "directory",
+      "path": "<root>/claude-market"
+     },
+     "installLocation": "<root>/claude-market",
+     "lastUpdated": "2026-10-21T06:58:43.803Z"
+    }
+   },
+   "claude-config/settings.json": {
+    "enabledPlugins": {
+     "fixture-plugin@fixture-market": false
+    },
+    "extraKnownMarketplaces": {
+     "fixture-market": {
+      "source": {
+       "source": "directory",
+       "path": "<root>/claude-market"
+      }
+     }
+    }
+   },
+   "claude-config/skills/fixture-skill/SKILL.md": "---\nname: fixture-skill\ndescription: Fixture fixture-skill\n---\nBody.\n",
+   "claude-home/.agents/skills/fixture-home-agents-skill/SKILL.md": "---\nname: fixture-home-agents-skill\ndescription: Fixture fixture-home-agents-skill\n---\nBody.\n",
+   "claude-market/.claude-plugin/marketplace.json": {
+    "name": "fixture-market",
+    "owner": {
+     "name": "Fixture"
+    },
+    "plugins": [
+     {
+      "name": "fixture-plugin",
+      "source": "./plugins/fixture-plugin"
+     }
+    ]
+   },
+   "claude-market/plugins/fixture-plugin/.claude-plugin/plugin.json": {
+    "name": "fixture-plugin",
+    "version": "1.0.0",
+    "mcpServers": {
+     "fixture-plugin-server": {
+      "command": "true"
+     }
+    }
+   },
+   "claude-market/plugins/fixture-plugin/skills/fixture-plugin-skill/SKILL.md": "---\nname: fixture-plugin-skill\ndescription: Fixture fixture-plugin-skill\n---\nBody.\n",
+   "project/.claude/settings.local.json": {
+    "enabledPlugins": {
+     "fixture-plugin@fixture-market": true
+    }
+   },
+   "project/.claude/skills/fixture-project-skill/SKILL.md": "---\nname: fixture-project-skill\ndescription: Fixture fixture-project-skill\n---\nBody.\n",
+   "project/.mcp.json": {
+    "mcpServers": {
+     "fixture-bad": {
+      "type": "stdio",
+      "command": "false",
+      "args": [],
+      "env": {}
+     }
+    }
+   }
+  },
+  "initialize_commands": [
+   "fixture-skill",
+   "fixture-project-skill",
+   "fixture-plugin:fixture-plugin-skill"
+  ],
+  "mcp_status_at_once": {
+   "subtype": "success",
+   "request_id": "mcp_status_at_once",
+   "response": {
+    "mcpServers": [
+     {
+      "name": "plugin:fixture-plugin:fixture-plugin-server",
+      "status": "pending",
+      "config": {
+       "type": "stdio",
+       "command": "true",
+       "args": []
+      },
+      "scope": "dynamic",
+      "source": "plugin"
+     },
+     {
+      "name": "fixture-ok",
+      "status": "pending",
+      "config": {
+       "type": "stdio",
+       "command": "python3",
+       "args": [
+        "<root>/server.py"
+       ]
+      },
+      "scope": "user",
+      "source": "user"
+     },
+     {
+      "name": "fixture-bad",
+      "status": "pending",
+      "config": {
+       "type": "stdio",
+       "command": "false",
+       "args": []
+      },
+      "scope": "project",
+      "source": "project"
+     },
+     {
+      "name": "fixture-http",
+      "status": "failed",
+      "error": "ENETUNREACH: Was there a typo in the url or port?",
+      "config": {
+       "type": "http",
+       "url": "http://127.0.0.1:9/mcp",
+       "headers": {
+        "Authorization": "Bearer fixture-secret"
+       }
+      },
+      "scope": "local",
+      "source": "local"
+     }
+    ]
+   }
+  },
+  "mcp_status_after_5s": {
+   "subtype": "success",
+   "request_id": "mcp_status_after_5s",
+   "response": {
+    "mcpServers": [
+     {
+      "name": "plugin:fixture-plugin:fixture-plugin-server",
+      "status": "failed",
+      "error": "Connection closed",
+      "config": {
+       "type": "stdio",
+       "command": "true",
+       "args": []
+      },
+      "scope": "dynamic",
+      "source": "plugin"
+     },
+     {
+      "name": "fixture-ok",
+      "status": "connected",
+      "serverInfo": {
+       "name": "fixture",
+       "version": "1.0"
+      },
+      "config": {
+       "type": "stdio",
+       "command": "python3",
+       "args": [
+        "<root>/server.py"
+       ]
+      },
+      "scope": "user",
+      "source": "user",
+      "tools": [
+       {
+        "name": "ping",
+        "annotations": {}
+       }
+      ]
+     },
+     {
+      "name": "fixture-bad",
+      "status": "failed",
+      "error": "Connection closed",
+      "config": {
+       "type": "stdio",
+       "command": "false",
+       "args": []
+      },
+      "scope": "project",
+      "source": "project"
+     },
+     {
+      "name": "fixture-http",
+      "status": "failed",
+      "error": "ENETUNREACH: Was there a typo in the url or port?",
+      "config": {
+       "type": "http",
+       "url": "http://127.0.0.1:9/mcp",
+       "headers": {
+        "Authorization": "Bearer fixture-secret"
+       }
+      },
+      "scope": "local",
+      "source": "local"
+     }
+    ]
+   }
+  }
+ },
+ "codex": {
+  "cli": {
+   "mcp add stdio": [
+    "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))"
+   ],
+   "mcp add failing": [
+    "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))"
+   ],
+   "mcp add http": [
+    "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))"
+   ],
+   "plugin marketplace add": [
+    "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))"
+   ],
+   "plugin add": [
+    "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))"
+   ]
+  },
+  "files": {
+   "codex-home/config.toml": "[mcp_servers.fixture-ok]\ncommand = \"python3\"\nargs = [\"<root>/server.py\"]\n\n[mcp_servers.fixture-ok.env]\nFIXTURE_TOKEN = \"fixture-secret\"\n\n[mcp_servers.fixture-bad]\ncommand = \"false\"\n\n[mcp_servers.fixture-http]\nurl = \"http://127.0.0.1:9/mcp\"\nbearer_token_env_var = \"FIXTURE_BEARER\"\n\n[marketplaces.fixture-market]\nsource_type = \"local\"\nsource = \"<root>/codex-market\"\n\n[plugins.\"fixture-plugin@fixture-market\"]\nenabled = true\n\n[[skills.config]]\npath = \"<root>/codex-home/skills/fixture-off-skill/SKILL.md\"\nenabled = false\n\n[projects.\"<root>/project\"]\ntrust_level = \"trusted\"\n",
+   "codex-home/skills/fixture-codex-skill/SKILL.md": "---\nname: fixture-codex-skill\ndescription: Fixture fixture-codex-skill\n---\nBody.\n",
+   "codex-home/skills/fixture-off-skill/SKILL.md": "---\nname: fixture-off-skill\ndescription: Fixture fixture-off-skill\n---\nBody.\n",
+   "codex-user/.agents/skills/fixture-home-agents-skill/SKILL.md": "---\nname: fixture-home-agents-skill\ndescription: Fixture fixture-home-agents-skill\n---\nBody.\n",
+   "codex-user/.codex/skills/fixture-home-codex-skill/SKILL.md": "---\nname: fixture-home-codex-skill\ndescription: Fixture fixture-home-codex-skill\n---\nBody.\n",
+   "project/.codex/config.toml": "[mcp_servers.fixture-repo]\ncommand = \"true\"\n",
+   "project/.codex/skills/fixture-repo-codex-skill/SKILL.md": "---\nname: fixture-repo-codex-skill\ndescription: Fixture fixture-repo-codex-skill\n---\nBody.\n",
+   "project/.agents/skills/fixture-repo-agents-skill/SKILL.md": "---\nname: fixture-repo-agents-skill\ndescription: Fixture fixture-repo-agents-skill\n---\nBody.\n"
+  },
+  "untrusted_project": {
+   "mcpServerStatus/list": {
+    "id": 2,
+    "result": {
+     "data": [
+      {
+       "name": "fixture-bad",
+       "runtimeStatus": null,
+       "pluginId": null,
+       "httpOrigin": null,
+       "serverInfo": null,
+       "serverCapabilities": null,
+       "tools": {},
+       "toolsError": "MCP startup failed: handshaking with MCP server failed: Send message error Transport [codex_rmcp_client::stdio_server_launcher::StdioServerTransport] error: Broken pipe (os error 32), when send initialize request: Send message error Transport [codex_rmcp_client::stdio_server_launcher::StdioServerTransport] error: Broken pipe (os error 32), when send initialize request",
+       "resources": [],
+       "resourceTemplates": [],
+       "authStatus": "unsupported"
+      },
+      {
+       "name": "fixture-http",
+       "runtimeStatus": null,
+       "pluginId": null,
+       "httpOrigin": "http://127.0.0.1:9",
+       "serverInfo": null,
+       "serverCapabilities": null,
+       "tools": {},
+       "toolsError": "MCP startup failed: Environment variable FIXTURE_BEARER for MCP server 'fixture-http' is not set",
+       "resources": [],
+       "resourceTemplates": [],
+       "authStatus": "bearerToken"
+      },
+      {
+       "name": "fixture-ok",
+       "runtimeStatus": null,
+       "pluginId": null,
+       "httpOrigin": null,
+       "serverInfo": {
+        "name": "fixture",
+        "title": null,
+        "version": "1.0",
+        "description": null,
+        "icons": null,
+        "websiteUrl": null
+       },
+       "serverCapabilities": {
+        "tools": {}
+       },
+       "tools": {
+        "ping": {
+         "name": "ping",
+         "description": "Ping",
+         "inputSchema": {
+          "type": "object"
+         }
+        }
+       },
+       "toolsError": null,
+       "resources": [],
+       "resourceTemplates": [],
+       "authStatus": "unsupported"
+      }
+     ],
+     "nextCursor": null
+    }
+   },
+   "startup_notifications": [
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-66f9-7a71-9c23-ebdf27ccf0bf",
+      "name": "fixture-bad",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565929732
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-66f9-7a71-9c23-ebdf27ccf0bf",
+      "name": "fixture-ok",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565929732
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-66f9-7a71-9c23-ebdf27ccf0bf",
+      "name": "fixture-http",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565929732
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-66f9-7a71-9c23-ebdf27ccf0bf",
+      "name": "fixture-http",
+      "status": "failed",
+      "error": "MCP client for `fixture-http` failed to start: MCP startup failed: Environment variable FIXTURE_BEARER for MCP server 'fixture-http' is not set",
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565929732
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-66f9-7a71-9c23-ebdf27ccf0bf",
+      "name": "fixture-bad",
+      "status": "failed",
+      "error": "MCP client for `fixture-bad` failed to start: MCP startup failed: handshaking with MCP server failed: connection closed: initialize response: connection closed: initialize response",
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565929732
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-66f9-7a71-9c23-ebdf27ccf0bf",
+      "name": "fixture-ok",
+      "status": "ready",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565929742
+    }
+   ],
+   "skills/list": {
+    "id": 4,
+    "result": {
+     "data": [
+      {
+       "cwd": "<root>/project",
+       "skills": [
+        {
+         "name": "fixture-repo-agents-skill",
+         "description": "Fixture fixture-repo-agents-skill",
+         "path": "<root>/project/.agents/skills/fixture-repo-agents-skill/SKILL.md",
+         "scope": "repo",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-repo-codex-skill",
+         "description": "Fixture fixture-repo-codex-skill",
+         "path": "<root>/project/.codex/skills/fixture-repo-codex-skill/SKILL.md",
+         "scope": "repo",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-codex-skill",
+         "description": "Fixture fixture-codex-skill",
+         "path": "<root>/codex-home/skills/fixture-codex-skill/SKILL.md",
+         "scope": "user",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-home-agents-skill",
+         "description": "Fixture fixture-home-agents-skill",
+         "path": "<root>/codex-user/.agents/skills/fixture-home-agents-skill/SKILL.md",
+         "scope": "user",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-off-skill",
+         "description": "Fixture fixture-off-skill",
+         "path": "<root>/codex-home/skills/fixture-off-skill/SKILL.md",
+         "scope": "user",
+         "enabled": false,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-plugin:fixture-plugin-skill",
+         "description": "Fixture fixture-plugin-skill",
+         "path": "<root>/codex-home/plugins/cache/fixture-market/fixture-plugin/1.0.0/skills/fixture-plugin-skill/SKILL.md",
+         "scope": "user",
+         "enabled": true,
+         "pluginId": "fixture-plugin@fixture-market"
+        },
+        {
+         "name": "imagegen",
+         "description": "Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas.",
+         "interface": {
+          "displayName": "Image Gen",
+          "shortDescription": "Generate or edit images for websites, games, and more",
+          "iconSmall": "<root>/codex-home/skills/.system/imagegen/assets/imagegen-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/imagegen/assets/imagegen.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use $imagegen to make or edit an image for this project."
+         },
+         "path": "<root>/codex-home/skills/.system/imagegen/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "openai-docs",
+         "description": "Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge\u2014including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex\u2014and for OpenAI APIs/products and ChatGPT Work. Also use for model choice/migration, prompting, SDKs, Responses, Realtime, agents, evals, and Chat/Work/Codex comparisons. Do not use for generic app/software tasks that merely mention Codex.",
+         "shortDescription": "Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, and self-knowledge; OpenAI APIs and ChatGPT Work. 'You'/'this app' means Codex only.",
+         "interface": {
+          "displayName": "OpenAI Docs",
+          "shortDescription": "OpenAI and Codex docs for models, skills, tasks, and setup",
+          "iconSmall": "<root>/codex-home/skills/.system/openai-docs/assets/openai-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/openai-docs/assets/openai.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use OpenAI Docs for official docs lookup, questions about Codex itself or Codex surfaces, model selection, model migration, and prompt-upgrade work."
+         },
+         "path": "<root>/codex-home/skills/.system/openai-docs/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "review-agent",
+         "description": "Perform a read-only, defect-first review of a specified code change and return every actionable finding. Use when another agent delegates review of uncommitted changes, a base-branch diff, a commit, or custom review instructions.",
+         "interface": {
+          "displayName": "Review Agent",
+          "shortDescription": "Find actionable bugs in code changes",
+          "iconSmall": null,
+          "iconLarge": null,
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use $review-agent to review the requested code changes and return actionable findings."
+         },
+         "path": "<root>/codex-home/skills/.system/review-agent/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "skill-creator",
+         "description": "Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources.",
+         "shortDescription": "Create or update a skill",
+         "interface": {
+          "displayName": "Skill Creator",
+          "shortDescription": "Create or update a skill",
+          "iconSmall": "<root>/codex-home/skills/.system/skill-creator/assets/skill-creator-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/skill-creator/assets/skill-creator.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": null
+         },
+         "path": "<root>/codex-home/skills/.system/skill-creator/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "skill-installer",
+         "description": "Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos).",
+         "shortDescription": "Install curated skills from openai/skills or other repos",
+         "interface": {
+          "displayName": "Skill Installer",
+          "shortDescription": "Install curated skills from openai/skills or other repos",
+          "iconSmall": "<root>/codex-home/skills/.system/skill-installer/assets/skill-installer-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/skill-installer/assets/skill-installer.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": null
+         },
+         "path": "<root>/codex-home/skills/.system/skill-installer/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        }
+       ],
+       "errors": []
+      }
+     ]
+    }
+   }
+  },
+  "trusted_project": {
+   "startup_notifications": [
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-7711-7831-89f3-e4733fe7da92",
+      "name": "fixture-http",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565933854
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-7711-7831-89f3-e4733fe7da92",
+      "name": "fixture-repo",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565933854
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-7711-7831-89f3-e4733fe7da92",
+      "name": "fixture-bad",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565933854
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-7711-7831-89f3-e4733fe7da92",
+      "name": "fixture-ok",
+      "status": "starting",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565933854
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-7711-7831-89f3-e4733fe7da92",
+      "name": "fixture-http",
+      "status": "failed",
+      "error": "MCP client for `fixture-http` failed to start: MCP startup failed: Environment variable FIXTURE_BEARER for MCP server 'fixture-http' is not set",
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565933854
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-7711-7831-89f3-e4733fe7da92",
+      "name": "fixture-bad",
+      "status": "failed",
+      "error": "MCP client for `fixture-bad` failed to start: MCP startup failed: handshaking with MCP server failed: Send message error Transport [codex_rmcp_client::stdio_server_launcher::StdioServerTransport] error: Broken pipe (os error 32), when send initialize request: Send message error Transport [codex_rmcp_client::stdio_server_launcher::StdioServerTransport] error: Broken pipe (os error 32), when send initialize request",
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565933854
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-7711-7831-89f3-e4733fe7da92",
+      "name": "fixture-repo",
+      "status": "failed",
+      "error": "MCP client for `fixture-repo` failed to start: MCP startup failed: handshaking with MCP server failed: connection closed: initialize response: connection closed: initialize response",
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565933854
+    },
+    {
+     "method": "mcpServer/startupStatus/updated",
+     "params": {
+      "threadId": "01a15d41-7711-7831-89f3-e4733fe7da92",
+      "name": "fixture-ok",
+      "status": "ready",
+      "error": null,
+      "failureReason": null
+     },
+     "emittedAtMs": 1792565933866
+    }
+   ],
+   "mcpServerStatus/list with threadId": {
+    "id": 3,
+    "result": {
+     "data": [
+      {
+       "name": "fixture-bad",
+       "runtimeStatus": "failed",
+       "pluginId": null,
+       "httpOrigin": null,
+       "serverInfo": null,
+       "serverCapabilities": null,
+       "tools": {},
+       "toolsError": "MCP startup failed: handshaking with MCP server failed: connection closed: initialize response: connection closed: initialize response",
+       "resources": [],
+       "resourceTemplates": [],
+       "authStatus": "unsupported"
+      },
+      {
+       "name": "fixture-http",
+       "runtimeStatus": "failed",
+       "pluginId": null,
+       "httpOrigin": "http://127.0.0.1:9",
+       "serverInfo": null,
+       "serverCapabilities": null,
+       "tools": {},
+       "toolsError": "MCP startup failed: Environment variable FIXTURE_BEARER for MCP server 'fixture-http' is not set",
+       "resources": [],
+       "resourceTemplates": [],
+       "authStatus": "bearerToken"
+      },
+      {
+       "name": "fixture-ok",
+       "runtimeStatus": "connected",
+       "pluginId": null,
+       "httpOrigin": null,
+       "serverInfo": {
+        "name": "fixture",
+        "title": null,
+        "version": "1.0",
+        "description": null,
+        "icons": null,
+        "websiteUrl": null
+       },
+       "serverCapabilities": {
+        "tools": {}
+       },
+       "tools": {
+        "ping": {
+         "name": "ping",
+         "description": "Ping",
+         "inputSchema": {
+          "type": "object"
+         }
+        }
+       },
+       "toolsError": null,
+       "resources": [],
+       "resourceTemplates": [],
+       "authStatus": "unsupported"
+      },
+      {
+       "name": "fixture-repo",
+       "runtimeStatus": "failed",
+       "pluginId": null,
+       "httpOrigin": null,
+       "serverInfo": null,
+       "serverCapabilities": null,
+       "tools": {},
+       "toolsError": "MCP startup failed: handshaking with MCP server failed: connection closed: initialize response: connection closed: initialize response",
+       "resources": [],
+       "resourceTemplates": [],
+       "authStatus": "unsupported"
+      }
+     ],
+     "nextCursor": null
+    }
+   }
+  }
+ }
+}

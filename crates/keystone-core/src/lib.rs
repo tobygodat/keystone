@@ -14,6 +14,7 @@ mod account;
 mod account_tests;
 mod composition;
 mod database;
+pub mod integrations;
 mod layout;
 mod project;
 mod session_context;

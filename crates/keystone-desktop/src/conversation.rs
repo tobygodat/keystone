@@ -626,8 +626,9 @@ impl Conversation {
             Event::ModelReported { model } => self.reported_model = Some(model),
             Event::ModelLost => self.reported_model = None,
             Event::ContextUsage { used, window } => self.context = Some((used, window)),
-            // Catalogs, commands and account usage belong to the provider, not to a conversation.
-            Event::Catalog(_) | Event::Commands(_) | Event::Usage(_) => {}
+            // Catalogs, commands, account usage and MCP status belong to the provider, not to a
+            // conversation.
+            Event::Catalog(_) | Event::Commands(_) | Event::Usage(_) | Event::McpStatus(_) => {}
             Event::TurnStarted => {
                 self.running = true;
                 self.error = None;

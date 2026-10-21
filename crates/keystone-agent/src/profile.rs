@@ -8,6 +8,7 @@
 //! credentials itself.
 
 use keystone_core::Provider;
+use keystone_core::integrations::Location;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -178,6 +179,63 @@ pub fn default_home(provider: Provider) -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(folder)))
 }
 
+/// The variables that decide where a provider keeps an account's files. Captured once
+/// from Keystone's environment, so a test can name fixture folders instead.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ConfigEnv {
+    pub claude_config_dir: Option<PathBuf>,
+    pub codex_home: Option<PathBuf>,
+    pub home: Option<PathBuf>,
+}
+
+impl ConfigEnv {
+    /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `HOME` as Keystone inherited them.
+    pub fn inherited() -> Self {
+        let var = |name| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            claude_config_dir: var("CLAUDE_CONFIG_DIR"),
+            codex_home: var("CODEX_HOME"),
+            home: var("HOME"),
+        }
+    }
+
+    /// Where the account whose home is `home` keeps its files; `None` as the home is
+    /// the default account, which uses the inherited folder. Claude keeps
+    /// `.claude.json` in its config dir when `CLAUDE_CONFIG_DIR` is set, else in `~`.
+    /// `None` when the default account's folder is unknown.
+    pub fn location(&self, provider: Provider, home: Option<&Path>) -> Option<Location> {
+        match provider {
+            Provider::Claude => {
+                let (config_dir, global_file) = match home.or(self.claude_config_dir.as_deref()) {
+                    Some(dir) => (dir.to_owned(), dir.join(".claude.json")),
+                    None => {
+                        let user = self.home.as_deref()?;
+                        (user.join(".claude"), user.join(".claude.json"))
+                    }
+                };
+                Some(Location::Claude {
+                    config_dir,
+                    global_file,
+                })
+            }
+            Provider::Codex => {
+                let home = match home.or(self.codex_home.as_deref()) {
+                    Some(home) => home.to_owned(),
+                    None => self.home.as_deref()?.join(".codex"),
+                };
+                Some(Location::Codex {
+                    home,
+                    user_home: self.home.clone(),
+                })
+            }
+        }
+    }
+}
+
 /// `text` as one shell word.
 fn shell_quote(text: &str) -> String {
     if !text.is_empty()
@@ -193,6 +251,57 @@ fn shell_quote(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_locations_follow_each_providers_own_rules() {
+        let env = ConfigEnv {
+            claude_config_dir: None,
+            codex_home: None,
+            home: Some("/h".into()),
+        };
+        assert_eq!(
+            env.location(Provider::Claude, None),
+            Some(Location::Claude {
+                config_dir: "/h/.claude".into(),
+                global_file: "/h/.claude.json".into(),
+            })
+        );
+        assert_eq!(
+            env.location(Provider::Claude, Some(Path::new("/w"))),
+            Some(Location::Claude {
+                config_dir: "/w".into(),
+                global_file: "/w/.claude.json".into(),
+            })
+        );
+        assert_eq!(
+            env.location(Provider::Codex, None),
+            Some(Location::Codex {
+                home: "/h/.codex".into(),
+                user_home: Some("/h".into()),
+            })
+        );
+        let env = ConfigEnv {
+            claude_config_dir: Some("/c".into()),
+            codex_home: Some("/x".into()),
+            home: None,
+        };
+        assert_eq!(
+            env.location(Provider::Claude, None),
+            Some(Location::Claude {
+                config_dir: "/c".into(),
+                global_file: "/c/.claude.json".into(),
+            })
+        );
+        assert_eq!(
+            env.location(Provider::Codex, Some(Path::new("/y"))),
+            Some(Location::Codex {
+                home: "/y".into(),
+                user_home: None,
+            })
+        );
+        assert_eq!(ConfigEnv::default().location(Provider::Codex, None), None);
+        assert_eq!(ConfigEnv::default().location(Provider::Claude, None), None);
+    }
 
     #[test]
     fn an_account_sets_only_its_own_home_and_drops_inherited_credentials() {

@@ -54,8 +54,8 @@
 //! (NN/2 % of a 200,000-token context) and, before its `result`, a synthetic, labelled
 //! `rate_limit_event` with the 5-hour window at NN%. `get_usage` is not scripted.
 //!
-//! `init` lists tools unless launched with `--tools ""`, and no MCP servers, slash
-//! commands or skills. The `initialize` answer's `commands` lists the skills and
+//! `init` lists tools unless launched with `--tools ""`, the MCP servers the fixture
+//! config turns on (see [`mcp_servers`]), and no slash commands or skills. The `initialize` answer's `commands` lists the skills and
 //! commands under `$CLAUDE_CONFIG_DIR` and the working directory's `.claude`, as Claude
 //! Code 2.1.301 does, then two built-ins; none with `--disable-slash-commands`.
 //! `init-tools` and `init-commands` settings replace the JSON of `init`'s `tools` and
@@ -193,6 +193,44 @@ fn store(kind: &str, message: Value, uuid: Option<&str>) {
 const RELEASE_LIMIT: Duration = Duration::from_secs(10);
 
 const VERSION: &str = "2.1.300";
+
+/// The MCP servers `init` reports: with `KEYSTONE_FAKE_MCP_CONFIG=1` and
+/// `CLAUDE_CONFIG_DIR` naming a fixture, every server the account and the working
+/// directory turn on, as Keystone's inventory reads them. A stdio server whose command
+/// is `false` has `failed`, as the real CLI reports it; every other one is `connected`.
+/// Otherwise none, so a test run from a shell with a real `CLAUDE_CONFIG_DIR` never
+/// reads it.
+fn mcp_servers() -> Value {
+    use keystone_core::integrations::{Detail, Location, State, Transport, read};
+    if !std::env::var("KEYSTONE_FAKE_MCP_CONFIG").is_ok_and(|v| v == "1") {
+        return json!([]);
+    }
+    let Some(config_dir) = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from) else {
+        return json!([]);
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return json!([]);
+    };
+    let location = Location::Claude {
+        global_file: config_dir.join(".claude.json"),
+        config_dir,
+    };
+    let inventory = read(&keystone_core::AccountId::new("fake"), &location, &cwd);
+    inventory
+        .items
+        .iter()
+        .filter(|item| item.state == State::On && item.overridden_by.is_none())
+        .filter_map(|item| match &item.detail {
+            Detail::McpServer(server) => {
+                let failed = matches!(&server.transport,
+                    Transport::Stdio { command, .. } if command == "false");
+                Some(json!({"name": item.name,
+                    "status": if failed { "failed" } else { "connected" }}))
+            }
+            _ => None,
+        })
+        .collect()
+}
 
 fn emit(out: &Out, message: Value) {
     let mut out = out.lock().unwrap();
@@ -929,7 +967,7 @@ fn work(
         };
         let mode = shared.mode.lock().unwrap().clone();
         let mut init = json!({"type": "system", "subtype": "init", "session_id": session,
-               "capabilities": capabilities, "permissionMode": mode, "mcp_servers": [],
+               "capabilities": capabilities, "permissionMode": mode, "mcp_servers": mcp_servers(),
                "slash_commands": [], "skills": [], "claude_code_version": VERSION,
                "model": shared.model});
         if let Some(tools) = &tools {
