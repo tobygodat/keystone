@@ -1,0 +1,725 @@
+{
+ "time_utc": "2026-10-21T02:29:33Z",
+ "claude_version": "2.1.301 (Claude Code)",
+ "codex_version": "codex-cli 0.163.0",
+ "claude": {
+  "frames_before_answer": [
+   {
+    "type": "control_response",
+    "subtype": null
+   }
+  ],
+  "subtype": "success",
+  "error": null,
+  "response_keys": [
+   "account",
+   "agents",
+   "analytics_disabled",
+   "available_output_styles",
+   "capabilities",
+   "claude_code_version",
+   "commands",
+   "current_permission_mode",
+   "fast_mode_disabled_reason",
+   "fast_mode_state",
+   "feedback_mode",
+   "ide_rc_auto_enable_gate",
+   "models",
+   "output_style",
+   "pid",
+   "remote_control_auto_connect_default",
+   "remote_control_auto_enable",
+   "remote_control_auto_on_by_default",
+   "remote_control_available",
+   "session_state",
+   "user_output_styles_dir"
+  ],
+  "commands": [
+   {
+    "name": "fixture-skill",
+    "description": "Fixture user skill (user)",
+    "argumentHint": ""
+   },
+   {
+    "name": "fixture-project-skill",
+    "description": "Fixture project skill (project)",
+    "argumentHint": ""
+   },
+   {
+    "name": "fixture-ns:deep",
+    "description": "Fixture namespaced user command (user)",
+    "argumentHint": ""
+   },
+   {
+    "name": "fixture-project",
+    "description": "Fixture project command (project)",
+    "argumentHint": "<ticket>"
+   },
+   {
+    "name": "fixture-review",
+    "description": "Fixture user command (user)",
+    "argumentHint": "file"
+   },
+   {
+    "name": "deep-research",
+    "description": "Deep research harness \u2014 fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "design",
+    "description": "Grant or revoke Claude agent access to your Design projects",
+    "argumentHint": "consent | revoke",
+    "builtin": true
+   },
+   {
+    "name": "design-sync",
+    "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+    "argumentHint": "[<project hint, e.g. \"Acme DS\">]",
+    "builtin": true
+   },
+   {
+    "name": "dataviz",
+    "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium \u2014 an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, \u2026), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG \u2014 a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system \u2014 elegant, accessible, consistent in light and dark \u2014 using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` \u2014 swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "update-config",
+    "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command.",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "verify",
+    "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior \u2014 drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) \u2014 there's nothing to observe.",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "debug",
+    "description": "Enable debug logging for this session and help diagnose issues",
+    "argumentHint": "[issue description]",
+    "builtin": true
+   },
+   {
+    "name": "code-review",
+    "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low|medium|high|xhigh|max: from few high-confidence findings up to many, some of them uncertain); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. Pass --max-findings <n> to report up to n findings, or --max-findings all for every finding. The choice stays until you pass --max-findings default.",
+    "argumentHint": "[low|medium|high|xhigh|max] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]",
+    "aliases": [
+     "review"
+    ],
+    "builtin": true
+   },
+   {
+    "name": "simplify",
+    "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only \u2014 it does not hunt for bugs; use /code-review for that.",
+    "argumentHint": "[<target>]",
+    "builtin": true
+   },
+   {
+    "name": "batch",
+    "description": "Research and plan a large-scale change, then execute it in parallel across 5\u201330 isolated worktree agents that each open a PR.",
+    "argumentHint": "<instruction>",
+    "builtin": true
+   },
+   {
+    "name": "fewer-permission-prompts",
+    "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "doctor",
+    "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health \u2014 what the `claude doctor` terminal diagnostics cover \u2014 from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+    "argumentHint": "[prompt-audit [<path>]]",
+    "aliases": [
+     "checkup"
+    ],
+    "builtin": true
+   },
+   {
+    "name": "loop",
+    "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+    "argumentHint": "[interval] [prompt]",
+    "aliases": [
+     "proactive"
+    ],
+    "builtin": true
+   },
+   {
+    "name": "claude-api",
+    "description": "Reference for the Claude API / Anthropic SDK \u2014 model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER \u2014 read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" \u2014 whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) \u2014 never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named \u2014 don't Read the file).",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "workflow-authoring",
+    "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "run",
+    "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "run-skill-generator",
+    "description": "Author or improve the run-<unit> skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "plugin-authoring",
+    "description": "Make a mod: a change to Claude's own interface or behaviour, such as a live pane or panel, a band above the prompt, a status line, a toast, a slash command, or a hook on tool calls or prompts. Use to make, change or debug a mod or its hooks module.",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "agents",
+    "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "auto-mode-setup",
+    "description": "Teach auto mode about your environment, plus optional rule tweaks",
+    "argumentHint": "[--request-id <uuid>] (--wizard posture=\u2026 scope=\u2026 depth=\u2026 --propose | --expect-sha256 <64-hex> --apply-file <path>)",
+    "builtin": true
+   },
+   {
+    "name": "autocompact",
+    "description": "Configure the auto-compact window size",
+    "argumentHint": "[auto|<tokens>]",
+    "builtin": true
+   },
+   {
+    "name": "clear",
+    "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+    "argumentHint": "[name]",
+    "aliases": [
+     "reset",
+     "new"
+    ],
+    "builtin": true
+   },
+   {
+    "name": "color",
+    "description": "Set the prompt bar color for this session",
+    "argumentHint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+    "builtin": true
+   },
+   {
+    "name": "compact",
+    "description": "Free up context by summarizing the conversation so far",
+    "argumentHint": "<optional custom summarization instructions>",
+    "builtin": true
+   },
+   {
+    "name": "config",
+    "description": "Set a setting by key",
+    "argumentHint": "key=value",
+    "aliases": [
+     "settings"
+    ],
+    "builtin": true
+   },
+   {
+    "name": "output-style",
+    "description": "List output styles or switch to one",
+    "argumentHint": "[style]",
+    "builtin": true
+   },
+   {
+    "name": "context",
+    "description": "Show current context usage",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "effort",
+    "description": "Set effort level for model usage",
+    "argumentHint": "<low|medium|high|xhigh|max|auto|ultracode [on|off]>",
+    "builtin": true
+   },
+   {
+    "name": "fast",
+    "description": "Toggle fast mode (Opus 5.5)",
+    "argumentHint": "[on|off]",
+    "builtin": true
+   },
+   {
+    "name": "focus",
+    "description": "Toggle focus view: just your prompt, summary, and response",
+    "argumentHint": "[on|off]",
+    "builtin": true
+   },
+   {
+    "name": "heapdump",
+    "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "init",
+    "description": "Initialize a new CLAUDE.md file with codebase documentation",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "mcp",
+    "description": "Manage MCP servers",
+    "argumentHint": "[reconnect|enable|disable [<server>|all]]",
+    "builtin": true
+   },
+   {
+    "name": "model",
+    "description": "Set the AI model for Claude Code",
+    "argumentHint": "<model>",
+    "builtin": true
+   },
+   {
+    "name": "__remote-workflow",
+    "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "workflow-launch-exec",
+    "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "reload-plugins",
+    "description": "Activate pending plugin changes in the current session",
+    "argumentHint": "[--force]",
+    "builtin": true
+   },
+   {
+    "name": "reload-skills",
+    "description": "Pick up skills added or changed on disk during this session",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "rename",
+    "description": "Rename the current conversation",
+    "argumentHint": "[name]",
+    "aliases": [
+     "name"
+    ],
+    "builtin": true
+   },
+   {
+    "name": "security-review",
+    "description": "Complete a security review of the pending changes on the current branch",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "usage",
+    "description": "Show session cost, plan usage, and what's contributing to your limits",
+    "argumentHint": "",
+    "aliases": [
+     "cost",
+     "stats"
+    ],
+    "builtin": true
+   },
+   {
+    "name": "insights",
+    "description": "Generate a report analyzing your Claude Code sessions",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "recap",
+    "description": "Generate a one-line session recap now",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "goal",
+    "description": "Set a goal \u2014 keep working until the condition is met",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "design-consent",
+    "description": "Grant Claude agent access to your Design projects",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "design-revoke",
+    "description": "Revoke Claude agent access to your Design projects",
+    "argumentHint": "",
+    "builtin": true
+   },
+   {
+    "name": "list-agents",
+    "description": "List subagents, teammates, and other Claude sessions you can message",
+    "argumentHint": "",
+    "aliases": [
+     "peers"
+    ],
+    "builtin": true
+   },
+   {
+    "name": "team-onboarding",
+    "description": "Help teammates ramp on Claude Code with a guide from your usage",
+    "argumentHint": "",
+    "builtin": true
+   }
+  ],
+  "agents": [
+   "claude",
+   "Explore",
+   "general-purpose",
+   "Plan",
+   "statusline-setup"
+  ],
+  "exit": 0,
+  "stderr_tail": ""
+ },
+ "codex_schema": {
+  "exit": 0,
+  "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"/tmp/slash-probe-xkttbh2v/codex-home\"))\n",
+  "methods": [
+   "command/exec",
+   "command/exec/outputDelta",
+   "command/exec/resize",
+   "command/exec/terminate",
+   "command/exec/write",
+   "execCommandApproval",
+   "item/commandExecution/outputDelta",
+   "item/commandExecution/requestApproval",
+   "item/commandExecution/terminalInteraction",
+   "plugin/skill/read",
+   "skills/changed",
+   "skills/config/write",
+   "skills/extraRoots/set",
+   "skills/list",
+   "thread/shellCommand"
+  ],
+  "schema_files_matching": [
+   "CommandExecutionRequestApprovalParams.json",
+   "CommandExecutionRequestApprovalResponse.json",
+   "ExecCommandApprovalParams.json",
+   "ExecCommandApprovalResponse.json",
+   "v2/CommandExecOutputDeltaNotification.json",
+   "v2/CommandExecParams.json",
+   "v2/CommandExecResizeParams.json",
+   "v2/CommandExecResizeResponse.json",
+   "v2/CommandExecResponse.json",
+   "v2/CommandExecTerminateParams.json",
+   "v2/CommandExecTerminateResponse.json",
+   "v2/CommandExecWriteParams.json",
+   "v2/CommandExecWriteResponse.json",
+   "v2/CommandExecutionOutputDeltaNotification.json",
+   "v2/PluginSkillReadParams.json",
+   "v2/PluginSkillReadResponse.json",
+   "v2/SkillsChangedNotification.json",
+   "v2/SkillsConfigWriteParams.json",
+   "v2/SkillsConfigWriteResponse.json",
+   "v2/SkillsExtraRootsSetParams.json",
+   "v2/SkillsExtraRootsSetResponse.json",
+   "v2/SkillsListParams.json",
+   "v2/SkillsListResponse.json",
+   "v2/ThreadShellCommandParams.json",
+   "v2/ThreadShellCommandResponse.json"
+  ]
+ },
+ "codex": {
+  "answers": {
+   "initialize": {
+    "id": 1,
+    "result": {
+     "userAgent": "keystone/0.163.0 (Arch Linux Rolling Release; x86_64) dumb (keystone; probe)",
+     "codexHome": "<root>/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux"
+    }
+   },
+   "skills/list {\"cwds\": [\"<root>/project\"]}": {
+    "id": 2,
+    "result": {
+     "data": [
+      {
+       "cwd": "<root>/project",
+       "skills": [
+        {
+         "name": "fixture-agents-skill",
+         "description": "Fixture .agents repo skill",
+         "path": "<root>/project/.agents/skills/fixture-agents-skill/SKILL.md",
+         "scope": "repo",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-codex-project-skill",
+         "description": "Fixture Codex repo skill",
+         "path": "<root>/project/.codex/skills/fixture-codex-project-skill/SKILL.md",
+         "scope": "repo",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-codex-skill",
+         "description": "Fixture Codex user skill",
+         "path": "<root>/codex-home/skills/fixture-codex-skill/SKILL.md",
+         "scope": "user",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "imagegen",
+         "description": "Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas.",
+         "interface": {
+          "displayName": "Image Gen",
+          "shortDescription": "Generate or edit images for websites, games, and more",
+          "iconSmall": "<root>/codex-home/skills/.system/imagegen/assets/imagegen-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/imagegen/assets/imagegen.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use $imagegen to make or edit an image for this project."
+         },
+         "path": "<root>/codex-home/skills/.system/imagegen/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "openai-docs",
+         "description": "Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge\u2014including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex\u2014and for OpenAI APIs/products and ChatGPT Work. Also use for model choice/migration, prompting, SDKs, Responses, Realtime, agents, evals, and Chat/Work/Codex comparisons. Do not use for generic app/software tasks that merely mention Codex.",
+         "shortDescription": "Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, and self-knowledge; OpenAI APIs and ChatGPT Work. 'You'/'this app' means Codex only.",
+         "interface": {
+          "displayName": "OpenAI Docs",
+          "shortDescription": "OpenAI and Codex docs for models, skills, tasks, and setup",
+          "iconSmall": "<root>/codex-home/skills/.system/openai-docs/assets/openai-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/openai-docs/assets/openai.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use OpenAI Docs for official docs lookup, questions about Codex itself or Codex surfaces, model selection, model migration, and prompt-upgrade work."
+         },
+         "path": "<root>/codex-home/skills/.system/openai-docs/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "review-agent",
+         "description": "Perform a read-only, defect-first review of a specified code change and return every actionable finding. Use when another agent delegates review of uncommitted changes, a base-branch diff, a commit, or custom review instructions.",
+         "interface": {
+          "displayName": "Review Agent",
+          "shortDescription": "Find actionable bugs in code changes",
+          "iconSmall": null,
+          "iconLarge": null,
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use $review-agent to review the requested code changes and return actionable findings."
+         },
+         "path": "<root>/codex-home/skills/.system/review-agent/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "skill-creator",
+         "description": "Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources.",
+         "shortDescription": "Create or update a skill",
+         "interface": {
+          "displayName": "Skill Creator",
+          "shortDescription": "Create or update a skill",
+          "iconSmall": "<root>/codex-home/skills/.system/skill-creator/assets/skill-creator-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/skill-creator/assets/skill-creator.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": null
+         },
+         "path": "<root>/codex-home/skills/.system/skill-creator/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "skill-installer",
+         "description": "Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos).",
+         "shortDescription": "Install curated skills from openai/skills or other repos",
+         "interface": {
+          "displayName": "Skill Installer",
+          "shortDescription": "Install curated skills from openai/skills or other repos",
+          "iconSmall": "<root>/codex-home/skills/.system/skill-installer/assets/skill-installer-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/skill-installer/assets/skill-installer.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": null
+         },
+         "path": "<root>/codex-home/skills/.system/skill-installer/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        }
+       ],
+       "errors": []
+      }
+     ]
+    }
+   },
+   "skills/list {\"cwds\": [\"<root>/project\"], \"forceReload\": true}": {
+    "id": 3,
+    "result": {
+     "data": [
+      {
+       "cwd": "<root>/project",
+       "skills": [
+        {
+         "name": "fixture-agents-skill",
+         "description": "Fixture .agents repo skill",
+         "path": "<root>/project/.agents/skills/fixture-agents-skill/SKILL.md",
+         "scope": "repo",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-codex-project-skill",
+         "description": "Fixture Codex repo skill",
+         "path": "<root>/project/.codex/skills/fixture-codex-project-skill/SKILL.md",
+         "scope": "repo",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "fixture-codex-skill",
+         "description": "Fixture Codex user skill",
+         "path": "<root>/codex-home/skills/fixture-codex-skill/SKILL.md",
+         "scope": "user",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "imagegen",
+         "description": "Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas.",
+         "interface": {
+          "displayName": "Image Gen",
+          "shortDescription": "Generate or edit images for websites, games, and more",
+          "iconSmall": "<root>/codex-home/skills/.system/imagegen/assets/imagegen-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/imagegen/assets/imagegen.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use $imagegen to make or edit an image for this project."
+         },
+         "path": "<root>/codex-home/skills/.system/imagegen/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "openai-docs",
+         "description": "Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge\u2014including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex\u2014and for OpenAI APIs/products and ChatGPT Work. Also use for model choice/migration, prompting, SDKs, Responses, Realtime, agents, evals, and Chat/Work/Codex comparisons. Do not use for generic app/software tasks that merely mention Codex.",
+         "shortDescription": "Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, and self-knowledge; OpenAI APIs and ChatGPT Work. 'You'/'this app' means Codex only.",
+         "interface": {
+          "displayName": "OpenAI Docs",
+          "shortDescription": "OpenAI and Codex docs for models, skills, tasks, and setup",
+          "iconSmall": "<root>/codex-home/skills/.system/openai-docs/assets/openai-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/openai-docs/assets/openai.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use OpenAI Docs for official docs lookup, questions about Codex itself or Codex surfaces, model selection, model migration, and prompt-upgrade work."
+         },
+         "path": "<root>/codex-home/skills/.system/openai-docs/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "review-agent",
+         "description": "Perform a read-only, defect-first review of a specified code change and return every actionable finding. Use when another agent delegates review of uncommitted changes, a base-branch diff, a commit, or custom review instructions.",
+         "interface": {
+          "displayName": "Review Agent",
+          "shortDescription": "Find actionable bugs in code changes",
+          "iconSmall": null,
+          "iconLarge": null,
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": "Use $review-agent to review the requested code changes and return actionable findings."
+         },
+         "path": "<root>/codex-home/skills/.system/review-agent/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "skill-creator",
+         "description": "Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources.",
+         "shortDescription": "Create or update a skill",
+         "interface": {
+          "displayName": "Skill Creator",
+          "shortDescription": "Create or update a skill",
+          "iconSmall": "<root>/codex-home/skills/.system/skill-creator/assets/skill-creator-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/skill-creator/assets/skill-creator.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": null
+         },
+         "path": "<root>/codex-home/skills/.system/skill-creator/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        },
+        {
+         "name": "skill-installer",
+         "description": "Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos).",
+         "shortDescription": "Install curated skills from openai/skills or other repos",
+         "interface": {
+          "displayName": "Skill Installer",
+          "shortDescription": "Install curated skills from openai/skills or other repos",
+          "iconSmall": "<root>/codex-home/skills/.system/skill-installer/assets/skill-installer-small.svg",
+          "iconLarge": "<root>/codex-home/skills/.system/skill-installer/assets/skill-installer.png",
+          "iconSmallUrl": null,
+          "iconLargeUrl": null,
+          "brandColor": null,
+          "defaultPrompt": null
+         },
+         "path": "<root>/codex-home/skills/.system/skill-installer/SKILL.md",
+         "scope": "system",
+         "enabled": true,
+         "pluginId": null
+        }
+       ],
+       "errors": []
+      }
+     ]
+    }
+   },
+   "prompts/list {}": {
+    "error": {
+     "code": -32600,
+     "message": "Invalid request: unknown variant `prompts/list`, expected one of `initialize`, `server/diagnostics`, `userVerification/status`, `userVerification/enroll`, `userVerification/delete`, `userVerification/verify`, `userVerification/cancel`, `thread/start`, `thread/resume`, `thread/fork`, `thread/archive`, `thread/delete`, `thread/unsubscribe`, `thread/increment_elicitation`, `thread/decrement_elicitation`, `thread/name/set`, `thread/prediction/request`, `thread/goal/set`, `thread/goal/get`, `thread/goal/clear`, `thread/queue/add`, `thread/queue/list`, `thread/queue/update`, `thread/queue/delete`, `thread/queue/reorder`, `thread/queue/start`, `thread/metadata/update`, `thread/attachment/add`, `thread/attachment/list`, `thread/attachmentOwner/list`, `thread/attachment/remove`, `thread/section/move`, `thread/settings/update`, `thread/memoryMode/set`, `memory/status`, `memory/reset`, `rollout/compress`, `thread/unarchive`, `thread/compact/start`, `thread/shellCommand`, `thread/approveGuardianDeniedAction`, `thread/backgroundTerminals/clean`, `thread/backgroundTerminals/list`, `thread/backgroundTerminals/terminate`, `thread/revert`, `thread/list`, `project/list`, `project/read`, `project/create`, `project/import`, `project/update`, `project/move`, `project/delete`, `threadSection/list`, `threadSection/create`, `threadSection/update`, `threadSection/delete`, `thread/search`, `thread/searchOccurrences`, `thread/loaded/list`, `thread/read`, `thread/readState/update`, `thread/turns/list`, `thread/items/list`, `thread/items/read`, `thread/inject_items`, `skills/list`, `skills/extraRoots/set`, `hooks/list`, `marketplace/add`, `marketplace/remove`, `marketplace/upgrade`, `plugin/list`, `plugin/search`, `plugin/installed`, `plugin/reconcile`, `plugin/read`, `plugin/skill/read`, `plugin/share/save`, `plugin/share/updateTargets`, `plugin/share/list`, `plugin/share/checkout`, `plugin/share/delete`, `app/read`, `app/list`, `app/installed`, `fs/readFile`, `fs/writeFile`, `fs/createDirectory`, `fs/getMetadata`, `fs/readDirectory`, `fs/remove`, `fs/copy`, `fs/watch`, `fs/unwatch`, `skills/config/write`, `plugin/install`, `plugin/uninstall`, `turn/start`, `turn/settings/update`, `turn/steer`, `turn/interrupt`, `thread/realtime/start`, `thread/realtime/appendAudio`, `thread/realtime/appendText`, `thread/realtime/appendSpeech`, `thread/realtime/stop`, `thread/timeline/list`, `thread/realtime/listVoices`, `review/start`, `model/list`, `account/gatewayOAuth/read`, `account/gatewayOAuth/login`, `account/gatewayOAuth/cancel`, `modelProvider/capabilities/read`, `experimentalFeature/list`, `permissionProfile/list`, `experimentalFeature/enablement/set`, `remoteControl/enable`, `remoteControl/disable`, `remoteControl/status/read`, `remoteControl/pairing/start`, `remoteControl/pairing/status`, `remoteControl/client/list`, `remoteControl/client/revoke`, `collaborationMode/list`, `mock/experimentalMethod`, `environment/add`, `environment/info`, `environment/status`, `mcpServer/oauth/login`, `config/mcpServer/reload`, `mcpServerStatus/list`, `mcpServer/resource/read`, `mcpServer/event/stream/start`, `mcpServer/event/stream/stop`, `mcpServer/tool/call`, `windowsSandbox/setupStart`, `windowsSandbox/readiness`, `account/login/start`, `account/bedrock/discover`, `account/bedrock/setup`, `account/bedrock/checkGovCloudRequirements`, `account/login/cancel`, `account/logout`, `account/rateLimits/read`, `account/rateLimitResetCredit/consume`, `account/usage/read`, `account/workspaceMessages/read`, `account/sendAddCreditsNudgeEmail`, `feedback/upload`, `command/exec`, `command/exec/write`, `command/exec/terminate`, `command/exec/resize`, `process/spawn`, `process/writeStdin`, `process/kill`, `process/resizePty`, `config/read`, `externalAgentConfig/detect`, `externalAgentConfig/import`, `externalAgentConfig/import/recordHistory`, `externalAgentConfig/import/readHistories`, `config/value/write`, `config/batchWrite`, `configRequirements/read`, `account/read`, `getConversationSummary`, `gitDiffToRemote`, `getAuthStatus`, `fuzzyFileSearch`, `fuzzyFileSearch/sessionStart`, `fuzzyFileSearch/sessionUpdate`, `fuzzyFileSearch/sessionStop`"
+    },
+    "id": 4
+   },
+   "customPrompts/list {}": {
+    "error": {
+     "code": -32600,
+     "message": "Invalid request: unknown variant `customPrompts/list`, expected one of `initialize`, `server/diagnostics`, `userVerification/status`, `userVerification/enroll`, `userVerification/delete`, `userVerification/verify`, `userVerification/cancel`, `thread/start`, `thread/resume`, `thread/fork`, `thread/archive`, `thread/delete`, `thread/unsubscribe`, `thread/increment_elicitation`, `thread/decrement_elicitation`, `thread/name/set`, `thread/prediction/request`, `thread/goal/set`, `thread/goal/get`, `thread/goal/clear`, `thread/queue/add`, `thread/queue/list`, `thread/queue/update`, `thread/queue/delete`, `thread/queue/reorder`, `thread/queue/start`, `thread/metadata/update`, `thread/attachment/add`, `thread/attachment/list`, `thread/attachmentOwner/list`, `thread/attachment/remove`, `thread/section/move`, `thread/settings/update`, `thread/memoryMode/set`, `memory/status`, `memory/reset`, `rollout/compress`, `thread/unarchive`, `thread/compact/start`, `thread/shellCommand`, `thread/approveGuardianDeniedAction`, `thread/backgroundTerminals/clean`, `thread/backgroundTerminals/list`, `thread/backgroundTerminals/terminate`, `thread/revert`, `thread/list`, `project/list`, `project/read`, `project/create`, `project/import`, `project/update`, `project/move`, `project/delete`, `threadSection/list`, `threadSection/create`, `threadSection/update`, `threadSection/delete`, `thread/search`, `thread/searchOccurrences`, `thread/loaded/list`, `thread/read`, `thread/readState/update`, `thread/turns/list`, `thread/items/list`, `thread/items/read`, `thread/inject_items`, `skills/list`, `skills/extraRoots/set`, `hooks/list`, `marketplace/add`, `marketplace/remove`, `marketplace/upgrade`, `plugin/list`, `plugin/search`, `plugin/installed`, `plugin/reconcile`, `plugin/read`, `plugin/skill/read`, `plugin/share/save`, `plugin/share/updateTargets`, `plugin/share/list`, `plugin/share/checkout`, `plugin/share/delete`, `app/read`, `app/list`, `app/installed`, `fs/readFile`, `fs/writeFile`, `fs/createDirectory`, `fs/getMetadata`, `fs/readDirectory`, `fs/remove`, `fs/copy`, `fs/watch`, `fs/unwatch`, `skills/config/write`, `plugin/install`, `plugin/uninstall`, `turn/start`, `turn/settings/update`, `turn/steer`, `turn/interrupt`, `thread/realtime/start`, `thread/realtime/appendAudio`, `thread/realtime/appendText`, `thread/realtime/appendSpeech`, `thread/realtime/stop`, `thread/timeline/list`, `thread/realtime/listVoices`, `review/start`, `model/list`, `account/gatewayOAuth/read`, `account/gatewayOAuth/login`, `account/gatewayOAuth/cancel`, `modelProvider/capabilities/read`, `experimentalFeature/list`, `permissionProfile/list`, `experimentalFeature/enablement/set`, `remoteControl/enable`, `remoteControl/disable`, `remoteControl/status/read`, `remoteControl/pairing/start`, `remoteControl/pairing/status`, `remoteControl/client/list`, `remoteControl/client/revoke`, `collaborationMode/list`, `mock/experimentalMethod`, `environment/add`, `environment/info`, `environment/status`, `mcpServer/oauth/login`, `config/mcpServer/reload`, `mcpServerStatus/list`, `mcpServer/resource/read`, `mcpServer/event/stream/start`, `mcpServer/event/stream/stop`, `mcpServer/tool/call`, `windowsSandbox/setupStart`, `windowsSandbox/readiness`, `account/login/start`, `account/bedrock/discover`, `account/bedrock/setup`, `account/bedrock/checkGovCloudRequirements`, `account/login/cancel`, `account/logout`, `account/rateLimits/read`, `account/rateLimitResetCredit/consume`, `account/usage/read`, `account/workspaceMessages/read`, `account/sendAddCreditsNudgeEmail`, `feedback/upload`, `command/exec`, `command/exec/write`, `command/exec/terminate`, `command/exec/resize`, `process/spawn`, `process/writeStdin`, `process/kill`, `process/resizePty`, `config/read`, `externalAgentConfig/detect`, `externalAgentConfig/import`, `externalAgentConfig/import/recordHistory`, `externalAgentConfig/import/readHistories`, `config/value/write`, `config/batchWrite`, `configRequirements/read`, `account/read`, `getConversationSummary`, `gitDiffToRemote`, `getAuthStatus`, `fuzzyFileSearch`, `fuzzyFileSearch/sessionStart`, `fuzzyFileSearch/sessionUpdate`, `fuzzyFileSearch/sessionStop`"
+    },
+    "id": 5
+   }
+  },
+  "exit": 0,
+  "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))\n\u001b[2m2026-10-21T02:29:34.579581Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mcodex_app_server\u001b[0m\u001b[2m:\u001b[0m Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted, but skills still load.\n    1. <root>/project/.codex\n       To load project-local config, hooks, and exec policies, add <root>/project as a trusted project in <root>/codex-home/config.toml.\n\n"
+ }
+}

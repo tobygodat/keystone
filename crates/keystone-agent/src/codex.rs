@@ -5,6 +5,7 @@
 //! [`CodexDriver::command`], and both produce lines to write and [`Event`]s per session.
 //! Checked against codex-cli 0.162.1.
 
+use crate::commands::{self, Commands};
 use crate::driver::{ApprovalState, Command, Outputs};
 use crate::item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
@@ -109,6 +110,10 @@ enum Pending {
         session: u64,
         models: Vec<ModelInfo>,
         page: u32,
+    },
+    /// `skills/list` for one folder, asked for by `session`.
+    Commands {
+        session: u64,
     },
     Steer {
         session: u64,
@@ -406,6 +411,21 @@ impl CodexDriver {
         self.request_catalog_page(session, Vec::new(), 1, None, out);
     }
 
+    /// Asks for the skills Codex offers in `cwd`. The answer arrives as
+    /// [`Event::Commands`] for `session`.
+    pub fn request_commands(&mut self, session: u64, cwd: &str, out: &mut Outputs) {
+        if let Some(message) = &self.initialization_error {
+            out.event(session, Event::Commands(Commands::Failed(message.clone())));
+            return;
+        }
+        let line = self.request(
+            "skills/list",
+            json!({"cwds": [cwd]}),
+            Pending::Commands { session },
+        );
+        self.write(line, out);
+    }
+
     /// Reads the stored history of `thread` without resuming it or opening it for
     /// `session`. The answer arrives as [`Event::HistoryRead`] with `ticket`.
     pub fn read_history(&mut self, session: u64, thread: String, ticket: u64, out: &mut Outputs) {
@@ -467,6 +487,10 @@ impl CodexDriver {
                 Pending::Catalog { session, .. } => {
                     out.event(*session, Event::Catalog(Catalog::Failed(reason.to_owned())))
                 }
+                Pending::Commands { session } => out.event(
+                    *session,
+                    Event::Commands(Commands::Failed(reason.to_owned())),
+                ),
                 Pending::History {
                     session, ticket, ..
                 } => out.event(
@@ -890,6 +914,22 @@ impl CodexDriver {
                         }),
                     ),
                 }
+            }
+            Pending::Commands { session } => {
+                let commands = match error {
+                    Some(error) => Commands::Failed(format!(
+                        "Codex could not list its skills: {}",
+                        error.message
+                    )),
+                    None => match serde_json::from_slice::<Response<Value>>(line)
+                        .ok()
+                        .and_then(|r| r.result)
+                    {
+                        Some(result) => Commands::Ready(commands::codex(&result)),
+                        None => Commands::Failed("Codex listed no skills.".into()),
+                    },
+                };
+                out.event(session, Event::Commands(commands));
             }
             Pending::Steer {
                 session,

@@ -137,6 +137,34 @@ pub fn default_sign_in_command(provider: Provider) -> String {
     sign_in_command(provider, inherited.as_deref())
 }
 
+/// The command that opens the provider's own terminal UI in `folder` on the account
+/// whose home is `home`, without the inherited credentials [`LaunchProfile::account`]
+/// removes, so they cannot sign it in as someone else. The default account (`None`)
+/// keeps the terminal's environment and names its home only when Keystone inherited
+/// `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, so a fresh terminal uses the same one.
+pub fn terminal_command(provider: Provider, home: Option<&Path>, folder: &Path) -> String {
+    let (variable, program, removed): (_, _, &[&str]) = match provider {
+        Provider::Claude => ("CLAUDE_CONFIG_DIR", "claude", &CLAUDE_REMOVED),
+        Provider::Codex => ("CODEX_HOME", "codex", &CODEX_CREDENTIALS),
+    };
+    let named = |home: &Path| {
+        format!(
+            "{variable}={} {program}",
+            shell_quote(&home.to_string_lossy())
+        )
+    };
+    let open = match home {
+        Some(home) => {
+            let unset: String = removed.iter().map(|name| format!("-u {name} ")).collect();
+            format!("env {unset}{}", named(home))
+        }
+        None => std::env::var_os(variable)
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| program.to_owned(), |home| named(Path::new(&home))),
+    };
+    format!("cd {} && {open}", shell_quote(&folder.to_string_lossy()))
+}
+
 /// The home the provider's default account uses: the inherited `CLAUDE_CONFIG_DIR`
 /// or `CODEX_HOME`, else `~/.claude` or `~/.codex`. No other account may overlap it.
 pub fn default_home(provider: Provider) -> Option<PathBuf> {
@@ -205,6 +233,30 @@ mod tests {
             r"CLAUDE_CONFIG_DIR='/h/it'\''s $HOME' claude auth login"
         );
         assert_eq!(sign_in_command(Provider::Codex, None), "codex login");
+    }
+
+    #[test]
+    fn terminal_commands_open_the_cli_in_the_folder_on_the_account() {
+        assert_eq!(
+            terminal_command(
+                Provider::Claude,
+                Some(Path::new("/h/.claude-work")),
+                Path::new("/src/it's here")
+            ),
+            concat!(
+                r"cd '/src/it'\''s here' && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN ",
+                "-u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX ",
+                "-u CLAUDE_CODE_USE_FOUNDRY CLAUDE_CONFIG_DIR=/h/.claude-work claude"
+            )
+        );
+        assert_eq!(
+            terminal_command(
+                Provider::Codex,
+                Some(Path::new("/h/codex")),
+                Path::new("/src")
+            ),
+            "cd /src && env -u OPENAI_API_KEY -u CODEX_API_KEY CODEX_HOME=/h/codex codex"
+        );
     }
 
     #[test]

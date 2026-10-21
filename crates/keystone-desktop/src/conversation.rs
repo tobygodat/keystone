@@ -565,7 +565,7 @@ impl Conversation {
             Event::ModelReported { model } => self.reported_model = Some(model),
             Event::ModelLost => self.reported_model = None,
             // Catalogs belong to the provider, not to a conversation.
-            Event::Catalog(_) => {}
+            Event::Catalog(_) | Event::Commands(_) => {}
             Event::TurnStarted => {
                 self.running = true;
                 self.error = None;

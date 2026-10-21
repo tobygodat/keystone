@@ -51,9 +51,11 @@
 //! `KEYSTONE_FAKE_ENV_RECEIPT` names a file each process appends its environment to.
 //!
 //! `init` lists tools unless launched with `--tools ""`, and no MCP servers, slash
-//! commands or skills. `init-tools` and `init-commands` settings replace the JSON of
-//! `init`'s `tools` and the `initialize` answer's `commands`; `missing` leaves the
-//! field out. A `hook` setting of `1` reports a `SessionStart` hook before reading
+//! commands or skills. The `initialize` answer's `commands` lists the skills and
+//! commands under `$CLAUDE_CONFIG_DIR` and the working directory's `.claude`, as Claude
+//! Code 2.1.301 does, then two built-ins; none with `--disable-slash-commands`.
+//! `init-tools` and `init-commands` settings replace the JSON of `init`'s `tools` and
+//! the `initialize` answer's `commands`; `missing` leaves the field out. A `hook` setting of `1` reports a `SessionStart` hook before reading
 //! anything, and a `reject-flag` setting names a flag to exit on at launch, as an
 //! older Claude would.
 //!
@@ -449,7 +451,14 @@ fn main() {
             json!(["Bash", "Read", "Edit"])
         },
     );
-    let commands = field("init-commands", json!([]));
+    let commands = field(
+        "init-commands",
+        if args.iter().any(|a| a == "--disable-slash-commands") {
+            json!([])
+        } else {
+            listed_commands()
+        },
+    );
     if setting("hook").as_deref() == Some("1") {
         emit(
             &out,
@@ -706,6 +715,73 @@ fn main() {
     shared.state.lock().unwrap().closed = true;
     shared.wake.notify_all();
     let _ = worker.join();
+}
+
+/// The `initialize` answer's `commands`, as Claude Code 2.1.301 lists them: skills,
+/// then commands, from `$CLAUDE_CONFIG_DIR` (never `~/.claude`) and the working
+/// directory's `.claude`, their source a description suffix, then two built-ins.
+fn listed_commands() -> Value {
+    let mut listed = Vec::new();
+    let user = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    let project = std::env::current_dir().ok().map(|cwd| cwd.join(".claude"));
+    for (root, tag) in [(user, "user"), (project, "project")] {
+        let Some(root) = root else { continue };
+        let mut found = Vec::new();
+        if let Ok(skills) = std::fs::read_dir(root.join("skills")) {
+            for skill in skills.flatten() {
+                let file = skill.path().join("SKILL.md");
+                if file.is_file() {
+                    found.push((skill.file_name().to_string_lossy().into_owned(), file));
+                }
+            }
+        }
+        found.sort();
+        let skills = found.len();
+        let mut stack = vec![root.join("commands")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "md") {
+                    let relative = path.strip_prefix(root.join("commands")).unwrap();
+                    let name = relative
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace('/', ":");
+                    found.push((name, path));
+                }
+            }
+        }
+        found[skills..].sort();
+        for (name, file) in found {
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            let front = |key: &str| {
+                text.lines()
+                    .skip(1)
+                    .take_while(|line| *line != "---")
+                    .find_map(|line| line.strip_prefix(&format!("{key}: ")))
+                    .map(|value| {
+                        value
+                            .trim_start_matches('[')
+                            .trim_end_matches(']')
+                            .to_owned()
+                    })
+                    .unwrap_or_default()
+            };
+            listed.push(
+                json!({"name": name, "description": format!("{} ({tag})", front("description")),
+                "argumentHint": front("argument-hint")}),
+            );
+        }
+    }
+    listed.push(json!({"name": "compact", "description": "Free up context by summarizing the conversation so far",
+        "argumentHint": "<optional custom summarization instructions>", "builtin": true}));
+    listed.push(
+        json!({"name": "context", "description": "Show current context usage",
+        "argumentHint": "", "builtin": true}),
+    );
+    Value::Array(listed)
 }
 
 /// The scripted catalog: `value`, display name, description, and what it resolves to.

@@ -3,6 +3,7 @@
 
 use crate::claude::{self, ClaudeDriver, Launch};
 use crate::codex::CodexDriver;
+use crate::commands::{self, Commands};
 use crate::driver::{ApprovalState, Command, Outputs};
 use crate::host::{Exit, Process};
 use crate::idle::{IdleCandidate, IdlePolicy, QUIESCE_TIMEOUT, Timer, TimerKind, Timers};
@@ -90,7 +91,8 @@ pub trait Connection {
         text: String,
     ) -> Result<(), &'static str>;
     /// Asks the provider which models it offers, from `cwd`. The answer arrives as
-    /// [`Event::Catalog`] for `session`, a failure to ask included.
+    /// [`Event::Catalog`] for `session`, a failure to ask included, and the commands
+    /// and skills it offers there as [`Event::Commands`].
     fn request_catalog(&self, session: u64, cwd: &str);
     /// Changes the session's approval state at once. It applies to the next turn the
     /// provider starts for the session, including one for a message already sent and
@@ -132,6 +134,11 @@ fn start_failed(message: String) -> Event {
 /// The event for a provider that could not start to list its models.
 fn catalog_failed(message: String) -> Event {
     Event::Catalog(Catalog::Failed(message))
+}
+
+/// The event for a provider that could not start to list its commands.
+fn commands_failed(message: String) -> Event {
+    Event::Commands(Commands::Failed(message))
 }
 
 fn command_session(command: &Command) -> u64 {
@@ -411,6 +418,16 @@ impl CodexConnection {
     pub fn request_catalog(&self, session: u64) {
         self.with_driver(session, catalog_failed, move |driver, _, out| {
             driver.request_catalog(session, out)
+        });
+    }
+
+    /// Asks Codex for the skills it offers in `cwd`, starting the app-server first if
+    /// it is not running. The answer, a failure to start included, arrives as
+    /// [`Event::Commands`] for `session`.
+    pub fn request_commands(&self, session: u64, cwd: &str) {
+        let cwd = cwd.to_owned();
+        self.with_driver(session, commands_failed, move |driver, _, out| {
+            driver.request_commands(session, &cwd, out)
         });
     }
 
@@ -752,9 +769,11 @@ impl Connection for CodexConnection {
         Ok(())
     }
 
-    /// One app-server serves every directory, so `cwd` plays no part.
-    fn request_catalog(&self, session: u64, _: &str) {
+    /// One app-server serves every directory, so `cwd` names only the folder whose
+    /// skills are listed.
+    fn request_catalog(&self, session: u64, cwd: &str) {
         CodexConnection::request_catalog(self, session);
+        CodexConnection::request_commands(self, session, cwd);
     }
 
     fn set_approval(&self, session: u64, approval: ApprovalState) {
@@ -1929,12 +1948,33 @@ impl ClaudeStarter {
     fn probe_catalog(&self, session: u64, cwd: &Path) {
         let program = self.shared.lock().unwrap().program.clone();
         let catalog = match self.find_program(program) {
-            Err(message) => Some(Catalog::Failed(message)),
+            Err(message) => Some((Catalog::Failed(message), serde_json::Value::Null)),
             Ok(program) => self.read_catalog(session, &program, cwd),
         };
-        if let Some(catalog) = catalog {
+        if let Some((catalog, commands)) = catalog {
+            let ready = matches!(catalog, Catalog::Ready { .. });
             push(&self.inbox, &self.wake, session, Event::Catalog(catalog));
+            if ready {
+                let home = self.claude_home();
+                let commands = commands::claude(&commands, home.as_deref(), cwd);
+                push(
+                    &self.inbox,
+                    &self.wake,
+                    session,
+                    Event::Commands(Commands::Ready(commands)),
+                );
+            }
         }
+    }
+
+    /// The config home this account's `claude` reads its commands and skills from.
+    fn claude_home(&self) -> Option<PathBuf> {
+        self.profile
+            .env()
+            .iter()
+            .find(|(name, _)| *name == "CLAUDE_CONFIG_DIR")
+            .and_then(|(_, value)| value.clone().map(PathBuf::from))
+            .or_else(|| crate::default_home(keystone_core::Provider::Claude))
     }
 
     fn report_compatibility(&self, session: u64, notice: Option<String>) {
@@ -1954,10 +1994,16 @@ impl ClaudeStarter {
         }
     }
 
-    /// Runs the catalog probe; `None` when the connection was dropped meanwhile.
-    fn read_catalog(&self, session: u64, program: &Path, cwd: &Path) -> Option<Catalog> {
+    /// Runs the catalog probe, with the answer's `commands` as Claude listed them;
+    /// `None` when the connection was dropped meanwhile.
+    fn read_catalog(
+        &self,
+        session: u64,
+        program: &Path,
+        cwd: &Path,
+    ) -> Option<(Catalog, serde_json::Value)> {
         let compatibility = match version::detect(Provider::Claude, program, cwd, &self.profile) {
-            Err(message) => return Some(Catalog::Failed(message)),
+            Err(message) => return Some((Catalog::Failed(message), serde_json::Value::Null)),
             Ok(compatibility) => compatibility,
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1969,24 +2015,21 @@ impl ClaudeStarter {
             if message["type"] == "control_response"
                 && message["response"]["request_id"] == "keystone-catalog"
             {
-                let _ = tx.send(claude::initialize_catalog(line));
+                let commands = message["response"]["response"]["commands"].clone();
+                let _ = tx.send(claude::initialize_catalog(line).map(|c| (c, commands)));
             }
         };
         let on_exit = move |exit: Exit| {
-            let _ = exited.send(Some(Catalog::Failed(exit_reason(
-                "Claude Code",
-                &exit,
-                false,
-            ))));
+            let reason = exit_reason("Claude Code", &exit, false);
+            let _ = exited.send(Some((Catalog::Failed(reason), serde_json::Value::Null)));
         };
         let process =
             match Process::spawn(program, &claude::ARGS, cwd, &self.profile, on_line, on_exit) {
                 Ok(process) => process,
                 Err(e) => {
-                    return Some(Catalog::Failed(format!(
-                        "Could not start Claude Code at {}. {e}",
-                        program.display()
-                    )));
+                    let message =
+                        format!("Could not start Claude Code at {}. {e}", program.display());
+                    return Some((Catalog::Failed(message), serde_json::Value::Null));
                 }
             };
         process.send(
@@ -2013,20 +2056,17 @@ impl ClaudeStarter {
         if closed {
             return None;
         }
-        let catalog = match answer {
-            Ok(Some(catalog)) => catalog,
-            Ok(None) => Catalog::Failed("Claude Code did not report its models.".into()),
-            Err(RecvTimeoutError::Timeout) => {
-                Catalog::Failed("Claude Code did not answer in time.".into())
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                Catalog::Failed("Claude Code stopped before answering.".into())
-            }
+        let failed = |message: &str| (Catalog::Failed(message.into()), serde_json::Value::Null);
+        let (catalog, commands) = match answer {
+            Ok(Some(answer)) => answer,
+            Ok(None) => failed("Claude Code did not report its models."),
+            Err(RecvTimeoutError::Timeout) => failed("Claude Code did not answer in time."),
+            Err(RecvTimeoutError::Disconnected) => failed("Claude Code stopped before answering."),
         };
         if matches!(catalog, Catalog::Ready { .. }) {
             self.report_compatibility(session, compatibility.notice);
         }
-        Some(catalog)
+        Some((catalog, commands))
     }
 
     /// The permission mode the user's own settings give a new conversation in `cwd`,

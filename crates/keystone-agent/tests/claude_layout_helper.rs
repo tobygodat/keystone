@@ -515,8 +515,10 @@ fn a_helper_connection_refuses_a_catalog_without_starting_claude() {
     assert!(started.is_empty(), "the helper started {started:?}");
 
     let (events, started) = catalog(ClaudeConnection::new);
+    // The ready catalog may arrive with the commands from the same answer.
     assert!(
-        matches!(events.as_slice(), [Event::Catalog(Catalog::Ready { .. })]),
+        matches!(events.as_slice(), [Event::Catalog(Catalog::Ready { .. }), rest @ ..]
+            if rest.iter().all(|e| matches!(e, Event::Commands(_)))),
         "{events:?}"
     );
     assert_eq!(started.len(), 1);

@@ -4,7 +4,7 @@ use crate::*;
 use gpui::EventEmitter;
 use keystone_agent::idle::{IdleCandidate, IdlePolicy};
 use keystone_agent::recovery::{self, RecoveryBatch, Snapshot, TurnEvidence};
-use keystone_agent::{Catalog, LaunchProfile};
+use keystone_agent::{Catalog, Commands, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{
     AccountId, Applied, Composition, ProjectId, SavedComposition, SessionTabs, ViewId,
@@ -868,6 +868,13 @@ impl AppState {
         }
     }
 
+    /// The commands the session's account lists in its folder: `None` while they load
+    /// or before anything asked for them.
+    pub(crate) fn commands(&self, session: u64, provider: Provider) -> Option<&Commands> {
+        self.catalogs
+            .commands(&self.catalog_key(session, provider)?)
+    }
+
     pub(crate) fn model_selection(
         &self,
         session: u64,
@@ -928,6 +935,9 @@ impl AppState {
                 Err(error) => Some(error),
             };
             if let Some(error) = refused {
+                let failed = Commands::Failed(error.clone());
+                self.catalogs
+                    .apply_commands(provider, account.clone(), session, failed);
                 self.catalogs
                     .apply(provider, account, session, Catalog::Failed(error));
             }
@@ -1025,6 +1035,10 @@ impl AppState {
                     Event::Catalog(catalog) => {
                         self.catalogs
                             .apply(provider, account.clone(), session, catalog);
+                    }
+                    Event::Commands(commands) => {
+                        self.catalogs
+                            .apply_commands(provider, account.clone(), session, commands);
                     }
                     Event::ProviderNotice { .. }
                         if self.route(session) != Some((provider, account.clone())) => {}

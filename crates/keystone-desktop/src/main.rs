@@ -15,6 +15,7 @@ mod session_tabs;
 mod settings;
 mod settings_accounts;
 mod settings_page;
+mod slash_menu;
 mod transcript;
 mod transcript_keyboard;
 mod view_state;
@@ -289,6 +290,7 @@ struct Keystone {
     customize_agent: Option<customization_agent::Agent>,
     palette: Option<commands::Palette>,
     files: files::Files,
+    slash: slash_menu::SlashMenu,
 }
 
 impl Keystone {
@@ -328,6 +330,9 @@ impl Keystone {
         }
     }
     fn send_message(&mut self, draft: ComposerDraft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.slash_blocks(&draft, cx) {
+            return;
+        }
         let id = draft.session;
         let sent = self
             .state
@@ -517,6 +522,7 @@ impl Keystone {
                 this.runtime_changed(changed, cx);
             }),
         );
+        let slash = slash_menu::SlashMenu::new(&composer, cx);
         let mut result = Self {
             state,
             error: None,
@@ -557,6 +563,7 @@ impl Keystone {
             customize_agent: None,
             palette: None,
             files: files::Files::default(),
+            slash,
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -1322,11 +1329,13 @@ impl Keystone {
             ),
             Some((session, provider)) => {
                 let status = if waiting {
-                    "Waiting for your approval"
+                    "Waiting for your approval".to_owned()
                 } else if running {
-                    "Ctrl+Enter steers this turn"
+                    "Ctrl+Enter steers this turn".to_owned()
+                } else if let Some(hint) = self.slash_hint(session, provider, cx) {
+                    format!("{hint} · Ctrl+Enter to send")
                 } else {
-                    "Ctrl+Enter to send · Enter for a new line"
+                    "Ctrl+Enter to send · Enter for a new line".to_owned()
                 };
                 let id = session;
                 let folder = self.conversation_folder(id, cx).unwrap();
@@ -1444,8 +1453,11 @@ impl Keystone {
                             })
                             .when(!can_send, |d| d.cursor_not_allowed()),
                     );
+                let menu_open = self
+                    .slash_entries(cx)
+                    .is_some_and(|(.., entries)| !entries.is_empty());
                 (
-                    field
+                    self.slash_keys(field, menu_open, cx)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.composer.focus_handle(cx).focus(window, cx)
                         }))
@@ -1476,6 +1488,8 @@ impl Keystone {
             .pr(px(12.))
             .pb(px(12.))
             .gap(px(14.))
+            .relative()
+            .children(current.and_then(|_| self.slash_menu(window_width, cx)))
             .child(field)
             .child(toolbar)
     }
@@ -2975,6 +2989,8 @@ impl Render for Keystone {
                         this.model_menu = None;
                         this.presentation.current.arrangement.surface_menu = None;
                         this.refresh(cx);
+                        cx.stop_propagation();
+                    } else if this.dismiss_slash(cx) {
                         cx.stop_propagation();
                     } else if this.presentation.current.customization.is_open() {
                         this.customize(arrangement_editor::Action::Close, window, cx);

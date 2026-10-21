@@ -19,6 +19,8 @@
 //! `KEYSTONE_FAKE_CODEX_NO_CATALOG=1` every `model/list` is a JSON-RPC error. `thread/start`
 //! and `thread/resume` reply with the thread's model: the `model` they were given, else
 //! `fake-default`, remembered per thread for the process. Each reply ends with it.
+//! `skills/list` answers the skills in `$CODEX_HOME/skills` and the folder's
+//! `.agents/skills` and `.codex/skills`, then one scripted system skill.
 //! `KEYSTONE_FAKE_ENV_RECEIPT` names a file each process appends its environment to, and
 //! a `CODEX_HOME` that is not a directory fails the start, as the real CLI does.
 //!
@@ -46,6 +48,51 @@ use std::time::Duration;
 mod orchestrator;
 
 type Out = Arc<Mutex<io::Stdout>>;
+
+/// The skills `skills/list` answers for `cwd`, as Codex 0.163.0 lists them: those in
+/// `$CODEX_HOME/skills` (never `~/.codex`) as `user`, those in the folder's
+/// `.agents/skills` and `.codex/skills` as `repo`, then one scripted `system` skill.
+fn skills(cwd: &str) -> Vec<Value> {
+    let home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from);
+    let cwd = std::path::Path::new(cwd);
+    let roots = [
+        (home.map(|h| h.join("skills")), "user"),
+        (Some(cwd.join(".agents/skills")), "repo"),
+        (Some(cwd.join(".codex/skills")), "repo"),
+    ];
+    let mut listed = Vec::new();
+    for (root, scope) in roots {
+        let Some(root) = root else { continue };
+        let mut found: Vec<_> = std::fs::read_dir(&root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path().join("SKILL.md"))
+            .filter(|file| file.is_file())
+            .collect();
+        found.sort();
+        for file in found {
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            let front = |key: &str| {
+                text.lines()
+                    .skip(1)
+                    .take_while(|line| *line != "---")
+                    .find_map(|line| line.strip_prefix(&format!("{key}: ")))
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            listed.push(
+                json!({"name": front("name"), "description": front("description"),
+                "path": file, "scope": scope, "enabled": true, "pluginId": null}),
+            );
+        }
+    }
+    listed.push(
+        json!({"name": "fake-system-skill", "description": "Scripted system skill",
+        "path": "/fake/system/SKILL.md", "scope": "system", "enabled": true, "pluginId": null}),
+    );
+    listed
+}
 
 fn emit(out: &Out, message: Value) {
     let mut out = out.lock().unwrap();
@@ -340,6 +387,10 @@ fn main() {
                     json!({"id": id, "error": {"code": -32600, "message": "invalid cursor"}}),
                 ),
             },
+            "skills/list" => {
+                let cwd = params["cwds"][0].as_str().unwrap_or_default().to_owned();
+                reply(json!({"data": [{"cwd": cwd, "skills": skills(&cwd)}]}));
+            }
             "turn/start" => {
                 let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
                 let text = params["input"][0]["text"]

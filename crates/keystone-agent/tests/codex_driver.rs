@@ -3,7 +3,10 @@
 
 use keystone_agent::codex::CodexDriver;
 use keystone_agent::{ApprovalState, Command, Outputs};
-use keystone_agent::{Catalog, Event, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus};
+use keystone_agent::{
+    Catalog, CommandSource, Commands, Event, ItemKind, ItemStatus, ModelInfo, RequestId,
+    SlashCommand, TurnStatus,
+};
 use keystone_core::ApprovalMode;
 use serde_json::Value;
 
@@ -1220,5 +1223,65 @@ fn the_model_list_becomes_a_catalog_across_its_pages_without_hidden_entries() {
     assert!(out.events.contains(&(
         SESSION,
         Event::Catalog(Catalog::Failed("Codex stopped".into()))
+    )));
+}
+
+/// Skills are asked for one folder; the answer lists them, a refusal and an exit
+/// before the answer each fail them.
+#[test]
+fn skills_for_a_folder_become_commands_and_a_refusal_or_exit_fails_them() {
+    let mut driver = opened();
+    let ask = |driver: &mut CodexDriver| {
+        let mut out = Outputs::default();
+        driver.request_commands(SESSION, "/tmp/repo", &mut out);
+        let request: Value = serde_json::from_str(&out.writes[0]).unwrap();
+        assert_eq!(request["method"], "skills/list");
+        assert_eq!(
+            request["params"],
+            serde_json::json!({"cwds": ["/tmp/repo"]})
+        );
+        request["id"].as_u64().unwrap()
+    };
+    let answer = |driver: &mut CodexDriver, reply: String| {
+        let mut out = Outputs::default();
+        driver.on_line(reply.as_bytes(), &mut out);
+        out.events
+    };
+    let id = ask(&mut driver);
+    let reply = format!(
+        r#"{{"id":{id},"result":{{"data":[{{"cwd":"/tmp/repo","skills":[{{"name":"review","description":"Review it","path":"/r/SKILL.md","scope":"repo","enabled":true,"pluginId":null}}]}}]}}}}"#
+    );
+    assert_eq!(
+        answer(&mut driver, reply),
+        vec![(
+            SESSION,
+            Event::Commands(Commands::Ready(vec![SlashCommand {
+                invocation: "$review".into(),
+                description: "Review it".into(),
+                argument_hint: String::new(),
+                source: CommandSource::Skill,
+                terminal_only: false,
+            }]))
+        )]
+    );
+    let id = ask(&mut driver);
+    let reply = format!(
+        r#"{{"id":{id},"error":{{"code":-32600,"message":"unknown variant `skills/list`"}}}}"#
+    );
+    assert_eq!(
+        answer(&mut driver, reply),
+        vec![(
+            SESSION,
+            Event::Commands(Commands::Failed(
+                "Codex could not list its skills: unknown variant `skills/list`".into()
+            ))
+        )]
+    );
+    ask(&mut driver);
+    let mut out = Outputs::default();
+    driver.on_exit("Codex exited", &mut out);
+    assert!(out.events.contains(&(
+        SESSION,
+        Event::Commands(Commands::Failed("Codex exited".into()))
     )));
 }

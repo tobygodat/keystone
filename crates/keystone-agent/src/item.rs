@@ -98,6 +98,10 @@ pub enum Event {
     },
     /// The provider's answer to a catalog request ([`Catalog`]).
     Catalog(Catalog),
+    /// The commands and skills the provider lists for a catalog request's folder.
+    /// Claude sends it only after a ready [`Event::Catalog`], from the same answer;
+    /// Codex asks for it separately and may fail one without the other.
+    Commands(crate::Commands),
     /// The model the provider says this session runs on.
     ModelReported {
         model: String,

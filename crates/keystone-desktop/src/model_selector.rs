@@ -6,7 +6,7 @@ use gpui::{
     Anchor, App, Div, ElementId, FontWeight, IntoElement, ParentElement, Pixels, SharedString,
     Stateful, Styled, Window, div, prelude::*, px,
 };
-use keystone_agent::{Catalog, ModelInfo};
+use keystone_agent::{Catalog, Commands, ModelInfo};
 use keystone_core::{Account, AccountId, Provider, WorkingDirectory};
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
@@ -36,11 +36,14 @@ pub struct CatalogKey {
     pub directory: WorkingDirectory,
 }
 
-/// Each catalog, asked once per app run and kept until Retry.
+/// Each catalog, asked once per app run and kept until Retry, with the commands the
+/// same request lists.
 #[derive(Default)]
 pub struct Catalogs {
     states: HashMap<CatalogKey, CatalogState>,
     asked: HashMap<(Provider, Option<AccountId>, u64), WorkingDirectory>,
+    commands: HashMap<CatalogKey, Option<Commands>>,
+    commands_asked: HashMap<(Provider, Option<AccountId>, u64), WorkingDirectory>,
 }
 
 impl Catalogs {
@@ -52,16 +55,42 @@ impl Catalogs {
         }
     }
 
+    /// The commands listed for `key`: `None` while they load.
+    pub fn commands(&self, key: &CatalogKey) -> Option<&Commands> {
+        self.commands.get(key)?.as_ref()
+    }
+
     pub fn ask(&mut self, key: CatalogKey, session: u64) -> bool {
         if self.states.contains_key(&key) {
             return false;
         }
-        self.asked.insert(
-            (key.provider, key.account.clone(), session),
-            key.directory.clone(),
-        );
+        let asker = (key.provider, key.account.clone(), session);
+        self.asked.insert(asker.clone(), key.directory.clone());
+        self.commands_asked.insert(asker, key.directory.clone());
+        self.commands.insert(key.clone(), None);
         self.states.insert(key, CatalogState::Loading);
         true
+    }
+
+    pub fn apply_commands(
+        &mut self,
+        provider: Provider,
+        account: Option<AccountId>,
+        session: u64,
+        commands: Commands,
+    ) {
+        let Some(directory) = self
+            .commands_asked
+            .remove(&(provider, account.clone(), session))
+        else {
+            return;
+        };
+        let key = CatalogKey {
+            provider,
+            account,
+            directory,
+        };
+        self.commands.insert(key, Some(commands));
     }
 
     pub fn apply(
@@ -77,7 +106,14 @@ impl Catalogs {
         let state = match catalog {
             // What the default resolves to is not shown: rows are names only.
             Catalog::Ready { models, .. } => CatalogState::Ready(models),
-            Catalog::Failed(message) => CatalogState::Failed(message),
+            Catalog::Failed(message) => {
+                // Claude lists commands only in a ready catalog's answer.
+                if provider == Provider::Claude {
+                    let failed = Commands::Failed(message.clone());
+                    self.apply_commands(provider, account.clone(), session, failed);
+                }
+                CatalogState::Failed(message)
+            }
         };
         self.states.insert(
             CatalogKey {
@@ -91,6 +127,7 @@ impl Catalogs {
 
     pub fn clear(&mut self, key: &CatalogKey) {
         self.states.remove(key);
+        self.commands.remove(key);
     }
 
     /// Drops everything asked of a removed account, so an account added later under
@@ -99,6 +136,8 @@ impl Catalogs {
         let gone = |id: &Option<AccountId>| id.as_ref() == Some(account);
         self.states.retain(|key, _| !gone(&key.account));
         self.asked.retain(|(_, id, _), _| !gone(id));
+        self.commands.retain(|key, _| !gone(&key.account));
+        self.commands_asked.retain(|(_, id, _), _| !gone(id));
     }
 }
 
