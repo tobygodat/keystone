@@ -175,6 +175,14 @@ fn open(response: SystemNotificationResponse, cx: &mut App) {
         .collect();
     windows.sort_by_key(|(_, id)| *id);
     let last = state.read(cx).notifier.last_window;
+    let holding: Vec<_> = windows
+        .iter()
+        .filter(|(window, _)| {
+            window
+                .read(cx)
+                .is_ok_and(|view| view.project_for(session, cx).is_none())
+        })
+        .collect();
     let target = windows
         .iter()
         .find(|(window, _)| {
@@ -182,6 +190,8 @@ fn open(response: SystemNotificationResponse, cx: &mut App) {
                 .read(cx)
                 .is_ok_and(|view| view.on_screen(cx).contains(&session))
         })
+        .or_else(|| holding.iter().copied().find(|(_, id)| Some(*id) == last))
+        .or_else(|| holding.first().copied())
         .or_else(|| windows.iter().find(|(_, id)| Some(*id) == last))
         .or(windows.first());
     if let Some((window, _)) = target {
@@ -231,10 +241,19 @@ impl Keystone {
         }
     }
 
-    /// Selects `session` from its notification, leaving Settings and Customize as
-    /// opening Settings does, and focuses the composer and the window.
+    /// Selects `session` from its notification, opening its project when this window shows
+    /// another, leaving Settings and Customize as opening Settings does, and focuses the
+    /// composer and the window. A refused project switch selects nothing and shows its error.
     fn open_notified(&mut self, session: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
+        if let Some(project) = self.project_for(session, cx) {
+            self.open_project(project, cx);
+            if self.project_for(session, cx).is_some() {
+                window.activate_window();
+                return;
+            }
+            self.focus_project_transition(window, cx);
+        }
         if self.presentation.current.customization.is_open() {
             self.customize(crate::arrangement_editor::Action::Close, window, cx);
         }

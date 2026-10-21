@@ -5,17 +5,16 @@ Find local sessions by title or provider and recover the full list after clearin
 ## Sub-features
 
 - `search-focus` reaches search through the field or Ctrl+F.
-- `search-match` filters both sidebar sections by title or provider without changing stored records.
+- `search-match` filters the current project's sessions in both sidebar sections by title or provider without changing stored records.
 - `search-empty` displays an empty result state.
-- `provider-filter` combines the provider choice with search over all sessions.
-- `new-project` chooses presentation and the creation folder for future sessions.
+- `provider-filter` combines the provider choice with search over the window's project's sessions.
 - `sidebar-toggle` hides and restores the session sidebar.
 
 ## How to get to it (user POV)
 
 - Click **Search** under the app bar. Ctrl+F also opens the sidebar and focuses search.
 - Type a provider or title. Select all and delete to clear.
-- Use the filter, folder, and pencil beside Search. Filter offers All sessions, Claude Code, and Codex. The folder opens the native project chooser. The pencil opens New session.
+- Use the filter and pencil beside Search. Filter offers All sessions, Claude Code, and Codex. The pencil opens New session. Projects are in [projects](projects.md).
 - Click the panel icon at the left of the main column's top bar to hide or restore the sidebar.
 
 ## Driving it with keystone-verify
@@ -39,10 +38,10 @@ Preconditions:
 
 ## Project transitions
 
-Click `new-project` and choose an existing folder in the rendered OS chooser. The selected session and draft stay. The tooltip names the canonical project used for the layout and future conversations. Cancel leaves the current presentation intact. A canonical alias of the same project changes nothing.
+Switch projects as [projects](projects.md) describes. The draft is saved first. Cancel leaves the current presentation intact. A canonical alias of the same project changes nothing.
 
 Apply distinct layouts in A and B. Stage another preview and type a distinct Customize prompt in each. Read earlier transcript rows in each, then return to A. Require the preview, prompt, Undo, and scroll to return independently. Changes that arrive while a project is parked must still appear on return. Widen after a narrow visit and require geometry to fit the current viewport.
 
 A project switch must save the current draft first. Use private filesystem faults to prove a failed barrier leaves the source presentation and draft intact. Visiting a project must not create a saved layout entry. Explicit saved widths such as 302 px remain unchanged; 264 px is the new default.
 
-Choose `filter`, then `filter-codex` or `filter-claude`. Require only matching global sessions, combined with search. Choose `filter-all` to restore them. An open filter menu blocks focused-latest read acknowledgement.
+Choose `filter`, then `filter-codex` or `filter-claude`. Require only the project's matching sessions, combined with search. Choose `filter-all` to restore them. An open filter menu blocks focused-latest read acknowledgement.

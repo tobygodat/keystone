@@ -77,7 +77,7 @@ pub(crate) fn bring_forward(c: &Composition, view: ViewId) -> Option<Composition
 
 impl Keystone {
     /// Which session each conversation view holds, leaving out views and sessions that
-    /// no longer exist.
+    /// no longer exist, and sessions of another project, held from before projects.
     pub(crate) fn session_tabs(&self, cx: &App) -> SessionTabs {
         let Ok(project) = &self.presentation.project else {
             return SessionTabs::default();
@@ -90,8 +90,12 @@ impl Keystone {
         if tabs.is_empty() {
             return tabs;
         }
-        let sessions: std::collections::HashSet<u64> =
-            workspace.sessions().iter().map(|s| s.id()).collect();
+        let sessions: std::collections::HashSet<u64> = workspace
+            .sessions()
+            .iter()
+            .filter(|s| crate::projects::holds(project, s))
+            .map(|s| s.id())
+            .collect();
         tabs.retain(|view, session| {
             c.component(view) == Some(Component::Conversation) && sessions.contains(&session)
         });
@@ -111,8 +115,15 @@ impl Keystone {
                     .preferences()
                     .held_in(project, self.window_id, view)
             })
-            .filter(|&session| state.session(session).is_some())
-            .or_else(|| workspace.selected_in(self.window_id))
+            .filter(|&session| {
+                state.session(session).is_some_and(|s| {
+                    self.presentation
+                        .project
+                        .as_ref()
+                        .is_ok_and(|project| crate::projects::holds(project, s))
+                })
+            })
+            .or_else(|| self.selected(cx))
     }
 
     pub(crate) fn view_key(&self, view: ViewId, cx: &App) -> Option<ViewKey> {
@@ -594,18 +605,21 @@ impl Keystone {
         }
         let selected = self.selected(cx);
         let shown = |id: u64| Some(id) == selected || tabs.view_of(id).is_some();
+        let Ok(project) = &self.presentation.project else {
+            return;
+        };
         let workspace = self.state.read(cx).store().workspace();
         let recent = |s: &&keystone_core::Session| s.updated_at().or(s.created_at());
         let next = workspace
             .sessions()
             .iter()
-            .filter(|s| !s.settled() && !shown(s.id()))
+            .filter(|s| !s.settled() && !shown(s.id()) && crate::projects::holds(project, s))
             .max_by_key(recent)
             .or_else(|| {
                 workspace
                     .sessions()
                     .iter()
-                    .filter(|s| !shown(s.id()))
+                    .filter(|s| !shown(s.id()) && crate::projects::holds(project, s))
                     .max_by_key(recent)
             })
             .map(|s| s.id());

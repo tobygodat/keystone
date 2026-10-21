@@ -643,6 +643,10 @@ mod ui_tests {
         let mut store = Store::open(state.join("workspace.json")).unwrap();
         let directory = WorkingDirectory::new(project).unwrap();
         store.create(Provider::Claude, &directory, 1).unwrap();
+        let shown = keystone_core::ProjectId::new(project).unwrap();
+        store
+            .open_project(keystone_core::WindowId::FIRST, &shown, None, Some(1), 1)
+            .unwrap();
         cx.update(keystone_ui::init);
         cx.update(crate::bind_keys);
         cx.executor().allow_parking();

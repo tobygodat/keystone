@@ -239,7 +239,7 @@ impl AppState {
         let mut errors = Vec::new();
         let sessions: Vec<u64> = drafts.iter().map(|d| d.session).collect();
         let drafts = drafts.into_iter().map(|d| (d.session, d.text)).collect();
-        match self.store.save_for_quit(drafts, windows) {
+        match self.store.save_for_quit(drafts, windows, crate::now_ms()) {
             Ok(_) => self.pending.retain(
                 |update| !matches!(update, PendingSave::Draft(id, _) if sessions.contains(id)),
             ),
@@ -888,15 +888,33 @@ impl AppState {
         result
     }
 
-    pub(crate) fn set_window_project(
+    /// Shows `project` in `window`. See [`keystone_core::Store::open_project`].
+    pub(crate) fn open_project(
         &mut self,
         window: WindowId,
+        project: &ProjectId,
+        left: Option<&ProjectId>,
+        selected: Option<u64>,
+        now: u64,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        self.store
+            .open_project(window, project, left, selected, now)
+            .map_err(Into::into)
+    }
+
+    /// Takes `project` off the project list. See
+    /// [`keystone_core::Store::forget_project`].
+    pub(crate) fn forget_project(
+        &mut self,
         project: &ProjectId,
     ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
         if self.phase != Phase::Running {
             return Err(std::io::Error::other("Keystone is quitting.").into());
         }
-        self.store.set_window_project(window, project)
+        self.store.forget_project(project).map_err(Into::into)
     }
 
     /// Forgets a closed window, keeping its sessions and their turns as they are. See

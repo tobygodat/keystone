@@ -988,6 +988,10 @@ mod tests {
                     .value;
                 store.set_account(id, account).unwrap();
             }
+            let project = keystone_core::ProjectId::new(dir.path()).unwrap();
+            store
+                .open_project(keystone_core::WindowId::FIRST, &project, None, Some(2), 1)
+                .unwrap();
         }
         let (_view, cx) = open_window(&path, cx);
         cx.run_until_parked();

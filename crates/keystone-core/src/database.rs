@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
@@ -45,13 +45,22 @@ CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 /// Forward migrations, one per schema version after 1, each run in the opening
 /// IMMEDIATE transaction that also records the new `user_version`.
-const MIGRATIONS: [&str; 1] = ["
+const MIGRATIONS: [&str; 2] = [
+    "
 CREATE TABLE accounts (
     id TEXT PRIMARY KEY,
     position INTEGER NOT NULL,
     payload TEXT NOT NULL CHECK(json_valid(payload))
 );
-"];
+",
+    "
+CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    position INTEGER NOT NULL,
+    payload TEXT NOT NULL CHECK(json_valid(payload))
+);
+",
+];
 
 #[derive(Clone)]
 pub struct Database {
@@ -408,6 +417,18 @@ impl Database {
                     .accounts
                     .push(serde_json::from_str(&row.map_err(sql_error)?)?);
             }
+            let mut statement = tx
+                .prepare("SELECT payload FROM projects ORDER BY position")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?;
+            for row in rows {
+                snapshot
+                    .workspace
+                    .projects
+                    .push(serde_json::from_str(&row.map_err(sql_error)?)?);
+            }
             validate(&snapshot).map_err(|error| invalid(error.to_string()))?;
             Ok((snapshot, revision))
         })
@@ -655,6 +676,41 @@ fn write_projection(
         .map_err(sql_error)?;
         tx.execute("INSERT INTO accounts(id, position, payload) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET position=excluded.position, payload=excluded.payload", params![id, position as i64, payload]).map_err(sql_error)?;
     }
+    let projects = &snapshot.workspace.projects;
+    for removed in previous
+        .into_iter()
+        .flat_map(|workspace| &workspace.projects)
+        .filter(|old| !projects.iter().any(|project| project.id() == old.id()))
+    {
+        let id = removed.id();
+        let id = id.path().to_string_lossy();
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('project.removed', ?1, ?2)",
+            params![id, serde_json::to_string(removed)?],
+        )
+        .map_err(sql_error)?;
+        tx.execute("DELETE FROM projects WHERE id=?1", [id])
+            .map_err(sql_error)?;
+    }
+    for (position, project) in projects.iter().enumerate() {
+        if previous.is_some_and(|workspace| workspace.projects.get(position) == Some(project)) {
+            continue;
+        }
+        let payload = serde_json::to_string(project)?;
+        let id = project.id();
+        let id = id.path().to_string_lossy();
+        let kind = if project.removed() {
+            "project.removed"
+        } else {
+            "project.upserted"
+        };
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES (?1, ?2, ?3)",
+            params![kind, id, payload],
+        )
+        .map_err(sql_error)?;
+        tx.execute("INSERT INTO projects(id, position, payload) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET position=excluded.position, payload=excluded.payload", params![id, position as i64, payload]).map_err(sql_error)?;
+    }
     let mut metadata = Snapshot {
         version: snapshot.version,
         next_id: snapshot.next_id,
@@ -663,6 +719,7 @@ fn write_projection(
     };
     metadata.workspace.sessions.clear();
     metadata.workspace.accounts.clear();
+    metadata.workspace.projects.clear();
     let payload = serde_json::to_string(&metadata)?;
     let previous: Option<String> = tx
         .query_row(

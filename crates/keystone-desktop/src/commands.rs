@@ -4,6 +4,7 @@
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::handoff::HandOff;
+use crate::projects::{OpenProject, SwitchProject};
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
 use crate::windows::{self, CloseWindow, Destination, MoveTabToWindow, NewWindow, OpenInNewWindow};
@@ -189,6 +190,20 @@ pub(crate) const COMMANDS: &[Command] = &[
         action: || Box::new(SplitRight),
     },
     Command {
+        id: "switch-project",
+        label: "Switch project",
+        keys: &["ctrl-o"],
+        context: Some(APP),
+        action: || Box::new(SwitchProject),
+    },
+    Command {
+        id: "open-project",
+        label: "Open folder as project",
+        keys: &["ctrl-shift-o"],
+        context: Some(APP),
+        action: || Box::new(OpenProject),
+    },
+    Command {
         id: "new-window",
         label: "New window",
         keys: &["ctrl-alt-n"],
@@ -346,7 +361,7 @@ fn kbd_text(keys: &str) -> String {
 /// The open palette and the focus it returns to when it closes.
 pub(crate) struct Palette {
     pub(crate) state: Entity<CommandPaletteState>,
-    restore: Option<FocusHandle>,
+    pub(crate) restore: Option<FocusHandle>,
     /// The tab whose destination the palette lists, instead of commands.
     moving: Option<ViewId>,
 }
@@ -373,7 +388,11 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let restore = window.focused(cx);
+        let restore = self
+            .projects
+            .take()
+            .and_then(|list| list.restore)
+            .or_else(|| window.focused(cx));
         let state = cx.new(|cx| CommandPaletteState::new(items, cx));
         state.focus_handle(cx).focus(window, cx);
         self.palette = Some(Palette {

@@ -1,3 +1,4 @@
+use crate::button::IconButton;
 use crate::color::Color;
 use crate::fuzzy;
 use crate::icon::{Icon, IconName};
@@ -7,6 +8,7 @@ use crate::styled_ext::{StyledExt, h_flex, v_flex};
 use crate::text_input::{self, InputMode, TextInput};
 use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, TextSize, radius, spacing};
+use crate::tooltip::Tooltip;
 use crate::virtual_list::{self, VirtualList, VirtualListState};
 use gpui::{
     AnchoredPositionMode, App, Context, Entity, EntityId, FocusHandle, Focusable, FontWeight,
@@ -17,7 +19,7 @@ use std::cmp::Reverse;
 use std::ops::Range;
 use std::rc::Rc;
 
-gpui::actions!(command_palette, [Dismiss, PageUp, PageDown]);
+gpui::actions!(command_palette, [Dismiss, PageUp, PageDown, Remove]);
 
 const CONTEXT: &str = "CommandPalette";
 const VISIBLE_ROWS: usize = 8;
@@ -27,6 +29,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Dismiss, Some(CONTEXT)),
         KeyBinding::new("pageup", PageUp, Some(CONTEXT)),
         KeyBinding::new("pagedown", PageDown, Some(CONTEXT)),
+        KeyBinding::new("shift-delete", Remove, Some(CONTEXT)),
     ]);
 }
 
@@ -38,6 +41,8 @@ pub struct PaletteItem {
     pub label: SharedString,
     pub detail: Option<SharedString>,
     pub kbd: Option<SharedString>,
+    /// Whether the palette offers to remove it, through `on_remove`.
+    pub removable: bool,
 }
 
 impl PaletteItem {
@@ -47,6 +52,7 @@ impl PaletteItem {
             label: label.into(),
             detail: None,
             kbd: None,
+            removable: false,
         }
     }
 
@@ -61,10 +67,20 @@ impl PaletteItem {
         self.kbd = Some(kbd.into());
         self
     }
+
+    /// Offers to remove the item: a button on its highlighted row, and Shift+Delete.
+    pub fn removable(mut self) -> Self {
+        self.removable = true;
+        self
+    }
 }
+
+type QueryItem = Box<dyn Fn(&str) -> Option<PaletteItem> + 'static>;
 
 struct Shown {
     item: usize,
+    /// The row the query itself made, in place of `item`.
+    typed: Option<PaletteItem>,
     /// Byte offsets of the label characters the query matched.
     positions: Vec<usize>,
 }
@@ -76,12 +92,22 @@ pub struct CommandPaletteState {
     list: Entity<VirtualListState>,
     items: Vec<PaletteItem>,
     shown: Vec<Shown>,
+    /// Builds a row from the query itself, shown first whenever it gives one.
+    query_item: Option<QueryItem>,
     _changed: Subscription,
 }
 
 impl CommandPaletteState {
     pub fn new(items: Vec<PaletteItem>, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new("Type a command", InputMode::SingleLine, cx));
+        Self::with_placeholder(items, "Type a command", cx)
+    }
+
+    pub fn with_placeholder(
+        items: Vec<PaletteItem>,
+        placeholder: &str,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| TextInput::new(placeholder, InputMode::SingleLine, cx));
         let list = cx.new(|cx| VirtualListState::new(items.len(), cx));
         let changed = cx.subscribe(&input, |this, _, _: &text_input::Changed, cx| {
             this.rescore(cx)
@@ -92,7 +118,29 @@ impl CommandPaletteState {
             list,
             items,
             shown,
+            query_item: None,
             _changed: changed,
+        }
+    }
+
+    /// Offers a row made from the query, such as a typed path, above every match.
+    pub fn set_query_item(
+        &mut self,
+        item: impl Fn(&str) -> Option<PaletteItem> + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.query_item = Some(Box::new(item));
+        self.rescore(cx);
+    }
+
+    /// Drops the item `id` names, keeping the query and the highlight's place.
+    pub fn remove_item(&mut self, id: &str, cx: &mut Context<Self>) {
+        let row = self.list.read(cx).highlighted();
+        self.items.retain(|item| item.id.as_ref() != id);
+        self.rescore(cx);
+        if let Some(row) = row {
+            let last = self.shown.len().saturating_sub(1);
+            self.list.update(cx, |list, _| list.move_to(row.min(last)));
         }
     }
 
@@ -113,18 +161,26 @@ impl CommandPaletteState {
 
     /// The items the query keeps, in display order.
     pub fn matches(&self) -> impl Iterator<Item = &PaletteItem> {
-        self.shown.iter().map(|shown| &self.items[shown.item])
+        self.shown.iter().map(|shown| self.item(shown))
     }
 
     pub fn highlighted_item(&self, cx: &App) -> Option<&PaletteItem> {
         let row = self.list.read(cx).highlighted()?;
-        self.shown.get(row).map(|shown| &self.items[shown.item])
+        self.shown.get(row).map(|shown| self.item(shown))
+    }
+
+    fn item<'a>(&'a self, shown: &'a Shown) -> &'a PaletteItem {
+        match &shown.typed {
+            Some(typed) => typed,
+            None => &self.items[shown.item],
+        }
     }
 
     fn unfiltered(items: &[PaletteItem]) -> Vec<Shown> {
         (0..items.len())
             .map(|item| Shown {
                 item,
+                typed: None,
                 positions: Vec::new(),
             })
             .collect()
@@ -144,7 +200,14 @@ impl CommandPaletteState {
                 .filter_map(|(item, it)| {
                     let found = fuzzy::score(query, &it.label)?;
                     let positions = found.positions;
-                    Some((found.score, Shown { item, positions }))
+                    Some((
+                        found.score,
+                        Shown {
+                            item,
+                            typed: None,
+                            positions,
+                        },
+                    ))
                 })
                 .collect();
             scored.sort_by_key(|(score, shown)| {
@@ -152,6 +215,16 @@ impl CommandPaletteState {
             });
             scored.into_iter().map(|(_, shown)| shown).collect()
         };
+        if let Some(typed) = self.query_item.as_ref().and_then(|make| make(query)) {
+            self.shown.insert(
+                0,
+                Shown {
+                    item: 0,
+                    typed: Some(typed),
+                    positions: Vec::new(),
+                },
+            );
+        }
         let count = self.shown.len();
         self.list.update(cx, |list, cx| {
             list.set_count(count);
@@ -169,6 +242,7 @@ impl Focusable for CommandPaletteState {
 }
 
 type ConfirmHandler = Rc<dyn Fn(&PaletteItem, &mut Window, &mut App) + 'static>;
+type RemoveHandler = Rc<dyn Fn(&PaletteItem, &mut Window, &mut App) + 'static>;
 type DismissHandler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 
 /// A centered overlay that filters commands as the user types. The input keeps focus
@@ -177,14 +251,19 @@ type DismissHandler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 /// `on_dismiss`. The host owns whether it is open and focuses
 /// [`CommandPaletteState`] when it opens.
 ///
-/// The card is `{id}`, the input `{id}-input`, and the rows `{id}-row-{n}`, for tests
-/// and native verification.
+/// With `on_remove`, a highlighted removable row shows a remove button, and
+/// Shift+Delete removes it too.
+///
+/// The card is `{id}`, the input `{id}-input`, the rows `{id}-row-{n}`, and a row's
+/// remove button `{id}-remove`, for tests and native verification.
 #[derive(IntoElement)]
 pub struct CommandPalette {
     id: SharedString,
     state: Entity<CommandPaletteState>,
     on_confirm: Option<ConfirmHandler>,
     on_dismiss: Option<DismissHandler>,
+    on_remove: Option<RemoveHandler>,
+    empty: SharedString,
 }
 
 impl CommandPalette {
@@ -194,7 +273,23 @@ impl CommandPalette {
             state: state.clone(),
             on_confirm: None,
             on_dismiss: None,
+            on_remove: None,
+            empty: "No matching commands".into(),
         }
+    }
+
+    pub fn on_remove(
+        mut self,
+        handler: impl Fn(&PaletteItem, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_remove = Some(Rc::new(handler));
+        self
+    }
+
+    /// What the card says when the query keeps nothing.
+    pub fn empty_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.empty = label.into();
+        self
     }
 
     pub fn on_confirm(
@@ -224,17 +319,19 @@ fn highlight_ranges(label: &str, positions: &[usize]) -> Vec<Range<usize>> {
 }
 
 fn render_row(
+    id: &SharedString,
     state: &Entity<CommandPaletteState>,
     row: usize,
     highlighted: bool,
     height: gpui::Pixels,
+    remove: Option<&Rc<dyn Fn(usize, &mut Window, &mut App)>>,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let state = state.read(cx);
     let Some(shown) = state.shown.get(row) else {
         return div().h(height).into_any_element();
     };
-    let item = &state.items[shown.item];
+    let item = state.item(shown);
     let marked = HighlightStyle {
         color: Some(Color::Accent.to_hsla(cx)),
         font_weight: Some(FontWeight::SEMIBOLD),
@@ -264,6 +361,23 @@ fn render_row(
                 })),
         )
         .children(item.kbd.clone().map(Kbd::new))
+        .children(
+            remove
+                .filter(|_| highlighted && item.removable)
+                .map(|remove| {
+                    let remove = remove.clone();
+                    IconButton::new(SharedString::from(format!("{id}-remove")), IconName::Close)
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("{id}-remove")
+                        })
+                        .tooltip(Tooltip::text("Remove from list · Shift+Delete"))
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            remove(row, window, cx)
+                        })
+                }),
+        )
         .into_any_element()
 }
 
@@ -294,14 +408,25 @@ impl RenderOnce for CommandPalette {
                 }
             }
         };
-        let confirm = {
-            let (state, on_confirm) = (self.state.clone(), self.on_confirm);
+        let remove = self.on_remove.map(|on_remove| {
+            let state = self.state.clone();
             Rc::new(move |row: usize, window: &mut Window, cx: &mut App| {
                 let state = state.read(cx);
                 let item = state
                     .shown
                     .get(row)
-                    .map(|shown| state.items[shown.item].clone());
+                    .map(|shown| state.item(shown).clone())
+                    .filter(|item| item.removable);
+                if let Some(item) = item {
+                    on_remove(&item, window, cx);
+                }
+            }) as Rc<dyn Fn(usize, &mut Window, &mut App)>
+        });
+        let confirm = {
+            let (state, on_confirm) = (self.state.clone(), self.on_confirm);
+            Rc::new(move |row: usize, window: &mut Window, cx: &mut App| {
+                let state = state.read(cx);
+                let item = state.shown.get(row).map(|shown| state.item(shown).clone());
                 if let (Some(item), Some(on_confirm)) = (item, &on_confirm) {
                     on_confirm(&item, window, cx);
                 }
@@ -350,13 +475,21 @@ impl RenderOnce for CommandPalette {
             div()
                 .px(spacing::MD)
                 .py(spacing::MD)
-                .child(Label::new("No matching commands").color(Color::Muted))
+                .child(Label::new(self.empty.clone()).color(Color::Muted))
                 .into_any_element()
         } else {
             let rows = {
-                let state = self.state.clone();
+                let (id, state, remove) = (id.clone(), self.state.clone(), remove.clone());
                 move |row, highlighted, _: &mut Window, cx: &mut App| {
-                    render_row(&state, row, highlighted, row_height, cx)
+                    render_row(
+                        &id,
+                        &state,
+                        row,
+                        highlighted,
+                        row_height,
+                        remove.as_ref(),
+                        cx,
+                    )
                 }
             };
             div()
@@ -387,6 +520,14 @@ impl RenderOnce for CommandPalette {
             .on_action({
                 let list = list.clone();
                 move |_: &PageDown, _, cx| move_highlight(&list, host, cx, |list| list.page(1))
+            })
+            .on_action({
+                let list = list.clone();
+                move |_: &Remove, window, cx| {
+                    if let (Some(row), Some(remove)) = (list.read(cx).highlighted(), &remove) {
+                        remove(row, window, cx);
+                    }
+                }
             })
             .child(input_row)
             .child(results);

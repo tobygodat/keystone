@@ -30,7 +30,7 @@ pub use database::{Database, StoredEvent, database_path};
 pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
 };
-pub use project::ProjectId;
+pub use project::{Project, ProjectId};
 use project::{ProjectLayouts, ProjectMap};
 use session_context::SavedSessionContext;
 pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory};
@@ -521,6 +521,10 @@ pub struct Workspace {
     /// projection, never in the workspace payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     accounts: Vec<Account>,
+    /// Folders the user opened as projects, in the order they were first listed.
+    /// Saved in their own projection, never in the workspace payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    projects: Vec<Project>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -544,6 +548,28 @@ impl Workspace {
 
     pub fn account(&self, id: &AccountId) -> Option<&Account> {
         self.accounts.iter().find(|account| account.id() == id)
+    }
+
+    /// The projects the user opened and has not removed, most recently opened first.
+    pub fn projects(&self) -> Vec<&Project> {
+        let mut projects: Vec<(usize, &Project)> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| !project.removed())
+            .collect();
+        projects.sort_by_key(|(position, project)| {
+            std::cmp::Reverse((project.last_opened(), *position))
+        });
+        projects.into_iter().map(|(_, project)| project).collect()
+    }
+
+    /// The projects the user took off the list.
+    pub fn removed_projects(&self) -> impl Iterator<Item = ProjectId> + '_ {
+        self.projects
+            .iter()
+            .filter(|project| project.removed())
+            .map(Project::id)
     }
 }
 
@@ -1334,6 +1360,13 @@ fn validate(snapshot: &Snapshot) -> StoreResult<()> {
         .is_some_and(|selected| !ids.contains(&selected))
     {
         return Err(invalid("selected session does not exist").into());
+    }
+    let mut projects = HashSet::new();
+    for project in &snapshot.workspace.projects {
+        let id = project.id();
+        if !id.path().is_absolute() || !projects.insert(id) {
+            return Err(invalid("invalid or duplicate project").into());
+        }
     }
     let mut accounts = HashSet::new();
     for account in &snapshot.workspace.accounts {

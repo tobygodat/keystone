@@ -11,6 +11,7 @@ mod handoff;
 mod model_selector;
 mod notifications;
 mod presentation;
+mod projects;
 mod relative_time;
 mod reveal;
 mod session_tabs;
@@ -418,6 +419,8 @@ struct Keystone {
     fixture_document: Arc<Document>,
     customize_agent: Option<customization_agent::Agent>,
     palette: Option<commands::Palette>,
+    /// The open project list.
+    projects: Option<projects::ProjectList>,
     files: files::Files,
     slash: slash_menu::SlashMenu,
     usage_focus: FocusHandle,
@@ -510,13 +513,15 @@ impl Keystone {
             .update(cx, |state, cx| state.continue_after_recovery(id, cx));
         self.composer.focus_handle(cx).focus(window, cx);
     }
-    /// The session this window shows and its composer sends to.
+    /// The session this window shows and its composer sends to: its saved selection,
+    /// while that is one of the window's project's sessions.
     fn selected(&self, cx: &App) -> Option<u64> {
-        self.state
-            .read(cx)
-            .store()
-            .workspace()
-            .selected_in(self.window_id)
+        let state = self.state.read(cx);
+        let selected = state.store().workspace().selected_in(self.window_id)?;
+        match (&self.presentation.project, state.session(selected)) {
+            (Ok(project), Some(session)) if !projects::holds(project, session) => None,
+            _ => Some(selected),
+        }
     }
     fn selected_session<'a>(&self, cx: &'a App) -> Option<&'a keystone_core::Session> {
         self.state.read(cx).session(self.selected(cx)?)
@@ -683,22 +688,45 @@ impl Keystone {
         let wake: Wake = Arc::new(move || {
             let _ = wake_tx.unbounded_send(());
         });
-        // At launch the first window opens on the project Keystone was launched in, as
-        // it always has; every other window reopens on the project it last showed.
+        // A window reopens on the project it last showed, even when its folder has gone,
+        // so that project's sessions stay readable. At launch, KEYSTONE_PROJECT_DIR opens
+        // the first window on that project instead.
+        let launch_project = std::env::var_os("KEYSTONE_PROJECT_DIR")
+            .filter(|_| launch && window_id == keystone_core::WindowId::FIRST);
         let saved_project = state
             .read(cx)
             .store()
             .workspace()
             .preferences()
             .window_project(window_id)
-            .filter(|_| !launch || window_id != keystone_core::WindowId::FIRST)
-            .map(|project| project.path().to_owned())
-            .filter(|path| path.is_dir());
-        let project_dir = saved_project
-            .or_else(|| std::env::var_os("KEYSTONE_PROJECT_DIR").map(PathBuf::from))
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let project = keystone_core::ProjectId::new(&project_dir).map_err(|e| e.to_string());
+            .filter(|_| launch_project.is_none());
+        // A window that never saved a project, as after an upgrade from before projects,
+        // opens on the folder of the session it shows, so that session stays in its
+        // sidebar, else on the folder Keystone was launched in.
+        let selected_folder = {
+            let workspace = state.read(cx).store().workspace();
+            workspace
+                .selected_in(window_id)
+                .and_then(|id| workspace.sessions().iter().find(|s| s.id() == id))
+                .and_then(|session| match session.context() {
+                    keystone_core::SessionContext::Recorded { directory, .. } => {
+                        Some(keystone_core::ProjectId::of(directory))
+                    }
+                    _ => None,
+                })
+                .filter(|_| launch_project.is_none())
+        };
+        let project = match saved_project.or(selected_folder) {
+            Some(project) => Ok(project),
+            None => {
+                let project_dir = launch_project
+                    .or_else(|| std::env::var_os("KEYSTONE_PROJECT_DIR"))
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                keystone_core::ProjectId::new(&project_dir).map_err(|e| e.to_string())
+            }
+        };
         let preferences = state.read(cx).store().workspace().preferences().clone();
         let presentation = Presentation::new(project, window_id, &preferences, cx);
         subscriptions.push(
@@ -751,10 +779,12 @@ impl Keystone {
             })),
             customize_agent: None,
             palette: None,
+            projects: None,
             files: files::Files::default(),
             slash,
             usage_focus: cx.focus_handle().tab_stop(true),
         };
+        result.save_opened_project(cx);
         result.sync_draft(cx);
         result.apply_theme(window, cx);
         result
@@ -1181,7 +1211,16 @@ impl Keystone {
                     cx,
                 ),
             )
-            .child(Label::new("keystone").color(Color::Muted))
+            .child(
+                Label::new(
+                    self.presentation
+                        .project
+                        .as_ref()
+                        .map_or("keystone", |project| project.name())
+                        .to_owned(),
+                )
+                .color(Color::Muted),
+            )
             .when(self.settings.is_some(), |d| {
                 d.child(Label::new("/").color(Color::Faint)).child(
                     Label::new("Settings")
@@ -1401,6 +1440,7 @@ impl Keystone {
                     cx,
                 ),
             )
+            .child(self.project_switcher(cx))
             .child(
                 h_flex()
                     .flex_shrink_0()
@@ -1428,14 +1468,6 @@ impl Keystone {
                             ),
                     )
                     .child(self.filter_menu(cx))
-                    .child(
-                        IconButton::new("new-project", IconName::Folder)
-                            .debug_selector(|| "new-project".into())
-                            .tooltip(Tooltip::text(self.project_tooltip()))
-                            .on_click(
-                                self.scoped_listener(cx, |this, _, _, cx| this.choose_project(cx)),
-                            ),
-                    )
                     .child(self.new_session_menu(cx)),
             )
             // A reused cached view skips prepaint, so it would report no element
@@ -3097,9 +3129,14 @@ impl SessionSidebar {
         let now = LocalTime::at(now_ms());
         let mut sections: [Vec<SessionRow>; 3] = Default::default();
         let accounts = workspace.accounts();
+        let project = this.presentation.project.as_ref().ok();
+        let in_project =
+            |s: &&keystone_core::Session| project.is_none_or(|project| projects::holds(project, s));
+        let project_empty = !workspace.sessions().iter().any(|s| in_project(&s));
         for (session, account) in workspace
             .sessions()
             .iter()
+            .filter(in_project)
             .map(|s| {
                 let account = s.account().and(model_selector::account_label(
                     s.provider(),
@@ -3143,10 +3180,16 @@ impl SessionSidebar {
         let empty = match (
             sections.iter().all(Vec::is_empty),
             workspace.sessions().is_empty(),
+            project_empty,
         ) {
-            (false, _) => None,
-            (true, true) => Some("No sessions yet. Start one from the composer or press Ctrl N."),
-            (true, false) => Some("No sessions match this search."),
+            (false, _, _) => None,
+            (true, true, _) => {
+                Some("No sessions yet. Start one from the composer or press Ctrl N.")
+            }
+            (true, false, true) => Some(
+                "No sessions in this project yet. Start one from the composer or press Ctrl N.",
+            ),
+            (true, false, false) => Some("No sessions match this search."),
         };
         let settled_open = this.settled_open;
         self.shows_time = false;
@@ -3488,6 +3531,16 @@ impl Render for Keystone {
                 }),
             )
             .on_action(
+                self.scoped_listener(cx, |this, _: &projects::SwitchProject, window, cx| {
+                    this.open_projects(None, window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &projects::OpenProject, window, cx| {
+                    this.choose_project(window, cx)
+                }),
+            )
+            .on_action(
                 self.scoped_listener(cx, |this, _: &session_tabs::NewTab, window, cx| {
                     this.new_tab(window, cx)
                 }),
@@ -3550,6 +3603,7 @@ impl Render for Keystone {
             .children(self.full_access_dialog(cx))
             .children(self.rename_dialog(cx))
             .children(self.palette_overlay(cx))
+            .children(self.projects_overlay(cx))
             .children(self.context_menu_overlay(cx));
         let root = self.settings_yields_to_workspace(root, cx);
         self.on_arrangement_drag(root, cx)
@@ -6550,16 +6604,21 @@ mod tests {
         assert!(!asking(&view, cx), "restoring a saved mode asks nothing");
         assert!(cx.debug_bounds("full-access-dialog").is_none());
         let full = ApprovalMode::FullAccess;
-        assert_eq!(saved_mode(&view, cx), (full, full, 0));
+        let launched = saved_mode(&view, cx).2;
+        assert_eq!(saved_mode(&view, cx), (full, full, launched));
 
         pick_mode(cx, full);
         assert!(!asking(&view, cx), "already in Full access");
-        assert_eq!(saved_mode(&view, cx), (full, full, 0), "nothing saved");
+        assert_eq!(
+            saved_mode(&view, cx),
+            (full, full, launched),
+            "nothing saved"
+        );
 
         let read_only = ApprovalMode::ReadOnly;
         pick_mode(cx, read_only);
         assert!(!asking(&view, cx), "leaving Full access asks nothing");
-        assert_eq!(saved_mode(&view, cx), (read_only, read_only, 1));
+        assert_eq!(saved_mode(&view, cx), (read_only, read_only, launched + 1));
     }
 
     /// For Claude, Cancel keeps the running process and its mode; only Confirm replaces

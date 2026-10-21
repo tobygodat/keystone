@@ -42,7 +42,7 @@ pub(crate) struct SavedWindow {
     placement: Option<Placement>,
     /// The project the window shows, by directory. Each window shows any project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    project: Option<String>,
+    pub(crate) project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected: Option<u64>,
     #[serde(default, skip_serializing_if = "ProjectMap::is_empty")]
@@ -103,7 +103,7 @@ impl SavedWindows {
         }
     }
 
-    fn entry(&mut self, id: WindowId) -> StoreResult<&mut SavedWindow> {
+    pub(crate) fn entry(&mut self, id: WindowId) -> StoreResult<&mut SavedWindow> {
         let windows = self.list_mut()?;
         match windows.iter().position(|w| w.id == id) {
             Some(index) => Ok(&mut windows[index]),
@@ -459,12 +459,14 @@ impl Store {
     }
 
     /// Saves the drafts, and each window's placement and project, collected for Quit
-    /// in one write. Saved windows from a newer version are kept as they are, without
-    /// the windows, so they never stop Quit.
+    /// in one write. A project a window shows joins the project list, as opened at
+    /// `now`, when it is not listed yet. Saved windows from a newer version are kept
+    /// as they are, without the windows, so they never stop Quit.
     pub fn save_for_quit(
         &mut self,
         drafts: Vec<(u64, String)>,
         windows: Vec<(WindowId, Placement, Option<ProjectId>)>,
+        now: u64,
     ) -> StoreResult<Applied<()>> {
         let mut next = self.workspace.clone();
         for (id, text) in drafts {
@@ -475,13 +477,19 @@ impl Store {
                 .draft = text;
         }
         if let SavedWindows::Supported(_) = next.preferences.windows {
-            for (window, placement, project) in windows {
-                let saved = next.preferences.windows.entry(window)?;
-                saved.placement = Some(placement);
+            for (window, placement, project) in &windows {
+                let saved = next.preferences.windows.entry(*window)?;
+                saved.placement = Some(*placement);
                 if let Some(project) = project {
                     saved.project = Some(project.as_saved().to_owned());
                 }
             }
+        }
+        for project in windows
+            .iter()
+            .filter_map(|(_, _, project)| project.as_ref())
+        {
+            next.list_project(project, now);
         }
         if next == self.workspace {
             return Ok(self.finish_sync());

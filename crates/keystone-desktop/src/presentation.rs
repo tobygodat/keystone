@@ -33,6 +33,8 @@ pub(crate) struct ProjectPresentation {
     pub sidebar_before_customize: Option<bool>,
     pub borrow_focus: Option<FocusHandle>,
     pub folder_focus: FocusHandle,
+    /// The session the window showed when it left this project, shown again on return.
+    left_selection: Option<u64>,
 }
 impl ProjectPresentation {
     fn new(initial: &Composition, requests: RequestIds, cx: &mut Context<Keystone>) -> Self {
@@ -47,6 +49,7 @@ impl ProjectPresentation {
             sidebar_before_customize: None,
             borrow_focus: None,
             folder_focus: cx.focus_handle(),
+            left_selection: None,
         }
     }
     fn suspend(&mut self) -> Option<u64> {
@@ -217,16 +220,9 @@ impl Keystone {
         }
     }
 
-    pub(crate) fn project_tooltip(&self) -> String {
-        match &self.presentation.project {
-            Ok(project) => format!(
-                "New project · Current layout and new sessions · {}",
-                project.path().display()
-            ),
-            Err(error) => format!("New project · Current project unavailable · {error}"),
-        }
-    }
-    pub(crate) fn choose_project(&mut self, cx: &mut Context<Self>) {
+    /// Asks the platform for a folder to open as this window's project. Where it has
+    /// no folder picker, the project list opens for a typed path instead.
+    pub(crate) fn choose_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ticket) = self.presentation.project_ticket() else {
             self.error = Some("No more folder requests are available.".into());
             cx.notify();
@@ -238,9 +234,16 @@ impl Keystone {
             multiple: false,
             prompt: Some("Open project".into()),
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let outcome = FolderPick::from_native(picked.await);
-            let _ = this.update(cx, |this, cx| this.finish_project_pick(ticket, outcome, cx));
+            let failed = matches!(outcome, FolderPick::Failed(_));
+            let _ = this.update_in(cx, |this, window, cx| {
+                let current = this.presentation.project_picker == Some(ticket);
+                this.finish_project_pick(ticket, outcome, cx);
+                if failed && current {
+                    this.open_projects(Some("~/"), window, cx);
+                }
+            });
         })
         .detach();
     }
@@ -256,20 +259,27 @@ impl Keystone {
         let path = match outcome {
             FolderPick::Cancelled => return,
             FolderPick::Failed(error) => {
-                self.error = Some(error);
+                eprintln!("{error}");
+                self.error = Some(
+                    "No folder picker is available here. Type the folder's path instead.".into(),
+                );
                 self.refresh(cx);
                 return;
             }
             FolderPick::Selected(path) => path,
         };
-        let project = match ProjectId::new(&path) {
-            Ok(project) => project,
+        match ProjectId::new(&path) {
+            Ok(project) => self.open_project(project, cx),
             Err(error) => {
                 self.error = Some(format!("Project not opened. {error}"));
                 self.refresh(cx);
-                return;
             }
-        };
+        }
+    }
+    /// Shows `project` in this window, with its own layout, tabs and the session it
+    /// showed last, and lists it as the most recent project. Each window keeps its own
+    /// project; the others are left as they are.
+    pub(crate) fn open_project(&mut self, project: ProjectId, cx: &mut Context<Self>) {
         if self.presentation.project.as_ref().ok() == Some(&project) {
             return;
         }
@@ -306,6 +316,29 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
+        let left = self.selected(cx);
+        let returning = prepared
+            .is_none()
+            .then(|| self.presentation.parked[&Some(project.clone())].left_selection)
+            .flatten();
+        let selected = self.selection_in(&project, returning, cx);
+        let window_id = self.window_id;
+        let leaving = self.presentation.project.as_ref().ok().cloned();
+        let opened = self.state.update(cx, |state, _| {
+            state.open_project(
+                window_id,
+                &project,
+                leaving.as_ref(),
+                selected,
+                crate::now_ms(),
+            )
+        });
+        if let Err(error) = opened {
+            self.error = Some(format!("Project not opened. {error}"));
+            self.refresh(cx);
+            return;
+        }
+        self.presentation.current.left_selection = left;
         let outgoing = self.presentation.current.suspend();
         if let Some(request) = outgoing
             && let Some(agent) = &self.customize_agent
@@ -319,18 +352,7 @@ impl Keystone {
                 .unwrap()
         });
         let old = std::mem::replace(&mut self.presentation.current, destination);
-        self.presentation
-            .parked
-            .insert(self.presentation.project.as_ref().ok().cloned(), old);
-        let window_id = self.window_id;
-        if let Err(error) = self
-            .state
-            .update(cx, |state, _| state.set_window_project(window_id, &project))
-        {
-            self.error = Some(format!(
-                "This window's project is not saved, so a relaunch opens the previous one. {error}"
-            ));
-        }
+        self.presentation.parked.insert(leaving, old);
         self.presentation.project = Ok(project);
         self.presentation.activation = next;
         self.presentation.selection_changed();
@@ -341,6 +363,7 @@ impl Keystone {
         self.approval_menu = false;
         self.confirm_full_access = None;
         self.window_drag = false;
+        self.sync_draft(cx);
         self.refresh(cx);
     }
     pub(crate) fn focus_project_transition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -421,6 +444,9 @@ impl Keystone {
                         session: ticket.session,
                         revision: applied.revision,
                     });
+                if self.selected(cx).is_none() {
+                    return self.open_project(ProjectId::of(&directory), cx);
+                }
                 self.refresh(cx);
             }
             Err(error) => self.folder_error(

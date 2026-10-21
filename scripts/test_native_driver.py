@@ -96,6 +96,18 @@ class PersistenceTest(unittest.TestCase):
         self.assertEqual([a['id'] for a in driver.read_workspace(self.state)['workspace']['accounts']],
                          ['claude-a', 'codex-b'])
 
+    def test_projection_reads_projects_in_order_when_the_table_exists(self):
+        self.assertNotIn('projects', driver.read_workspace(self.state)['workspace'])
+        self.writer.execute('CREATE TABLE projects(id TEXT, position INTEGER, payload TEXT)')
+        self.writer.commit()
+        self.assertNotIn('projects', driver.read_workspace(self.state)['workspace'])
+        self.writer.executemany('INSERT INTO projects VALUES(?, ?, ?)', [
+            ('/b', 1, json.dumps({'path': '/b'})),
+            ('/a', 0, json.dumps({'path': '/a', 'last_opened': 5}))])
+        self.writer.commit()
+        self.assertEqual([p['path'] for p in driver.read_workspace(self.state)['workspace']['projects']],
+                         ['/a', '/b'])
+
     def test_projection_uses_one_consistent_read_transaction(self):
         with driver.closing(driver.open_database(self.database)) as connection:
             writer = self.writer

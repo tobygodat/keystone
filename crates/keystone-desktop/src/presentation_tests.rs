@@ -48,6 +48,7 @@ fn open(
         )
     });
     pick(&view, cx, &dir.path().join("a"));
+    view.update_in(cx, |this, window, cx| this.focus.focus(window, cx));
     (dir, view, cx)
 }
 fn pick(view: &Entity<Keystone>, cx: &mut VisualTestContext, directory: &Path) {
@@ -76,6 +77,8 @@ fn project_switch_releases_a_transcript_copy_action_and_restores_its_row(cx: &mu
         });
         cx.notify();
     });
+    cx.simulate_keystrokes("ctrl-l");
+    cx.simulate_input("draft kept across the switch");
     cx.simulate_keystrokes("ctrl-shift-t home tab");
     let old_focus = view.update_in(cx, |this, window, _| {
         let focus = this
@@ -91,14 +94,19 @@ fn project_switch_releases_a_transcript_copy_action_and_restores_its_row(cx: &mu
     });
     pick(&view, cx, &dir.path().join("b"));
     cx.update(|window, _| assert!(!old_focus.is_focused(window)));
-    cx.simulate_keystrokes("ctrl-l");
-    cx.simulate_input("draft after project switch");
+    view.read_with(cx, |this, cx| {
+        assert_eq!(this.selected(cx), None, "B has no session yet");
+        assert_eq!(this.composer.read(cx).value(), "");
+    });
     pick(&view, cx, &dir.path().join("a"));
     cx.simulate_keystrokes("ctrl-shift-t ctrl-shift-c");
     let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
     assert_eq!(text.as_deref(), Some("project-local keyboard row"));
     view.read_with(cx, |this, cx| {
-        assert_eq!(this.composer.read(cx).value(), "draft after project switch")
+        assert_eq!(
+            this.composer.read(cx).value(),
+            "draft kept across the switch"
+        )
     });
 }
 
@@ -1485,4 +1493,20 @@ fn many_accounts_scroll_inside_a_short_window(cx: &mut TestAppContext) {
             "spacious {spacious}: {account:?} in {list:?}"
         );
     }
+}
+
+#[gpui::test]
+fn choosing_a_folder_outside_the_project_for_an_old_conversation_follows_it(
+    cx: &mut TestAppContext,
+) {
+    let (dir, view, cx) = open(cx, false);
+    let b = ProjectId::new(&dir.path().join("b")).unwrap();
+    view.update(cx, |this, cx| {
+        assert_eq!(this.selected(cx), Some(1));
+        let ticket = this.presentation.legacy_ticket(1).unwrap();
+        this.finish_legacy_folder(ticket, FolderPick::Selected(dir.path().join("b")), cx);
+        assert_eq!(this.presentation.project.as_ref().ok(), Some(&b));
+        assert_eq!(this.selected(cx), Some(1), "the conversation stays shown");
+        assert_eq!(this.error, None);
+    });
 }

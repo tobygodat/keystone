@@ -1,6 +1,8 @@
 use super::*;
 use crate::{AppState, close_window, install_app_state, open_windows};
-use gpui::{AnyWindowHandle, Entity, SharedString, TestAppContext, VisualTestContext, WeakEntity};
+use gpui::{
+    AnyWindowHandle, Entity, Focusable, SharedString, TestAppContext, VisualTestContext, WeakEntity,
+};
 use keystone_agent::{Approval, RequestId};
 use keystone_core::{Provider, Store, WorkingDirectory};
 use std::path::Path;
@@ -570,4 +572,140 @@ fn activating_a_notification_closes_customize_as_settings_does(cx: &mut TestAppC
     cx.run_until_parked();
     assert!(!cx.read(|cx| first.read(cx).presentation.current.customization.is_open()));
     assert_eq!(selected(&first, cx), Some(2));
+}
+
+/// A notification for a session in another project opens that project in the window it
+/// lands in, so the session shows instead of an empty conversation.
+#[gpui::test]
+fn a_notification_for_another_projects_session_opens_its_project(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let beta = root.join("beta");
+    std::fs::create_dir(root.join("alpha")).unwrap();
+    std::fs::create_dir(&beta).unwrap();
+    let path = seeded(&root, |store| {
+        let alpha = WorkingDirectory::new(&root.join("alpha")).unwrap();
+        let beta = WorkingDirectory::new(&beta).unwrap();
+        store.create(Provider::Claude, &alpha, 10).unwrap();
+        store.create(Provider::Claude, &beta, 11).unwrap();
+        store.rename(5, "Beta session").unwrap();
+        store.select(4).unwrap();
+    });
+    let state = launch(&path, cx);
+    let first = view(WindowId::FIRST, cx);
+    assert_eq!(selected(&first, cx), Some(4));
+    receive(&state, vec![(5, finished())], cx);
+    assert_eq!(sent(cx), [("Beta session".into(), "Turn finished".into())]);
+
+    deactivate(&first, cx);
+    cx.simulate_system_notification_response(SystemNotificationResponse {
+        tag: "session-5".into(),
+        action_id: None,
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| first.read(cx).presentation.project.clone().ok()),
+        Some(keystone_core::ProjectId::new(&beta).unwrap())
+    );
+    assert_eq!(selected(&first, cx), Some(5));
+    let mut window = VisualTestContext::from_window(handle(&first, cx), cx);
+    assert!(
+        window.update(|window, cx| first.read(cx).composer.focus_handle(cx).is_focused(window)),
+        "the composer keeps focus through the project switch"
+    );
+}
+
+/// The project a notification opens may have been left with Customize open; it closes,
+/// so the notified session comes forward.
+#[gpui::test]
+fn a_notification_closes_customize_in_the_project_it_opens(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    let path = seeded(&root, |store| {
+        for (name, at) in [("alpha", 10), ("beta", 11), ("beta", 12)] {
+            let folder = WorkingDirectory::new(&root.join(name)).unwrap();
+            store.create(Provider::Claude, &folder, at).unwrap();
+        }
+        store.select(4).unwrap();
+    });
+    let alpha = keystone_core::ProjectId::new(&root.join("alpha")).unwrap();
+    let beta = keystone_core::ProjectId::new(&root.join("beta")).unwrap();
+    let state = launch(&path, cx);
+    let first = view(WindowId::FIRST, cx);
+    first.update(cx, |this, cx| this.open_project(beta.clone(), cx));
+    cx.run_until_parked();
+    assert_eq!(selected(&first, cx), Some(6));
+    handle(&first, cx)
+        .update(cx, |_, window, cx| {
+            first.update(cx, |this, cx| {
+                this.customize(crate::arrangement_editor::Action::Open, window, cx)
+            })
+        })
+        .unwrap();
+    cx.run_until_parked();
+    first.update(cx, |this, cx| this.open_project(alpha.clone(), cx));
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| first.read(cx).presentation.current.customization.is_open()));
+    deactivate(&first, cx);
+    receive(&state, vec![(5, finished())], cx);
+    cx.simulate_system_notification_response(SystemNotificationResponse {
+        tag: "session-5".into(),
+        action_id: None,
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| first.read(cx).presentation.project.clone().ok()),
+        Some(beta)
+    );
+    assert!(!cx.read(|cx| first.read(cx).presentation.current.customization.is_open()));
+    assert_eq!(selected(&first, cx), Some(5));
+}
+
+/// A window already on the session's project takes its notification before the window
+/// used last, which keeps its own project.
+#[gpui::test]
+fn a_notification_prefers_a_window_on_its_project_to_the_one_used_last(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    let path = seeded(&root, |store| {
+        for (name, at) in [("alpha", 10), ("beta", 11), ("beta", 12)] {
+            let folder = WorkingDirectory::new(&root.join(name)).unwrap();
+            store.create(Provider::Claude, &folder, at).unwrap();
+        }
+        store.select(4).unwrap();
+    });
+    let alpha = keystone_core::ProjectId::new(&root.join("alpha")).unwrap();
+    let beta = keystone_core::ProjectId::new(&root.join("beta")).unwrap();
+    let state = launch(&path, cx);
+    let first = view(WindowId::FIRST, cx);
+    handle(&first, cx)
+        .update(cx, |_, window, cx| {
+            first.update(cx, |this, cx| this.open_new_window(None, window, cx))
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let second = view(WindowId(1), cx);
+    second.update(cx, |this, cx| this.open_project(beta.clone(), cx));
+    select(&second, 5, cx);
+    activate(&first, cx);
+    deactivate(&first, cx);
+    receive(&state, vec![(6, finished())], cx);
+    cx.simulate_system_notification_response(SystemNotificationResponse {
+        tag: "session-6".into(),
+        action_id: None,
+    });
+    cx.run_until_parked();
+    assert_eq!(selected(&second, cx), Some(6));
+    assert_eq!(selected(&first, cx), Some(4));
+    let project = |view: &Entity<Keystone>, cx: &mut TestAppContext| {
+        cx.read(|cx| view.read(cx).presentation.project.clone().ok())
+    };
+    assert_eq!(project(&first, cx), Some(alpha));
+    assert_eq!(project(&second, cx), Some(beta));
 }

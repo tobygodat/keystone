@@ -233,6 +233,7 @@ fn quit_saves_every_draft_and_placement_in_one_write() {
                 (WindowId::FIRST, placement(5.), Some(project.clone())),
                 (second, placement(60.), None),
             ],
+            7,
         )
         .unwrap();
     assert_eq!(store.writes(), writes + 1);
@@ -240,10 +241,15 @@ fn quit_saves_every_draft_and_placement_in_one_write() {
         .save_for_quit(
             vec![(1, "one".into())],
             vec![(second, placement(60.), None)],
+            8,
         )
         .unwrap();
     assert_eq!(store.writes(), writes + 1, "nothing changed");
-    assert!(store.save_for_quit(vec![(9, "x".into())], vec![]).is_err());
+    assert!(
+        store
+            .save_for_quit(vec![(9, "x".into())], vec![], 9)
+            .is_err()
+    );
     assert_eq!(store.writes(), writes + 1);
 
     let reopened = Store::open(directory.path().join("state.json")).unwrap();
@@ -311,6 +317,7 @@ fn a_state_from_before_windows_opens_one_window_and_unreadable_windows_are_kept(
         .save_for_quit(
             vec![(1, "quit draft".into())],
             vec![(WindowId::FIRST, placement(0.), None)],
+            1,
         )
         .unwrap();
     assert_eq!(store.workspace().sessions()[0].draft(), "quit draft");
