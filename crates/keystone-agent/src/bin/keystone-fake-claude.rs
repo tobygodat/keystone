@@ -573,7 +573,7 @@ fn main() {
                             };
                             response["pending_permission_requests"] = json!(pending);
                             response["pending_user_dialog_requests"] = json!([]);
-                            response["session_state"] = json!(state);
+                            response["response"]["session_state"] = json!(state);
                         }
                         emit(
                             &out,

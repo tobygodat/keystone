@@ -702,9 +702,10 @@ impl ClaudeDriver {
     /// Asks Claude whether this process is quiescent, with a repeated `initialize`.
     /// It succeeds only on a successful answer reporting the session idle with empty
     /// pending-approval and pending-dialog lists, followed by the conversation's own
-    /// empty background-task snapshot. The SDK declares the lists and the snapshot for a
-    /// repeated `initialize`, but not `session_state`, and nothing establishes that the
-    /// request changes nothing in a live session; see `docs/design/providers.md`. The outcome
+    /// empty background-task snapshot. Claude Code 2.1.300, 2.1.301 and 2.1.305 put
+    /// `session_state` in the answer's `response` and the lists beside it. Passing proves nothing about
+    /// scheduled tasks or hooks yet to fire, so no profile evicts on it alone; see
+    /// `docs/design/providers.md`. The outcome
     /// arrives through [`ClaudeDriver::take_quiescence`]. Anything else observed in
     /// between counts as activity, which the caller compares.
     pub fn check_quiescence(&mut self, out: &mut Outputs) {
@@ -747,9 +748,10 @@ impl ClaudeDriver {
                 response.error.unwrap_or_else(|| "no reason given".into())
             ))
         } else {
+            let state = response.response.and_then(|answer| answer.session_state);
             empty(&response.pending_permission_requests, "approvals")
                 .and_then(|()| empty(&response.pending_user_dialog_requests, "dialogs"))
-                .and_then(|()| match response.session_state.as_deref() {
+                .and_then(|()| match state.as_deref() {
                     Some("idle") => Ok(()),
                     Some(state) => Err(format!("Claude Code reports the session {state}")),
                     None => Err("Claude Code did not report the session state".into()),
@@ -2018,7 +2020,6 @@ struct ControlResult {
     response: Option<ModeSet>,
     pending_permission_requests: Option<Vec<Value>>,
     pending_user_dialog_requests: Option<Vec<Value>>,
-    session_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2030,6 +2031,7 @@ struct ModeSet {
     commands: Option<Value>,
     claude_code_version: Option<Value>,
     models: Option<Vec<WireModel>>,
+    session_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2222,7 +2224,7 @@ mod tests {
         (driver, out)
     }
 
-    const QUIET: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{},"pending_permission_requests":[],"pending_user_dialog_requests":[],"session_state":"idle"}}"#;
+    const QUIET: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{"session_state":"idle"},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}"#;
     const UNATTRIBUTED: &str = "Claude Code sent activity Keystone could not read or attribute";
     const NO_TASKS: &str =
         r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[]}"#;
@@ -2424,12 +2426,12 @@ mod tests {
                 "did not report the session state",
             ),
             (
-                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{},"pending_permission_requests":[{"request_id":"p"}],"pending_user_dialog_requests":[],"session_state":"requires_action"}}"#,
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{"session_state":"requires_action"},"pending_permission_requests":[{"request_id":"p"}],"pending_user_dialog_requests":[]}}"#,
                 NO_TASKS,
                 "approvals pending",
             ),
             (
-                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{},"pending_permission_requests":[],"pending_user_dialog_requests":[],"session_state":"running"}}"#,
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{"session_state":"running"},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}"#,
                 NO_TASKS,
                 "reports the session running",
             ),
@@ -2451,6 +2453,29 @@ mod tests {
                 "{reason}: {result:?}"
             );
         }
+    }
+
+    /// Claude Code 2.1.300, 2.1.301 and 2.1.305 answer a repeated `initialize` with
+    /// `session_state` inside the answer's `response`, beside the version and mode, and
+    /// the pending lists beside `request_id`. Recorded offline from the real 2.1.301 with
+    /// no credentials (TOB-44, run `init-plain-2.1.301`), abridged to the fields shown,
+    /// `request_id` renumbered and the snapshot's `session_id` renamed. #44's connect
+    /// receipt (`tests/fixtures/provider-connect-probes.json`) has the same nesting. A
+    /// `session_state` beside `request_id`, where no CLI puts it, reports nothing.
+    #[test]
+    fn a_check_reads_session_state_where_claude_code_sends_it() {
+        let recorded = r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{"output_style":"default","account":{"tokenSource":"none","apiProvider":"firstParty"},"pid":37665,"claude_code_version":"2.1.301","current_permission_mode":"auto","remote_control_auto_enable":false,"remote_control_available":true,"fast_mode_state":"off","session_state":"idle","capabilities":["ui_surface_v1","mcp_call_result_not_for_model_v1"]},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}"#;
+        let snapshot = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[],"uuid":"2b048f76-afa3-4cc5-b198-2c92bc07b6db","session_id":"s1"}"#;
+        let (mut driver, _) = idle_driver();
+        assert_eq!(check(&mut driver, &[recorded, snapshot]), Some(Ok(())));
+
+        let beside = r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{},"pending_permission_requests":[],"pending_user_dialog_requests":[],"session_state":"idle"}}"#;
+        let (mut driver, _) = idle_driver();
+        let result = check(&mut driver, &[beside, snapshot]);
+        assert!(
+            matches!(&result, Some(Err(m)) if m.contains("did not report the session state")),
+            "{result:?}"
+        );
     }
 
     /// An agent's steer refused because nothing runs leaves the idle proof standing:
