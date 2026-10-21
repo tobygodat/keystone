@@ -71,12 +71,13 @@ pub(crate) struct Presentation {
 impl Presentation {
     pub fn new(
         project: Result<ProjectId, String>,
+        window: keystone_core::WindowId,
         preferences: &Preferences,
         cx: &mut Context<Keystone>,
     ) -> Self {
         let initial = project.as_ref().map_or_else(
             |_| Composition::from_sidebar(preferences.sidebar_layout().shown()),
-            |p| preferences.composition(p),
+            |p| preferences.composition_in(p, window),
         );
         let requests = RequestIds::default();
         Self {
@@ -297,7 +298,7 @@ impl Keystone {
                     .store()
                     .workspace()
                     .preferences()
-                    .composition(&project),
+                    .composition_in(&project, self.window_id),
                 self.presentation.requests.clone(),
                 cx,
             ))
@@ -321,6 +322,15 @@ impl Keystone {
         self.presentation
             .parked
             .insert(self.presentation.project.as_ref().ok().cloned(), old);
+        let window_id = self.window_id;
+        if let Err(error) = self
+            .state
+            .update(cx, |state, _| state.set_window_project(window_id, &project))
+        {
+            self.error = Some(format!(
+                "This window's project is not saved, so a relaunch opens the previous one. {error}"
+            ));
+        }
         self.presentation.project = Ok(project);
         self.presentation.activation = next;
         self.presentation.selection_changed();
@@ -350,7 +360,7 @@ impl Keystone {
         }
     }
     pub(crate) fn choose_legacy_folder(&mut self, session: u64, cx: &mut Context<Self>) {
-        if self.state.read(cx).store().workspace().selected() != Some(session)
+        if self.selected(cx) != Some(session)
             || self.conversation_folder(session, cx) != Some(ConversationFolder::LegacyMissing)
         {
             return;
@@ -380,7 +390,7 @@ impl Keystone {
     ) {
         if self.presentation.legacy_picker != Some(ticket)
             || !self.presentation.matches(ticket.activation)
-            || self.state.read(cx).store().workspace().selected() != Some(ticket.session)
+            || self.selected(cx) != Some(ticket.session)
             || self.conversation_folder(ticket.session, cx)
                 != Some(ConversationFolder::LegacyMissing)
         {

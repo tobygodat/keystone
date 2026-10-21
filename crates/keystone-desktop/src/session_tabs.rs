@@ -63,7 +63,9 @@ impl Keystone {
         };
         let c = self.shown_composition(cx);
         let workspace = self.state.read(cx).store().workspace();
-        let mut tabs = workspace.preferences().session_tabs(project);
+        let mut tabs = workspace
+            .preferences()
+            .session_tabs_in(project, self.window_id);
         if tabs.is_empty() {
             return tabs;
         }
@@ -83,9 +85,13 @@ impl Keystone {
             .project
             .as_ref()
             .ok()
-            .and_then(|project| workspace.preferences().held(project, view))
+            .and_then(|project| {
+                workspace
+                    .preferences()
+                    .held_in(project, self.window_id, view)
+            })
             .filter(|&session| state.session(session).is_some())
-            .or_else(|| workspace.selected())
+            .or_else(|| workspace.selected_in(self.window_id))
     }
 
     pub(crate) fn view_key(&self, view: ViewId, cx: &App) -> Option<ViewKey> {
@@ -96,7 +102,7 @@ impl Keystone {
     /// The visible conversation views that show `session`.
     pub(crate) fn showing(&self, session: u64, cx: &App) -> Vec<ViewId> {
         let tabs = self.session_tabs(cx);
-        let selected = self.state.read(cx).store().workspace().selected();
+        let selected = self.selected(cx);
         self.presentation
             .current
             .arrangement
@@ -113,7 +119,7 @@ impl Keystone {
         let c = self.shown_composition(cx);
         let views = conversations(&c);
         let tabs = self.session_tabs(cx);
-        let selected = self.state.read(cx).store().workspace().selected();
+        let selected = self.selected(cx);
         self.presentation
             .current
             .arrangement
@@ -144,7 +150,7 @@ impl Keystone {
         if self.presentation.current.customization.is_open() {
             return;
         }
-        let selected = self.state.read(cx).store().workspace().selected();
+        let selected = self.selected(cx);
         let first = self.presentation.current.arrangement.seen.is_none();
         if self.presentation.current.arrangement.seen == Some(selected) {
             return;
@@ -240,7 +246,7 @@ impl Keystone {
         self.show_fitted(view, cx);
         let held = self.session_tabs(cx).get(view);
         if let Some(session) = held
-            && self.state.read(cx).store().workspace().selected() != Some(session)
+            && self.selected(cx) != Some(session)
         {
             self.select(session, cx);
             self.presentation.current.arrangement.seen = Some(Some(session));
@@ -290,9 +296,9 @@ impl Keystone {
         };
         let shown = layout.clone().unwrap_or_else(|| self.saved_composition(cx));
         tabs.retain(|view, _| shown.component(view) == Some(Component::Conversation));
-        let selected = self.state.read(cx).store().workspace().selected();
+        let selected = self.selected(cx);
         let saved = match self.state.update(cx, |state, cx| {
-            state.show(&project, layout, tabs, selected, cx)
+            state.show(&project, self.window_id, layout, tabs, selected, cx)
         }) {
             Ok(applied) => {
                 self.error = durability_warning(applied.durability);
@@ -316,7 +322,7 @@ impl Keystone {
         view: ViewId,
         cx: &mut Context<Self>,
     ) -> bool {
-        let selected = self.state.read(cx).store().workspace().selected();
+        let selected = self.selected(cx);
         let Some(session) = tabs.get(view).filter(|&s| Some(s) != selected) else {
             let saved = self.save_view(layout, tabs, cx);
             if saved {
@@ -342,7 +348,7 @@ impl Keystone {
         }
         let mut tabs = self.session_tabs(cx);
         let active = self.active_view(cx)?;
-        if let Some(session) = self.state.read(cx).store().workspace().selected()
+        if let Some(session) = self.selected(cx)
             && tabs.get(active).is_none()
             && tabs.view_of(session).is_none()
         {
@@ -418,9 +424,9 @@ impl Keystone {
         let Some((view, layout)) = self.open_view(&c, Place::TabWith(active), cx) else {
             return;
         };
-        let before = self.state.read(cx).store().workspace().selected();
+        let before = self.selected(cx);
         self.start_showing(provider, Some((layout, tabs, view)), window, cx);
-        let selected = self.state.read(cx).store().workspace().selected();
+        let selected = self.selected(cx);
         if selected == before {
             return;
         }
@@ -577,7 +583,7 @@ impl Keystone {
             }
             return;
         }
-        let selected = self.state.read(cx).store().workspace().selected();
+        let selected = self.selected(cx);
         let shown = |id: u64| Some(id) == selected || tabs.view_of(id).is_some();
         let workspace = self.state.read(cx).store().workspace();
         let recent = |s: &&keystone_core::Session| s.updated_at().or(s.created_at());
@@ -726,7 +732,7 @@ impl Keystone {
         if self.presentation.current.customization.is_open()
             || self.presentation.project.is_err()
             || Self::has_session_tabs(&self.shown_composition(cx))
-            || self.state.read(cx).store().workspace().selected().is_none()
+            || self.selected(cx).is_none()
         {
             return None;
         }

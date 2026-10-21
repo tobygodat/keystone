@@ -352,9 +352,8 @@ impl AppState {
                 {
                     return Err("model must contain 1 to 256 bytes".into());
                 }
-                let selected = self.store.workspace().selected();
                 let id = self
-                    .create(provider, project, now_ms(), cx)
+                    .create_unselected(provider, project, now_ms(), cx)
                     .map_err(|e| e.to_string())?
                     .value;
                 self.orchestrator
@@ -363,9 +362,6 @@ impl AppState {
                     .records
                     .child(id, caller.session);
                 let setup = (|| -> Result<(), String> {
-                    if let Some(selected) = selected {
-                        self.select(selected, cx).map_err(|e| e.to_string())?;
-                    }
                     self.set_provider_account(id, provider, account, cx)
                         .map_err(|e| e.to_string())?;
                     self.set_approval_mode(id, selected_mode, cx)

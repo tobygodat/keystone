@@ -1,6 +1,6 @@
 # Save and Quit
 
-UC-11 keeps close-as-Quit. Ctrl+Q, the title-bar Close button, and compositor close all use the application save transaction. Closing the last window does not run conversations in the background; that is deferred to TOB-24.
+Ctrl+Q quits every window through the application save transaction, which saves every window's draft and placement in one write. Closing one of several windows closes only that window and leaves its work running (see [windows](windows.md)). Closing the last window uses the same save at once when no turn runs; while a turn runs without waiting for an answer, Keystone keeps running with no window and quits through the same save when it ends. The failure and retry journeys below use Ctrl+Q, or close the last window with nothing running.
 
 ## Native acceptance
 

@@ -375,7 +375,7 @@ impl Keystone {
     pub(crate) fn fitted_shown(&self, c: &Composition, cx: &App) -> Option<ViewId> {
         let first = first_displayed_conversation(c.root(), c);
         self.fitted_tab(c).or_else(|| {
-            let selected = self.state.read(cx).store().workspace().selected();
+            let selected = self.selected(cx);
             if self.presentation.current.customization.is_open()
                 || first.is_some_and(|view| self.view_session(view, cx) == selected)
             {
@@ -587,6 +587,13 @@ impl Keystone {
                             this.reveal_view(id, window, cx);
                             if this.shown_composition(cx).component(id) == Some(Component::Conversation) {
                                 this.activate(id, cx);
+                            }
+                        }))
+                        .on_mouse_down(gpui::MouseButton::Right, self.scoped_listener(cx, move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            if this.shown_composition(cx).component(id) == Some(Component::Conversation)
+                                && let Some(session) = this.view_session(id, cx)
+                            {
+                                this.open_context_menu(session, event.position, cx);
                             }
                         }))
                 })))
@@ -896,7 +903,16 @@ impl Keystone {
                 }),
             );
         if sessions {
+            let menu = views.to_vec();
             bar = bar
+                .on_menu(self.scoped_listener(
+                    cx,
+                    move |this, &(ix, position): &(usize, gpui::Point<Pixels>), _, cx| {
+                        if let Some(session) = this.view_session(menu[ix], cx) {
+                            this.open_context_menu(session, position, cx);
+                        }
+                    },
+                ))
                 .on_move(self.scoped_listener(
                     cx,
                     move |this, &(from, to): &(usize, usize), window, cx| {
@@ -1335,7 +1351,7 @@ impl Keystone {
                                                     if !this.presentation.matches(activation) {
                                                         return;
                                                     }
-                                                    let hidden_selection = this.state.read(cx).store().workspace().selected() == Some(key.session)
+                                                    let hidden_selection = this.selected(cx) == Some(key.session)
                                                         && this.presentation.current.arrangement.visible.contains(&key.view)
                                                         && this.presentation.current.views.keyboard_state(key).is_some_and(|keyboard| {
                                                             keyboard.action == Some(crate::view_state::CopyTarget::TextSelection)
@@ -1767,7 +1783,7 @@ impl Keystone {
             || (self.presentation.current.arrangement.sidebar_overlay
                 && self.presentation.current.arrangement.fitted
                 && self.arrangement_has_sidebar(cx))
-            || self.state.read(cx).store().workspace().selected() != Some(key.session)
+            || self.selected(cx) != Some(key.session)
             || !self
                 .presentation
                 .current

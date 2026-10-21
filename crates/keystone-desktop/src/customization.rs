@@ -82,7 +82,7 @@ impl Keystone {
                 .store()
                 .workspace()
                 .preferences()
-                .project_layout(p)
+                .layout_in(p, self.window_id)
         })
     }
     pub(crate) fn saved_composition(&self, cx: &App) -> Composition {
@@ -104,7 +104,7 @@ impl Keystone {
                     .store()
                     .workspace()
                     .preferences()
-                    .composition(p)
+                    .composition_in(p, self.window_id)
             },
         )
     }
@@ -178,11 +178,12 @@ impl Keystone {
                 }
                 Effect::Save(layout, commit) => {
                     let previous = self.saved_layout(cx).cloned();
+                    let window_id = self.window_id;
                     let result = match &self.presentation.project {
                         Ok(project) => self
                             .state
                             .update(cx, |state, cx| {
-                                state.set_project_layout(project, layout, cx)
+                                state.set_layout(project, window_id, layout, cx)
                             })
                             .map(|a| !matches!(a.durability, keystone_core::Durability::Synced))
                             .map_err(|e| e.to_string()),
@@ -205,7 +206,7 @@ impl Keystone {
                         .store()
                         .workspace()
                         .preferences()
-                        .project_layout(&source)
+                        .layout_in(&source, self.window_id)
                         .cloned();
                     let effects = self
                         .presentation
@@ -705,7 +706,7 @@ impl Keystone {
             .store()
             .workspace()
             .preferences()
-            .project_layouts()
+            .layouts_in(self.window_id)
             .filter(|(id, _)| self.presentation.project.as_ref().ok() != Some(id))
             .collect();
         let (title, description) = match chooser {

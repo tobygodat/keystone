@@ -5,6 +5,7 @@ use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
+use crate::windows::{CloseWindow, NewWindow, OpenInNewWindow};
 use crate::{
     ContinueRecovery, FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, OpenSettings,
     Quit, RenameSession, RetryRecovery, ToggleSettle, ToggleSidebar,
@@ -177,6 +178,27 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-\\"],
         context: Some(APP),
         action: || Box::new(SplitRight),
+    },
+    Command {
+        id: "new-window",
+        label: "New window",
+        keys: &["ctrl-alt-n"],
+        context: Some(APP),
+        action: || Box::new(NewWindow),
+    },
+    Command {
+        id: "close-window",
+        label: "Close window",
+        keys: &["ctrl-shift-w"],
+        context: Some(APP),
+        action: || Box::new(CloseWindow),
+    },
+    Command {
+        id: "open-in-new-window",
+        label: "Open session in new window",
+        keys: &["ctrl-alt-shift-n"],
+        context: Some(APP),
+        action: || Box::new(OpenInNewWindow),
     },
     Command {
         id: "transcript-previous-row",

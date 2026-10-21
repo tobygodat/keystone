@@ -7,8 +7,8 @@ use keystone_agent::recovery::{self, RecoveryBatch, Snapshot, TurnEvidence};
 use keystone_agent::{Catalog, Commands, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{
-    AccountId, AccountUsage, Applied, Composition, LimitWindow, ProjectId, SavedComposition,
-    SessionTabs, ViewId, WorkingDirectory,
+    AccountId, AccountUsage, Applied, Composition, LimitWindow, Placement, ProjectId,
+    SavedComposition, SessionTabs, ViewId, WindowId, WorkingDirectory,
 };
 use std::collections::BTreeMap;
 
@@ -60,6 +60,9 @@ pub(crate) struct AppState {
     wake: Wake,
     changes: RuntimeChanged,
     pub(crate) phase: Phase,
+    /// Set when the last window closed while a turn ran. Keystone then quits, saving
+    /// as Quit does, once no turn runs.
+    pub(crate) quit_when_idle: bool,
     pending: std::collections::VecDeque<PendingSave>,
     orchestrator: Option<orchestrator::Orchestrator>,
     /// Each session's current recovery request, from its check until its batch saves.
@@ -216,9 +219,12 @@ impl AppState {
         self.publish(cx);
     }
 
+    /// Saves every window's draft, placement and project in one write, then everything
+    /// still waiting to be saved. The one save path for Quit, however it was asked for.
     pub(crate) fn save(
         &mut self,
-        draft: Option<ComposerDraft>,
+        drafts: Vec<ComposerDraft>,
+        windows: Vec<(WindowId, Placement, Option<ProjectId>)>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         if self.phase == Phase::Exiting {
@@ -230,13 +236,13 @@ impl AppState {
             self.save_calls += 1;
         }
         let mut errors = Vec::new();
-        if let Some(draft) = draft {
-            match self.store.set_draft(draft.session, draft.text) {
-                Ok(_) => self.pending.retain(
-                    |update| !matches!(update, PendingSave::Draft(id, _) if *id == draft.session),
-                ),
-                Err(error) => errors.push(format!("Draft not saved. {error}")),
-            }
+        let sessions: Vec<u64> = drafts.iter().map(|d| d.session).collect();
+        let drafts = drafts.into_iter().map(|d| (d.session, d.text)).collect();
+        match self.store.save_for_quit(drafts, windows) {
+            Ok(_) => self.pending.retain(
+                |update| !matches!(update, PendingSave::Draft(id, _) if sessions.contains(id)),
+            ),
+            Err(error) => errors.push(format!("Draft not saved. {error}")),
         }
         let logs = self.flush_logs(cx);
         self.retry_updates();
@@ -572,9 +578,20 @@ impl AppState {
         result
     }
 
+    #[cfg(test)]
     pub(crate) fn set_project_layout(
         &mut self,
         project: &ProjectId,
+        layout: Option<SavedComposition>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        self.set_layout(project, WindowId::FIRST, layout, cx)
+    }
+
+    pub(crate) fn set_layout(
+        &mut self,
+        project: &ProjectId,
+        window: WindowId,
         layout: Option<SavedComposition>,
         cx: &mut Context<Self>,
     ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
@@ -582,7 +599,7 @@ impl AppState {
             return Err(std::io::Error::other("Keystone is exiting.").into());
         }
 
-        let result = self.store.set_project_layout(project, layout);
+        let result = self.store.set_layout_in(project, window, layout);
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -591,6 +608,7 @@ impl AppState {
     pub(crate) fn show(
         &mut self,
         project: &ProjectId,
+        window: WindowId,
         layout: Option<Composition>,
         tabs: SessionTabs,
         selected: Option<u64>,
@@ -600,7 +618,7 @@ impl AppState {
             return Err(std::io::Error::other("Keystone is exiting.").into());
         }
 
-        let result = self.store.show(project, layout, tabs, selected);
+        let result = self.store.show_in(project, window, layout, tabs, selected);
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -697,6 +715,7 @@ impl AppState {
 
     pub(crate) fn select(
         &mut self,
+        window: WindowId,
         id: u64,
         cx: &mut Context<Self>,
     ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
@@ -704,7 +723,7 @@ impl AppState {
             return Err(std::io::Error::other("Keystone is exiting.").into());
         }
 
-        let result = self.store.select(id);
+        let result = self.store.select_in(window, id);
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -730,6 +749,7 @@ impl AppState {
         result
     }
 
+    #[cfg(test)]
     pub(crate) fn create(
         &mut self,
         provider: Provider,
@@ -737,7 +757,7 @@ impl AppState {
         now: u64,
         cx: &mut Context<Self>,
     ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
-        self.create_showing(provider, directory, now, None, cx)
+        self.create_showing(provider, directory, now, WindowId::FIRST, None, cx)
     }
 
     /// Creates a session, saving `show` with it in the same write. See
@@ -747,6 +767,7 @@ impl AppState {
         provider: Provider,
         directory: &WorkingDirectory,
         now: u64,
+        window: WindowId,
         show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
         cx: &mut Context<Self>,
     ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
@@ -754,10 +775,110 @@ impl AppState {
             return Err(std::io::Error::other("Keystone is exiting.").into());
         }
 
-        let result = self.store.create_showing(provider, directory, now, show);
+        let result = self
+            .store
+            .create_showing(provider, directory, now, window, show);
         self.changes.sidebar = true;
         self.publish(cx);
         result
+    }
+
+    /// Creates a session an agent starts, selected in no window.
+    pub(crate) fn create_unselected(
+        &mut self,
+        provider: Provider,
+        directory: &WorkingDirectory,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self.store.create_unselected(provider, directory, now);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Saves a new window showing `selected`, or nothing. See
+    /// [`keystone_core::Store::open_window`].
+    pub(crate) fn open_window(
+        &mut self,
+        project: Option<&ProjectId>,
+        selected: Option<u64>,
+        placement: Option<Placement>,
+    ) -> Result<Applied<WindowId>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        self.store.open_window(project, selected, placement)
+    }
+
+    pub(crate) fn set_window_project(
+        &mut self,
+        window: WindowId,
+        project: &ProjectId,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        self.store.set_window_project(window, project)
+    }
+
+    /// Forgets a closed window, keeping its sessions and their turns as they are. See
+    /// [`keystone_core::Store::close_window`].
+    pub(crate) fn close_window(
+        &mut self,
+        window: WindowId,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<Option<WindowId>>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        let result = self.store.close_window(window);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    pub(crate) fn set_placement(
+        &mut self,
+        window: WindowId,
+        placement: Placement,
+        project: Option<&ProjectId>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        self.store.set_placement(window, placement, project)
+    }
+
+    /// Whether any turn runs, so Keystone keeps running without a window until it ends.
+    pub(crate) fn turn_running(&self) -> bool {
+        self.conversations.values().any(|c| c.running)
+    }
+
+    /// Whether a running turn waits for the user to answer an approval request.
+    pub(crate) fn awaiting_answer(&self) -> bool {
+        self.conversations
+            .values()
+            .any(|c| c.running && c.awaiting_approval())
+    }
+
+    /// While no window is open: quits once no turn runs, and opens the windows again
+    /// when a turn asks for an approval, so the user can answer it.
+    fn quit_if_idle(&mut self, cx: &mut Context<Self>) {
+        if !self.quit_when_idle || self.phase != Phase::Running {
+            return;
+        }
+        if !self.turn_running() {
+            self.quit_when_idle = false;
+            cx.defer(request_quit);
+        } else if self.awaiting_answer() {
+            self.quit_when_idle = false;
+            let state = cx.entity();
+            cx.defer(move |cx| windows::reopen(state, cx));
+        }
     }
 
     pub(crate) fn new(store: Store, cx: &mut Context<Self>) -> Self {
@@ -795,6 +916,7 @@ impl AppState {
             wake,
             changes: RuntimeChanged::default(),
             phase: Phase::Running,
+            quit_when_idle: false,
             pending: Default::default(),
             orchestrator: None,
             recoveries: HashMap::new(),
@@ -838,16 +960,11 @@ impl AppState {
     pub(crate) fn publish(&mut self, cx: &mut Context<Self>) {
         cx.emit(std::mem::take(&mut self.changes));
         cx.notify();
+        self.quit_if_idle(cx);
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.changes.sidebar = true;
         self.publish(cx);
-    }
-
-    pub(crate) fn selected_session(&self) -> Option<&keystone_core::Session> {
-        let workspace = self.store.workspace();
-        let id = workspace.selected()?;
-        workspace.sessions().iter().find(|s| s.id() == id)
     }
 
     pub(crate) fn session(&self, id: u64) -> Option<&keystone_core::Session> {

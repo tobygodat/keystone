@@ -200,7 +200,7 @@ class WheelTest(unittest.TestCase):
     def test_named_wheel_uses_live_center_and_signed_axis_distances(self):
         self.assertEqual(self.server.handle('wheel', {'id': 'conversation', 'vertical': -3,
                                                      'horizontal': 2}), ({'ok': True}, None))
-        self.run.find.assert_called_once_with('conversation')
+        self.run.find.assert_called_once_with('conversation', None)
         self.run.call.assert_called_once_with('input', {'actions': [
             {'action': 'scroll', 'x': 500, 'y': 300, 'scroll_x': 30, 'scroll_y': -45}]})
 
@@ -236,6 +236,70 @@ class WheelTest(unittest.TestCase):
         self.assertEqual(driver.app_env(env), env)
         with self.assertRaises(ValueError):
             driver.app_env({'KEYSTONE_STATE_PATH': '/not-owned-by-run'})
+
+
+class WindowsTest(unittest.TestCase):
+    def frame(self, path, windows):
+        path.write_text(json.dumps({'pid': 7, 'revision': 3, 'windows': windows}))
+
+    def run_for(self, compositor):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        run = SimpleNamespace(geometry=Path(temporary.name) / 'elements.json', app_pids=[7],
+                              record=Mock(),
+                              call=Mock(return_value={'structuredContent': {'windows': compositor}}))
+        run.window_rects = lambda pid: driver.Run.window_rects(run, pid)
+        run.elements = lambda window=None: driver.Run.elements(run, window)
+        return run
+
+    def element(self, name, x):
+        bounds = {'x': x, 'y': 10, 'w': 20, 'h': 10}
+        return {'id': name, 'bounds': bounds, 'visible': bounds}
+
+    def test_elements_of_each_window_are_placed_by_its_title(self):
+        compositor = [{'pid': 7, 'title': 'Keystone', 'rect': {'x': 0, 'y': 0, 'width': 800, 'height': 600}},
+                      {'pid': 7, 'title': 'Keystone 2', 'rect': {'x': 900, 'y': 50, 'width': 800, 'height': 600}},
+                      {'pid': 8, 'title': 'Keystone 2', 'rect': {'x': 5, 'y': 5, 'width': 1, 'height': 1}}]
+        run = self.run_for(compositor)
+        viewport = {'w': 800, 'h': 600}
+        self.frame(run.geometry, [
+            {'title': 'Keystone', 'viewport': viewport, 'elements': [self.element('composer', 100)]},
+            {'title': 'Keystone 2', 'viewport': viewport, 'elements': [self.element('composer', 100),
+                                                                       self.element('session-1', 0)]}])
+        listed = driver.Run.elements(run)
+        self.assertEqual(listed['windows'], ['Keystone', 'Keystone 2'])
+        self.assertEqual([(e['id'], e['window'], e['center']['x']) for e in listed['elements']],
+                         [('composer', 'Keystone', 110), ('composer', 'Keystone 2', 1010),
+                          ('session-1', 'Keystone 2', 910)])
+        with self.assertRaisesRegex(RuntimeError, 'pass window'):
+            driver.Run.find(run, 'composer')
+        self.assertEqual(driver.Run.find(run, 'composer', 'Keystone 2')['center'], {'x': 1010, 'y': 65})
+        self.assertEqual(driver.Run.find(run, 'session-1')['window'], 'Keystone 2')
+        self.assertEqual(driver.Run.elements(run, 'Keystone 3')['elements'], [],
+                         'a closed window shows nothing')
+        self.frame(run.geometry, [
+            {'title': 'Keystone', 'viewport': viewport, 'elements': [self.element('composer', 100)]}])
+        with self.assertRaises(driver.NotReady):
+            driver.Run.elements(run, 'Keystone 2')
+
+    def test_an_app_with_no_window_open_shows_no_elements(self):
+        run = self.run_for([{'pid': 8, 'title': 'Keystone',
+                             'rect': {'x': 0, 'y': 0, 'width': 800, 'height': 600}}])
+        self.frame(run.geometry, [{'title': 'Keystone', 'viewport': {'w': 800, 'h': 600},
+                                   'elements': [self.element('composer', 100)]}])
+        self.assertEqual(driver.Run.elements(run)['elements'], [])
+        self.assertEqual(driver.Run.wait_for(run, 'composer', False, 100),
+                         {'id': 'composer', 'present': False})
+        self.frame(run.geometry, [])
+        self.assertEqual(driver.Run.elements(run, 'Keystone')['elements'], [])
+
+    def test_a_window_still_resizing_is_not_ready(self):
+        run = self.run_for([{'pid': 7, 'title': 'Keystone',
+                             'rect': {'x': 0, 'y': 0, 'width': 800, 'height': 600}}])
+        self.frame(run.geometry, [{'title': 'Keystone', 'viewport': {'w': 400, 'h': 600},
+                                   'elements': []}])
+        with self.assertRaises(driver.NotReady):
+            driver.Run.elements(run)
 
 
 if __name__ == '__main__':

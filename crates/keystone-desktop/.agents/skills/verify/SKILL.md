@@ -49,6 +49,7 @@ Prefer names and waits over coordinates and sleeps:
 - `wait_for` with `{"id":"new-codex"}` waits until the element is visible. Add `"present":false` to wait for it to go.
 - `input` takes driver actions: `{"actions":[{"action":"keypress","keys":["ctrl","l"]}]}`, `{"action":"type","text":"Verification draft"}`, and `{"action":"wait","duration_ms":500}`.
 - `wheel` takes a fresh named target and signed whole notch counts: `{"id":"conversation","vertical":-3}` scrolls upward three notches. Positive vertical scrolls down; positive horizontal scrolls right. It uses the same upstream `input` path as raw `scroll`, whose units remain axis distances (15 per notch). Read actual row/pixel movement, not only a successful input response. See [wheel and maximize](features/wheel-and-maximize.md) for the native acceptance journey.
+- With several windows, every element names its `window` title, and `elements`, `click`, `wait_for` and `wheel` take `window` to choose one when a name repeats. See [windows](features/windows.md).
 - `screenshot` returns the PNG and saves it as evidence.
 - `workspace` reads saved SQLite workspace and session projections in one read-only transaction. `snapshot` uses SQLite's backup API, including committed WAL contents, and preserves both the database and a matching JSON projection in the evidence directory. Its `path` remains the JSON export; `database_path` names the self-contained backup.
 - `call` reaches any upstream tool, such as `{"tool":"windows_list"}`.

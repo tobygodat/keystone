@@ -321,66 +321,85 @@ class Run:
         self.record('doctor', result)
         return result
 
-    def window_rect(self, pid):
+    def window_rects(self, pid):
+        """The compositor's windows for `pid`, as {title, rect}. None while the app runs
+        with no window open."""
         windows = self.call('windows_list').get('structuredContent', {})
-        for window in windows.get('windows', windows if isinstance(windows, list) else []):
-            if window.get('pid') == pid:
-                return window['rect']
-        raise RuntimeError(f'No window for app PID {pid}: {json.dumps(windows)}')
+        return [w for w in windows.get('windows', windows if isinstance(windows, list) else [])
+                if w.get('pid') == pid]
 
-    def elements(self):
-        """Named elements in desktop pixels, read from the live app's latest frame."""
+    def elements(self, window=None):
+        """Named elements in desktop pixels, read from the live app's latest frame of each
+        of its windows. Each element names its window's title. `window` keeps one title.
+        A window the compositor does not list shows no elements."""
         if not self.geometry.exists():
             raise NotReady('The app has not written element geometry yet')
         frame = json.loads(self.geometry.read_text())
         if frame['pid'] not in self.app_pids:
             raise NotReady(f'Geometry is from PID {frame["pid"]}, not a launched app')
-        rect = self.window_rect(frame['pid'])
-        ox, oy = rect['x'], rect['y']
-        # The first frame can predate the compositor's configure, and its
-        # layout then belongs to another size. Clicking it misses. The
-        # tolerance covers the window's own inset, 1 px a side under Sway.
-        viewport = frame.get('viewport')
-        if viewport and (abs(viewport['w'] - rect['width']) > 8
-                         or abs(viewport['h'] - rect['height']) > 8):
-            self.record('elements_not_ready', {'revision': frame['revision'],
-                                               'viewport': viewport, 'window': rect})
-            raise NotReady(f'Frame is {viewport["w"]}x{viewport["h"]}, '
-                           f'window is {rect["width"]}x{rect["height"]}')
-
-        def place(b):
-            return None if b is None else {'x': round(ox + b['x']), 'y': round(oy + b['y']),
-                                           'w': round(b['w']), 'h': round(b['h'])}
-
+        rects = self.window_rects(frame['pid'])
+        frames = frame['windows'] if 'windows' in frame else [{'title': None, **frame}]
+        if not rects:
+            frames = []
         elements = []
-        for element in frame['elements']:
-            visible = place(element['visible'])
-            elements.append({'id': element['id'], 'bounds': place(element['bounds']),
-                             'visible': visible,
-                             'center': None if visible is None else
-                             {'x': visible['x'] + visible['w'] // 2,
-                              'y': visible['y'] + visible['h'] // 2}})
-        result = {'revision': frame['revision'], 'pid': frame['pid'], 'elements': elements}
+        for drawn in frames:
+            title = drawn.get('title')
+            if window is not None and title != window:
+                continue
+            matches = [w for w in rects if title and w.get('title') == title]
+            if not matches and len(rects) == 1 and len(frames) == 1:
+                matches = rects
+            if len(matches) != 1:
+                raise NotReady(f'No single compositor window titled {title!r}')
+            rect = matches[0]['rect']
+            ox, oy = rect['x'], rect['y']
+            # The first frame can predate the compositor's configure, and its
+            # layout then belongs to another size. Clicking it misses. The
+            # tolerance covers the window's own inset, 1 px a side under Sway.
+            viewport = drawn.get('viewport')
+            if viewport and (abs(viewport['w'] - rect['width']) > 8
+                             or abs(viewport['h'] - rect['height']) > 8):
+                self.record('elements_not_ready', {'revision': frame['revision'], 'window': title,
+                                                   'viewport': viewport, 'rect': rect})
+                raise NotReady(f'Frame of {title!r} is {viewport["w"]}x{viewport["h"]}, '
+                               f'window is {rect["width"]}x{rect["height"]}')
+
+            def place(b):
+                return None if b is None else {'x': round(ox + b['x']), 'y': round(oy + b['y']),
+                                               'w': round(b['w']), 'h': round(b['h'])}
+
+            for element in drawn['elements']:
+                visible = place(element['visible'])
+                elements.append({'id': element['id'], 'window': title,
+                                 'bounds': place(element['bounds']), 'visible': visible,
+                                 'center': None if visible is None else
+                                 {'x': visible['x'] + visible['w'] // 2,
+                                  'y': visible['y'] + visible['h'] // 2}})
+        if (window is not None and not any(d.get('title') == window for d in frames)
+                and any(r.get('title') == window for r in rects)):
+            raise NotReady(f'No frame from a window titled {window!r}')
+        result = {'revision': frame['revision'], 'pid': frame['pid'],
+                  'windows': [d.get('title') for d in frames], 'elements': elements}
         self.record('elements', result)
         return result
 
-    def find(self, element_id):
-        matches = [e for e in self.elements()['elements'] if e['id'] == element_id]
+    def find(self, element_id, window=None):
+        matches = [e for e in self.elements(window)['elements'] if e['id'] == element_id]
         if not matches:
             raise RuntimeError(f'No element named {element_id!r} in the current frame')
         if len(matches) > 1:
-            raise RuntimeError(f'{len(matches)} elements are named {element_id!r}')
+            raise RuntimeError(f'{len(matches)} elements are named {element_id!r}; pass window')
         if matches[0]['center'] is None:
             raise RuntimeError(f'{element_id!r} is laid out but fully clipped')
         return matches[0]
 
-    def wait_for(self, element_id, present, timeout_ms):
+    def wait_for(self, element_id, present, timeout_ms, window=None):
         deadline = time.monotonic() + timeout_ms / 1000
         while True:
             # Absence counts only from an observed frame, never from a failed read.
             try:
                 found = any(e['id'] == element_id and e['visible']
-                            for e in self.elements()['elements'])
+                            for e in self.elements(window)['elements'])
             except NotReady as error:
                 found, unready = None, error
             if found == present:
@@ -480,6 +499,8 @@ def schema(properties=None, required=()):
 
 
 ID = {'type': 'string', 'description': 'Element name, as listed by `elements`'}
+WINDOW = {'type': 'string', 'description': 'Window title, such as "Keystone 2", when several '
+          'windows show an element of that name'}
 TOOLS = [
     ('start', 'Build nothing; launch the --binary build (default target/debug/keystone-desktop) on a new '
      'private desktop with an '
@@ -494,10 +515,11 @@ TOOLS = [
      schema()),
     ('screenshot', 'Capture the whole private desktop as a PNG and save it as evidence.', schema()),
     ('elements', 'List named elements from the app\'s latest frame in desktop pixels. `visible` is the '
-     'unclipped part; menus that overlap an element are not subtracted. Unnamed controls need a screenshot.',
-     schema()),
+     'unclipped part; menus that overlap an element are not subtracted. Unnamed controls need a screenshot. '
+     'Each element names its window; pass window to list one.',
+     schema({'window': WINDOW})),
     ('click', 'Left-click the center of a named element, or explicit desktop pixels.',
-     schema({'id': ID, 'x': {'type': 'integer'}, 'y': {'type': 'integer'},
+     schema({'id': ID, 'window': WINDOW, 'x': {'type': 'integer'}, 'y': {'type': 'integer'},
              'button': {'type': 'string', 'enum': ['left', 'right', 'middle'], 'default': 'left'},
              'count': {'type': 'integer', 'default': 1}})),
     ('input', 'Pass ordered actions to the driver: keypress {keys}, type {text}, wait {duration_ms}, '
@@ -506,11 +528,11 @@ TOOLS = [
      schema({'actions': {'type': 'array', 'items': {'type': 'object'}}}, ['actions'])),
     ('wheel', 'Scroll a named element or desktop pixels by signed whole wheel notches. '
      'Positive vertical scrolls down; positive horizontal scrolls right. Requires the wheel driver patch.',
-     schema({'id': ID, 'x': {'type': 'integer'}, 'y': {'type': 'integer'},
+     schema({'id': ID, 'window': WINDOW, 'x': {'type': 'integer'}, 'y': {'type': 'integer'},
              'horizontal': {'type': 'integer', 'minimum': -100, 'maximum': 100, 'default': 0},
              'vertical': {'type': 'integer', 'minimum': -100, 'maximum': 100, 'default': 0}})),
     ('wait_for', 'Wait until a named element is visible, or gone with present=false.',
-     schema({'id': ID, 'present': {'type': 'boolean', 'default': True},
+     schema({'id': ID, 'window': WINDOW, 'present': {'type': 'boolean', 'default': True},
              'timeout_ms': {'type': 'integer', 'default': 5000}}, ['id'])),
     ('workspace', 'Read saved SQLite workspace projections in one read-only transaction.', schema()),
     ('snapshot', 'Back up SQLite including WAL commits and export its workspace JSON into evidence.',
@@ -555,10 +577,10 @@ class Server:
             saved = next(c for c in result['_evidence']['content'] if c.get('type') == 'image')
             return {**result.get('structuredContent', {}), 'path': saved['path']}, image
         if name == 'elements':
-            return run.elements(), None
+            return run.elements(arguments.get('window')), None
         if name == 'click':
             if 'id' in arguments:
-                target = run.find(arguments['id'])['center']
+                target = run.find(arguments['id'], arguments.get('window'))['center']
             elif 'x' in arguments and 'y' in arguments:
                 target = {'x': arguments['x'], 'y': arguments['y']}
             else:
@@ -575,7 +597,7 @@ class Server:
                    for value in (horizontal, vertical)):
                 raise ValueError('Wheel notches must be integers within +/-100')
             if 'id' in arguments:
-                target = run.find(arguments['id'])['center']
+                target = run.find(arguments['id'], arguments.get('window'))['center']
             elif 'x' in arguments and 'y' in arguments:
                 target = {'x': arguments['x'], 'y': arguments['y']}
             else:
@@ -585,7 +607,7 @@ class Server:
             return run.call('input', {'actions': [action]}).get('structuredContent'), None
         if name == 'wait_for':
             return run.wait_for(arguments['id'], arguments.get('present', True),
-                                arguments.get('timeout_ms', 5000)), None
+                                arguments.get('timeout_ms', 5000), arguments.get('window')), None
         if name == 'workspace':
             result = read_workspace(run.state)
             run.record('workspace', result)

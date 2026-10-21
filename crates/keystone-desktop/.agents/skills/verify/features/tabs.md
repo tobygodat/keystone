@@ -1,6 +1,6 @@
 # Tabs and split panes
 
-Sessions open as tabs, and the window splits into panes, each with its own tab strip. One conversation view at a time is active: the one the user last clicked, typed in or moved to by keyboard. It shows the selected session, which the composer, the top bar and the session shortcuts act on. The layout, which session each tab holds and the selection are saved together in SQLite in one write, so a relaunch, or a crash, restores them as one.
+Sessions open as tabs, and each window splits into panes, its own tabs and selection apart from other windows ([windows](windows.md)), each with its own tab strip. One conversation view at a time is active: the one the user last clicked, typed in or moved to by keyboard. It shows the selected session, which the composer, the top bar and the session shortcuts act on. The layout, which session each tab holds and the selection are saved together in SQLite in one write, so a relaunch, or a crash, restores them as one.
 
 ## Sub-features
 

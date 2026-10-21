@@ -257,7 +257,7 @@ fn workspace_failure_keeps_settings_window_and_live_providers_then_retries(
 }
 
 #[gpui::test]
-fn failed_nonselected_log_barrier_vetoes_close_and_retry_needs_no_send(cx: &mut TestAppContext) {
+fn failed_nonselected_log_barrier_vetoes_quit_and_retry_needs_no_send(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (view, state, cx) = open(dir.path(), cx);
     state.update(cx, |s, cx| {
@@ -272,13 +272,13 @@ fn failed_nonselected_log_barrier_vetoes_close_and_retry_needs_no_send(cx: &mut 
         s.publish(cx);
     });
     draft(&view, cx, "close draft");
-    assert!(!cx.simulate_close());
+    cx.update(|_, cx| request_quit(cx));
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Running);
     assert!(cx.debug_bounds("shutdown-error").is_some());
     assert!(state.read_with(cx, |s, _| s.conversations()[&2].save_error.is_some()));
     drop(writer);
-    assert!(!cx.simulate_close());
+    cx.update(|_, cx| request_quit(cx));
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Exiting);
     let entries = keystone_agent::log::read(&sessions, 2).unwrap();

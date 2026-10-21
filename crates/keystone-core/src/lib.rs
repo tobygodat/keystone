@@ -19,6 +19,7 @@ mod project;
 mod session_context;
 mod tabs;
 mod usage;
+mod windows;
 
 pub use account::{Account, AccountId, expand_home, homes_overlap, lexical};
 pub use composition::{
@@ -36,6 +37,8 @@ pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory};
 use tabs::SavedTabs;
 pub use tabs::SessionTabs;
 pub use usage::{AccountUsage, LimitWindow, Reading};
+use windows::SavedWindows;
+pub use windows::{Placement, WindowId};
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
@@ -398,6 +401,8 @@ pub struct Preferences {
     project_layouts: ProjectLayouts,
     #[serde(skip_serializing_if = "ProjectMap::is_empty")]
     project_tabs: ProjectMap<SavedTabs>,
+    #[serde(skip_serializing_if = "SavedWindows::is_empty")]
+    windows: SavedWindows,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -412,51 +417,28 @@ impl Preferences {
     }
 
     pub fn project_layout(&self, project: &ProjectId) -> Option<&SavedComposition> {
-        self.project_layouts.get(project)
+        self.layout_in(project, WindowId::FIRST)
     }
 
     pub fn project_layouts(&self) -> impl Iterator<Item = (ProjectId, &SavedComposition)> {
-        self.project_layouts.iter()
+        self.layouts_in(WindowId::FIRST)
     }
 
-    /// The composition to draw for `project`. Until it saves its own, a project shows
-    /// the sidebar layout every project shared before compositions existed.
+    /// The composition the first window draws for `project`. Until it saves its own,
+    /// a project shows the sidebar layout every project shared before compositions
+    /// existed.
     pub fn composition(&self, project: &ProjectId) -> Composition {
-        match self.project_layouts.get(project) {
-            Some(saved) => saved.shown(),
-            None => Composition::from_sidebar(self.sidebar_layout.shown()),
-        }
+        self.composition_in(project, WindowId::FIRST)
     }
 
-    /// Drops `project`'s tabs for views its layout no longer has, so a view id used
-    /// again never inherits a session.
-    fn forget_closed_tabs(&mut self, project: &ProjectId) {
-        let Some(SavedTabs::Supported(tabs)) = self.project_tabs.get(project) else {
-            return;
-        };
-        let layout = self.composition(project);
-        let mut tabs = tabs.clone();
-        tabs.retain(|view, _| layout.component(view) == Some(Component::Conversation));
-        let _ = self.project_tabs.set(
-            project,
-            (!tabs.is_empty()).then_some(SavedTabs::Supported(tabs)),
-        );
-    }
-
-    /// The session `view` of `project` holds, without copying the project's tabs.
+    /// The session `view` of `project` holds in the first window.
     pub fn held(&self, project: &ProjectId, view: ViewId) -> Option<u64> {
-        match self.project_tabs.get(project)? {
-            SavedTabs::Supported(tabs) => tabs.get(view),
-            SavedTabs::Unsupported(_) => None,
-        }
+        self.held_in(project, WindowId::FIRST, view)
     }
 
-    /// Which session each of `project`'s conversation views holds.
+    /// Which session each of `project`'s conversation views holds in the first window.
     pub fn session_tabs(&self, project: &ProjectId) -> SessionTabs {
-        self.project_tabs
-            .get(project)
-            .map(SavedTabs::shown)
-            .unwrap_or_default()
+        self.session_tabs_in(project, WindowId::FIRST)
     }
 }
 
@@ -576,18 +558,40 @@ impl Store {
         directory: &WorkingDirectory,
         now: u64,
     ) -> StoreResult<Applied<u64>> {
-        self.create_showing(provider, directory, now, None)
+        self.create_showing(provider, directory, now, WindowId::FIRST, None)
     }
 
-    /// Creates a session as [`Store::create`] does and, given a project's layout and
-    /// tabs, saves them with `view` holding the new session, in the same write. Saved
-    /// layouts or tabs this build cannot change are left as they are, and the session is
-    /// still created.
+    /// Creates a session without selecting it in any window, for work an agent starts.
+    pub fn create_unselected(
+        &mut self,
+        provider: Provider,
+        directory: &WorkingDirectory,
+        now: u64,
+    ) -> StoreResult<Applied<u64>> {
+        self.create_session(provider, directory, now, None, None)
+    }
+
+    /// Creates a session and selects it in `window`. Given a project's layout and
+    /// tabs, saves them for `window` with `view` holding the new session, in the same
+    /// write. Saved layouts or tabs this build cannot change are left as they are, and
+    /// the session is still created.
     pub fn create_showing(
         &mut self,
         provider: Provider,
         directory: &WorkingDirectory,
         now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
+        self.create_session(provider, directory, now, Some(window), show)
+    }
+
+    fn create_session(
+        &mut self,
+        provider: Provider,
+        directory: &WorkingDirectory,
+        now: u64,
+        window: Option<WindowId>,
         show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
     ) -> StoreResult<Applied<u64>> {
         let id = self.next_id;
@@ -615,23 +619,22 @@ impl Store {
             account: None,
             unknown: Map::new(),
         });
-        next.selected = Some(id);
-        if let Some((project, layout, mut tabs, view)) = show {
-            let ids: std::collections::HashSet<u64> = next.sessions.iter().map(|s| s.id).collect();
-            tabs.retain(|_, session| ids.contains(&session));
-            tabs.hold(view, id);
-            let mut shown = next.preferences.clone();
-            if shown
-                .project_layouts
-                .set(project, Some(layout.into()))
-                .and_then(|_| {
-                    shown
-                        .project_tabs
-                        .set(project, Some(SavedTabs::Supported(tabs)))
-                })
-                .is_ok()
-            {
-                next.preferences = shown;
+        let sessions: HashSet<u64> = next.sessions.iter().map(|s| s.id).collect();
+        if let Some(window) = window {
+            let shown = next.shown_mut(window)?;
+            *shown.selected = Some(id);
+            if let Some((project, layout, mut tabs, view)) = show {
+                tabs.retain(|_, session| sessions.contains(&session));
+                tabs.hold(view, id);
+                let (mut layouts, mut saved_tabs) = (shown.layouts.clone(), shown.tabs.clone());
+                if layouts
+                    .set(project, Some(layout.into()))
+                    .and_then(|_| saved_tabs.set(project, Some(SavedTabs::Supported(tabs))))
+                    .is_ok()
+                {
+                    *shown.layouts = layouts;
+                    *shown.tabs = saved_tabs;
+                }
             }
         }
         let applied = self.commit(next, next_id)?;
@@ -667,6 +670,11 @@ impl Store {
     }
 
     pub fn select(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        self.select_in(WindowId::FIRST, id)
+    }
+
+    /// Selects `id` in `window`, leaving every other window's selection as it is.
+    pub fn select_in(&mut self, window: WindowId, id: u64) -> StoreResult<Applied<()>> {
         if !self
             .workspace
             .sessions
@@ -675,11 +683,14 @@ impl Store {
         {
             return Err(invalid(format!("unknown session ID {id}")).into());
         }
-        if self.workspace.selected == Some(id) {
+        if self.workspace.selected_in(window) == Some(id) {
             return Ok(self.finish_sync());
         }
         let mut next = self.workspace.clone();
-        next.selected = Some(id);
+        *next.shown_mut(window)?.selected = Some(id);
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
         self.commit(next, self.next_id)
     }
 
@@ -758,12 +769,26 @@ impl Store {
         project: &ProjectId,
         layout: Option<SavedComposition>,
     ) -> StoreResult<Applied<()>> {
-        let mut layouts = self.workspace.preferences.project_layouts.clone();
-        layouts.set(project, layout)?;
-        self.update_preferences(|preferences| {
-            preferences.project_layouts = layouts;
-            preferences.forget_closed_tabs(project);
-        })
+        self.set_layout_in(project, WindowId::FIRST, layout)
+    }
+
+    /// Saves exactly `layout` for `project` in `window` alone, as
+    /// [`Store::set_project_layout`] does for the first window.
+    pub fn set_layout_in(
+        &mut self,
+        project: &ProjectId,
+        window: WindowId,
+        layout: Option<SavedComposition>,
+    ) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        let sidebar = Composition::from_sidebar(next.preferences.sidebar_layout.shown());
+        let mut shown = next.shown_mut(window)?;
+        shown.layouts.set(project, layout)?;
+        shown.forget_closed_tabs(project, &sidebar);
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
     }
 
     /// Saves what `project`'s window shows in one write, so a crash keeps all of it or
@@ -774,6 +799,19 @@ impl Store {
         &mut self,
         project: &ProjectId,
         layout: Option<Composition>,
+        tabs: SessionTabs,
+        selected: Option<u64>,
+    ) -> StoreResult<Applied<()>> {
+        self.show_in(project, WindowId::FIRST, layout, tabs, selected)
+    }
+
+    /// Saves what `window` shows of `project` in one write, as [`Store::show`] does for
+    /// the first window. Other windows are left as they are.
+    pub fn show_in(
+        &mut self,
+        project: &ProjectId,
+        window: WindowId,
+        layout: Option<Composition>,
         mut tabs: SessionTabs,
         selected: Option<u64>,
     ) -> StoreResult<Applied<()>> {
@@ -783,22 +821,18 @@ impl Store {
         }
         tabs.retain(|_, session| exists(session));
         let mut next = self.workspace.clone();
+        let shown = next.shown_mut(window)?;
         if let Some(layout) = layout {
-            next.preferences
-                .project_layouts
-                .set(project, Some(layout.into()))?;
+            shown.layouts.set(project, Some(layout.into()))?;
         }
-        let unreadable = matches!(
-            next.preferences.project_tabs.get(project),
-            Some(SavedTabs::Unsupported(_))
-        );
+        let unreadable = matches!(shown.tabs.get(project), Some(SavedTabs::Unsupported(_)));
         if !(unreadable && tabs.is_empty()) {
-            next.preferences.project_tabs.set(
+            shown.tabs.set(
                 project,
                 (!tabs.is_empty()).then_some(SavedTabs::Supported(tabs)),
             )?;
         }
-        next.selected = selected;
+        *shown.selected = selected;
         if next == self.workspace {
             return Ok(self.finish_sync());
         }
@@ -2230,6 +2264,7 @@ mod tests {
                 Provider::Claude,
                 &working_directory(),
                 2,
+                WindowId::FIRST,
                 Some((&project, layout.clone(), tabs, ViewId(3))),
             )
             .unwrap()

@@ -21,14 +21,14 @@ mod transcript_keyboard;
 mod usage;
 mod view_state;
 mod widget;
+mod windows;
 use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
-    Anchor, AnyElement, AnyView, App, AvailableSpace, BackgroundExecutor, Bounds, BoxShadow,
-    Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, ListOffset, MouseButton,
+    Anchor, AnyElement, AnyView, App, AvailableSpace, BackgroundExecutor, BoxShadow, Context,
+    Entity, FocusHandle, Focusable, FontWeight, IntoElement, ListOffset, MouseButton,
     MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle, StyleRefinement, Subscription,
-    WeakEntity, Window, WindowBounds, WindowOptions, canvas, div, list, point, prelude::*, px,
-    size,
+    WeakEntity, Window, WindowBounds, canvas, div, list, point, prelude::*, px, size,
 };
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{
@@ -179,7 +179,8 @@ struct FolderWarning {
 
 struct DesktopApp {
     state: Entity<AppState>,
-    root: Option<WeakEntity<Keystone>>,
+    /// Every open Keystone window, in the order they opened.
+    windows: Vec<WeakEntity<Keystone>>,
 }
 
 impl gpui::Global for DesktopApp {}
@@ -189,18 +190,127 @@ fn install_app_state(store: Store, cx: &mut App) -> Entity<AppState> {
     cx.set_quit_mode(gpui::QuitMode::Explicit);
     cx.set_global(DesktopApp {
         state: state.clone(),
-        root: None,
+        windows: Vec::new(),
     });
     cx.on_action(|_: &Quit, cx| request_quit(cx));
     state
 }
 
 fn register_window(root: WeakEntity<Keystone>, window: &Window, cx: &mut App) {
-    cx.global_mut::<DesktopApp>().root = Some(root);
-    window.on_window_should_close(cx, |_, cx| {
+    cx.global_mut::<DesktopApp>().windows.push(root.clone());
+    window.on_window_should_close(cx, move |window, cx| close_window(&root, window, cx));
+}
+
+/// The open Keystone windows, without any that closed since.
+fn open_windows(cx: &App) -> Vec<Entity<Keystone>> {
+    cx.try_global::<DesktopApp>()
+        .map(|app| app.windows.iter().filter_map(WeakEntity::upgrade).collect())
+        .unwrap_or_default()
+}
+
+/// Where `window` is and how big, to save and to restore.
+fn placement(window: &Window) -> keystone_core::Placement {
+    let (bounds, maximized) = match window.window_bounds() {
+        WindowBounds::Windowed(bounds) => (bounds, false),
+        WindowBounds::Maximized(bounds) | WindowBounds::Fullscreen(bounds) => (bounds, true),
+    };
+    keystone_core::Placement {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+        maximized,
+    }
+}
+
+/// Closes one window and leaves its sessions and their turns running. Another window
+/// keeps the closed one's draft. Closing the last window quits as Quit does, at once
+/// when no turn runs, else once the last turn ends, and keeps the window saved so the
+/// next launch opens it. Returns whether the window may close now.
+fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) -> bool {
+    let Some(app) = cx.try_global::<DesktopApp>() else {
+        return true;
+    };
+    let state = app.state.clone();
+    if state.read(cx).phase != app_state::Phase::Running {
+        return false;
+    }
+    let Some(view) = root.upgrade() else {
+        return true;
+    };
+    let others = open_windows(cx)
+        .into_iter()
+        .filter(|other| other != &view)
+        .count();
+    if others == 0 && state.read(cx).awaiting_answer() {
+        view.update(cx, |view, cx| {
+            view.error = Some(
+                "Answer the approval request before closing the last window, or Quit to stop the turn."
+                    .into(),
+            );
+            view.refresh(cx);
+        });
+        return false;
+    }
+    if others == 0 && !state.read(cx).turn_running() {
         request_quit(cx);
-        false
+        return false;
+    }
+    let id = view.read(cx).window_id;
+    let placement = placement(window);
+    let saved = view.update(cx, |view, cx| {
+        view.draft_save_task = None;
+        if !view.save_draft(cx) {
+            return Err(None);
+        }
+        let project = view.presentation.project.clone().ok();
+        let placed = view.state.update(cx, |state, _| {
+            state.set_placement(id, placement, project.as_ref())
+        });
+        if others == 0 {
+            // Quit cannot save a window that is already closed, so it stays open.
+            return placed.map(|_| None).map_err(|error| {
+                Some(format!(
+                    "Window not closed. Its place is not saved; Quit to stop the turn. {error}"
+                ))
+            });
+        }
+        view.state
+            .update(cx, |state, cx| state.close_window(id, cx))
+            .map(|applied| applied.value)
+            .map_err(|error| Some(format!("Window not closed. {error}")))
     });
+    let promoted = match saved {
+        Ok(promoted) => promoted,
+        Err(error) => {
+            view.update(cx, |view, cx| {
+                if error.is_some() {
+                    view.error = error;
+                }
+                view.refresh(cx);
+            });
+            return false;
+        }
+    };
+    if others == 0 {
+        state.update(cx, |state, _| state.quit_when_idle = true);
+    }
+    view.update(cx, |view, _| view.customize_agent = None);
+    cx.global_mut::<DesktopApp>()
+        .windows
+        .retain(|w| w.upgrade().is_some_and(|w| w != view));
+    automation::forget_window(window.window_handle().window_id().as_u64());
+    if let Some(heir) = promoted {
+        for other in open_windows(cx) {
+            other.update(cx, |other, cx| {
+                if other.window_id == heir {
+                    other.window_id = keystone_core::WindowId::FIRST;
+                    other.refresh(cx);
+                }
+            });
+        }
+    }
+    true
 }
 
 fn request_quit(cx: &mut App) {
@@ -208,36 +318,42 @@ fn request_quit(cx: &mut App) {
         return;
     };
     let state = app.state.clone();
-    let root = app.root.clone();
     if !state.update(cx, |state, _| state.reserve_quit()) {
         return;
     }
     cx.defer(move |cx| {
-        let draft = match root.as_ref().and_then(WeakEntity::upgrade) {
-            Some(root) => root
-                .downgrade()
-                .update(cx, |view, cx| {
-                    view.draft_save_task = None;
-                    view.composer_draft(cx)
-                })
-                .map_err(|error| format!("Could not collect the live window's draft. {error}")),
-            None => Ok(None),
-        };
-        let draft = match draft {
-            Ok(draft) => draft,
-            Err(error) => {
-                state.update(cx, |state, cx| state.quit_failed(error, cx));
-                return;
+        let windows = open_windows(cx);
+        let mut drafts = Vec::new();
+        let mut saved = Vec::new();
+        for view in &windows {
+            let handle = view.read(cx).handle;
+            let id = view.read(cx).window_id;
+            let draft = view.update(cx, |view, cx| {
+                view.draft_save_task = None;
+                view.composer_draft(cx)
+            });
+            drafts.extend(draft.filter(|d| {
+                drafts
+                    .iter()
+                    .all(|o: &ComposerDraft| o.session != d.session)
+            }));
+            let project = view.read(cx).presentation.project.clone().ok();
+            if let Ok(placement) = handle.update(cx, |_, window, _| placement(window)) {
+                saved.push((id, placement, project));
             }
-        };
-        if state.update(cx, |state, cx| state.save(draft, cx)).is_err() {
+        }
+        if state
+            .update(cx, |state, cx| state.save(drafts, saved, cx))
+            .is_err()
+        {
+            if windows.is_empty() {
+                windows::reopen(state, cx);
+            }
             return;
         }
         state.update(cx, |state, cx| state.teardown(cx));
-        if let Some(root) = root {
-            let _ = root.update(cx, |view, _| {
-                view.customize_agent = None;
-            });
+        for view in windows {
+            view.update(cx, |view, _| view.customize_agent = None);
         }
         cx.quit();
     });
@@ -245,6 +361,14 @@ fn request_quit(cx: &mut App) {
 
 struct Keystone {
     state: Entity<AppState>,
+    /// Which saved window this is. Its layout, tabs and selection are its own.
+    window_id: keystone_core::WindowId,
+    handle: gpui::AnyWindowHandle,
+    /// The menu a right click on a session or a tab opened.
+    context_menu: Option<windows::ContextMenu>,
+    placement_task: Option<gpui::Task<()>>,
+    /// The saved window the platform title names, set once it has been.
+    titled: Option<keystone_core::WindowId>,
     error: Option<String>,
     folder_warning: Option<FolderWarning>,
     composer: Entity<TextInput>,
@@ -383,8 +507,16 @@ impl Keystone {
             .update(cx, |state, cx| state.continue_after_recovery(id, cx));
         self.composer.focus_handle(cx).focus(window, cx);
     }
+    /// The session this window shows and its composer sends to.
+    fn selected(&self, cx: &App) -> Option<u64> {
+        self.state
+            .read(cx)
+            .store()
+            .workspace()
+            .selected_in(self.window_id)
+    }
     fn selected_session<'a>(&self, cx: &'a App) -> Option<&'a keystone_core::Session> {
-        self.state.read(cx).selected_session()
+        self.state.read(cx).session(self.selected(cx)?)
     }
     fn session<'a>(&self, id: u64, cx: &'a App) -> Option<&'a keystone_core::Session> {
         self.state.read(cx).session(id)
@@ -439,8 +571,28 @@ impl Keystone {
         }
     }
 
+    #[cfg(test)]
     fn new(
         state: Entity<AppState>,
+        fixture: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::in_window(
+            state,
+            keystone_core::WindowId::FIRST,
+            true,
+            fixture,
+            window,
+            cx,
+        )
+    }
+
+    /// `launch` is true for the windows Keystone opens as it starts.
+    fn in_window(
+        state: Entity<AppState>,
+        window_id: keystone_core::WindowId,
+        launch: bool,
         fixture: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -453,6 +605,9 @@ impl Keystone {
         let rename_input = cx.new(|cx| TextInput::new("Session title", InputMode::SingleLine, cx));
         let mut subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
+                if let Some(session) = this.selected(cx) {
+                    this.share_draft(session, cx);
+                }
                 this.draft_save_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(250))
@@ -469,6 +624,9 @@ impl Keystone {
             cx.subscribe(&search, |this, _, _: &Changed, cx| this.refresh(cx)),
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
             cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            cx.observe_window_bounds(window, |this, window, cx| {
+                this.save_placement_soon(window, cx)
+            }),
         ];
         let app = cx.weak_entity();
         let session_sidebar = cx.new(|_| SessionSidebar {
@@ -516,13 +674,24 @@ impl Keystone {
         let wake: Wake = Arc::new(move || {
             let _ = wake_tx.unbounded_send(());
         });
-        let project_dir = std::env::var_os("KEYSTONE_PROJECT_DIR")
-            .map(PathBuf::from)
+        // At launch the first window opens on the project Keystone was launched in, as
+        // it always has; every other window reopens on the project it last showed.
+        let saved_project = state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .window_project(window_id)
+            .filter(|_| !launch || window_id != keystone_core::WindowId::FIRST)
+            .map(|project| project.path().to_owned())
+            .filter(|path| path.is_dir());
+        let project_dir = saved_project
+            .or_else(|| std::env::var_os("KEYSTONE_PROJECT_DIR").map(PathBuf::from))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let project = keystone_core::ProjectId::new(&project_dir).map_err(|e| e.to_string());
         let preferences = state.read(cx).store().workspace().preferences().clone();
-        let presentation = Presentation::new(project, &preferences, cx);
+        let presentation = Presentation::new(project, window_id, &preferences, cx);
         subscriptions.push(
             cx.subscribe(&state, |this, _, changed: &RuntimeChanged, cx| {
                 this.runtime_changed(changed, cx);
@@ -531,6 +700,11 @@ impl Keystone {
         let slash = slash_menu::SlashMenu::new(&composer, cx);
         let mut result = Self {
             state,
+            window_id,
+            handle: window.window_handle(),
+            context_menu: None,
+            placement_task: None,
+            titled: None,
             error: None,
             folder_warning: None,
             composer,
@@ -626,23 +800,69 @@ impl Keystone {
         self.session_sidebar.update(cx, |_, cx| cx.notify());
     }
 
+    /// Shows the selected session's draft: as typed in another window that shows it,
+    /// else as saved.
     fn sync_draft(&mut self, cx: &mut Context<Self>) {
-        let value = self
-            .state
-            .read(cx)
-            .store()
-            .workspace()
-            .sessions()
-            .iter()
-            .find(|s| Some(s.id()) == self.state.read(cx).store().workspace().selected())
-            .map(|s| s.draft().to_owned())
-            .unwrap_or_default();
+        let selected = self.selected(cx);
+        let this = cx.entity();
+        let typed = open_windows(cx)
+            .into_iter()
+            .filter(|other| other != &this)
+            .find(|other| selected.is_some() && other.read(cx).selected(cx) == selected)
+            .map(|other| other.read(cx).composer.read(cx).value().to_owned());
+        let value = typed.unwrap_or_else(|| {
+            self.state
+                .read(cx)
+                .store()
+                .workspace()
+                .sessions()
+                .iter()
+                .find(|s| Some(s.id()) == selected)
+                .map(|s| s.draft().to_owned())
+                .unwrap_or_default()
+        });
         self.composer
             .update(cx, |input, cx| input.set_value(value, cx));
     }
 
+    /// Shows the draft just saved for `session` in every other window that shows it,
+    /// so a session open in two windows has one draft.
+    fn share_draft(&self, session: u64, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        let text = self.composer.read(cx).value().to_owned();
+        for other in open_windows(cx) {
+            if other == this {
+                continue;
+            }
+            other.update(cx, |other, cx| {
+                if other.selected(cx) == Some(session) && other.composer.read(cx).value() != text {
+                    other.draft_save_task = None;
+                    other
+                        .composer
+                        .update(cx, |input, cx| input.set_value(text.clone(), cx));
+                }
+            });
+        }
+    }
+
+    /// Saves this window's placement once it has stopped moving, so a crash keeps it.
+    fn save_placement_soon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.placement_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let (id, placement) = (this.window_id, placement(window));
+                let project = this.presentation.project.clone().ok();
+                let _ = this.state.update(cx, |state, _| {
+                    state.set_placement(id, placement, project.as_ref())
+                });
+            });
+        }));
+    }
+
     fn save_draft(&mut self, cx: &mut Context<Self>) -> bool {
-        let session_id = self.state.read(cx).store().workspace().selected();
+        let session_id = self.selected(cx);
         let result = if let Some(id) = session_id {
             let draft = self.composer.read(cx).value().to_owned();
             self.state
@@ -656,6 +876,9 @@ impl Keystone {
         };
         match result {
             Ok(durability) => {
+                if let Some(id) = session_id {
+                    self.share_draft(id, cx);
+                }
                 self.error = durability_warning(durability);
                 cx.notify();
                 self.error.is_none()
@@ -675,9 +898,9 @@ impl Keystone {
     #[cfg(test)]
     fn save_before_exit(&mut self, cx: &mut Context<Self>) -> bool {
         self.draft_save_task = None;
-        let draft = self.composer_draft(cx);
+        let drafts = self.composer_draft(cx).into_iter().collect();
         self.state
-            .update(cx, |state, cx| state.save(draft, cx))
+            .update(cx, |state, cx| state.save(drafts, Vec::new(), cx))
             .is_ok()
     }
 
@@ -704,11 +927,11 @@ impl Keystone {
         if !self.save_draft(cx) {
             return;
         }
-        if let Some(left) = self.state.read(cx).store().workspace().selected() {
+        if let Some(left) = self.selected(cx) {
             let rows = self.replies.get_mut().settle(left);
             self.invalidate(left, ranges(rows), false, cx);
         }
-        let previous = self.state.read(cx).store().workspace().selected();
+        let previous = self.selected(cx);
         let project = self.presentation.project.as_ref().ok().cloned();
         let show = show.and_then(|(layout, tabs, view)| {
             project
@@ -716,12 +939,12 @@ impl Keystone {
                 .map(|project| (project, layout, tabs, view))
         });
         self.error = match self.state.update(cx, |state, cx| {
-            state.create_showing(provider, &directory, now_ms(), show, cx)
+            state.create_showing(provider, &directory, now_ms(), self.window_id, show, cx)
         }) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
-        if self.state.read(cx).store().workspace().selected() != previous {
+        if self.selected(cx) != previous {
             self.presentation.selection_changed();
             self.approval_menu = false;
             self.confirm_full_access = None;
@@ -740,7 +963,7 @@ impl Keystone {
             .workspace()
             .sessions()
             .iter()
-            .find(|s| Some(s.id()) == self.state.read(cx).store().workspace().selected())
+            .find(|s| Some(s.id()) == self.selected(cx))
             .map(|s| (s.id(), s.settled()));
         if let Some((id, settled)) = selected {
             self.settle(id, !settled, cx);
@@ -807,11 +1030,11 @@ impl Keystone {
         shown: Option<session_tabs::Shown>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let previous = self.state.read(cx).store().workspace().selected();
+        let previous = self.selected(cx);
         if !self.save_draft(cx) {
             return false;
         }
-        if let Some(left) = self.state.read(cx).store().workspace().selected() {
+        if let Some(left) = self.selected(cx) {
             let rows = self.replies.get_mut().settle(left);
             self.invalidate(left, ranges(rows), false, cx);
         }
@@ -827,9 +1050,12 @@ impl Keystone {
         }
         self.presentation.current.arrangement.sidebar_overlay = false;
         let project = self.presentation.project.clone();
+        let window_id = self.window_id;
         let result = self.state.update(cx, |state, cx| match (shown, &project) {
-            (None, _) => state.select(id, cx),
-            (Some((layout, tabs)), Ok(project)) => state.show(project, layout, tabs, Some(id), cx),
+            (None, _) => state.select(window_id, id, cx),
+            (Some((layout, tabs)), Ok(project)) => {
+                state.show(project, window_id, layout, tabs, Some(id), cx)
+            }
             (Some(_), Err(error)) => {
                 Err(format!("Cannot save this project's layout. {error}").into())
             }
@@ -839,7 +1065,7 @@ impl Keystone {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
-        if self.state.read(cx).store().workspace().selected() != previous {
+        if self.selected(cx) != previous {
             self.presentation.selection_changed();
             self.approval_menu = false;
             self.model_menu = None;
@@ -869,7 +1095,7 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) {
         self.create(provider, show, cx);
-        if self.error.is_none() && self.state.read(cx).store().workspace().selected().is_some() {
+        if self.error.is_none() && self.selected(cx).is_some() {
             self.composer.focus_handle(cx).focus(window, cx);
         }
     }
@@ -996,8 +1222,15 @@ impl Keystone {
                         .child(
                             IconButton::new("close", IconName::Close)
                                 .debug_selector(|| "close".into())
-                                .tooltip(Tooltip::with_key("Close window", "Ctrl+Q"))
-                                .on_click(|_, _, cx| request_quit(cx)),
+                                .tooltip(Tooltip::with_key("Close window", "Ctrl+Shift+W"))
+                                .on_click({
+                                    let root = cx.weak_entity();
+                                    move |_, window, cx| {
+                                        if close_window(&root, window, cx) {
+                                            window.remove_window();
+                                        }
+                                    }
+                                }),
                         ),
                     cx,
                 ),
@@ -1292,7 +1525,7 @@ impl Keystone {
     /// The welcome screen renders no composer, so focusing it there would strand the
     /// window's shortcuts; the root keeps them working.
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.read(cx).store().workspace().selected().is_some() {
+        if self.selected(cx).is_some() {
             self.composer.focus_handle(cx).focus(window, cx);
         } else {
             self.focus.focus(window, cx);
@@ -1358,7 +1591,7 @@ impl Keystone {
                             .track_focus(&self.presentation.current.folder_focus)
                             .debug_selector(|| "project".into())
                             .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
-                                if this.state.read(cx).store().workspace().selected() != Some(id) {
+                                if this.selected(cx) != Some(id) {
                                     return;
                                 }
                                 match &action {
@@ -1675,7 +1908,7 @@ impl Keystone {
         narrow: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let session = self.state.read(cx).store().workspace().selected();
+        let session = self.selected(cx);
         let applies = if running {
             "a change applies from the next turn"
         } else {
@@ -1718,7 +1951,7 @@ impl Keystone {
                     .checked(choice == mode)
                     .debug_selector(|| format!("approval-{}", choice.slug()))
                     .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                        if this.state.read(cx).store().workspace().selected() != session {
+                        if this.selected(cx) != session {
                             return;
                         }
                         this.choose_approval_mode(choice, window, cx)
@@ -1796,7 +2029,7 @@ impl Keystone {
         let confirmation = self.confirm_full_access.as_ref()?;
         if !Rc::ptr_eq(identity, &confirmation.identity)
             || !self.presentation.matches(confirmation.activation)
-            || self.state.read(cx).store().workspace().selected() != Some(confirmation.session)
+            || self.selected(cx) != Some(confirmation.session)
         {
             return None;
         }
@@ -1934,7 +2167,7 @@ impl Keystone {
 
     fn composer_draft(&self, cx: &App) -> Option<ComposerDraft> {
         Some(ComposerDraft {
-            session: self.state.read(cx).store().workspace().selected()?,
+            session: self.selected(cx)?,
             text: self.composer.read(cx).value().to_owned(),
         })
     }
@@ -2384,7 +2617,7 @@ impl Keystone {
                 true,
             ),
         };
-        let keyboard = self.state.read(cx).store().workspace().selected() == Some(session)
+        let keyboard = self.selected(cx) == Some(session)
             && self
                 .presentation
                 .current
@@ -2491,7 +2724,7 @@ impl Keystone {
                 self.folder_warning
                     .as_ref()
                     .filter(|warning| {
-                        self.state.read(cx).store().workspace().selected() == Some(warning.session)
+                        self.selected(cx) == Some(warning.session)
                             && !self.state.read(cx).store().is_durable(warning.revision)
                     })
                     .map(|_| (FOLDER_UNCONFIRMED.into(), Color::Warning))
@@ -2705,12 +2938,14 @@ impl SessionSidebar {
                 });
             })
             .on_aux_click(move |event, _, cx| {
-                if !event.is_middle_click() {
-                    return;
-                }
                 let _ = open_tab.update(cx, |this, cx| {
-                    if this.presentation.matches(activation) {
+                    if !this.presentation.matches(activation) {
+                        return;
+                    }
+                    if event.is_middle_click() {
                         this.open_in_new_tab(id, cx);
+                    } else if event.is_right_click() {
+                        this.open_context_menu(id, event.position(), cx);
                     }
                 });
             })
@@ -2870,7 +3105,7 @@ impl SessionSidebar {
                 provider: session.provider(),
                 account,
                 settled: session.settled(),
-                selected: Some(session.id()) == workspace.selected(),
+                selected: Some(session.id()) == this.selected(cx),
                 attention: session.attention(
                     live.is_some_and(|c| !c.approvals.is_empty()),
                     live.is_some_and(Conversation::awaiting_widget),
@@ -2953,6 +3188,7 @@ impl Render for SessionSidebar {
 impl Render for Keystone {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.focus_project_transition(window, cx);
+        self.sync_title(window);
         let theme = cx.theme();
         let (background, text) = (theme.colors.background, theme.colors.text);
         let current = self
@@ -2962,7 +3198,7 @@ impl Render for Keystone {
             .workspace()
             .sessions()
             .iter()
-            .find(|s| Some(s.id()) == self.state.read(cx).store().workspace().selected());
+            .find(|s| Some(s.id()) == self.selected(cx));
         let session = current.map(|s| (s.title().to_owned(), s.settled()));
         let selected = current.map(|s| s.id());
         if let Some(id) = selected {
@@ -2993,7 +3229,9 @@ impl Render for Keystone {
                 "Keystone"
             })
             .when(automation::enabled(), |d| {
-                d.child(automation::frame_writer())
+                d.child(automation::titled_frame_writer(windows::title(
+                    self.window_id,
+                )))
             })
             .on_key_down(self.scoped_listener(cx, |this, event, window, cx| {
                 if this.page_key(event, window, cx) {
@@ -3013,6 +3251,9 @@ impl Render for Keystone {
                     }
                     if this.presentation.current.customization.chooser().is_some() {
                         this.customize(arrangement_editor::Action::CloseChooser, window, cx);
+                        cx.stop_propagation();
+                    } else if this.context_menu.take().is_some() {
+                        cx.notify();
                         cx.stop_propagation();
                     } else if this.new_menu
                         || this.filter_menu
@@ -3208,6 +3449,29 @@ impl Render for Keystone {
                     this.split_right(window, cx)
                 }),
             )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &windows::NewWindow, window, cx| {
+                    this.open_new_window(None, window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |_, _: &windows::CloseWindow, window, cx| {
+                    let root = cx.weak_entity();
+                    window.defer(cx, move |window, cx| {
+                        if close_window(&root, window, cx) {
+                            window.remove_window();
+                        }
+                    });
+                }),
+            )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &windows::OpenInNewWindow, window, cx| {
+                    if let Some(session) = this.selected(cx) {
+                        this.open_new_window(Some(session), window, cx)
+                    }
+                },
+            ))
             .child(self.top_bar(session.filter(|_| self.settings.is_none()), cx))
             .when(customizing, |d| {
                 d.child(self.customize_panel(window.viewport_size(), cx))
@@ -3216,7 +3480,8 @@ impl Render for Keystone {
             .children(self.borrow_dialog(cx))
             .children(self.full_access_dialog(cx))
             .children(self.rename_dialog(cx))
-            .children(self.palette_overlay(cx));
+            .children(self.palette_overlay(cx))
+            .children(self.context_menu_overlay(cx));
         let root = self.settings_yields_to_workspace(root, cx);
         self.on_arrangement_drag(root, cx)
     }
@@ -9461,29 +9726,19 @@ fn main() {
             keystone_ui::init(cx);
             bind_keys(cx);
             let state = install_app_state(store, cx);
-            let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: None,
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let view = cx.new(|cx| {
-                        let view = Keystone::new(
-                            state.clone(),
-                            std::env::var_os("KEYSTONE_VISUAL_FIXTURE").is_some(),
-                            window,
-                            cx,
-                        );
-                        view.focus.focus(window, cx);
-                        view
-                    });
-                    register_window(view.downgrade(), window, cx);
-                    view
-                },
-            )
-            .expect("open Keystone window");
+            let fixture = std::env::var_os("KEYSTONE_VISUAL_FIXTURE").is_some();
+            let saved = state.read(cx).store().workspace().preferences().windows();
+            let mut opened = 0;
+            for (id, placement) in saved {
+                match windows::open(state.clone(), id, placement, true, fixture, cx) {
+                    Ok(()) => opened += 1,
+                    Err(error) => eprintln!("Could not open a Keystone window: {error}"),
+                }
+            }
+            if opened == 0 {
+                eprintln!("Cannot open any Keystone window");
+                std::process::exit(1);
+            }
             cx.activate(true);
         });
 }

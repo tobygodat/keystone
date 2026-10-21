@@ -231,7 +231,7 @@ fn global_runtime_loads_sends_answers_and_logs_both_providers_without_a_view(
         cx.update(|cx| {
             cx.set_global(DesktopApp {
                 state: state.clone(),
-                root: None,
+                windows: Vec::new(),
             })
         });
         state.downgrade()
@@ -318,7 +318,9 @@ fn global_runtime_loads_sends_answers_and_logs_both_providers_without_a_view(
     wait_until(cx, &state, |state| {
         completed(state, 1) && completed(state, 2)
     });
-    state.update(cx, |state, cx| state.save(None, cx).unwrap());
+    state.update(cx, |state, cx| {
+        state.save(Vec::new(), Vec::new(), cx).unwrap()
+    });
     state.read_with(cx, |state, _| {
         assert!(state.error.is_none());
         for (id, prompt, model) in [(1, "please run codex", "fake-fast"), (2, "please run claude", "fake-haiku")] {
@@ -377,13 +379,13 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
         keystone_ui::init(cx);
         cx.set_global(DesktopApp {
             state: state.clone(),
-            root: None,
+            windows: Vec::new(),
         });
     });
     let window = cx.add_window(|window, cx| Keystone::new(state.clone(), false, window, cx));
     let view = window.root(cx).unwrap();
     let weak_view = view.downgrade();
-    cx.update(|cx| cx.global_mut::<DesktopApp>().root = Some(weak_view.clone()));
+    cx.update(|cx| cx.global_mut::<DesktopApp>().windows = vec![weak_view.clone()]);
     state.update(cx, |state, cx| {
         for id in [1, 2] {
             assert!(state.send_message(
@@ -428,7 +430,9 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
     wait_until(cx, &state, |state| {
         completed(state, 1) && completed(state, 2)
     });
-    state.update(cx, |state, cx| state.save(None, cx).unwrap());
+    state.update(cx, |state, cx| {
+        state.save(Vec::new(), Vec::new(), cx).unwrap()
+    });
     state.read_with(cx, |state, _| {
         for id in [1, 2] {
             assert_eq!(
@@ -569,7 +573,7 @@ fn explicit_teardown_ends_only_owned_providers_descendants_and_catalog_probe(
     let unrelated = Unrelated::new();
     let pids = owned_processes(&state, dir.path(), cx);
     state.update(cx, |state, cx| {
-        state.save(None, cx).unwrap();
+        state.save(Vec::new(), Vec::new(), cx).unwrap();
         state.teardown(cx);
         assert_eq!(state.phase, Phase::Exiting);
         assert!(state.codex.is_empty() && state.claude.is_empty());
@@ -628,7 +632,7 @@ fn dropping_the_global_owner_ends_only_owned_processes_without_a_view(
     cx.update(|cx| {
         cx.set_global(DesktopApp {
             state: state.clone(),
-            root: None,
+            windows: Vec::new(),
         })
     });
     drop(state);

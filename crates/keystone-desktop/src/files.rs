@@ -391,11 +391,7 @@ impl Keystone {
     /// The selected session's recorded folder, or else the current project.
     pub(crate) fn files_root(&self, cx: &App) -> Result<PathBuf, String> {
         let recorded = self
-            .state
-            .read(cx)
-            .store()
-            .workspace()
-            .selected()
+            .selected(cx)
             .and_then(|session| self.conversation_folder(session, cx));
         match (recorded, &self.presentation.project) {
             (Some(ConversationFolder::Recorded(directory)), _) => Ok(directory.path().to_owned()),
@@ -440,11 +436,7 @@ impl Keystone {
             .filter(|view| shown.component(*view) == Some(Component::Conversation))
             .collect();
         let target = self
-            .state
-            .read(cx)
-            .store()
-            .workspace()
-            .selected()
+            .selected(cx)
             .and_then(|session| {
                 self.presentation
                     .current

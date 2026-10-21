@@ -107,7 +107,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<FocusHandle> {
-        if self.state.read(cx).store().workspace().selected() != Some(key.session)
+        if self.selected(cx) != Some(key.session)
             || !self
                 .presentation
                 .current
@@ -146,7 +146,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.state.read(cx).store().workspace().selected() != Some(key.session)
+        if self.selected(cx) != Some(key.session)
             || !self.presentation.current.arrangement.visible.contains(&key.view)
             || !self.state.read(cx).conversations().get(&key.session).and_then(|c| c.rows.get(index)).is_some_and(|row| matches!(row, Row::Item(item) if crate::transcript::activity_name(item).is_some())) {
             return;
@@ -207,7 +207,7 @@ impl Keystone {
         self.transcript_row(views[next], 0, window, cx);
     }
     pub(crate) fn focus_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.state.read(cx).store().workspace().selected() else {
+        let Some(session) = self.selected(cx) else {
             return;
         };
         let Some(key) = self

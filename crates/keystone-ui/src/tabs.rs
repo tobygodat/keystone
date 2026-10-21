@@ -10,7 +10,7 @@ use crate::theme::ActiveTheme;
 use crate::tokens::{Elevation, TextSize, radius};
 use crate::{Color, StyledExt, h_flex};
 use gpui::{
-    App, Context, ElementId, InteractiveElement, IntoElement, Pixels, Render, RenderOnce,
+    App, Context, ElementId, InteractiveElement, IntoElement, Pixels, Point, Render, RenderOnce,
     ScrollHandle, SharedString, Styled, Window, div, prelude::*, px,
 };
 use std::rc::Rc;
@@ -56,6 +56,7 @@ impl Tab {
 
 type IndexHandler = Rc<dyn Fn(&usize, &mut Window, &mut App)>;
 type MoveHandler = Rc<dyn Fn(&(usize, usize), &mut Window, &mut App)>;
+type MenuHandler = Rc<dyn Fn(&(usize, Point<Pixels>), &mut Window, &mut App)>;
 type InsertHandler = Rc<dyn Fn(&(DraggedTab, usize), &mut Window, &mut App)>;
 
 /// A row of tabs that scrolls sideways when it overflows. The caller owns the
@@ -69,6 +70,7 @@ pub struct TabBar {
     selected: Option<usize>,
     on_select: Option<IndexHandler>,
     on_close: Option<IndexHandler>,
+    on_menu: Option<MenuHandler>,
     drops: Drops,
 }
 
@@ -84,6 +86,7 @@ impl TabBar {
             selected: None,
             on_select: None,
             on_close: None,
+            on_menu: None,
             drops: Drops::default(),
         }
     }
@@ -113,6 +116,15 @@ impl TabBar {
     /// The close button or a middle click. Tabs show a close button only when this is set.
     pub fn on_close(mut self, handler: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Self {
         self.on_close = Some(Rc::new(handler));
+        self
+    }
+
+    /// A right click on a tab, with where it was pressed, to open the tab's menu.
+    pub fn on_menu(
+        mut self,
+        handler: impl Fn(&(usize, Point<Pixels>), &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_menu = Some(Rc::new(handler));
         self
     }
 
@@ -335,10 +347,17 @@ impl RenderOnce for TabBar {
                 .when_some(self.on_select.clone(), |d, select| {
                     d.on_click(move |_, window, cx| select(&ix, window, cx))
                 })
-                .when_some(self.on_close.clone(), |d, close| {
+                .when(self.on_close.is_some() || self.on_menu.is_some(), |d| {
+                    let (close, menu) = (self.on_close.clone(), self.on_menu.clone());
                     d.on_aux_click(move |event, window, cx| {
-                        if event.is_middle_click() {
+                        if event.is_middle_click()
+                            && let Some(close) = &close
+                        {
                             close(&ix, window, cx)
+                        } else if event.is_right_click()
+                            && let Some(menu) = &menu
+                        {
+                            menu(&(ix, event.position()), window, cx)
                         }
                     })
                 })

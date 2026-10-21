@@ -43,6 +43,14 @@ impl ProjectId {
     pub fn path(&self) -> &Path {
         Path::new(&self.0)
     }
+
+    pub(crate) fn as_saved(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn from_saved(saved: &str) -> Self {
+        Self(saved.to_owned())
+    }
 }
 
 /// What every project saved under one preference, by project directory. A value
@@ -62,7 +70,7 @@ impl<T> Default for ProjectMap<T> {
     }
 }
 
-impl<T> ProjectMap<T> {
+impl<T: Clone> ProjectMap<T> {
     pub(crate) fn is_empty(&self) -> bool {
         matches!(self, Self::Saved(saved) if saved.is_empty())
     }
@@ -83,6 +91,21 @@ impl<T> ProjectMap<T> {
             .into_iter()
             .flatten()
             .map(|(project, value)| (ProjectId(project.clone()), value))
+    }
+
+    /// Takes `heir`'s value for each of `projects`, none when `heir` cannot be read, and
+    /// keeps this map's for the rest. When this map cannot be read, `heir` replaces it.
+    pub(crate) fn inherit(&mut self, heir: Self, projects: &[ProjectId]) {
+        let Self::Saved(mine) = self else {
+            *self = heir;
+            return;
+        };
+        for project in projects {
+            match heir.get(project) {
+                Some(value) => mine.insert(project.0.clone(), value.clone()),
+                None => mine.remove(&project.0),
+            };
+        }
     }
 
     pub(crate) fn set(&mut self, project: &ProjectId, value: Option<T>) -> io::Result<()> {
