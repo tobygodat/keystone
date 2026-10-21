@@ -17,7 +17,7 @@ use crate::item::{
 };
 use crate::mcp::{Caller, Issuer};
 use crate::surface;
-use keystone_core::ApprovalMode;
+use keystone_core::{ApprovalMode, LimitWindow};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
@@ -288,6 +288,9 @@ pub struct ClaudeDriver {
     /// clears it.
     vetoed: bool,
     quiesce: Option<Quiesce>,
+    /// The context the latest main-conversation API call filled, in tokens, and the
+    /// model it ran on, until the turn's `result` reports the model's window.
+    context: Option<(u64, Option<String>)>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -362,6 +365,7 @@ impl ClaudeDriver {
             hooks: HashSet::new(),
             vetoed: false,
             quiesce: None,
+            context: None,
             unknown: 0,
         };
         let line = driver.request(json!({"subtype": "initialize"}), Request::Initialize);
@@ -660,6 +664,18 @@ impl ClaudeDriver {
         if envelope.kind == "system" {
             self.track_safety(&envelope, line);
         }
+        // The account's limits, whichever conversation's call reported them.
+        if envelope.kind == "rate_limit_event" {
+            return match serde_json::from_slice::<RateLimitEvent>(line) {
+                Ok(event) => {
+                    let windows = event.rate_limit_info.windows();
+                    if !windows.is_empty() {
+                        out.event(self.session, Event::Usage(windows));
+                    }
+                }
+                Err(_) => self.unknown += 1,
+            };
+        }
         // Subagent traffic is shown through the tool call that started it.
         if envelope.parent_tool_use_id.is_some() {
             return;
@@ -704,8 +720,8 @@ impl ClaudeDriver {
             }
             ("control_response", _) => self.on_control_response(line, out),
             ("result", _) => self.on_result(line, out),
-            // Status, usage, and notices Keystone does not show.
-            ("system" | "rate_limit_event" | "keep_alive" | "prompt_suggestion", _) => {}
+            // Status and notices Keystone does not show.
+            ("system" | "keep_alive" | "prompt_suggestion", _) => {}
             _ => self.unknown += 1,
         }
     }
@@ -1401,6 +1417,16 @@ impl ClaudeDriver {
             });
             return;
         }
+        if let Some(usage) = &assistant.message.usage {
+            let used = usage.input_tokens
+                + usage.cache_creation_input_tokens
+                + usage.cache_read_input_tokens
+                + usage.output_tokens;
+            // A message with no tokens at all, such as a synthetic one, held no context.
+            if used > 0 {
+                self.context = Some((used, assistant.message.model.clone()));
+            }
+        }
         self.ensure_turn(out);
         let message = assistant.message.id;
         if self.message.as_ref().is_none_or(|(id, _)| *id != message) {
@@ -1891,6 +1917,14 @@ impl ClaudeDriver {
             return self.unknown += 1;
         };
         let failed = result.is_error || result.subtype != "success";
+        if let Some((used, model)) = self.context.take() {
+            // Only the window of the model that filled it; another model's would mislead.
+            let window = model
+                .or_else(|| self.model.clone())
+                .and_then(|model| result.model_usage.get(&model))
+                .and_then(|usage| usage.context_window);
+            out.event(self.session, Event::ContextUsage { used, window });
+        }
         if !failed && self.launch == Launch::LayoutHelper {
             if !self.initialized
                 || !self.turn.as_ref().is_some_and(|turn| turn.written)
@@ -2168,6 +2202,106 @@ struct AssistantMessage {
     id: String,
     #[serde(default)]
     content: Vec<Value>,
+    model: Option<String>,
+    usage: Option<TokenUsage>,
+}
+
+/// The tokens one API call used, which together are what its context held.
+#[derive(Deserialize)]
+struct TokenUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+}
+
+#[derive(Deserialize)]
+struct ModelUsage {
+    #[serde(rename = "contextWindow")]
+    context_window: Option<u64>,
+}
+
+/// A `rate_limit_event`: what the latest API response said about the account's
+/// limits. Only windows, percentages and reset times are read.
+#[derive(Deserialize)]
+struct RateLimitEvent {
+    rate_limit_info: RateLimitInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitInfo {
+    status: Option<String>,
+    resets_at: Option<u64>,
+    rate_limit_type: Option<String>,
+    /// A fraction of the window, 0-1, and above 1 past the limit.
+    utilization: Option<f64>,
+    #[serde(default)]
+    unified_windows: Option<HashMap<String, Option<UnifiedWindow>>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnifiedWindow {
+    utilization: Option<f64>,
+    resets_at: Option<u64>,
+}
+
+impl RateLimitInfo {
+    /// Every window the event carries: each of `unifiedWindows`, and the limiting
+    /// window it names when that is not among them. A rejected window with no
+    /// utilization is full.
+    fn windows(&self) -> Vec<LimitWindow> {
+        let mut windows: Vec<LimitWindow> = self
+            .unified_windows
+            .iter()
+            .flatten()
+            .filter_map(|(id, window)| {
+                let window = window.as_ref()?;
+                Some(limit_window(
+                    id,
+                    window.utilization? * 100.0,
+                    window.resets_at,
+                ))
+            })
+            .collect();
+        windows.sort_by(|a, b| a.id.cmp(&b.id));
+        if let Some(kind) = &self.rate_limit_type
+            && !windows.iter().any(|w| &w.id == kind)
+        {
+            let used = match (self.utilization, self.status.as_deref()) {
+                (Some(fraction), _) => Some(fraction * 100.0),
+                (None, Some("rejected")) => Some(100.0),
+                _ => None,
+            };
+            if let Some(used) = used {
+                windows.push(limit_window(kind, used, self.resets_at));
+            }
+        }
+        windows
+    }
+}
+
+fn limit_window(id: &str, used_percent: f64, resets_at: Option<u64>) -> LimitWindow {
+    let label = match id {
+        "five_hour" => "5-hour",
+        "seven_day" => "Weekly",
+        "seven_day_opus" => "Weekly Opus",
+        "seven_day_sonnet" => "Weekly Sonnet",
+        "seven_day_overage_included" => "Weekly with extra usage",
+        "overage" => "Extra usage",
+        other => other,
+    };
+    LimitWindow {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        used_percent,
+        resets_at,
+    }
 }
 
 #[derive(Deserialize)]
@@ -2288,6 +2422,8 @@ struct ResultMessage {
     subtype: String,
     #[serde(default)]
     is_error: bool,
+    #[serde(rename = "modelUsage", default)]
+    model_usage: HashMap<String, ModelUsage>,
     result: Option<String>,
     #[serde(default)]
     errors: Vec<String>,
@@ -2400,6 +2536,125 @@ mod tests {
                     .any(|line| line.contains(r#""type":"user""#))
             );
         }
+    }
+
+    fn usage_events(out: &Outputs) -> Vec<Vec<LimitWindow>> {
+        out.events
+            .iter()
+            .filter_map(|(_, event)| match event {
+                Event::Usage(windows) => Some(windows.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rate_limit_events_become_usage_windows_without_counting_as_activity() {
+        let (mut driver, mut out) = idle_driver();
+        out.events.clear();
+        let activity = driver.activity();
+        for line in [
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1800000000,"rateLimitType":"five_hour","utilization":0.85,"overageDisabledReason":"org_level_disabled"},"uuid":"u","session_id":"s1"}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","utilization":0.4,"unifiedWindows":{"seven_day":{"utilization":0.12,"resetsAt":1800500000},"five_hour":{"utilization":0.4,"resetsAt":1800000000}}},"uuid":"u","session_id":"s1"}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day_opus","resetsAt":1800600000},"uuid":"u","session_id":"s1"}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"uuid":"u","session_id":"s1"}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":null,"resetsAt":1800000000},"seven_day":{"utilization":0.5,"resetsAt":1800500000}}},"uuid":"u","session_id":"s1"}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","rateLimitType":"five_hour","utilization":0.9,"resetsAt":1800000000,"unifiedWindows":{"seven_day":null,"five_hour":{"utilization":0.9,"resetsAt":1800000000}}},"uuid":"u","session_id":"s1"}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day","utilization":0.3,"resetsAt":1800500000,"unifiedWindows":null},"uuid":"u","session_id":"s1"}"#,
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        assert_eq!(driver.activity(), activity);
+        let usage = usage_events(&out);
+        assert_eq!(usage.len(), 6, "{usage:?}");
+        assert_eq!(
+            usage[4],
+            vec![limit_window("five_hour", 90.0, Some(1_800_000_000))]
+        );
+        assert_eq!(
+            usage[5],
+            vec![limit_window("seven_day", 30.0, Some(1_800_500_000))]
+        );
+        assert_eq!(
+            usage[3],
+            vec![limit_window("seven_day", 50.0, Some(1_800_500_000))]
+        );
+        assert_eq!(
+            usage[0],
+            vec![limit_window("five_hour", 85.0, Some(1_800_000_000))]
+        );
+        assert_eq!(
+            usage[1],
+            vec![
+                limit_window("five_hour", 40.0, Some(1_800_000_000)),
+                limit_window("seven_day", 12.0, Some(1_800_500_000)),
+            ]
+        );
+        assert_eq!(usage[1][1].label, "Weekly");
+        assert_eq!(
+            usage[2],
+            vec![limit_window("seven_day_opus", 100.0, Some(1_800_600_000))]
+        );
+    }
+
+    #[test]
+    fn a_result_reports_the_context_the_last_call_filled() {
+        let (mut driver, mut out) = idle_driver();
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "again".into(),
+            },
+            &mut out,
+        );
+        out.events.clear();
+        for line in [
+            r#"{"type":"system","subtype":"init","session_id":"s1","model":"fake-opus","capabilities":["msg_lifecycle_v1"]}"#,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":1000,"output_tokens":5}},"parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"m2","model":"fake-opus","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":90000,"output_tokens":6}},"parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"m2b","model":"<synthetic>","content":[],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}},"parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"m3","content":[],"usage":{"input_tokens":999999}},"parent_tool_use_id":"toolu_sub"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done","modelUsage":{"fake-haiku":{"contextWindow":100000},"fake-opus":{"contextWindow":200000}}}"#,
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        let context: Vec<_> = out
+            .events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::ContextUsage { .. }))
+            .collect();
+        assert_eq!(
+            context,
+            vec![&(
+                1,
+                Event::ContextUsage {
+                    used: 90_010,
+                    window: Some(200_000)
+                }
+            )]
+        );
+        // A window reported only for other models is not borrowed.
+        out.events.clear();
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "third".into(),
+            },
+            &mut out,
+        );
+        for line in [
+            r#"{"type":"assistant","message":{"id":"m4","model":"claude-other[1m]","content":[{"type":"text","text":"c"}],"usage":{"input_tokens":180000}},"parent_tool_use_id":null}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done","modelUsage":{"fake-opus":{"contextWindow":1000000}}}"#,
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        assert!(out.events.contains(&(
+            1,
+            Event::ContextUsage {
+                used: 180_000,
+                window: None
+            }
+        )));
     }
 
     /// A driver past `initialize` and one completed turn, so nothing Keystone itself

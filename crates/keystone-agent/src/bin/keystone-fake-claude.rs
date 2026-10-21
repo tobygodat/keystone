@@ -50,6 +50,10 @@
 //!
 //! `KEYSTONE_FAKE_ENV_RECEIPT` names a file each process appends its environment to.
 //!
+//! A prompt containing "usage NN" gives its reply's last assistant message token usage
+//! (NN/2 % of a 200,000-token context) and, before its `result`, a synthetic, labelled
+//! `rate_limit_event` with the 5-hour window at NN%. `get_usage` is not scripted.
+//!
 //! `init` lists tools unless launched with `--tools ""`, and no MCP servers, slash
 //! commands or skills. The `initialize` answer's `commands` lists the skills and
 //! commands under `$CLAUDE_CONFIG_DIR` and the working directory's `.claude`, as Claude
@@ -1331,18 +1335,53 @@ fn answer(
             return aborted(out, &message, &sent, abort);
         }
     }
+    let usage = usage_percent(text);
+    let mut message_json = json!({"id": message, "content": [{"type": "text", "text": sent}]});
+    let mut result =
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": sent});
+    if let Some(percent) = usage {
+        message_json["usage"] = json!({"input_tokens": 0, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": percent * 1000, "output_tokens": 0});
+        result["modelUsage"] = json!({model: {"contextWindow": 200_000}});
+    }
     emit(
         out,
-        json!({"type": "assistant", "message": {"id": message, "content":
-               [{"type": "text", "text": sent}]}, "parent_tool_use_id": null}),
+        json!({"type": "assistant", "message": message_json, "parent_tool_use_id": null}),
     );
     text_record(&sent);
     stream(out, json!({"type": "content_block_stop", "index": 0}));
+    if let Some(percent) = usage {
+        emit_rate_limit(out, session, percent);
+    }
+    emit(out, result);
+    "completed"
+}
+
+/// The percentage a prompt such as "usage 85" asks the fake to report.
+fn usage_percent(text: &str) -> Option<u64> {
+    let rest = &text[text.find("usage ")? + "usage ".len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// A synthetic, labelled `rate_limit_event`: the 5-hour window at `percent`, resetting
+/// in two hours, and the weekly one at 20%, resetting in four days.
+fn emit_rate_limit(out: &Out, session: &str, percent: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let fraction = percent as f64 / 100.0;
+    let (five_hour, weekly) = (now + 2 * 3600, now + 4 * 86_400);
     emit(
         out,
-        json!({"type": "result", "subtype": "success", "is_error": false, "result": sent}),
+        json!({"type": "rate_limit_event", "keystone_fake": "synthetic test data", "rate_limit_info": {
+            "status": if percent >= 80 { "allowed_warning" } else { "allowed" },
+            "resetsAt": five_hour, "rateLimitType": "five_hour", "utilization": fraction,
+            "unifiedWindows": {"five_hour": {"utilization": fraction, "resetsAt": five_hour},
+                               "seven_day": {"utilization": 0.2, "resetsAt": weekly}},
+            "isUsingOverage": false},
+            "uuid": format!("fake-rate-limit-{}", std::process::id()), "session_id": session}),
     );
-    "completed"
 }
 
 /// The idle-mode prompts: a Bash call handed to a background or ambient task, a hook

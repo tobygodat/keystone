@@ -3,7 +3,8 @@
 //! One app-server hosts every Codex session. Each Keystone session maps to one Codex
 //! thread. Lines go in through [`CodexDriver::on_line`], user actions through
 //! [`CodexDriver::command`], and both produce lines to write and [`Event`]s per session.
-//! Checked against codex-cli 0.162.1.
+//! Checked against codex-cli 0.162.1; rate-limit and token-usage notifications against
+//! the 0.163.0 app-server schema.
 
 use crate::commands::{self, Commands};
 use crate::driver::{ApprovalState, Command, Outputs};
@@ -13,7 +14,7 @@ use crate::item::{
 };
 use crate::mcp::{Caller, Issuer};
 use crate::surface;
-use keystone_core::ApprovalMode;
+use keystone_core::{ApprovalMode, LimitWindow};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
@@ -23,13 +24,11 @@ use std::collections::{HashMap, HashSet};
 const CATALOG_PAGES: u32 = 20;
 
 /// Notifications Keystone does not show. Codex skips sending them.
-const OPT_OUT: [&str; 6] = [
+const OPT_OUT: [&str; 4] = [
     "remoteControl/status/changed",
     "account/updated",
-    "account/rateLimits/updated",
     "mcpServer/startupStatus/updated",
     "thread/status/changed",
-    "thread/tokenUsage/updated",
 ];
 
 /// A Codex approval policy and sandbox, sent with each `turn/start`. Codex keeps them
@@ -1194,6 +1193,31 @@ impl CodexDriver {
                     out.event(session, Event::ApprovalResolved { request });
                 }
             }
+            // The account's limits, after a turn's responses. Account-wide, so it rides
+            // on no session in particular.
+            "account/rateLimits/updated" => {
+                let Some(note) = params::<RateLimitsNote>(line) else {
+                    return self.unknown += 1;
+                };
+                let windows = note.rate_limits.windows();
+                if !windows.is_empty() {
+                    out.event(0, Event::Usage(windows));
+                }
+            }
+            "thread/tokenUsage/updated" => {
+                let Some(note) = params::<TokenUsageNote>(line) else {
+                    return self.unknown += 1;
+                };
+                if let Some(session) = self.session_for(&note.thread_id) {
+                    out.event(
+                        session,
+                        Event::ContextUsage {
+                            used: note.token_usage.last.total_tokens,
+                            window: note.token_usage.model_context_window,
+                        },
+                    );
+                }
+            }
             "error" => {
                 // `willRetry` errors are transient; the final failure arrives with
                 // `turn/completed`.
@@ -1454,6 +1478,84 @@ struct DeltaNote {
 struct ResolvedNote {
     thread_id: String,
     request_id: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitsNote {
+    rate_limits: RateLimitSnapshot,
+}
+
+/// One limit's windows. Credits, plan and spend controls are not read.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitSnapshot {
+    limit_id: Option<String>,
+    limit_name: Option<String>,
+    primary: Option<RateLimitWindow>,
+    secondary: Option<RateLimitWindow>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitWindow {
+    /// 0-100.
+    used_percent: f64,
+    window_duration_mins: Option<u64>,
+    /// Unix seconds.
+    resets_at: Option<u64>,
+}
+
+impl RateLimitSnapshot {
+    fn windows(&self) -> Vec<LimitWindow> {
+        let limit = self.limit_id.as_deref().unwrap_or("codex");
+        [("primary", &self.primary), ("secondary", &self.secondary)]
+            .into_iter()
+            .filter_map(|(slot, window)| {
+                let window = window.as_ref()?;
+                let duration = match window.window_duration_mins {
+                    Some(300) => "5-hour".to_owned(),
+                    Some(10_080) => "Weekly".to_owned(),
+                    Some(minutes) if minutes % 1_440 == 0 => format!("{}-day", minutes / 1_440),
+                    Some(minutes) if minutes % 60 == 0 => format!("{}-hour", minutes / 60),
+                    Some(minutes) => format!("{minutes}-minute"),
+                    None if slot == "primary" => "Primary".to_owned(),
+                    None => "Secondary".to_owned(),
+                };
+                let label = match (&self.limit_name, limit) {
+                    (_, "codex") => duration,
+                    (Some(name), _) => format!("{name} {duration}"),
+                    (None, id) => format!("{id} {duration}"),
+                };
+                Some(LimitWindow {
+                    id: format!("{limit}/{slot}"),
+                    label,
+                    used_percent: window.used_percent,
+                    resets_at: window.resets_at,
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenUsageNote {
+    thread_id: String,
+    token_usage: ThreadTokenUsage,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadTokenUsage {
+    last: TokenBreakdown,
+    model_context_window: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenBreakdown {
+    total_tokens: u64,
 }
 
 #[derive(Deserialize)]

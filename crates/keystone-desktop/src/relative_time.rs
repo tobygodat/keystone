@@ -62,6 +62,24 @@ pub fn relative(now: LocalTime, then: LocalTime) -> String {
     }
 }
 
+/// When `then`, usually in the future, falls as seen from `now`: `14:05` on the same
+/// day, `Fri 14:05` within the next six days, and a date after that or before today.
+pub fn clock(now: LocalTime, then: LocalTime) -> String {
+    let seconds = ((then.ms / 1000) as i64 + then.offset_secs).rem_euclid(86_400);
+    let time = format!("{:02}:{:02}", seconds / 3_600, seconds % 3_600 / 60);
+    match then.day() - now.day() {
+        0 => time,
+        1..7 => format!(
+            "{} {time}",
+            WEEKDAYS[(then.day() + 4).rem_euclid(7) as usize]
+        ),
+        _ => {
+            let (month, day) = month_and_day(then.day());
+            format!("{} {day}", MONTHS[month - 1])
+        }
+    }
+}
+
 /// The month (1-12) and day of the month for a count of days since 1970-01-01.
 /// Howard Hinnant's `civil_from_days`.
 fn month_and_day(days: i64) -> (usize, i64) {
@@ -88,6 +106,23 @@ mod tests {
 
     fn utc(ms: u64) -> LocalTime {
         LocalTime { ms, offset_secs: 0 }
+    }
+
+    #[test]
+    fn clock_times_name_the_day_only_when_it_is_not_today() {
+        let now = utc(NOON);
+        let at = |offset: u64| clock(now, utc(NOON + offset));
+        assert_eq!(at(0), "12:00");
+        assert_eq!(at(2 * HOUR + 5 * MINUTE), "14:05");
+        assert_eq!(at(12 * HOUR), "Thu 00:00");
+        assert_eq!(at(2 * DAY + 3 * HOUR), "Fri 15:00");
+        assert_eq!(at(7 * DAY), "Oct 21");
+        assert_eq!(clock(now, utc(NOON - DAY)), "Oct 13");
+        let east = LocalTime {
+            ms: NOON + 11 * HOUR,
+            offset_secs: 2 * 3_600,
+        };
+        assert_eq!(clock(now, east), "Thu 01:00");
     }
 
     #[test]

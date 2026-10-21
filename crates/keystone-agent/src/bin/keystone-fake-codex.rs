@@ -40,6 +40,10 @@
 //! `item/tool/call` when the prompt asks (see `support/widgets.rs`), waits for the
 //! answer, and replies with what each call returned. `dynamicTools` is refused, as
 //! Codex 0.163 refuses it, unless `initialize` opted into `experimentalApi`.
+//!
+//! A prompt containing "usage NN" ends its turn with synthetic, labelled
+//! `account/rateLimits/updated` (the 5-hour window at NN%) and `thread/tokenUsage/updated`
+//! notifications.
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -757,7 +761,44 @@ fn run_turn(
         let item = json!({"type": "agentMessage", "id": steered_id, "text": text});
         notify(out, "item/completed", with(json!({"item": item})));
     }
+    if let Some(percent) = usage_percent(text) {
+        emit_usage(out, thread, turn_id, percent);
+    }
     finish(out, thread, turn_id, "completed");
+}
+
+/// The percentage a prompt such as "usage 85" asks the fake to report.
+fn usage_percent(text: &str) -> Option<u64> {
+    let rest = &text[text.find("usage ")? + "usage ".len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Synthetic, labelled limits for the account: the 5-hour window at `percent`,
+/// resetting in two hours, and the weekly one at 20%, resetting in four days. The
+/// context is half of `percent` of a 200,000-token window.
+fn emit_usage(out: &Out, thread: &str, turn_id: &str, percent: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    emit(
+        out,
+        json!({"method": "account/rateLimits/updated", "params": {"keystoneFake": "synthetic test data", "rateLimits": {
+            "limitId": "codex", "limitName": null, "normalModelSlug": null,
+            "primary": {"usedPercent": percent, "windowDurationMins": 300, "resetsAt": now + 2 * 3600},
+            "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": now + 4 * 86_400},
+            "credits": null, "individualLimit": null, "spendControlReached": null,
+            "planType": null, "rateLimitReachedType": null}}}),
+    );
+    let tokens = |total: u64| {
+        json!({"totalTokens": total, "inputTokens": total, "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0})
+    };
+    emit(
+        out,
+        json!({"method": "thread/tokenUsage/updated", "params": {"threadId": thread, "turnId": turn_id,
+            "tokenUsage": {"total": tokens(percent * 2000), "last": tokens(percent * 1000), "modelContextWindow": 200_000}}}),
+    );
 }
 
 /// Streams `text` word by word until done, steered, or interrupted. Returns what was sent.

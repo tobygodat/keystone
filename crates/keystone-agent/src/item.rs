@@ -162,6 +162,14 @@ pub enum Event {
         call: String,
         text: String,
     },
+    /// The account's usage-limit windows, as far as this report covers them. Belongs to
+    /// the connection's account, whatever session carries it.
+    Usage(Vec<keystone_core::LimitWindow>),
+    /// How much of the model's context window the conversation now fills, in tokens.
+    ContextUsage {
+        used: u64,
+        window: Option<u64>,
+    },
     /// The session's process is proven idle. The app saves everything it got before
     /// this, then may end the process with [`crate::Connection::evict_idle`]. Never a
     /// transcript event.

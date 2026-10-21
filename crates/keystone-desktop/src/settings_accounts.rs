@@ -141,7 +141,7 @@ impl Keystone {
             .automation_id("settings-accounts")
             .child(
                 Label::new(
-                    "Each account runs its CLI with a folder of its own, so sign-in, settings, skills and history stay apart. Sign an account in by running its command in a terminal; Keystone never sees your credentials. A session keeps the account it first sent with.",
+                    "Each account runs its CLI with a folder of its own, so sign-in, settings, skills and history stay apart. Sign an account in by running its command in a terminal; Keystone never sees your credentials. A session keeps the account it first sent with. Usage is what each provider last reported.",
                 )
                 .size(TextSize::Ui)
                 .color(Color::Muted),
@@ -282,13 +282,19 @@ impl Keystone {
             .py(spacing::SM)
             .hairline_t(cx)
             .child(
-                v_flex().flex_1().min_w_0().gap(px(2.)).child(title).child(
-                    Label::new(detail)
-                        .size(TextSize::Sm)
-                        .color(Color::Muted)
-                        .mono()
-                        .truncate(),
-                ),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(title)
+                    .child(
+                        Label::new(detail)
+                            .size(TextSize::Sm)
+                            .color(Color::Muted)
+                            .mono()
+                            .truncate(),
+                    )
+                    .child(self.usage_line(&key, provider, account.map(Account::id), cx)),
             )
             .child(actions)
     }

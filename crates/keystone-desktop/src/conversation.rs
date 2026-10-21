@@ -82,6 +82,9 @@ pub struct Conversation {
     /// report is never shown as current. A failed turn keeps it: the provider is still
     /// there.
     pub reported_model: Option<String>,
+    /// The tokens the conversation's context held at its provider's last report, and
+    /// the model's window when known. Not saved.
+    pub context: Option<(u64, Option<u64>)>,
     /// Set while the log cannot be written. Kept apart from provider errors, so it
     /// stays visible until saving works again.
     pub save_error: Option<String>,
@@ -613,6 +616,7 @@ impl Conversation {
                 Event::ThreadReady { thread_id } => return Some(thread_id),
                 Event::ModelReported { model } => self.reported_model = Some(model),
                 Event::ModelLost => self.reported_model = None,
+                Event::ContextUsage { used, window } => self.context = Some((used, window)),
                 event => pending.push(Pending::Event(event)),
             }
             return None;
@@ -621,8 +625,9 @@ impl Conversation {
             Event::ThreadReady { thread_id } => return Some(thread_id),
             Event::ModelReported { model } => self.reported_model = Some(model),
             Event::ModelLost => self.reported_model = None,
-            // Catalogs belong to the provider, not to a conversation.
-            Event::Catalog(_) | Event::Commands(_) => {}
+            Event::ContextUsage { used, window } => self.context = Some((used, window)),
+            // Catalogs, commands and account usage belong to the provider, not to a conversation.
+            Event::Catalog(_) | Event::Commands(_) | Event::Usage(_) => {}
             Event::TurnStarted => {
                 self.running = true;
                 self.error = None;

@@ -1120,3 +1120,55 @@ mod recovery;
 
 #[path = "idle_tests.rs"]
 mod idle;
+
+#[gpui::test]
+fn an_account_never_shows_usage_left_under_its_id(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+    let mut usage = AccountUsage::default();
+    usage.record(
+        vec![LimitWindow {
+            id: "five_hour".into(),
+            label: "5-hour".into(),
+            used_percent: 90.0,
+            resets_at: None,
+        }],
+        1,
+    );
+    // A save that landed after its account was removed.
+    let id = store
+        .add_account(Provider::Claude, "Work", dir.path().join("old"), &[])
+        .unwrap()
+        .value;
+    store.remove_account(&id).unwrap();
+    store
+        .database()
+        .record_usage(&format!("claude/{id}"), &usage)
+        .unwrap();
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    let folder = dir.path().join("new");
+    let again = state
+        .update(cx, |state, cx| {
+            state.add_account(Provider::Claude, "Work", folder.to_str().unwrap(), cx)
+        })
+        .unwrap()
+        .value;
+    assert_eq!(again, id);
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.usage(Provider::Claude, Some(&again)), None);
+    });
+
+    // A save still queued when its account goes is dropped.
+    state.update(cx, |state, cx| {
+        state.usage_saves.lock().unwrap().1 = true;
+        state.record_usage(
+            Provider::Claude,
+            Some(&again),
+            usage.readings.iter().map(|r| r.window.clone()).collect(),
+            cx,
+        );
+        state.remove_account(&again, cx).unwrap();
+        assert!(state.usage_saves.lock().unwrap().0.is_empty());
+    });
+}

@@ -1,4 +1,4 @@
-use crate::{Durability, Snapshot, Workspace, invalid, validate};
+use crate::{AccountUsage, Durability, Snapshot, Workspace, invalid, validate};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value};
 use std::fs::{self, File};
@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 const SCHEMA_VERSION: u32 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+/// The `metadata` keys that hold each account's usage readings.
+const USAGE_PREFIX: &str = "usage/";
 const SCHEMA: &str = "
 CREATE TABLE events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -470,6 +472,77 @@ impl Database {
         })
     }
 
+    /// Saves an account's usage readings under `account`: a `usage.recorded` event
+    /// and its projection in `metadata`, which older builds leave alone. Saved windows
+    /// `usage` does not carry are kept, so a reading this process never loaded is not
+    /// lost.
+    pub fn record_usage(&self, account: &str, usage: &AccountUsage) -> io::Result<()> {
+        self.connection(false, |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_error)?;
+            let key = format!("{USAGE_PREFIX}{account}");
+            let saved: Option<String> = tx
+                .query_row("SELECT value FROM metadata WHERE key=?1", [&key], |row| row.get(0))
+                .optional()
+                .map_err(sql_error)?;
+            let mut merged = saved
+                .and_then(|saved| serde_json::from_str::<AccountUsage>(&saved).ok())
+                .unwrap_or_default();
+            for reading in &usage.readings {
+                match merged
+                    .readings
+                    .iter_mut()
+                    .find(|old| old.window.id == reading.window.id)
+                {
+                    Some(old) => *old = reading.clone(),
+                    None => merged.readings.push(reading.clone()),
+                }
+            }
+            if let Some(newest) = usage.readings.iter().map(|r| r.observed_at).max() {
+                merged.prune(newest);
+            }
+            let payload = serde_json::to_string(&merged)?;
+            tx.execute(
+                "INSERT INTO events(kind, entity_id, payload) VALUES ('usage.recorded', ?1, ?2)",
+                params![account, payload],
+            )
+            .map_err(sql_error)?;
+            tx.execute(
+                "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, payload],
+            )
+            .map_err(sql_error)?;
+            tx.commit().map_err(sql_error)
+        })
+    }
+
+    /// Every account's saved usage, by the key [`Database::record_usage`] took. A
+    /// reading that no longer parses is skipped.
+    pub fn usage(&self) -> io::Result<Vec<(String, AccountUsage)>> {
+        self.connection(true, |connection| {
+            let mut statement = connection
+                .prepare("SELECT key, value FROM metadata WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([USAGE_PREFIX], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    Some((
+                        key.strip_prefix(USAGE_PREFIX)?.to_owned(),
+                        serde_json::from_str(&value).ok()?,
+                    ))
+                })
+                .collect())
+        })
+    }
+
     pub fn events_after(&self, sequence: u64, limit: u32) -> io::Result<Vec<StoredEvent>> {
         let sequence = i64::try_from(sequence)
             .map_err(|_| invalid("event cursor exceeds SQLite sequence range"))?;
@@ -558,10 +631,20 @@ fn write_projection(
         .map_err(sql_error)?;
         tx.execute("DELETE FROM accounts WHERE id=?1", [id])
             .map_err(sql_error)?;
+        clear_usage(tx, id)?;
     }
     for (position, account) in accounts.iter().enumerate() {
         if previous.is_some_and(|workspace| workspace.accounts.get(position) == Some(account)) {
             continue;
+        }
+        // A new account may reuse a removed one's ID; it starts with no readings.
+        if previous.is_some_and(|workspace| {
+            !workspace
+                .accounts
+                .iter()
+                .any(|old| old.id() == account.id())
+        }) {
+            clear_usage(tx, account.id().as_str())?;
         }
         let payload = serde_json::to_string(account)?;
         let id = account.id().as_str();
@@ -593,6 +676,18 @@ fn write_projection(
         tx.execute("INSERT INTO events(kind, entity_id, payload) VALUES ('workspace.upserted', 'workspace', ?1)", [&payload]).map_err(sql_error)?;
     }
     tx.execute("INSERT INTO workspace(singleton, revision, payload) VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO UPDATE SET revision=excluded.revision, payload=excluded.payload", params![revision, payload]).map_err(sql_error)?;
+    Ok(())
+}
+
+/// Forgets every provider's usage readings for account `id`.
+fn clear_usage(tx: &rusqlite::Transaction<'_>, id: &str) -> io::Result<()> {
+    for provider in ["claude", "codex"] {
+        tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [format!("{USAGE_PREFIX}{provider}/{id}")],
+        )
+        .map_err(sql_error)?;
+    }
     Ok(())
 }
 
@@ -682,6 +777,75 @@ mod tests {
         fs::write(path, r#"{"version":1,"next_id":2,"future":{"kept":true},"workspace":{"selected":1,"sessions":[{"id":1,"title":"Imported","provider":"Codex","settled":false,"draft":"saved draft","model_locked":false,"future_session":42}],"preferences":{"future_preference":"kept"}}}"#).unwrap();
         fs::create_dir(path.parent().unwrap().join("sessions")).unwrap();
         fs::write(path.parent().unwrap().join("sessions/1.jsonl"), "{\"entry\":\"turn_started\"}\n{\"entry\":\"turn_ended\",\"status\":\"completed\",\"error\":null}\n{torn").unwrap();
+    }
+
+    #[test]
+    fn usage_readings_survive_reopening_and_append_an_event() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let database = Database::open(&path).unwrap();
+        let before = database.events_after(0, 1000).unwrap().len();
+        let mut usage = AccountUsage::default();
+        usage.record(
+            vec![crate::LimitWindow {
+                id: "five_hour".into(),
+                label: "5-hour".into(),
+                used_percent: 85.0,
+                resets_at: Some(1_800_000_000),
+            }],
+            42,
+        );
+        database.record_usage("claude/default", &usage).unwrap();
+        usage.readings[0].window.used_percent = 90.0;
+        database.record_usage("claude/default", &usage).unwrap();
+        database
+            .record_usage("codex/codex-work", &AccountUsage::default())
+            .unwrap();
+        // A report that carries fewer windows keeps the saved ones it leaves out.
+        let mut weekly = AccountUsage::default();
+        weekly.record(
+            vec![crate::LimitWindow {
+                id: "seven_day".into(),
+                label: "Weekly".into(),
+                used_percent: 20.0,
+                resets_at: None,
+            }],
+            43,
+        );
+        database.record_usage("claude/default", &weekly).unwrap();
+        usage.readings.push(weekly.readings[0].clone());
+        drop(database);
+        let reopened = Database::open(&path).unwrap();
+        let saved = reopened.usage().unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].0, "claude/default");
+        assert_eq!(saved[0].1, usage);
+        assert_eq!(saved[1].0, "codex/codex-work");
+        let events = reopened.events_after(0, 1000).unwrap();
+        assert_eq!(events.len(), before + 4);
+        assert!(events[before..].iter().all(|e| e.kind == "usage.recorded"));
+        Database::open_read_only(&path).unwrap().usage().unwrap();
+    }
+
+    #[test]
+    fn a_saved_window_that_reset_a_day_before_the_next_report_is_dropped() {
+        let database = Database::in_memory().unwrap();
+        let window = |id: &str, resets_at| crate::LimitWindow {
+            id: id.into(),
+            label: id.into(),
+            used_percent: 100.0,
+            resets_at,
+        };
+        let mut once = AccountUsage::default();
+        once.record(vec![window("seven_day_opus", Some(1))], 1_000);
+        database.record_usage("claude/default", &once).unwrap();
+        let mut later = AccountUsage::default();
+        later.record(vec![window("five_hour", None)], 2_000 + 24 * 60 * 60_000);
+        database.record_usage("claude/default", &later).unwrap();
+        assert_eq!(
+            database.usage().unwrap(),
+            [("claude/default".into(), later)]
+        );
     }
 
     #[test]

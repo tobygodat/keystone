@@ -26,12 +26,13 @@ fn opened() -> CodexDriver {
     let mut driver = CodexDriver::new("0.0.0-test", &mut out);
     let init: Value = serde_json::from_str(&out.writes[0]).unwrap();
     assert_eq!(init["method"], "initialize");
-    assert!(
-        init["params"]["capabilities"]["optOutNotificationMethods"]
-            .as_array()
-            .unwrap()
-            .contains(&"account/rateLimits/updated".into())
-    );
+    let opted_out = init["params"]["capabilities"]["optOutNotificationMethods"]
+        .as_array()
+        .unwrap();
+    assert!(opted_out.contains(&"account/updated".into()));
+    // Usage displays read these two.
+    assert!(!opted_out.contains(&"account/rateLimits/updated".into()));
+    assert!(!opted_out.contains(&"thread/tokenUsage/updated".into()));
 
     // Commands before the handshake completes wait for it.
     let mut out = Outputs::default();
@@ -1284,4 +1285,65 @@ fn skills_for_a_folder_become_commands_and_a_refusal_or_exit_fails_them() {
         SESSION,
         Event::Commands(Commands::Failed("Codex exited".into()))
     )));
+}
+
+#[test]
+fn rate_limit_and_token_usage_notifications_become_usage_events() {
+    let mut driver = opened();
+    let out = feed(
+        &mut driver,
+        &[
+            r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":{"usedPercent":85,"windowDurationMins":300,"resetsAt":1800000000},"secondary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1800500000},"credits":{"hasCredits":true,"unlimited":false,"balance":"5"},"individualLimit":null,"spendControlReached":null,"planType":"pro","rateLimitReachedType":null}}}"#.into(),
+            r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex_other","limitName":"Spark","primary":{"usedPercent":3,"windowDurationMins":null,"resetsAt":null},"secondary":null}}}"#.into(),
+            r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":null,"limitName":null,"primary":null,"secondary":null}}}"#.into(),
+            r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex_bengalfox","limitName":null,"primary":{"usedPercent":9,"windowDurationMins":300,"resetsAt":null},"secondary":null}}}"#.into(),
+            format!(r#"{{"method":"thread/tokenUsage/updated","params":{{"threadId":"{THREAD}","turnId":"t1","tokenUsage":{{"total":{{"totalTokens":90000,"inputTokens":1,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":1,"reasoningOutputTokens":0}},"last":{{"totalTokens":45000,"inputTokens":1,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":1,"reasoningOutputTokens":0}},"modelContextWindow":258400}}}}}}"#),
+            r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"other-thread","turnId":"t1","tokenUsage":{"total":{"totalTokens":1},"last":{"totalTokens":1},"modelContextWindow":null}}}"#.into(),
+        ],
+    );
+    let window =
+        |id: &str, label: &str, used: f64, resets_at: Option<u64>| keystone_core::LimitWindow {
+            id: id.into(),
+            label: label.into(),
+            used_percent: used,
+            resets_at,
+        };
+    assert_eq!(
+        out.events,
+        vec![
+            (
+                0,
+                Event::Usage(vec![
+                    window("codex/primary", "5-hour", 85.0, Some(1_800_000_000)),
+                    window("codex/secondary", "Weekly", 12.0, Some(1_800_500_000)),
+                ])
+            ),
+            (
+                0,
+                Event::Usage(vec![window(
+                    "codex_other/primary",
+                    "Spark Primary",
+                    3.0,
+                    None
+                )])
+            ),
+            (
+                0,
+                Event::Usage(vec![window(
+                    "codex_bengalfox/primary",
+                    "codex_bengalfox 5-hour",
+                    9.0,
+                    None
+                )])
+            ),
+            (
+                SESSION,
+                Event::ContextUsage {
+                    used: 45_000,
+                    window: Some(258_400)
+                }
+            ),
+        ]
+    );
+    assert_eq!(driver.unknown, 0);
 }

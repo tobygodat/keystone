@@ -18,6 +18,7 @@ mod settings_page;
 mod slash_menu;
 mod transcript;
 mod transcript_keyboard;
+mod usage;
 mod view_state;
 mod widget;
 use conversation::{Conversation, Row};
@@ -292,6 +293,7 @@ struct Keystone {
     palette: Option<commands::Palette>,
     files: files::Files,
     slash: slash_menu::SlashMenu,
+    usage_focus: FocusHandle,
 }
 
 impl Keystone {
@@ -500,6 +502,9 @@ impl Keystone {
                     if this.presentation.current.sidebar && this.session_sidebar.read(cx).shows_time
                     {
                         this.refresh(cx);
+                    } else if this.state.read(cx).has_usage() {
+                        // Usage readings age and reset too.
+                        cx.notify();
                     }
                 });
                 if aged.is_err() {
@@ -565,6 +570,7 @@ impl Keystone {
             palette: None,
             files: files::Files::default(),
             slash,
+            usage_focus: cx.focus_handle().tab_stop(true),
         };
         result.sync_draft(cx);
         result.apply_theme(window, cx);
@@ -1400,6 +1406,7 @@ impl Keystone {
                     .when_some(mode, |d, mode| {
                         d.child(self.approval_menu(mode, running, narrow, cx))
                     })
+                    .children(self.usage_meter(session, narrow, cx))
                     .child(div().flex_1())
                     .when(running, |d| {
                         d.child(

@@ -7,8 +7,8 @@ use keystone_agent::recovery::{self, RecoveryBatch, Snapshot, TurnEvidence};
 use keystone_agent::{Catalog, Commands, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{
-    AccountId, Applied, Composition, ProjectId, SavedComposition, SessionTabs, ViewId,
-    WorkingDirectory,
+    AccountId, AccountUsage, Applied, Composition, LimitWindow, ProjectId, SavedComposition,
+    SessionTabs, ViewId, WorkingDirectory,
 };
 use std::collections::BTreeMap;
 
@@ -82,6 +82,11 @@ pub(crate) struct AppState {
     /// Idle processes waiting for their session's log to save, by session: the log
     /// checkpoint's ticket and the provider's candidate.
     idle_saves: HashMap<u64, (u64, IdleCandidate)>,
+    /// Each account's latest usage readings, by [`usage_key`], as saved.
+    usage: BTreeMap<String, AccountUsage>,
+    /// Readings waiting to be saved off the UI thread, the newest per account, and
+    /// whether a save is running.
+    usage_saves: Arc<std::sync::Mutex<(BTreeMap<String, AccountUsage>, bool)>>,
     /// Idle eviction for new Claude connections, in place of the debug-build setting.
     #[cfg(test)]
     pub(crate) test_idle: Option<IdlePolicy>,
@@ -511,6 +516,10 @@ impl AppState {
         if let (Err(_), Some(first)) = (&result, &created) {
             remove_created(first);
         }
+        // The store forgot any readings left under a reused ID; so does this run.
+        if let Ok(added) = &result {
+            self.usage.remove(&usage_key(provider, Some(&added.value)));
+        }
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -549,6 +558,14 @@ impl AppState {
             self.codex.remove(&key);
             self.claude.remove(&key);
             self.catalogs.forget_account(id);
+            // The store forgot its saved readings in the same transaction; a save
+            // still queued must not write them back.
+            let mut saves = self.usage_saves.lock().unwrap();
+            for provider in [Provider::Claude, Provider::Codex] {
+                let key = usage_key(provider, Some(id));
+                self.usage.remove(&key);
+                saves.0.remove(&key);
+            }
         }
         self.changes.sidebar = true;
         self.publish(cx);
@@ -767,7 +784,6 @@ impl AppState {
             None => logs,
         };
         Self {
-            store,
             error: None,
             shutdown_error: None,
             codex: BTreeMap::new(),
@@ -790,6 +806,20 @@ impl AppState {
             widget_saves: Default::default(),
             send_unloaded: Default::default(),
             idle_saves: HashMap::new(),
+            usage: store
+                .database()
+                .usage()
+                .unwrap_or_else(|error| {
+                    eprintln!("Keystone could not load saved usage: {error}");
+                    Vec::new()
+                })
+                .into_iter()
+                .map(|(key, mut usage)| {
+                    usage.prune(now_ms());
+                    (key, usage)
+                })
+                .collect(),
+            usage_saves: Arc::default(),
             #[cfg(test)]
             test_idle: None,
             reviewing: HashMap::new(),
@@ -799,6 +829,7 @@ impl AppState {
             save_calls: 0,
             #[cfg(test)]
             test_programs: None,
+            store,
         }
     }
     pub(crate) fn store(&self) -> &Store {
@@ -1044,6 +1075,9 @@ impl AppState {
                         self.catalogs
                             .apply_commands(provider, account.clone(), session, commands);
                     }
+                    Event::Usage(windows) => {
+                        self.record_usage(provider, account.as_ref(), windows, cx)
+                    }
                     Event::ProviderNotice { .. }
                         if self.route(session) != Some((provider, account.clone())) => {}
                     event => events.push((session, event)),
@@ -1219,6 +1253,59 @@ impl AppState {
         } else {
             self.publish(cx);
         }
+    }
+
+    /// The latest usage readings of `provider`'s `account`; `None` is the default.
+    pub(crate) fn usage(
+        &self,
+        provider: Provider,
+        account: Option<&AccountId>,
+    ) -> Option<&AccountUsage> {
+        self.usage.get(&usage_key(provider, account))
+    }
+
+    pub(crate) fn has_usage(&self) -> bool {
+        self.usage.values().any(|usage| !usage.readings.is_empty())
+    }
+
+    /// Keeps a report of the account's windows and saves the result off the UI
+    /// thread, the newest per account. A failed save leaves the reading shown for this
+    /// run, and the account's next report saves every window again.
+    fn record_usage(
+        &mut self,
+        provider: Provider,
+        account: Option<&AccountId>,
+        windows: Vec<LimitWindow>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = usage_key(provider, account);
+        let usage = self.usage.entry(key.clone()).or_default();
+        usage.record(windows, now_ms());
+        let mut saves = self.usage_saves.lock().unwrap();
+        saves.0.insert(key, usage.clone());
+        if std::mem::replace(&mut saves.1, true) {
+            return;
+        }
+        drop(saves);
+        let (saves, database) = (self.usage_saves.clone(), self.store.database());
+        cx.background_spawn(async move {
+            loop {
+                let batch = {
+                    let mut saves = saves.lock().unwrap();
+                    if saves.0.is_empty() {
+                        saves.1 = false;
+                        return;
+                    }
+                    std::mem::take(&mut saves.0)
+                };
+                for (key, usage) in batch {
+                    if let Err(error) = database.record_usage(&key, &usage) {
+                        eprintln!("Keystone could not save usage for {key}: {error}");
+                    }
+                }
+            }
+        })
+        .detach();
     }
 
     /// The provider and account a session runs on; `None` as the account is the
@@ -2170,4 +2257,16 @@ fn real_path(path: &std::path::Path) -> PathBuf {
             .unwrap_or(std::path::Path::new("")),
     );
     keystone_core::lexical(&joined)
+}
+
+/// Where an account's usage is saved: the provider and the account ID, or `default`.
+fn usage_key(provider: Provider, account: Option<&AccountId>) -> String {
+    let provider = match provider {
+        Provider::Claude => "claude",
+        Provider::Codex => "codex",
+    };
+    format!(
+        "{provider}/{}",
+        account.map_or(AccountId::DEFAULT, AccountId::as_str)
+    )
 }

@@ -358,3 +358,49 @@ fn another_account_returns_the_model_to_the_default_and_a_provider_move_saves_on
     );
     assert_eq!(store.workspace().sessions()[0].provider(), Provider::Codex);
 }
+
+#[test]
+fn removing_or_adding_an_account_forgets_usage_saved_under_its_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let mut store = Store::open(&path).unwrap();
+    let id = store
+        .add_account(Provider::Claude, "Work", "/accounts/a".into(), &[])
+        .unwrap()
+        .value;
+    let mut usage = crate::AccountUsage::default();
+    usage.record(
+        vec![crate::LimitWindow {
+            id: "five_hour".into(),
+            label: "5-hour".into(),
+            used_percent: 90.0,
+            resets_at: None,
+        }],
+        1,
+    );
+    let key = format!("claude/{id}");
+    store.database().record_usage(&key, &usage).unwrap();
+    store
+        .database()
+        .record_usage("claude/default", &usage)
+        .unwrap();
+    store.remove_account(&id).unwrap();
+    let keys = |store: &Store| -> Vec<String> {
+        store
+            .database()
+            .usage()
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
+    };
+    assert_eq!(keys(&store), ["claude/default"]);
+    // Saved under the ID by a build that did not clear it, then the ID is reused.
+    store.database().record_usage(&key, &usage).unwrap();
+    let again = store
+        .add_account(Provider::Claude, "Work", "/accounts/b".into(), &[])
+        .unwrap()
+        .value;
+    assert_eq!(again, id);
+    assert_eq!(keys(&Store::open(&path).unwrap()), ["claude/default"]);
+}

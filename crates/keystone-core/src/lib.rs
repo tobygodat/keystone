@@ -18,6 +18,7 @@ mod layout;
 mod project;
 mod session_context;
 mod tabs;
+mod usage;
 
 pub use account::{Account, AccountId, expand_home, homes_overlap, lexical};
 pub use composition::{
@@ -34,6 +35,7 @@ use session_context::SavedSessionContext;
 pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory};
 use tabs::SavedTabs;
 pub use tabs::SessionTabs;
+pub use usage::{AccountUsage, LimitWindow, Reading};
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 

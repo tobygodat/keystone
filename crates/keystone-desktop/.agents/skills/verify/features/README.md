@@ -25,6 +25,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Claude idle shutdown](provider-idle.md) covers proven-idle eviction of a scripted Claude, lazy resume with the same thread, folder, flags, account and requested model, and held work that keeps its process.
 - [Keyboard transcript actions](transcript-keyboard.md) covers virtual row/action navigation, exact copy bytes, occurrence-scoped Jump and hidden-focus transitions.
 - [Tabs and split panes](tabs.md) covers session tabs, Split right, opening from the sidebar, cycling, closing and collapsing, dragging tabs between strips and to pane edges, pane dividers, and restoring all of it after Quit or a crash.
+- [Usage](usage.md) covers each account's limit windows in Settings → Accounts, the composer footer meter at 80% and above, and the saved reading with its age after a restart.
 - [Command palette](palette.md) covers opening with Ctrl+K or Ctrl+Shift+P, filtering, running a command, dismissing with focus restored, and dialog blocking.
 
 ## Coverage rules

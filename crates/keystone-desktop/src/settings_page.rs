@@ -132,6 +132,18 @@ impl Keystone {
         self.refresh(cx);
     }
 
+    /// Opens the page on Accounts, as the usage meter does.
+    pub(crate) fn open_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_none() {
+            self.toggle_settings(window, cx);
+        }
+        if let Some(page) = &mut self.settings {
+            page.section = Section::Accounts;
+            window.focus(&page.sections[page.section_index()], cx);
+        }
+        self.refresh(cx);
+    }
+
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
         self.focus_composer(window, cx);
