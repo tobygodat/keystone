@@ -931,13 +931,20 @@ impl AppState {
         }
     }
 
-    pub(crate) fn commit(&mut self, session: u64) {
+    /// Logs what the session's conversation changed. Returns whether the log budget
+    /// rejected any of it.
+    pub(crate) fn commit(&mut self, session: u64) -> bool {
         let Some(conversation) = self.conversations.get_mut(&session) else {
-            return;
+            return false;
         };
-        let lost = match self.logs.append(session, conversation.take_writes()) {
-            Ok(()) => 0,
-            Err(_) => self.logs.lost_entries(session),
+        let rejected = self
+            .logs
+            .append(session, conversation.take_writes())
+            .is_err();
+        let lost = if rejected {
+            self.logs.lost_entries(session)
+        } else {
+            0
         };
         let changed = conversation.take_changes();
         let replies = changed
@@ -959,6 +966,7 @@ impl AppState {
             selected: self.store.workspace().selected() == Some(session),
         });
         self.record_loss(session, lost);
+        rejected
     }
 
     pub(crate) fn pump(&mut self, cx: &mut Context<Self>) {
@@ -1544,9 +1552,7 @@ impl AppState {
     /// Commits a shown recovery batch, then asks the log to confirm it. A batch the log
     /// rejects over its budget is held for Retry instead of being confirmed.
     fn save_recovery(&mut self, session: u64, ticket: u64, batch: RecoveryBatch) {
-        let lost = self.logs.lost_entries(session);
-        self.commit(session);
-        if self.logs.lost_entries(session) == lost {
+        if !self.commit(session) {
             self.logs.checkpoint(session, ticket);
         } else if let Some(conversation) = self.conversations.get_mut(&session) {
             conversation.recovery = Some(Recovery::Unsaved(batch));

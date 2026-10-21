@@ -208,7 +208,23 @@ impl Conversation {
         let mut review = None;
         let mut last_local = false;
         let mut exited = false;
+        // The marker for a recovery batch the log rejected is named after the batch, and
+        // a Retry that saved the batch later means nothing was lost.
+        let saved: BTreeSet<String> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Recovery { batch } => Some(format!(
+                    "{}{}",
+                    keystone_agent::log::LOSS_MARKER_PREFIX,
+                    batch.id
+                )),
+                _ => None,
+            })
+            .collect();
         for (position, entry) in entries.into_iter().enumerate() {
+            if matches!(&entry, Entry::Item { item, .. } if saved.contains(&item.id)) {
+                continue;
+            }
             let (seq, entry_run) = match &entry {
                 Entry::TurnStarted | Entry::Recovery { .. } | Entry::ProviderExited => (None, None),
                 Entry::Item { seq, run, .. }
@@ -303,11 +319,19 @@ impl Conversation {
             .collect();
         // Stable, so rows with the same place keep their order in the file.
         ordered.sort_by_key(|(place, _, _)| *place);
-        // Log gap markers with nothing between them read as one gap.
-        ordered.dedup_by(|(_, _, later), (_, _, kept)| {
+        // Log gap markers with nothing between them read as one gap, unless a recovery
+        // batch was logged between them: it may have filled the earlier one.
+        ordered.dedup_by(|(_, logged, later), (_, first, kept)| {
             let (Row::Item(later), Row::Item(kept)) = (later, kept) else {
                 return false;
             };
+            let (from, to) = (*logged.min(first), *logged.max(first));
+            if batches
+                .iter()
+                .any(|(position, _)| from < *position && *position < to)
+            {
+                return false;
+            }
             let (Some(more), Some(count)) = (lost_count(later), lost_count(kept)) else {
                 return false;
             };
@@ -1015,6 +1039,185 @@ mod tests {
         log.save(&mut live);
         assert_eq!(texts(&live), ["hi", "one", "two", "three"]);
         assert_eq!(log.restore().rows, live.rows);
+    }
+
+    /// A recovery that adds the provider's rows where the log marked a gap says so on
+    /// the marker, now and on every restore.
+    #[test]
+    fn a_recovery_that_fills_a_marked_gap_stops_claiming_the_loss() {
+        use keystone_agent::recovery::{Snapshot, SnapshotTurn, reconcile};
+        let mut log = Log(vec![
+            Entry::Item {
+                item: user("u1", "hi"),
+                seq: Some(0),
+                run: Some(1),
+            },
+            Entry::TurnStarted,
+            gap_marker("reply", 1, Some(1), Some(1)),
+        ]);
+        let mut live = log.restore();
+        assert!(live.needs_recovery());
+        let snapshot = Snapshot {
+            turns: vec![SnapshotTurn {
+                items: vec![
+                    user("u1", "hi"),
+                    message("m", "Hello", ItemStatus::Completed),
+                ],
+                end: Some(TurnStatus::Completed),
+            }],
+            limits: Vec::new(),
+        };
+        let batch = reconcile(&live.neutral_items(), live.open_turn(), &snapshot).unwrap();
+        assert_eq!(batch.report.extended, 0);
+        live.apply_recovery(batch);
+        log.save(&mut live);
+        let filled = "1 log entry was not saved here (log budget exceeded); recovery has added what the provider recorded.";
+        assert_eq!(texts(&live), ["hi", "Hello", filled]);
+        assert!(live.rows.iter().all(|row| !matches!(row,
+            Row::Item(item) if lost_count(item).is_some())));
+        let Some(Row::Item(marker)) = live.rows.iter().find(|row| {
+            matches!(row,
+            Row::Item(item) if item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX))
+        }) else {
+            panic!("the marker is still shown");
+        };
+        let summary = crate::transcript::loss_summary(marker);
+        assert!(summary.badges.is_empty() && summary.details.is_empty());
+        assert_eq!(summary.headline, filled);
+        assert_eq!(log.restore().rows, live.rows);
+    }
+
+    #[test]
+    fn a_filled_gap_stays_filled_when_a_later_loss_lands_next_to_it() {
+        use keystone_agent::recovery::{Snapshot, SnapshotTurn, reconcile};
+        let mut log = Log(vec![
+            Entry::Item {
+                item: user("u1", "hi"),
+                seq: Some(0),
+                run: Some(1),
+            },
+            Entry::TurnStarted,
+            gap_marker("reply", 1, Some(1), Some(1)),
+        ]);
+        let mut live = log.restore();
+        let snapshot = Snapshot {
+            turns: vec![SnapshotTurn {
+                items: vec![
+                    user("u1", "hi"),
+                    message("m", "Hello", ItemStatus::Completed),
+                ],
+                end: Some(TurnStatus::Completed),
+            }],
+            limits: Vec::new(),
+        };
+        let batch = reconcile(&live.neutral_items(), live.open_turn(), &snapshot).unwrap();
+        live.apply_recovery(batch);
+        log.save(&mut live);
+        // The next run's first entry is lost, and its marker sorts right after.
+        log.0.push(gap_marker("next", 1, Some(0), Some(2)));
+        assert_eq!(
+            texts(&log.restore()),
+            [
+                "hi",
+                "Hello",
+                "1 log entry was not saved here (log budget exceeded); recovery has added what the provider recorded.",
+                "1 log entry was lost (log budget exceeded).",
+            ]
+        );
+    }
+
+    /// The log's own record of a recovery batch it rejected: the history, then what
+    /// the log saved for the batch, then anything after it.
+    fn rejected_recovery(later: Option<&str>, retried: bool) -> Vec<Entry> {
+        use keystone_agent::log::Logs;
+        use keystone_agent::recovery::{Outcome, RecoveryReport, TurnEvidence};
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let wake: keystone_agent::Wake = std::sync::Arc::new(|| {});
+        let logs = Logs::new(sessions.clone(), wake.clone()).with_budget(800);
+        let write = |entry| Write { entry, sync: true };
+        logs.append(
+            1,
+            vec![
+                write(Entry::Item {
+                    item: user("u1", "hi"),
+                    seq: Some(0),
+                    run: Some(1),
+                }),
+                write(Entry::TurnStarted),
+            ],
+        )
+        .unwrap();
+        let batch = RecoveryBatch {
+            id: "recovery-9".into(),
+            operations: vec![Operation::Insert {
+                after: "u1".into(),
+                item: message(
+                    "m",
+                    &"A long recovered reply. ".repeat(40),
+                    ItemStatus::Completed,
+                ),
+            }],
+            report: RecoveryReport {
+                outcome: Outcome::Partial,
+                messages: 1,
+                tools: 0,
+                extended: 0,
+                turn: TurnEvidence::Unknown,
+                limits: Vec::new(),
+            },
+            report_after: Some("m".into()),
+            closes_turn: true,
+        };
+        let recovery = || {
+            write(Entry::Recovery {
+                batch: batch.clone(),
+            })
+        };
+        assert!(logs.append(1, vec![recovery()]).is_err());
+        logs.flush_pending().unwrap();
+        if retried {
+            // Retry once there is room.
+            let roomy = Logs::new(sessions.clone(), wake);
+            roomy.append(1, vec![recovery()]).unwrap();
+            roomy.flush_pending().unwrap();
+        }
+        if let Some(text) = later {
+            logs.append(
+                1,
+                vec![write(Entry::Item {
+                    item: user(&format!("{LOCAL}2"), text),
+                    seq: Some(0),
+                    run: Some(2),
+                })],
+            )
+            .unwrap();
+        }
+        logs.flush_pending().unwrap();
+        keystone_agent::log::read(&sessions, 1).unwrap()
+    }
+
+    #[test]
+    fn a_rejected_recovery_batch_restores_in_place_counting_its_rows() {
+        let restored = Log(rejected_recovery(Some("next"), false)).restore();
+        assert_eq!(
+            texts(&restored),
+            [
+                "hi",
+                "2 log entries were lost (log budget exceeded).",
+                "next"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rejected_recovery_batch_that_retry_saved_leaves_no_marker() {
+        let restored = Log(rejected_recovery(None, true)).restore();
+        assert_eq!(
+            texts(&restored),
+            ["hi", &"A long recovered reply. ".repeat(40)]
+        );
+        assert!(matches!(restored.rows.last(), Some(Row::Recovery(_))));
     }
 
     /// A provider that exits while the history loads is logged after the turn it

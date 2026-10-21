@@ -13,7 +13,7 @@ use crate::item::{Item, ItemKind, ItemStatus, TurnStatus};
 use crate::worker::Worker;
 use keystone_core::{Database, Durability};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -263,17 +263,22 @@ struct SaveFailure {
 /// keeps both ends of its text. An entry that still does not fit the room left is rejected, and
 /// the session's log gets a gap marker in its place: an item with the
 /// [`LOSS_MARKER_PREFIX`] that counts the missing entries and is placed where the
-/// first of them was. Later entries are admitted again once there is room, and the
-/// marker is saved like any entry, not only at Quit. Turn boundaries and provider exits
-/// are never rejected: they may use a small reserve beyond the budget, and past it a
-/// turn's error is not kept, so boundaries alone keep growing, by a few dozen bytes a
-/// turn, while the store cannot write. Markers are not counted: rejections with
-/// no admitted entry between them share one marker, so a session's queue holds at most
-/// one marker more than the entries it holds. Behind a marker that is saved but not yet
-/// durable, further rejections are only counted until its barrier succeeds, so a crash
-/// then can leave a marker that undercounts. A session's strict [`Logs::flush`] stays
-/// failed for the lifetime of these Logs; [`Logs::flush_pending`] reports only
-/// retryable work. Queue metadata is additional memory.
+/// first of them was. A rejected recovery batch gets a marker of its own, named after
+/// the batch and counting its rows, which a restore drops if a Retry saved the batch.
+/// Later entries are admitted again once there is room, and the marker is saved like
+/// any entry, not only at Quit. Turn boundaries and provider exits are never rejected:
+/// they may use a small reserve beyond the budget, with a turn error cut to fit, and past
+/// it a turn's error is not kept. Boundaries that do not fit even then are kept outside
+/// the budget: after a failed save a session keeps one turn of them, and the earlier
+/// ones join the gap marker as lost; once committed, they no longer wait in memory for
+/// a failing directory barrier. Markers are not counted either: rejections with no
+/// admitted entry between them share one marker, saved again with each new count, even
+/// behind a failing barrier, so a crash never leaves it undercounting, and
+/// a session's queue holds at most one marker more than the entries it holds, plus
+/// one per rejected recovery batch. A
+/// session's strict [`Logs::flush`] stays failed for the lifetime of these Logs;
+/// [`Logs::flush_pending`] reports only retryable work. Queue metadata is additional
+/// memory.
 pub const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
 pub const LOSS_MARKER_PREFIX: &str = "keystone-log-loss-";
 
@@ -286,9 +291,10 @@ pub fn loss_text(count: u64) -> String {
     }
 }
 
-/// How many entries a gap marker says were lost, or `None` for any other item.
+/// How many entries a gap marker says were lost, or `None` for any other item,
+/// including a marker a recovery has since [`filled`].
 pub fn lost_count(item: &Item) -> Option<u64> {
-    if !item.id.starts_with(LOSS_MARKER_PREFIX) {
+    if !item.id.starts_with(LOSS_MARKER_PREFIX) || item.status != ItemStatus::Failed {
         return None;
     }
     let digits = item.text.split(' ').next()?;
@@ -303,11 +309,36 @@ pub fn with_lost_count(marker: &mut Item, count: u64) {
     };
 }
 
+/// `marker` once a recovery has added what the provider recorded where its entries
+/// were lost, so it no longer says they are missing.
+pub fn filled(marker: &Item) -> Item {
+    let count = lost_count(marker).unwrap_or(1);
+    let entries = if count == 1 {
+        "1 log entry was".to_owned()
+    } else {
+        format!("{count} log entries were")
+    };
+    let text = format!(
+        "{entries} not saved here (log budget exceeded); recovery has added what the provider recorded."
+    );
+    Item {
+        id: marker.id.clone(),
+        kind: ItemKind::Other {
+            name: format!("Keystone log loss: {text}"),
+        },
+        text,
+        status: ItemStatus::Completed,
+    }
+}
+
 struct Budget {
     bytes: usize,
     limit: usize,
     /// Entries rejected for each session.
     rejected: BTreeMap<u64, u64>,
+    /// Recovery batches rejected so far, so a batch rejected again on Retry is counted
+    /// once.
+    batches: BTreeSet<String>,
 }
 
 fn limit_error(session: u64, entries: u64) -> String {
@@ -331,6 +362,8 @@ struct Gap {
 }
 
 impl Gap {
+    /// A recovery batch counts the rows it would have added: one per insertion and its
+    /// report.
     fn of(entry: &Entry) -> Self {
         let (seq, run) = match entry {
             Entry::Item { seq, run, .. }
@@ -338,7 +371,16 @@ impl Gap {
             | Entry::TurnEnded { seq, run, .. } => (*seq, *run),
             _ => (None, None),
         };
-        Self { count: 1, seq, run }
+        let count = match entry {
+            Entry::Recovery { batch } => {
+                let inserts = batch.operations.iter().filter(|operation| {
+                    matches!(operation, crate::recovery::Operation::Insert { .. })
+                });
+                inserts.count() as u64 + 1
+            }
+            _ => 1,
+        };
+        Self { count, seq, run }
     }
 
     fn merge(self, later: Gap) -> Gap {
@@ -376,15 +418,31 @@ impl Gap {
 
 struct PendingWrite {
     record: (String, String),
-    /// A gap marker's item ID and the gap it stands for. Markers are not counted in
-    /// the budget.
-    marker: Option<(String, Gap)>,
+    kind: Kind,
+}
+
+enum Kind {
+    /// An entry counted in the budget.
+    Entry,
+    /// A gap marker, not counted in the budget: its item ID, the gap it stands for, and
+    /// whether it stands for one recovery batch alone, under that batch's ID.
+    Marker { id: String, gap: Gap, batch: bool },
+    /// A turn boundary admitted past the reserve, not counted in the budget: which
+    /// boundary, and the gap it leaves when a later one collapses it.
+    Spare {
+        boundary: std::mem::Discriminant<Entry>,
+        gap: Gap,
+    },
 }
 
 /// What admission passes to the writer, in order.
 enum Queued {
     Write(PendingWrite),
-    Gap(Gap),
+    /// Rejected entries in a row, or one rejected recovery batch with its ID.
+    Gap {
+        gap: Gap,
+        batch: Option<String>,
+    },
 }
 
 #[derive(Default)]
@@ -392,9 +450,6 @@ struct PendingSession {
     log: Option<SessionLog>,
     writes: VecDeque<PendingWrite>,
     committed: usize,
-    /// Rejected entries waiting for a marker, held while the last marker queued is
-    /// saved but not yet confirmed durable, so it can no longer change.
-    gap: Option<Gap>,
 }
 
 struct LimitedLine {
@@ -462,6 +517,7 @@ impl Logs {
                 bytes: 0,
                 limit: MAX_PENDING_BYTES,
                 rejected: BTreeMap::new(),
+                batches: BTreeSet::new(),
             })),
             dir,
             read,
@@ -532,7 +588,9 @@ impl Logs {
         let mut admission = self.budget.lock().unwrap();
         let mut queued = Vec::new();
         let mut bytes = 0;
+        // Entries refused in this call, and how many of them are newly lost.
         let mut rejected = 0;
+        let mut newly_lost = 0;
         for write in writes {
             let used = admission.bytes + bytes;
             let room = admission.limit.saturating_sub(used);
@@ -542,16 +600,19 @@ impl Logs {
                 write.entry,
                 Entry::TurnStarted | Entry::TurnEnded { .. } | Entry::ProviderExited
             );
+            let mut spare = false;
             let (entry, line) = if boundary {
                 let mut entry = write.entry;
                 let mut line = serialize(&entry, room);
+                let reserve = (admission.limit / 64).max(BOUNDARY_BYTES);
+                let reserved = (admission.limit + reserve).saturating_sub(used);
                 if line.is_none() {
-                    let reserve = (admission.limit / 64).max(BOUNDARY_BYTES);
                     entry = fit(entry, BOUNDARY_BYTES);
-                    line = serialize(&entry, (admission.limit + reserve).saturating_sub(used));
+                    line = serialize(&entry, reserved);
                 }
-                // Past the reserve a boundary is still kept, without its error: a few
-                // dozen bytes a turn.
+                // Past the reserve a boundary is still kept, without its error. One that
+                // still does not fit is kept outside the budget, and the writer collapses
+                // a run of them.
                 if line.is_none() {
                     if let Entry::TurnEnded {
                         error: Some(error), ..
@@ -559,7 +620,11 @@ impl Logs {
                     {
                         *error = "The error was not saved (log budget exceeded).".into();
                     }
+                    line = serialize(&entry, reserved);
+                }
+                if line.is_none() {
                     line = serialize(&entry, usize::MAX);
+                    spare = true;
                 }
                 (entry, line)
             } else {
@@ -569,23 +634,48 @@ impl Logs {
                 (entry, line)
             };
             if let Some(line) = line {
-                bytes += line.len();
+                let kind = if spare {
+                    Kind::Spare {
+                        boundary: std::mem::discriminant(&entry),
+                        gap: Gap::of(&entry),
+                    }
+                } else {
+                    bytes += line.len();
+                    Kind::Entry
+                };
                 queued.push(Queued::Write(PendingWrite {
                     record: (event_key(), line),
-                    marker: None,
+                    kind,
                 }));
                 continue;
             }
             rejected += 1;
-            match queued.last_mut() {
-                Some(Queued::Gap(gap)) => *gap = gap.merge(Gap::of(&entry)),
-                _ => queued.push(Queued::Gap(Gap::of(&entry))),
+            let gap = Gap::of(&entry);
+            let batch = match &entry {
+                Entry::Recovery { batch } => Some(batch.id.clone()),
+                _ => None,
+            };
+            if batch
+                .as_ref()
+                .is_none_or(|id| admission.batches.insert(id.clone()))
+            {
+                newly_lost += gap.count;
+            }
+            match (queued.last_mut(), &batch) {
+                (
+                    Some(Queued::Gap {
+                        gap: held,
+                        batch: None,
+                    }),
+                    None,
+                ) => *held = held.merge(gap),
+                _ => queued.push(Queued::Gap { gap, batch }),
             }
         }
         admission.bytes += bytes;
         let lost = if rejected > 0 {
             let lost = admission.rejected.entry(session).or_default();
-            *lost = lost.saturating_add(rejected);
+            *lost = lost.saturating_add(newly_lost);
             *lost
         } else {
             0
@@ -772,11 +862,11 @@ impl Files {
                     session,
                 ));
             }
-            pending.retry(budget)?;
-            // Rejections held behind a marker that was waiting on its barrier.
-            pending.mark_gap(false);
             pending.retry(budget)
         })();
+        if result.is_err() {
+            self.sessions.get_mut(&session).unwrap().compact();
+        }
         let failure = result
             .err()
             .map(|error| format!("Session {session}: {error}"));
@@ -818,46 +908,148 @@ impl PendingSession {
     /// Queues a write, or the marker for rejected entries.
     fn queue(&mut self, queued: Queued) {
         match queued {
-            Queued::Write(write) => {
-                self.mark_gap(true);
-                self.writes.push_back(write);
-            }
-            Queued::Gap(gap) => {
-                self.gap = Some(self.gap.map_or(gap, |held| held.merge(gap)));
-                self.mark_gap(false);
+            Queued::Write(write) => self.writes.push_back(write),
+            Queued::Gap { gap, batch: None } => self.mark_gap(gap),
+            Queued::Gap {
+                gap,
+                batch: Some(batch),
+            } => {
+                let id = format!("{LOSS_MARKER_PREFIX}{batch}");
+                // A batch rejected again on Retry is marked already.
+                if !self.writes.iter().any(
+                    |write| matches!(&write.kind, Kind::Marker { id: held, .. } if *held == id),
+                ) {
+                    self.writes.push_back(PendingWrite {
+                        record: (event_key(), gap.record(&id)),
+                        kind: Kind::Marker {
+                            id,
+                            gap,
+                            batch: true,
+                        },
+                    });
+                }
             }
         }
     }
 
-    /// Queues the marker for held rejections. Rejections with nothing queued between
-    /// them share one marker: an unsent one is rewritten. Behind a marker already
-    /// saved and awaiting its directory barrier, they wait for that barrier, unless an
-    /// entry follows them now. So a session never queues more markers than entries
-    /// plus one, and markers that end up adjacent are merged when a log is restored.
-    fn mark_gap(&mut self, before_write: bool) {
-        let Some(gap) = self.gap.take() else {
+    /// Queues the marker for rejected entries. Rejections with nothing queued between
+    /// them share one marker, saved again with the new count under a fresh event key,
+    /// since a failed append may still have committed the old payload. A marker already
+    /// committed and awaiting its directory barrier is saved again too, so a crash
+    /// while the barrier keeps failing never leaves it undercounting: a restore keeps
+    /// the larger count of a marker saved twice, and memory holds only the latest. So a
+    /// session never queues more markers than entries plus one, and markers that end
+    /// up adjacent are merged when a log is restored.
+    fn mark_gap(&mut self, gap: Gap) {
+        if let Some(index) = self.mergeable() {
+            let PendingWrite {
+                record,
+                kind: Kind::Marker { id, gap: held, .. },
+            } = &mut self.writes[index]
+            else {
+                unreachable!("a mergeable write is a marker");
+            };
+            *held = held.merge(gap);
+            *record = (event_key(), held.record(id));
+            self.committed = self.committed.min(index);
+            return;
+        }
+        let id = format!("{LOSS_MARKER_PREFIX}{}", event_key());
+        self.writes.push_back(PendingWrite {
+            record: (event_key(), gap.record(&id)),
+            kind: Kind::Marker {
+                id,
+                gap,
+                batch: false,
+            },
+        });
+    }
+
+    /// The marker a rejection now joins: the last write, or the last before a run of
+    /// rejected recovery batches' markers, which keep their own.
+    fn mergeable(&self) -> Option<usize> {
+        let index = self
+            .writes
+            .iter()
+            .rposition(|write| !matches!(write.kind, Kind::Marker { batch: true, .. }))?;
+        matches!(self.writes[index].kind, Kind::Marker { batch: false, .. }).then_some(index)
+    }
+
+    /// After a failed save, so a store that works again saves every boundary. Past the
+    /// reserve a session keeps one turn of boundaries while the store cannot write.
+    fn compact(&mut self) {
+        let unsent: Vec<_> = self.writes.drain(self.committed..).collect();
+        for write in unsent {
+            if let Kind::Spare { boundary, .. } = write.kind {
+                self.collapse(boundary);
+            }
+            self.writes.push_back(write);
+        }
+    }
+
+    /// A boundary past the reserve drops the unsent ones from the last turn start, when
+    /// it starts a turn itself, or else from an earlier boundary of its kind since that
+    /// start. What it drops joins the gap marker, as entries lost, so only a few
+    /// boundaries wait however many turns go by. A rejected recovery batch's marker is
+    /// kept as it is.
+    fn collapse(&mut self, boundary: std::mem::Discriminant<Entry>) {
+        let started = std::mem::discriminant(&Entry::TurnStarted);
+        let tail = self.writes.len()
+            - self
+                .writes
+                .iter()
+                .skip(self.committed)
+                .rev()
+                .take_while(|write| matches!(write.kind, Kind::Spare { .. } | Kind::Marker { .. }))
+                .count();
+        let at = |index: usize, kind| matches!(self.writes[index].kind, Kind::Spare { boundary, .. } if boundary == kind);
+        let turn = (tail..self.writes.len())
+            .rev()
+            .find(|&index| at(index, started));
+        let from = if boundary == started {
+            turn
+        } else {
+            (turn.unwrap_or(tail)..self.writes.len()).find(|&index| at(index, boundary))
+        };
+        let Some(from) = from else {
             return;
         };
-        let unsent = self.writes.len() > self.committed;
-        match self.writes.back_mut() {
-            Some(PendingWrite {
-                record,
-                marker: Some((id, held)),
-            }) if unsent => {
-                *held = held.merge(gap);
-                // A fresh key: a failed append may still have committed the old payload.
-                *record = (event_key(), held.record(id));
-            }
-            Some(PendingWrite {
-                marker: Some(_), ..
-            }) if !before_write => self.gap = Some(gap),
-            _ => {
-                let id = format!("{LOSS_MARKER_PREFIX}{}", event_key());
+        let mut kept = None;
+        let mut batches = Vec::new();
+        let mut dropped: Option<Gap> = None;
+        for write in self.writes.drain(from..).collect::<Vec<_>>() {
+            let gap = match write.kind {
+                Kind::Marker { batch: true, .. } => {
+                    batches.push(write);
+                    continue;
+                }
+                Kind::Marker { id, gap, .. } => {
+                    kept.get_or_insert(id);
+                    gap
+                }
+                Kind::Spare { gap, .. } => gap,
+                Kind::Entry => unreachable!("a collapse never reaches a budgeted entry"),
+            };
+            dropped = Some(dropped.map_or(gap, |held| held.merge(gap)));
+        }
+        self.writes.extend(batches);
+        let Some(gap) = dropped else {
+            return;
+        };
+        match kept {
+            // A dropped marker keeps its ID, so a copy whose append outcome was unknown
+            // restores as the same marker.
+            Some(id) if self.mergeable().is_none() => {
                 self.writes.push_back(PendingWrite {
                     record: (event_key(), gap.record(&id)),
-                    marker: Some((id, gap)),
+                    kind: Kind::Marker {
+                        id,
+                        gap,
+                        batch: false,
+                    },
                 });
             }
+            _ => self.mark_gap(gap),
         }
     }
 
@@ -879,6 +1071,16 @@ impl PendingSession {
                 let durability = log.append_records(&records)?;
                 self.committed = self.writes.len();
                 if let Durability::DirectorySyncPending(error) = durability {
+                    // Committed rows are never sent again, so only entries counted in
+                    // the budget wait here for the barrier. The last write stays, so a
+                    // rejection after it is marked after it.
+                    let last = self.writes.len() - 1;
+                    let mut index = 0;
+                    self.writes.retain(|write| {
+                        index += 1;
+                        index > last || matches!(write.kind, Kind::Entry)
+                    });
+                    self.committed = self.writes.len();
                     return Err(io::Error::other(error));
                 }
             } else {
@@ -886,7 +1088,7 @@ impl PendingSession {
             }
             let mut budget = budget.lock().unwrap();
             for write in self.writes.drain(..self.committed) {
-                if write.marker.is_none() {
+                if matches!(write.kind, Kind::Entry) {
                     budget.bytes -= write.record.1.len();
                 }
             }
@@ -897,8 +1099,8 @@ impl PendingSession {
     }
 }
 
-/// What a turn boundary that needs the reserve is cut to: its error keeps 1 KiB from
-/// each end.
+/// What a turn boundary that needs the reserve is cut to: its error keeps at most
+/// 1 KiB from each end, and less when escaping makes that too long.
 const BOUNDARY_BYTES: usize = 4096;
 
 /// `entry` as one log line, or `None` when it is longer than `limit` bytes.
@@ -915,7 +1117,8 @@ fn serialize(entry: &Entry, limit: usize) -> Option<String> {
 /// `entry`, keeping both ends of its text with a note of what was left out when it
 /// serializes to more than `limit` bytes. Only message, reasoning and output text,
 /// approval actions and turn errors shrink. Items and approvals are cut to a quarter of
-/// the budget; a turn error only when its boundary needs the reserve.
+/// the budget and keep at least 1 KiB from each end; a turn error is cut only when its
+/// boundary needs the reserve, as far as it takes to fit.
 fn fit(mut entry: Entry, limit: usize) -> Entry {
     let fits = |entry: &Entry| {
         serde_json::to_writer(
@@ -941,8 +1144,15 @@ fn fit(mut entry: Entry, limit: usize) -> Entry {
     let Some(original) = text(&mut entry).map(std::mem::take) else {
         return entry;
     };
+    // Escaping can make even 1 KiB from each end too long for a turn error that needs
+    // the reserve, so that is cut as far as it takes.
+    let least = if matches!(entry, Entry::TurnEnded { .. }) {
+        1
+    } else {
+        1024
+    };
     let mut keep = limit / 4;
-    while keep >= 1024 {
+    while keep >= least {
         if original.len() > keep * 2 {
             let head = original.floor_char_boundary(keep);
             let tail = original.ceil_char_boundary(original.len() - keep);
@@ -1941,7 +2151,7 @@ mod tests {
     }
 
     #[test]
-    fn rejections_behind_a_saved_marker_wait_for_its_barrier_in_bounded_memory() {
+    fn rejections_behind_a_committed_marker_save_their_count_in_bounded_memory() {
         let (logs, _, dir) = logs();
         let logs = logs.with_budget(4096);
         inject(&logs, 1, (0..101).map(|_| Fault::Committed).collect());
@@ -1949,28 +2159,29 @@ mod tests {
             assert!(logs.append(1, vec![bulky(n, 8192)]).is_err());
         }
         logs.writer.flush();
+        // The barrier never succeeded: what a crash now would leave.
         let sessions = dir.path().join("sessions");
-        assert_eq!(read(&sessions, 1).unwrap().len(), 1);
-        {
-            let files = logs.files.lock().unwrap();
-            let pending = &files.sessions[&1];
-            assert_eq!(
-                pending.writes.len(),
-                1,
-                "one marker, however many rejections"
-            );
-            assert_eq!(pending.gap.map(|gap| gap.count), Some(99));
-        }
+        let entries = read(&sessions, 1).unwrap();
+        let ids: BTreeSet<_> = entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Item { item, .. } => item.id.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ids.len(), 1, "one marker, saved again with each count");
+        assert_eq!(
+            entries.last().and_then(marker),
+            Some(("100 log entries were lost (log budget exceeded).", Some(0)))
+        );
+        assert_eq!(
+            logs.files.lock().unwrap().sessions[&1].writes.len(),
+            1,
+            "only the latest copy waits for the barrier"
+        );
         assert!(logs.flush_pending().is_err());
         logs.flush_pending().unwrap();
-        let entries = read(&sessions, 1).unwrap();
-        assert_eq!(
-            entries.iter().map(marker).collect::<Vec<_>>(),
-            [
-                Some(("1 log entry was lost (log budget exceeded).", Some(0))),
-                Some(("99 log entries were lost (log budget exceeded).", Some(1))),
-            ]
-        );
+        assert_eq!(read(&sessions, 1).unwrap(), entries);
         assert_eq!(logs.lost_entries(1), 100);
         assert_eq!(logs.budget.lock().unwrap().bytes, 0);
     }
@@ -2064,18 +2275,260 @@ mod tests {
             },
             sync: true,
         };
-        // Each error is too escaped to cut, so it is dropped; the boundaries left fill
-        // the budget and the reserve.
+        // The cut errors fill the budget and the reserve; past it each turn end is kept
+        // without its error and stands in for the ones before it.
         for n in 0..120 {
             logs.append(1, vec![ended(n)]).unwrap();
         }
+        // A stopped turn has no error to replace.
         logs.append(
-            1,
+            2,
             vec![Write {
                 entry: Entry::TurnEnded {
                     status: TurnStatus::Interrupted,
                     error: None,
-                    seq: Some(120),
+                    seq: Some(0),
+                    run: Some(1),
+                },
+                sync: true,
+            }],
+        )
+        .unwrap();
+        logs.writer.flush();
+        fs::remove_file(path(&sessions, 0)).unwrap();
+        logs.flush_pending().unwrap();
+        let entries = read(&sessions, 1).unwrap();
+        let note = "The error was not saved (log budget exceeded).";
+        let cut = entries
+            .iter()
+            .take_while(|entry| {
+                matches!(entry, Entry::TurnEnded { error: Some(error), .. }
+                if error.contains("bytes not saved (log budget exceeded)"))
+            })
+            .count();
+        let kept = entries
+            .iter()
+            .position(|entry| marker(entry).is_some())
+            .unwrap();
+        assert!(cut >= 2 && kept > cut, "{entries:?}");
+        assert!(entries[cut..kept].iter().all(|entry| matches!(entry,
+            Entry::TurnEnded { error: Some(error), .. } if error == note)));
+        assert_eq!(entries.len(), kept + 2);
+        let collapsed = loss_text(119 - kept as u64);
+        assert_eq!(
+            marker(&entries[kept]),
+            Some((collapsed.as_str(), Some(kept as u64)))
+        );
+        assert!(
+            matches!(&entries[kept + 1], Entry::TurnEnded { error: Some(error), seq: Some(119), .. }
+            if error == note)
+        );
+        assert!(matches!(
+            &read(&sessions, 2).unwrap()[..],
+            [Entry::TurnEnded {
+                status: TurnStatus::Interrupted,
+                error: None,
+                ..
+            }]
+        ));
+        assert_eq!(logs.lost_entries(1), 0);
+    }
+
+    /// Fills the budget, then its reserve with turn starts, and returns how many were
+    /// counted in it. The last is past the reserve.
+    fn fill_budget_and_reserve(logs: &Logs, budget: usize) -> usize {
+        let overhead = serde_json::to_vec(&bulky(0, 0).entry).unwrap().len() + 1;
+        logs.append(1, vec![bulky(0, budget - overhead)]).unwrap();
+        let started = Write {
+            entry: Entry::TurnStarted,
+            sync: false,
+        };
+        for counted in 0..budget {
+            let before = logs.budget.lock().unwrap().bytes;
+            logs.append(1, vec![started.clone()]).unwrap();
+            if logs.budget.lock().unwrap().bytes == before {
+                return counted;
+            }
+        }
+        panic!("turn starts past the reserve still grow the budget");
+    }
+
+    /// A turn past the reserve: its start, an item the budget rejects, and its end.
+    fn spare_turn(logs: &Logs, n: u64) {
+        logs.append(
+            1,
+            vec![Write {
+                entry: Entry::TurnStarted,
+                sync: false,
+            }],
+        )
+        .unwrap();
+        assert!(logs.append(1, vec![entry(2 * n)]).is_err());
+        logs.append(
+            1,
+            vec![Write {
+                entry: Entry::TurnEnded {
+                    status: TurnStatus::Failed,
+                    error: Some("failed".into()),
+                    seq: Some(2 * n + 1),
+                    run: Some(1),
+                },
+                sync: true,
+            }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn boundaries_past_the_reserve_stay_bounded_while_the_store_cannot_write() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        let sessions = dir.path().join("sessions");
+        fs::write(path(&sessions, 0), "not a database").unwrap();
+        let counted = fill_budget_and_reserve(&logs, 8192);
+        let bytes = logs.budget.lock().unwrap().bytes;
+        for n in 1..=1000 {
+            spare_turn(&logs, n);
+        }
+        logs.writer.flush();
+        assert!(
+            logs.files.lock().unwrap().sessions[&1].writes.len() <= 1 + counted + 5,
+            "a few writes wait, however many turns go by"
+        );
+        assert_eq!(logs.budget.lock().unwrap().bytes, bytes);
+        fs::remove_file(path(&sessions, 0)).unwrap();
+        logs.flush_pending().unwrap();
+        let entries = read(&sessions, 1).unwrap();
+        // One marker counts the start past the reserve and every turn but the last: its
+        // start, item and end.
+        let kept = 1 + counted;
+        assert_eq!(entries.len(), kept + 4, "{entries:?}");
+        assert_eq!(
+            marker(&entries[kept]),
+            Some((loss_text(1 + 3 * 999).as_str(), Some(2)))
+        );
+        assert_eq!(entries[kept + 1], Entry::TurnStarted);
+        assert_eq!(
+            marker(&entries[kept + 2]),
+            Some((loss_text(1).as_str(), Some(2000)))
+        );
+        assert!(matches!(
+            entries[kept + 3],
+            Entry::TurnEnded {
+                seq: Some(2001),
+                ..
+            }
+        ));
+        assert_eq!(logs.lost_entries(1), 1000);
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn boundaries_past_the_reserve_are_all_saved_once_the_store_works_again() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        let sessions = dir.path().join("sessions");
+        fs::write(path(&sessions, 0), "not a database").unwrap();
+        fill_budget_and_reserve(&logs, 8192);
+        spare_turn(&logs, 1);
+        logs.writer.flush();
+        fs::remove_file(path(&sessions, 0)).unwrap();
+        // The next turn starts in the append that finds the store working.
+        logs.append(
+            1,
+            vec![Write {
+                entry: Entry::TurnStarted,
+                sync: false,
+            }],
+        )
+        .unwrap();
+        logs.flush_pending().unwrap();
+        let entries = read(&sessions, 1).unwrap();
+        assert!(
+            matches!(
+                &entries[entries.len() - 2],
+                Entry::TurnEnded { seq: Some(3), .. }
+            ),
+            "{entries:?}"
+        );
+        assert_eq!(entries.last(), Some(&Entry::TurnStarted));
+    }
+
+    #[test]
+    fn rejected_recovery_batches_do_not_stop_boundaries_collapsing() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        let sessions = dir.path().join("sessions");
+        fs::write(path(&sessions, 0), "not a database").unwrap();
+        let counted = fill_budget_and_reserve(&logs, 8192);
+        for n in 1..=200 {
+            spare_turn(&logs, n);
+            let recovery = Write {
+                entry: Entry::Recovery {
+                    batch: batch(&format!("recovery-{n}"), 20),
+                },
+                sync: true,
+            };
+            assert!(logs.append(1, vec![recovery]).is_err());
+        }
+        logs.writer.flush();
+        let waiting = logs.files.lock().unwrap().sessions[&1].writes.len();
+        // Each rejected batch keeps its own marker; the boundaries around them collapse.
+        assert!(waiting <= 1 + counted + 200 + 6, "{waiting}");
+        fs::remove_file(path(&sessions, 0)).unwrap();
+        logs.flush_pending().unwrap();
+        let entries = read(&sessions, 1).unwrap();
+        let batches = entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Item { item, .. } if item.id.starts_with(&format!("{LOSS_MARKER_PREFIX}recovery-"))))
+            .count();
+        assert_eq!(batches, 200);
+    }
+
+    #[test]
+    fn boundaries_past_the_reserve_do_not_wait_in_memory_for_a_failing_barrier() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        inject(&logs, 1, (0..10_000).map(|_| Fault::Committed).collect());
+        let counted = fill_budget_and_reserve(&logs, 8192);
+        for n in 1..=1000 {
+            spare_turn(&logs, n);
+        }
+        logs.writer.flush();
+        {
+            let mut files = logs.files.lock().unwrap();
+            let pending = files.sessions.get_mut(&1).unwrap();
+            assert_eq!(
+                pending.writes.len(),
+                1 + counted + 1,
+                "only budgeted entries and the last write wait for the barrier"
+            );
+            pending.log.as_mut().unwrap().faults.clear();
+        }
+        // Every row was committed while the barrier failed.
+        let committed = read(&dir.path().join("sessions"), 1).unwrap();
+        assert_eq!(committed.len(), 1 + counted + 1 + 3 * 1000);
+        logs.flush_pending().unwrap();
+        assert_eq!(read(&dir.path().join("sessions"), 1).unwrap(), committed);
+        assert_eq!(logs.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn an_escaped_turn_error_that_needs_the_reserve_is_cut_not_dropped() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        let sessions = dir.path().join("sessions");
+        fs::write(path(&sessions, 0), "not a database").unwrap();
+        let overhead = serde_json::to_vec(&bulky(0, 0).entry).unwrap().len() + 1;
+        logs.append(1, vec![bulky(0, 8192 - overhead)]).unwrap();
+        let error = format!("start{}end", "\"\\\u{1}".repeat(4096));
+        logs.append(
+            1,
+            vec![Write {
+                entry: Entry::TurnEnded {
+                    status: TurnStatus::Failed,
+                    error: Some(error),
+                    seq: Some(1),
                     run: Some(1),
                 },
                 sync: true,
@@ -2085,20 +2538,133 @@ mod tests {
         fs::remove_file(path(&sessions, 0)).unwrap();
         logs.flush_pending().unwrap();
         let entries = read(&sessions, 1).unwrap();
-        assert_eq!(entries.len(), 121);
+        let ended = &entries[1];
         assert!(
-            matches!(&entries[7], Entry::TurnEnded { error: Some(error), .. }
-            if error == "The error was not saved (log budget exceeded).")
+            matches!(ended, Entry::TurnEnded { error: Some(error), .. }
+            if error.starts_with("start\"\\\u{1}") && error.ends_with("\"\\\u{1}end")
+                && error.contains("bytes not saved (log budget exceeded)")),
+            "{ended:?}"
         );
-        assert!(matches!(
-            &entries[120],
-            Entry::TurnEnded {
-                status: TurnStatus::Interrupted,
-                error: None,
-                ..
-            }
-        ));
-        assert_eq!(logs.lost_entries(1), 0);
+        assert!(serde_json::to_vec(ended).unwrap().len() <= BOUNDARY_BYTES);
+        // An item still keeps at least 1 KiB from each end, so under a small budget an
+        // escaped one is rejected rather than cut further.
+        let mut escaped = entry(2);
+        if let Entry::Item { item, .. } = &mut escaped.entry {
+            item.text = "\"".repeat(4096);
+        }
+        assert!(logs.append(1, vec![escaped]).is_err());
+        logs.flush_pending().unwrap();
+        assert_eq!(
+            marker(read(&sessions, 1).unwrap().last().unwrap()),
+            Some((loss_text(1).as_str(), Some(2)))
+        );
+    }
+
+    fn batch(id: &str, rows: usize) -> crate::recovery::RecoveryBatch {
+        crate::recovery::RecoveryBatch {
+            id: id.into(),
+            operations: (0..rows)
+                .map(|n| crate::recovery::Operation::Insert {
+                    after: "u1".into(),
+                    item: Item {
+                        text: "recovered ".repeat(100),
+                        ..item(&format!("r{n}"))
+                    },
+                })
+                .collect(),
+            report: crate::recovery::RecoveryReport {
+                outcome: crate::recovery::Outcome::Recovered,
+                messages: rows as u32,
+                tools: 0,
+                extended: 0,
+                turn: crate::recovery::TurnEvidence::Unaffected,
+                limits: Vec::new(),
+            },
+            report_after: None,
+            closes_turn: false,
+        }
+    }
+
+    #[test]
+    fn a_rejected_batch_counts_only_the_rows_it_would_have_added() {
+        let mut recovery = batch("recovery-y", 2);
+        recovery
+            .operations
+            .push(crate::recovery::Operation::Replace {
+                expected: item("r0"),
+                item: item("r0"),
+            });
+        assert_eq!(Gap::of(&Entry::Recovery { batch: recovery }).count, 3);
+    }
+
+    #[test]
+    fn a_batch_rejected_again_after_other_writes_is_marked_once() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        let sessions = dir.path().join("sessions");
+        fs::write(path(&sessions, 0), "not a database").unwrap();
+        fill_budget_and_reserve(&logs, 8192);
+        for _ in 0..50 {
+            let recovery = Write {
+                entry: Entry::Recovery {
+                    batch: batch("recovery-x", 20),
+                },
+                sync: true,
+            };
+            assert!(logs.append(1, vec![recovery]).is_err());
+            logs.append(
+                1,
+                vec![Write {
+                    entry: Entry::ProviderExited,
+                    sync: true,
+                }],
+            )
+            .unwrap();
+        }
+        logs.writer.flush();
+        fs::remove_file(path(&sessions, 0)).unwrap();
+        logs.flush_pending().unwrap();
+        let copies = read(&sessions, 1)
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Item { item, .. } if item.id == format!("{LOSS_MARKER_PREFIX}recovery-x")))
+            .count();
+        assert_eq!(copies, 1);
+        assert_eq!(logs.lost_entries(1), 21);
+    }
+
+    #[test]
+    fn a_rejected_recovery_batch_is_marked_under_its_id_with_its_rows() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(1000);
+        let recovery = || Write {
+            entry: Entry::Recovery {
+                batch: batch("recovery-7", 3),
+            },
+            sync: true,
+        };
+        assert!(logs.append(1, vec![recovery()]).is_err());
+        assert_eq!(logs.lost_entries(1), 4);
+        // Retry while there is still no room: the same batch, counted and marked once.
+        assert!(logs.append(1, vec![recovery()]).is_err());
+        assert!(logs.append(1, vec![bulky(5, 2000)]).is_err());
+        logs.flush_pending().unwrap();
+        // A copy saved again after the first committed restores as the same marker.
+        let entries = read(&dir.path().join("sessions"), 1).unwrap();
+        let (later, batch_markers) = entries.split_last().unwrap();
+        assert!(!batch_markers.is_empty());
+        for entry in batch_markers {
+            let Entry::Item {
+                item, seq: None, ..
+            } = entry
+            else {
+                panic!("{entries:?}");
+            };
+            assert_eq!(item.id, format!("{LOSS_MARKER_PREFIX}recovery-7"));
+            assert_eq!(lost_count(item), Some(4));
+        }
+        assert_eq!(marker(later), Some((loss_text(1).as_str(), Some(5))));
+        assert_eq!(logs.lost_entries(1), 5);
     }
 
     #[test]

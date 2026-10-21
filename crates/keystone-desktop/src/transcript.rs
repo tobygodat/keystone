@@ -449,6 +449,14 @@ fn plural(count: u64, one: &str, many: &str) -> String {
 /// How a log gap marker reads, as a partial recovery does: what is shown here is not
 /// everything that happened.
 pub fn loss_summary(marker: &Item) -> RecoverySummary {
+    // A recovery has since added what the provider recorded there.
+    if keystone_agent::log::lost_count(marker).is_none() {
+        return RecoverySummary {
+            badges: Vec::new(),
+            headline: marker.text.clone(),
+            details: Vec::new(),
+        };
+    }
     RecoverySummary {
         badges: vec![("Partial", Color::Warning)],
         headline: marker.text.clone(),

@@ -359,6 +359,26 @@ pub fn reconcile(neutral: &[Item], open_turn: bool, snapshot: &Snapshot) -> Opti
             }
         }
     };
+    // Rows are added right after the last match, so a gap the log marked there is where
+    // they go, and its marker no longer says they are lost. Filled markers are the last
+    // operations, so the size cap drops them first.
+    let inserts = operations
+        .iter()
+        .filter(|operation| matches!(operation, Operation::Insert { .. }))
+        .count();
+    if inserts > 0
+        && let Some(last) = anchor.and_then(|anchor| matched[anchor])
+    {
+        for marker in neutral[last + 1..]
+            .iter()
+            .take_while(|item| crate::log::lost_count(item).is_some())
+        {
+            operations.push(Operation::Replace {
+                expected: marker.clone(),
+                item: crate::log::filled(marker),
+            });
+        }
+    }
     // Keep the batch within the log's budget: drop the latest additions first, so what
     // is kept still follows on from Keystone's history.
     // Each operation's size is counted once; the report and framing fit in the margin.
@@ -370,22 +390,28 @@ pub fn reconcile(neutral: &[Item], open_turn: bool, snapshot: &Snapshot) -> Opti
     let mut total = sizes
         .iter()
         .fold(2usize, |sum, size| sum.saturating_add(*size));
-    if total > MAX_BATCH_BYTES - 64 * 1024 {
-        while total > MAX_BATCH_BYTES - 64 * 1024
-            && let Some(operation) = operations.pop()
-        {
-            total = total.saturating_sub(sizes[operations.len()]);
-            if let Operation::Insert { item, .. } = operation {
-                shown.retain(|id| *id != item.id);
-            }
+    let fill = |operation: &Operation| matches!(operation, Operation::Replace { expected, .. } if crate::log::lost_count(expected).is_some());
+    let mut truncated = false;
+    while total > MAX_BATCH_BYTES - 64 * 1024
+        && let Some(operation) = operations.pop()
+    {
+        total = total.saturating_sub(sizes[operations.len()]);
+        truncated |= !fill(&operation);
+        if let Operation::Insert { item, .. } = operation {
+            shown.retain(|id| *id != item.id);
         }
+    }
+    if truncated {
         limits.push(Limit::Truncated);
+        // Not everything the provider recorded is added, so no gap is filled.
+        operations.retain(|operation| !fill(operation));
     }
     let (mut messages, mut tools, mut extended, mut unknown) = (0, 0, 0, 0);
     for operation in &operations {
         let item = match operation {
             Operation::Replace { expected, item } => {
-                extended += u32::from(expected.id == item.id);
+                extended +=
+                    u32::from(expected.id == item.id && crate::log::lost_count(expected).is_none());
                 item
             }
             Operation::Insert { item, .. } => {
@@ -489,6 +515,98 @@ mod tests {
         assert_eq!(batch.report.messages, 1);
         assert_eq!(batch.report_after.as_deref(), Some("m:0"));
         assert!(batch.closes_turn);
+    }
+
+    fn gap(id: &str) -> Item {
+        let mut item = item(
+            &format!("{}{id}", crate::log::LOSS_MARKER_PREFIX),
+            ItemKind::Other {
+                name: String::new(),
+            },
+            "",
+            ItemStatus::Failed,
+        );
+        crate::log::with_lost_count(&mut item, 1);
+        item
+    }
+
+    #[test]
+    fn only_gaps_right_after_the_last_match_are_filled_and_not_counted_as_extended() {
+        let neutral = [
+            user("u1", "hi"),
+            gap("a"),
+            gap("b"),
+            user("local:2", "unsent"),
+            gap("c"),
+        ];
+        let snap = snapshot(vec![(
+            vec![
+                user("u1", "hi"),
+                reply("m:0", "Hello", ItemStatus::Completed),
+            ],
+            Some(TurnStatus::Completed),
+        )]);
+        let batch = reconcile(&neutral, false, &snap).unwrap();
+        let filled: Vec<_> = batch
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::Replace { expected, item } => {
+                    assert_eq!(crate::log::lost_count(item), None);
+                    Some(expected.id.clone())
+                }
+                Operation::Insert { .. } => None,
+            })
+            .collect();
+        assert_eq!(filled, [gap("a").id, gap("b").id]);
+        assert_eq!(batch.report.extended, 0);
+        assert_eq!(batch.report.messages, 1);
+    }
+
+    #[test]
+    fn gaps_left_unfilled_for_room_do_not_make_a_recovery_partial() {
+        let neutral = [user("u1", "hi"), gap("a")];
+        let fits = MAX_BATCH_BYTES - 64 * 1024 - 400;
+        let snap = snapshot(vec![(
+            vec![
+                user("u1", "hi"),
+                reply("m:0", &"x".repeat(fits), ItemStatus::Completed),
+            ],
+            Some(TurnStatus::Completed),
+        )]);
+        let batch = reconcile(&neutral, false, &snap).unwrap();
+        assert_eq!(
+            batch.report.outcome,
+            Outcome::Recovered,
+            "{:?}",
+            batch.report
+        );
+        assert!(matches!(&batch.operations[..], [Operation::Insert { .. }]));
+    }
+
+    #[test]
+    fn a_truncated_recovery_fills_no_gap() {
+        let neutral = [user("u1", "hi"), gap("a")];
+        let snap = snapshot(vec![(
+            std::iter::once(user("u1", "hi"))
+                .chain((0..5).map(|n| {
+                    reply(
+                        &format!("m:{n}"),
+                        &"x".repeat(MAX_BATCH_BYTES / 4),
+                        ItemStatus::Completed,
+                    )
+                }))
+                .collect(),
+            Some(TurnStatus::Completed),
+        )]);
+        let batch = reconcile(&neutral, false, &snap).unwrap();
+        assert!(batch.report.limits.contains(&Limit::Truncated));
+        assert!(
+            batch
+                .operations
+                .iter()
+                .all(|operation| matches!(operation, Operation::Insert { .. }))
+        );
     }
 
     #[test]
