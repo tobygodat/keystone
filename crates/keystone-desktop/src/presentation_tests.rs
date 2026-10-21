@@ -566,7 +566,7 @@ fn creation_after_project_switch_records_b_and_keeps_existing_a_context(cx: &mut
     });
     pick(&view, cx, &dir.path().join("b"));
     view.update(cx, |this, cx| {
-        this.create(Provider::Claude, cx);
+        this.create(Provider::Claude, None, cx);
         assert_eq!(this.state.read(cx).store().workspace().selected(), Some(3));
         assert_eq!(
             this.state.read(cx).store().workspace().sessions()[0].draft(),

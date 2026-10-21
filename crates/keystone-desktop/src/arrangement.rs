@@ -4,7 +4,7 @@ use crate::{Keystone, ViewKey, arch_mark, model_selector, now_ms};
 use gpui::{
     Anchor, AnyElement, App, AvailableSpace, Bounds, Context, Empty, Focusable, FontWeight,
     IntoElement, MouseButton, Pixels, Point, SharedString, Window, canvas, div, prelude::*, px,
-    size,
+    relative, size,
 };
 use keystone_core::{
     ApprovalMode, Axis, Component, Composition, Edit, Node, NodePath, Place, Provider, Size, ViewId,
@@ -33,6 +33,20 @@ pub struct Arrangement {
     toolbar_height: Pixels,
     composer_min_width: f32,
     resize: Option<Resize>,
+    /// The conversation view the user last worked in. See `session_tabs`.
+    pub active: Option<ViewId>,
+    /// The selection `follow_selection` last placed, so it places each one once.
+    pub seen: Option<Option<u64>>,
+    /// The inactive view keyboard focus is in, so focus moving there activates it once.
+    pub focused: Option<ViewId>,
+    /// Each drawn tab strip's id and its views, so a tab dropped from another strip can
+    /// be found.
+    bars: Vec<(gpui::ElementId, Vec<ViewId>)>,
+    /// Pane sizes being dragged outside Customize, shown until the drop saves them.
+    pane_resize: Option<(NodePath, Vec<Size>)>,
+    /// The fitted tab row's scroll, and the tab it last scrolled into view.
+    fitted_scroll: gpui::ScrollHandle,
+    fitted_revealed: Option<ViewId>,
 }
 struct Resize {
     start: Point<Pixels>,
@@ -65,7 +79,7 @@ pub fn ordered_views(node: &Node) -> Vec<ViewId> {
     }
 }
 
-fn first_displayed_conversation(node: &Node, c: &Composition) -> Option<ViewId> {
+pub(crate) fn first_displayed_conversation(node: &Node, c: &Composition) -> Option<ViewId> {
     let conversation = |id: &ViewId| c.component(*id) == Some(Component::Conversation);
     match node {
         Node::View { id } => conversation(id).then_some(*id),
@@ -129,10 +143,19 @@ impl Arrangement {
         self.sidebar_overlay = false;
         self.surface_menu = None;
         self.toolbar_height = px(0.);
+        self.seen = None;
+        self.focused = None;
+        self.bars.clear();
+        self.pane_resize = None;
     }
 
     pub(crate) fn restore_tabs(&mut self) {
         self.tab = None;
+    }
+
+    /// Shows `view` as the fitted tab while the window is fitted.
+    pub(crate) fn reveal(&mut self, view: ViewId) {
+        self.tab = Some(view);
     }
 
     /// Whether a window this wide is too narrow for the composer's full controls.
@@ -142,7 +165,7 @@ impl Arrangement {
 }
 
 /// The tab group holding `view` and its selected index.
-fn tabs_holding(node: &Node, view: ViewId) -> Option<(&[ViewId], usize)> {
+pub(crate) fn tabs_holding(node: &Node, view: ViewId) -> Option<(&[ViewId], usize)> {
     match node {
         Node::View { .. } => None,
         Node::Tabs { selected, views } => views.contains(&view).then_some((views, *selected)),
@@ -163,7 +186,10 @@ fn displays(node: &Node, view: ViewId) -> bool {
 /// Whether a strip drawn for `node` has `anchor` in front, so its "+" is on screen.
 fn strip_shows(node: &Node, c: &Composition, anchor: ViewId) -> bool {
     match node {
-        Node::View { id } => *id == anchor && c.component(anchor) == Some(Component::Files),
+        Node::View { id } => {
+            *id == anchor
+                && (c.component(anchor) == Some(Component::Files) || Keystone::has_session_tabs(c))
+        }
         Node::Tabs { selected, views } => views[*selected] == anchor,
         Node::Split { children, .. } => children
             .iter()
@@ -171,18 +197,33 @@ fn strip_shows(node: &Node, c: &Composition, anchor: ViewId) -> bool {
     }
 }
 
-/// A tab's title: the component, and the occurrence id when there can be several.
-fn tab_label(id: ViewId, c: &Composition) -> String {
-    match c.component(id).unwrap() {
-        Component::Files => label(Component::Files).to_owned(),
-        component => format!("{} {}", label(component), id.0),
-    }
-}
-
 impl Keystone {
+    /// A tab's title: the session a conversation shows, else the component and its
+    /// occurrence id.
+    fn tab_label(&self, id: ViewId, c: &Composition, cx: &App) -> String {
+        match c.component(id).unwrap() {
+            Component::Files => label(Component::Files).to_owned(),
+            Component::Conversation if !self.presentation.current.customization.is_open() => self
+                .view_session(id, cx)
+                .and_then(|session| self.state.read(cx).session(session))
+                .map_or_else(|| "New session".to_owned(), |s| s.title().to_owned()),
+            component => format!("{} {}", label(component), id.0),
+        }
+    }
+
     /// The composition on screen: the Customize draft while it is open, else the saved one.
     pub(crate) fn shown_composition(&self, cx: &App) -> Composition {
         let saved = self.saved_composition(cx);
+        if let Some((split, sizes)) = &self.presentation.current.arrangement.pane_resize
+            && !self.presentation.current.customization.is_open()
+        {
+            return saved
+                .edit(Edit::Resize {
+                    split: split.clone(),
+                    sizes: sizes.clone(),
+                })
+                .unwrap_or(saved);
+        }
         self.presentation
             .current
             .customization
@@ -214,25 +255,14 @@ impl Keystone {
         if self.presentation.current.customization.is_open() {
             self.customize(Action::Edit(edit), window, cx);
         } else {
-            let result = match (before.edit(edit), &self.presentation.project) {
-                (Err(problem), _) => Err(problem.to_string()),
-                (Ok(_), Err(error)) => Err(format!("Cannot save this project's layout. {error}")),
-                (Ok(layout), Ok(project)) => self
-                    .state
-                    .update(cx, |state, cx| {
-                        state.set_project_layout(project, Some(layout.into()), cx)
-                    })
-                    .map(|applied| crate::durability_warning(applied.durability))
-                    .map_err(|error| error.to_string()),
-            };
-            match result {
-                Ok(warning) => {
-                    self.error = warning;
-                    if !selecting {
+            match before.edit(edit) {
+                Err(problem) => self.error = Some(format!("Layout not changed. {problem}")),
+                Ok(layout) => {
+                    let tabs = self.session_tabs(cx);
+                    if self.save_view(Some(layout), tabs, cx) && !selecting {
                         self.presentation.current.customization.forget_undo();
                     }
                 }
-                Err(error) => self.error = Some(format!("Layout not changed. {error}")),
             }
         }
         // A closed view's focus handle outlives it, and a handle that is no longer drawn
@@ -248,7 +278,12 @@ impl Keystone {
 
     /// The view on screen where `closed` was: the rest of its tab group, or whatever
     /// the fitted tabs fall back to.
-    fn shown_in_place_of(&self, closed: ViewId, before: &Composition, cx: &App) -> Option<ViewId> {
+    pub(crate) fn shown_in_place_of(
+        &self,
+        closed: ViewId,
+        before: &Composition,
+        cx: &App,
+    ) -> Option<ViewId> {
         let after = self.shown_composition(cx);
         if self.presentation.current.arrangement.fitted {
             return self
@@ -264,9 +299,14 @@ impl Keystone {
     }
 
     /// Focuses the content of `view`, or the window when there is none to focus.
-    fn focus_view(&mut self, view: Option<ViewId>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_view(
+        &mut self,
+        view: Option<ViewId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let component = view.and_then(|view| self.shown_composition(cx).component(view));
-        let session = self.state.read(cx).store().workspace().selected();
+        let session = view.and_then(|view| self.view_session(view, cx));
         match (component, view, session) {
             (Some(Component::Files), _, _) => self.focus_files(window, cx),
             (Some(Component::Conversation), Some(view), Some(session)) => self
@@ -305,44 +345,47 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> bool {
         if self.shown_composition(cx).component(view) == Some(Component::Conversation) {
-            return self
-                .state
-                .read(cx)
-                .store()
-                .workspace()
-                .selected()
-                .is_some_and(|session| {
-                    self.presentation.current.views.contains_focus(
-                        ViewKey { view, session },
-                        window,
-                        cx,
-                    )
-                });
+            return self.view_session(view, cx).is_some_and(|session| {
+                self.presentation.current.views.contains_focus(
+                    ViewKey { view, session },
+                    window,
+                    cx,
+                )
+            });
         }
         let handle = match self.shown_composition(cx).component(view) {
             Some(Component::Files) => self
                 .files_root(cx)
                 .ok()
                 .map(|root| self.files.browser(&root, cx).focus_handle(cx)),
-            Some(Component::Conversation) => self
-                .state
-                .read(cx)
-                .store()
-                .workspace()
-                .selected()
-                .map(|session| {
-                    self.presentation
-                        .current
-                        .views
-                        .focus(ViewKey { view, session }, cx)
-                }),
+            Some(Component::Conversation) => self.view_session(view, cx).map(|session| {
+                self.presentation
+                    .current
+                    .views
+                    .focus(ViewKey { view, session }, cx)
+            }),
             _ => None,
         };
         handle.is_some_and(|handle| handle.contains_focused(window, cx))
     }
 
     /// The fitted tab's choice while `c` still shows that surface.
-    fn fitted_tab(&self, c: &Composition) -> Option<ViewId> {
+    /// The surface a fitted window shows: the one chosen there, else the layout's first
+    /// displayed conversation while it shows the selected session, else the active view.
+    pub(crate) fn fitted_shown(&self, c: &Composition, cx: &App) -> Option<ViewId> {
+        let first = first_displayed_conversation(c.root(), c);
+        self.fitted_tab(c).or_else(|| {
+            let selected = self.state.read(cx).store().workspace().selected();
+            if self.presentation.current.customization.is_open()
+                || first.is_some_and(|view| self.view_session(view, cx) == selected)
+            {
+                return first;
+            }
+            self.active_view(cx).or(first)
+        })
+    }
+
+    pub(crate) fn fitted_tab(&self, c: &Composition) -> Option<ViewId> {
         self.presentation
             .current
             .arrangement
@@ -504,6 +547,7 @@ impl Keystone {
             0.
         };
         self.presentation.current.arrangement.visible.clear();
+        self.presentation.current.arrangement.bars.clear();
         if self
             .presentation
             .current
@@ -518,20 +562,32 @@ impl Keystone {
                 .into_iter()
                 .filter(|id| c.component(*id).is_some_and(Component::is_surface))
                 .collect();
-            let selected = self
-                .fitted_tab(&c)
-                .unwrap_or_else(|| first_displayed_conversation(c.root(), &c).unwrap());
+            let selected = self.fitted_shown(&c, cx).unwrap();
+            let arrangement = &mut self.presentation.current.arrangement;
+            if arrangement.fitted_revealed != Some(selected)
+                && let Some(index) = surfaces.iter().position(|&id| id == selected)
+            {
+                if arrangement.fitted_scroll.bounds_for_item(index).is_some() {
+                    arrangement.fitted_scroll.scroll_to_item(index);
+                    arrangement.fitted_revealed = Some(selected);
+                } else {
+                    window.request_animation_frame();
+                }
+            }
             let composer = c
                 .views()
                 .find(|(_, k)| *k == Component::Composer)
                 .unwrap()
                 .0;
             let mut body = v_flex().relative().flex_1().min_h_0().w_full()
-                .when(f32::from(viewport.height)-44.-toolbar > 230., |d| d.child(div().flex_none().child(Label::new("Views use tabs and the composer stays below until this window has more room.").size(TextSize::Sm).color(Color::Muted))))
-                .child(h_flex().flex_none().gap_1().children(surfaces.iter().map(|&id| {
-                    self.conversation_tab(format!("fitted-tab-{}", id.0), tab_label(id, &c), selected == id, cx)
+                .when(f32::from(viewport.height)-44.-toolbar > 230., |d| d.child(div().flex_none().px_2().py_1().child(div().debug_selector(|| "fitted-hint".into()).child(Label::new("Views use tabs and the composer stays below until this window has more room.").size(TextSize::Sm).color(Color::Muted)))))
+                .child(h_flex().id("fitted-tabs").debug_selector(|| "fitted-tabs".into()).flex_none().w_full().min_w_0().gap_1().overflow_x_scroll().track_scroll(&self.presentation.current.arrangement.fitted_scroll).children(surfaces.iter().map(|&id| {
+                    self.conversation_tab(format!("fitted-tab-{}", id.0), self.tab_label(id, &c, cx), selected == id, cx)
                         .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                            this.reveal_view(id, window, cx)
+                            this.reveal_view(id, window, cx);
+                            if this.shown_composition(cx).component(id) == Some(Component::Conversation) {
+                                this.activate(id, cx);
+                            }
                         }))
                 })))
                 .child(div().flex_1().min_h_0().overflow_hidden().child(self.arrangement_view(selected, &c, false, viewport.width, cx)))
@@ -561,9 +617,7 @@ impl Keystone {
             .filter(|(view, component)| {
                 component.is_surface()
                     && if fitted {
-                        self.fitted_tab(&c)
-                            .or_else(|| first_displayed_conversation(c.root(), &c))
-                            == Some(*view)
+                        self.fitted_shown(&c, cx) == Some(*view)
                     } else {
                         displays(c.root(), *view)
                     }
@@ -596,7 +650,12 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
-            Node::View { id } if c.component(*id) == Some(Component::Files) => {
+            Node::View { id }
+                if c.component(*id) == Some(Component::Files)
+                    || (c.component(*id) == Some(Component::Conversation)
+                        && Self::has_session_tabs(c)
+                        && !self.presentation.current.customization.is_open()) =>
+            {
                 self.surface_group(std::slice::from_ref(id), 0, c, window_width, cx)
             }
             Node::View { id } => self.arrangement_view(*id, c, auto, window_width, cx),
@@ -678,7 +737,15 @@ impl Keystone {
                     if hidden_sidebar {
                         continue;
                     }
-                    if i > 0 && self.presentation.current.customization.is_open() {
+                    let editing = self.presentation.current.customization.is_open();
+                    let panes = !editing
+                        && i > 0
+                        && [&children[i - 1].node, &child.node].iter().all(|node| {
+                            ordered_views(node)
+                                .iter()
+                                .all(|&v| c.component(v) == Some(Component::Conversation))
+                        });
+                    if i > 0 && (editing || panes) {
                         split = split.child(self.split_grip(
                             path.clone(),
                             axis,
@@ -758,7 +825,9 @@ impl Keystone {
 
     /// Surfaces sharing one area under a tab strip: the tabs, each with a close button,
     /// and a "+" that opens another surface there. A lone Files view is a group of one,
-    /// so it can be closed and joined; a lone conversation keeps its plain chrome.
+    /// so it can be closed and joined; so is a lone conversation once there are several,
+    /// each pane naming the sessions it shows. Session tabs drag to reorder and to move
+    /// between panes, and the active pane's strip is underlined.
     fn surface_group(
         &mut self,
         views: &[ViewId],
@@ -767,29 +836,91 @@ impl Keystone {
         window_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (select, close) = (views.to_vec(), views.to_vec());
+        let (select, close, order, insert) =
+            (views.to_vec(), views.to_vec(), views.to_vec(), views[0]);
         let colors = cx.theme().colors;
-        let bar = TabBar::new(SharedString::from(if views.len() == 1 {
+        let editing = self.presentation.current.customization.is_open();
+        let lone_files = views.len() == 1 && c.component(views[0]) == Some(Component::Files);
+        let bar_id = SharedString::from(if lone_files {
             "files".to_owned()
         } else {
             format!("surface-tabs-{}", views[0].0)
-        }))
-        .children(
-            views
-                .iter()
-                .map(|&id| Tab::new(("surface-tab", id.0 as usize), tab_label(id, c))),
-        )
-        .selected(selected)
-        .on_select(
-            self.scoped_listener(cx, move |this, ix: &usize, window, cx| {
-                this.select_tab(select[*ix], window, cx)
-            }),
-        )
-        .on_close(
-            self.scoped_listener(cx, move |this, ix: &usize, window, cx| {
-                this.edit_surfaces(Edit::Close(close[*ix]), window, cx)
-            }),
-        );
+        });
+        self.presentation
+            .current
+            .arrangement
+            .bars
+            .push((bar_id.clone().into(), views.to_vec()));
+        let active = self.active_view(cx);
+        let sessions = Self::has_session_tabs(c) && !editing;
+        let running = |this: &Self, id: ViewId, cx: &App| {
+            c.component(id) == Some(Component::Conversation)
+                && this.view_session(id, cx).is_some_and(|session| {
+                    this.state
+                        .read(cx)
+                        .conversations()
+                        .get(&session)
+                        .is_some_and(|c| c.running)
+                })
+        };
+        let tabs: Vec<_> = views
+            .iter()
+            .map(|&id| {
+                Tab::new(("surface-tab", id.0 as usize), self.tab_label(id, c, cx))
+                    .dot(running(self, id, cx).then_some(TabDot::Working))
+            })
+            .collect();
+        let mut bar = TabBar::new(bar_id)
+            .children(tabs)
+            .selected(selected)
+            .on_select(
+                self.scoped_listener(cx, move |this, ix: &usize, window, cx| {
+                    let view = select[*ix];
+                    if this.presentation.current.customization.is_open()
+                        || this.shown_composition(cx).component(view)
+                            != Some(Component::Conversation)
+                    {
+                        return this.select_tab(view, window, cx);
+                    }
+                    this.show_view(view, window, cx);
+                }),
+            )
+            .on_close(
+                self.scoped_listener(cx, move |this, ix: &usize, window, cx| {
+                    let view = close[*ix];
+                    if this.shown_composition(cx).component(view) == Some(Component::Conversation) {
+                        this.close_tab(view, window, cx)
+                    } else {
+                        this.edit_surfaces(Edit::Close(view), window, cx)
+                    }
+                }),
+            );
+        if sessions {
+            bar = bar
+                .on_move(self.scoped_listener(
+                    cx,
+                    move |this, &(from, to): &(usize, usize), window, cx| {
+                        this.reorder_tab(order[from], to, window, cx)
+                    },
+                ))
+                .on_insert(self.scoped_listener(
+                    cx,
+                    move |this, (drag, at): &(DraggedTab, usize), _, cx| {
+                        let moved = this
+                            .presentation
+                            .current
+                            .arrangement
+                            .bars
+                            .iter()
+                            .find(|(id, _)| *id == drag.bar_id)
+                            .and_then(|(_, views)| views.get(drag.index).copied());
+                        if let Some(view) = moved {
+                            this.move_tab(view, insert, *at, cx);
+                        }
+                    },
+                ));
+        }
+        let in_front = views.iter().any(|&view| Some(view) == active);
         v_flex()
             .size_full()
             .min_h_0()
@@ -800,8 +931,27 @@ impl Keystone {
                     .w_full()
                     .pr_1()
                     .bg(colors.sidebar)
-                    .hairline_b(cx)
+                    .map(|d| {
+                        if sessions && in_front {
+                            d.border_b_2().border_color(colors.accent)
+                        } else {
+                            d.hairline_b(cx)
+                        }
+                    })
                     .child(div().flex_1().min_w_0().child(bar))
+                    .when(sessions, |d| {
+                        let view = views[selected];
+                        d.child(
+                            IconButton::new(("pane-split", view.0 as usize), IconName::Split)
+                                .size(ButtonSize::Compact)
+                                .debug_selector(move || format!("pane-split-{}", view.0))
+                                .tooltip(Tooltip::text("Split right · Ctrl+\\"))
+                                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                                    this.activate(view, cx);
+                                    this.split_right(window, cx)
+                                })),
+                        )
+                    })
                     .child(self.surface_menu(views[selected], c, cx)),
             )
             .child(div().flex_1().min_h_0().child(self.arrangement_view(
@@ -883,6 +1033,8 @@ impl Keystone {
             .id(SharedString::from(id.clone()))
             .automation_id(id)
             .h(px(26.))
+            .flex_shrink_0()
+            .max_w(px(200.))
             .px_2()
             .rounded(radius::CONTROL)
             .bg(colors
@@ -896,11 +1048,16 @@ impl Keystone {
             )
             .cursor_pointer()
             .hover(move |d| d.bg(colors.selection_fill))
-            .child(Label::new(text).size(TextSize::Ui).color(if selected {
-                Color::Strong
-            } else {
-                Color::Muted
-            }))
+            .child(
+                Label::new(text)
+                    .size(TextSize::Ui)
+                    .color(if selected {
+                        Color::Strong
+                    } else {
+                        Color::Muted
+                    })
+                    .truncate(),
+            )
     }
 
     pub(crate) fn measure_customize_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1017,35 +1174,6 @@ impl Keystone {
                     ),
             );
         }
-        if !editing
-            && component == Component::Conversation
-            && c.views()
-                .filter(|(_, kind)| *kind == Component::Conversation)
-                .count()
-                > 1
-        {
-            let earlier = current.is_some_and(|(session, _)| {
-                self.presentation
-                    .current
-                    .views
-                    .scrolled_up(ViewKey { view: id, session })
-            });
-            pane = pane.child(
-                h_flex().h(px(26.)).flex_none().px_2().child(
-                    Label::new(format!(
-                        "Conversation {} · {}",
-                        id.0,
-                        if earlier {
-                            "Reading earlier"
-                        } else {
-                            "Following latest"
-                        }
-                    ))
-                    .size(TextSize::Sm)
-                    .color(Color::Muted),
-                ),
-            );
-        }
         match component {
             Component::SessionList => {
                 pane = pane.child(
@@ -1072,7 +1200,14 @@ impl Keystone {
             }
             Component::Conversation => {
                 self.presentation.current.arrangement.visible.push(id);
-                if let Some((session, _)) = current {
+                if !editing {
+                    pane = pane.capture_any_mouse_down(
+                        self.scoped_listener(cx, move |this, _, _, cx| this.activate(id, cx)),
+                    );
+                }
+                if let Some(session) = self.view_session(id, cx) {
+                    self.state
+                        .update(cx, |state, _| state.ensure_history(session));
                     let key = ViewKey { view: id, session };
                     let rows = self
                         .state
@@ -1275,6 +1410,21 @@ impl Keystone {
                 }
             }
         }
+        if !editing
+            && component == Component::Conversation
+            && Self::has_session_tabs(c)
+            && cx.has_active_drag()
+        {
+            pane = pane.children(
+                [
+                    ("left", Axis::Row, false),
+                    ("right", Axis::Row, true),
+                    ("above", Axis::Column, false),
+                    ("below", Axis::Column, true),
+                ]
+                .map(|(side, axis, after)| self.tab_drop_edge(id, side, axis, after, cx)),
+            );
+        }
         if editing {
             let tab = component.is_surface();
             pane = pane
@@ -1325,6 +1475,59 @@ impl Keystone {
                 });
         }
         pane.into_any_element()
+    }
+
+    /// A band along one edge of a pane that takes a dragged session tab and splits the
+    /// pane there. It is drawn only while something is being dragged.
+    fn tab_drop_edge(
+        &self,
+        target: ViewId,
+        side: &'static str,
+        axis: Axis,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors;
+        let id = format!("pane-drop-{}-{side}", target.0);
+        div()
+            .id(SharedString::from(id.clone()))
+            .automation_id(id)
+            .absolute()
+            .map(|d| match side {
+                "left" => d.left_0().top_0().bottom_0().w(relative(0.25)),
+                "right" => d.right_0().top_0().bottom_0().w(relative(0.25)),
+                "above" => d
+                    .top_0()
+                    .left(relative(0.25))
+                    .right(relative(0.25))
+                    .h(relative(0.3)),
+                _ => d
+                    .bottom_0()
+                    .left(relative(0.25))
+                    .right(relative(0.25))
+                    .h(relative(0.3)),
+            })
+            .drag_over::<DraggedTab>(move |d, _, _, _| {
+                d.bg(colors.selection_fill.opacity(0.6))
+                    .border_2()
+                    .border_color(colors.selection_ring)
+            })
+            .on_drop(
+                self.scoped_listener(cx, move |this, drag: &DraggedTab, window, cx| {
+                    let dragged = this
+                        .presentation
+                        .current
+                        .arrangement
+                        .bars
+                        .iter()
+                        .find(|(id, _)| *id == drag.bar_id)
+                        .and_then(|(_, views)| views.get(drag.index).copied());
+                    if let Some(view) = dragged {
+                        this.split_with_tab(view, target, axis, after, window, cx);
+                    }
+                }),
+            )
+            .into_any_element()
     }
 
     fn drop_target(
@@ -1388,16 +1591,24 @@ impl Keystone {
     ) -> AnyElement {
         let colors = cx.theme().colors;
         let name = format!("split-grip-{:?}-{index}", split.0);
+        let quiet = !self.presentation.current.customization.is_open();
         div()
             .id(SharedString::from(name.clone()))
             .automation_id(name)
             .flex_none()
-            .bg(colors.border)
             .map(|d| {
-                if axis == Axis::Row {
-                    d.w(px(GRIP)).h_full().cursor_col_resize()
+                if quiet {
+                    d.bg(colors.border.opacity(0.5))
                 } else {
-                    d.h(px(GRIP)).w_full().cursor_row_resize()
+                    d.bg(colors.border)
+                }
+            })
+            .map(|d| {
+                let grip = if quiet { 3. } else { GRIP };
+                if axis == Axis::Row {
+                    d.w(px(grip)).h_full().cursor_col_resize()
+                } else {
+                    d.h(px(grip)).w_full().cursor_row_resize()
                 }
             })
             .hover(move |d| d.bg(colors.selection_ring))
@@ -1491,7 +1702,33 @@ impl Keystone {
             }
         }
         let split = drag.split.clone();
-        self.customize(Action::Edit(Edit::Resize { split, sizes }), window, cx);
+        if self.presentation.current.customization.is_open() {
+            self.customize(Action::Edit(Edit::Resize { split, sizes }), window, cx);
+        } else {
+            self.presentation.current.arrangement.pane_resize = Some((split, sizes));
+            cx.notify();
+        }
+    }
+
+    /// Saves pane sizes dragged outside Customize once the divider is released.
+    fn finish_pane_resize(&mut self, cx: &mut Context<Self>) {
+        self.presentation.current.arrangement.resize = None;
+        let Some((split, sizes)) = self.presentation.current.arrangement.pane_resize.take() else {
+            return;
+        };
+        match self
+            .saved_composition(cx)
+            .edit(Edit::Resize { split, sizes })
+        {
+            Ok(layout) => {
+                let tabs = self.session_tabs(cx);
+                self.save_view(Some(layout), tabs, cx);
+            }
+            Err(problem) => {
+                self.error = Some(format!("Layout not changed. {problem}"));
+                self.refresh(cx);
+            }
+        }
     }
 
     pub(crate) fn on_arrangement_drag<E: gpui::InteractiveElement>(
@@ -1505,6 +1742,9 @@ impl Keystone {
                 this.resize_components(event.event.position, window, cx)
             },
         ))
+        .on_drop::<ResizeGrip>(self.scoped_listener(cx, |this, _: &ResizeGrip, _, cx| {
+            this.finish_pane_resize(cx)
+        }))
     }
 
     fn observe_conversation(
@@ -1568,7 +1808,9 @@ impl Keystone {
         {
             return;
         }
-        if self.presentation.current.views.scrolled_up(key) || self.replies.borrow().pacing() {
+        if self.presentation.current.views.scrolled_up(key)
+            || self.replies.borrow().pacing_in(key.session)
+        {
             return;
         }
         let Some(conversation) = self.state.read(cx).conversations().get(&key.session) else {

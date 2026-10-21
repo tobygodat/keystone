@@ -45,56 +45,56 @@ impl ProjectId {
     }
 }
 
+/// What every project saved under one preference, by project directory. A value
+/// that is not a map is kept as is and reads as empty.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
-pub(crate) enum ProjectLayouts {
-    Saved(BTreeMap<String, SavedComposition>),
+pub(crate) enum ProjectMap<T> {
+    Saved(BTreeMap<String, T>),
     Unexpected(Value),
 }
 
-impl Default for ProjectLayouts {
+pub(crate) type ProjectLayouts = ProjectMap<SavedComposition>;
+
+impl<T> Default for ProjectMap<T> {
     fn default() -> Self {
         Self::Saved(BTreeMap::new())
     }
 }
 
-impl ProjectLayouts {
+impl<T> ProjectMap<T> {
     pub(crate) fn is_empty(&self) -> bool {
-        matches!(self, Self::Saved(layouts) if layouts.is_empty())
+        matches!(self, Self::Saved(saved) if saved.is_empty())
     }
 
-    pub(crate) fn get(&self, project: &ProjectId) -> Option<&SavedComposition> {
+    pub(crate) fn get(&self, project: &ProjectId) -> Option<&T> {
         match self {
-            Self::Saved(layouts) => layouts.get(&project.0),
+            Self::Saved(saved) => saved.get(&project.0),
             Self::Unexpected(_) => None,
         }
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (ProjectId, &SavedComposition)> {
-        let layouts = match self {
-            Self::Saved(layouts) => Some(layouts),
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (ProjectId, &T)> {
+        let saved = match self {
+            Self::Saved(saved) => Some(saved),
             Self::Unexpected(_) => None,
         };
-        layouts
+        saved
             .into_iter()
             .flatten()
-            .map(|(project, layout)| (ProjectId(project.clone()), layout))
+            .map(|(project, value)| (ProjectId(project.clone()), value))
     }
 
-    pub(crate) fn set(
-        &mut self,
-        project: &ProjectId,
-        layout: Option<SavedComposition>,
-    ) -> io::Result<()> {
-        let Self::Saved(layouts) = self else {
+    pub(crate) fn set(&mut self, project: &ProjectId, value: Option<T>) -> io::Result<()> {
+        let Self::Saved(saved) = self else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "saved project layouts are not a map",
+                "saved project preferences are not a map",
             ));
         };
-        match layout {
-            Some(layout) => layouts.insert(project.0.clone(), layout),
-            None => layouts.remove(&project.0),
+        match value {
+            Some(value) => saved.insert(project.0.clone(), value),
+            None => saved.remove(&project.0),
         };
         Ok(())
     }

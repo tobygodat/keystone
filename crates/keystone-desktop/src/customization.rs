@@ -190,6 +190,7 @@ impl Keystone {
                     };
                     if result.is_ok() {
                         self.presentation.current.arrangement.restore_tabs();
+                        self.presentation.current.arrangement.seen = None;
                     }
                     let shown = self.saved_composition(cx);
                     self.presentation

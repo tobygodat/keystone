@@ -255,7 +255,28 @@ fn header_only_conversation_does_not_observe_until_transcript_is_visible(cx: &mu
     let (_dir, view, cx) = open(cx);
     click(cx, "customize-apply");
     click(cx, "customize-close");
-    cx.simulate_resize(gpui::size(px(1280.), px(236.)));
+    cx.simulate_resize(gpui::size(px(1280.), px(210.)));
+    cx.run_until_parked();
+    unread(&view, cx);
+    let transcript = cx.debug_bounds("conversation").unwrap();
+    assert_eq!(transcript.size.height, px(0.));
+    cx.simulate_keystrokes("ctrl-shift-t");
+    cx.run_until_parked();
+    assert!(view.update_in(cx, |this, window, cx| {
+        this.view_contains_focus(ViewId::MAIN, window, cx)
+    }));
+    assert!(viewed(&view, cx) < 10);
+    cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+    cx.run_until_parked();
+    assert!(viewed(&view, cx) >= 10);
+}
+
+#[gpui::test]
+fn a_click_above_a_hidden_transcript_does_not_observe_it(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    cx.simulate_resize(gpui::size(px(1280.), px(210.)));
     cx.run_until_parked();
     unread(&view, cx);
     let transcript = cx.debug_bounds("conversation").unwrap();
@@ -266,8 +287,11 @@ fn header_only_conversation_does_not_observe_until_transcript_is_visible(cx: &mu
     );
     cx.run_until_parked();
     assert!(viewed(&view, cx) < 10);
+    click(cx, "fitted-tab-0");
+    assert!(viewed(&view, cx) < 10);
     cx.simulate_resize(gpui::size(px(1280.), px(900.)));
     cx.run_until_parked();
+    click(cx, "conversation");
     assert!(viewed(&view, cx) >= 10);
 }
 

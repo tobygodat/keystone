@@ -131,6 +131,13 @@ impl Replies {
         self.rows.values().any(|reply| reply.burst.is_some())
     }
 
+    /// Whether a reply of `session` is still catching up.
+    pub fn pacing_in(&self, session: u64) -> bool {
+        self.rows
+            .iter()
+            .any(|(&(s, _), reply)| s == session && reply.burst.is_some())
+    }
+
     /// Shows every reply of `session` in full at its next draw. Returns the rows that
     /// were pacing.
     pub fn settle(&mut self, session: u64) -> Vec<usize> {
@@ -266,6 +273,16 @@ mod tests {
         replies.observe(KEY, &streaming(&"a".repeat(200)), ms(start, 500));
         assert_eq!(shown(&replies).len(), 200);
         assert!(!replies.pacing());
+    }
+
+    #[test]
+    fn a_reply_pacing_in_one_session_does_not_count_as_pacing_in_another() {
+        let start = Instant::now();
+        let mut replies = Replies::default();
+        replies.observe(KEY, &streaming(""), start);
+        replies.observe(KEY, &streaming(&"word ".repeat(50)), start);
+        assert!(replies.pacing_in(KEY.0));
+        assert!(!replies.pacing_in(KEY.0 + 1));
     }
 
     #[test]

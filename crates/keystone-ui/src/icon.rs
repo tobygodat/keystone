@@ -26,6 +26,7 @@ macro_rules! icons {
 
 icons! {
     Panel => "icons/panel.svg", "<rect x='4' y='4' width='16' height='16' rx='3'/><path d='M9 4v16'/>";
+    Split => "icons/split.svg", "<rect x='3' y='5' width='18' height='14' rx='3'/><path d='M12 5v14'/>";
     Chat => "icons/chat.svg", "<path d='M20 11a8 8 0 0 1-8 8H5l-3 3v-10a8 8 0 0 1 16-2'/><path d='M15 13h5v8l-3-2h-2a3 3 0 0 1 0-6Z'/>";
     Search => "icons/search.svg", "<circle cx='10' cy='10' r='6'/><path d='m15 15 5 5'/>";
     Inbox => "icons/inbox.svg", "<path d='m4 5-2 9v6h20v-6l-2-9Z'/><path d='M2 14h6l2 3h4l2-3h6'/>";

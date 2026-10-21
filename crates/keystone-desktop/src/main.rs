@@ -11,6 +11,7 @@ mod model_selector;
 mod presentation;
 mod relative_time;
 mod reveal;
+mod session_tabs;
 mod settings;
 mod settings_accounts;
 mod settings_page;
@@ -304,19 +305,17 @@ impl Keystone {
                 &change.changed,
                 true,
             );
-            if change.selected && state.store().workspace().selected() == Some(change.session) {
-                if let Some(conversation) = state.conversations().get(&change.session) {
-                    for &(index, bytes, status) in &change.replies {
-                        if let Some(Row::Item(item)) = conversation.rows.get(index)
-                            && item.kind == ItemKind::AgentMessage
-                        {
-                            self.replies.get_mut().observe_text(
-                                (change.session, index),
-                                item.text.get(..bytes).unwrap_or(&item.text),
-                                status,
-                                now,
-                            );
-                        }
+            if !self.showing(change.session, cx).is_empty() {
+                for &(index, bytes, status) in &change.replies {
+                    if let Some(Row::Item(item)) = conversation.rows.get(index)
+                        && item.kind == ItemKind::AgentMessage
+                    {
+                        self.replies.get_mut().observe_text(
+                            (change.session, index),
+                            item.text.get(..bytes).unwrap_or(&item.text),
+                            status,
+                            now,
+                        );
                     }
                 }
             }
@@ -346,7 +345,7 @@ impl Keystone {
             .presentation
             .current
             .views
-            .send_target(&self.presentation.current.arrangement.visible, id)
+            .send_target(&self.showing(id, cx), id)
         {
             self.presentation.current.views.scroll_to_end(key);
         }
@@ -668,7 +667,18 @@ impl Keystone {
             .is_ok()
     }
 
-    fn create(&mut self, provider: Provider, cx: &mut Context<Self>) {
+    /// Creates a session and selects it. Given a layout, tabs and a view, saves them
+    /// with the view holding the new session, in the same write.
+    fn create(
+        &mut self,
+        provider: Provider,
+        show: Option<(
+            keystone_core::Composition,
+            keystone_core::SessionTabs,
+            keystone_core::ViewId,
+        )>,
+        cx: &mut Context<Self>,
+    ) {
         let directory = match self.presentation.creation_directory() {
             Ok(directory) => directory,
             Err(error) => {
@@ -685,8 +695,14 @@ impl Keystone {
             self.invalidate(left, ranges(rows), false, cx);
         }
         let previous = self.state.read(cx).store().workspace().selected();
+        let project = self.presentation.project.as_ref().ok().cloned();
+        let show = show.and_then(|(layout, tabs, view)| {
+            project
+                .as_ref()
+                .map(|project| (project, layout, tabs, view))
+        });
         self.error = match self.state.update(cx, |state, cx| {
-            state.create(provider, &directory, now_ms(), cx)
+            state.create_showing(provider, &directory, now_ms(), show, cx)
         }) {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
@@ -757,18 +773,55 @@ impl Keystone {
             .child(Markdown::new("fixture", self.fixture_document.clone()))
     }
 
+    /// Selects `id` and shows it where [`Keystone::place`] puts it, in one write.
     fn select(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some((view, change)) = self.place(id, cx) else {
+            self.select_showing(id, None, cx);
+            return;
+        };
+        if self.select_showing(id, change, cx) {
+            self.show_fitted(view, cx);
+            self.presentation.current.arrangement.seen = Some(Some(id));
+        }
+    }
+
+    /// Selects `id`, saving the layout and tabs given in the same write. Returns whether
+    /// it was saved.
+    pub(crate) fn select_showing(
+        &mut self,
+        id: u64,
+        shown: Option<session_tabs::Shown>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let previous = self.state.read(cx).store().workspace().selected();
         if !self.save_draft(cx) {
-            return;
+            return false;
         }
         if let Some(left) = self.state.read(cx).store().workspace().selected() {
             let rows = self.replies.get_mut().settle(left);
             self.invalidate(left, ranges(rows), false, cx);
         }
-        self.replies.get_mut().forget(id);
+        let on_screen = self.session_tabs(cx).view_of(id).is_some_and(|view| {
+            self.presentation
+                .current
+                .arrangement
+                .visible
+                .contains(&view)
+        });
+        if !on_screen {
+            self.replies.get_mut().forget(id);
+        }
         self.presentation.current.arrangement.sidebar_overlay = false;
-        self.error = match self.state.update(cx, |state, cx| state.select(id, cx)) {
+        let project = self.presentation.project.clone();
+        let result = self.state.update(cx, |state, cx| match (shown, &project) {
+            (None, _) => state.select(id, cx),
+            (Some((layout, tabs)), Ok(project)) => state.show(project, layout, tabs, Some(id), cx),
+            (Some(_), Err(error)) => {
+                Err(format!("Cannot save this project's layout. {error}").into())
+            }
+        });
+        let saved = result.is_ok();
+        self.error = match result {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
@@ -781,10 +834,27 @@ impl Keystone {
         self.sync_draft(cx);
 
         self.refresh(cx);
+        saved
     }
 
     fn start(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
-        self.create(provider, cx);
+        self.start_showing(provider, None, window, cx);
+    }
+
+    /// Starts a session as [`Keystone::start`] does, saving `show` with it as
+    /// [`Keystone::create`] does.
+    pub(crate) fn start_showing(
+        &mut self,
+        provider: Provider,
+        show: Option<(
+            keystone_core::Composition,
+            keystone_core::SessionTabs,
+            keystone_core::ViewId,
+        )>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create(provider, show, cx);
         if self.error.is_none() && self.state.read(cx).store().workspace().selected().is_some() {
             self.composer.focus_handle(cx).focus(window, cx);
         }
@@ -890,7 +960,8 @@ impl Keystone {
             })
             .child(div().flex_1())
             .when(self.settings.is_none(), |d| {
-                d.child(self.customize_toggle(cx))
+                d.children(self.split_toggle(cx))
+                    .child(self.customize_toggle(cx))
             })
             .child(
                 self.own_press(
@@ -2264,12 +2335,13 @@ impl Keystone {
                 true,
             ),
         };
-        let keyboard = self
-            .presentation
-            .current
-            .views
-            .send_target(&self.presentation.current.arrangement.visible, session)
-            == Some(key);
+        let keyboard = self.state.read(cx).store().workspace().selected() == Some(session)
+            && self
+                .presentation
+                .current
+                .views
+                .send_target(&self.showing(session, cx), session)
+                == Some(key);
         let (continue_focus, retry_focus) = self.recovery_focus.clone();
         v_flex()
             .id(arrangement::selector("recovery", key.view))
@@ -2551,7 +2623,12 @@ impl SessionSidebar {
                         .truncate(),
                 ),
         };
-        let (select, settle, sidebar) = (app.downgrade(), app.downgrade(), sidebar.clone());
+        let (select, open_tab, settle, sidebar) = (
+            app.downgrade(),
+            app.downgrade(),
+            app.downgrade(),
+            sidebar.clone(),
+        );
         ListItem::new(("session", id))
             .on_hover(move |&hovered, _, cx| {
                 let _ = sidebar.update(cx, |this, cx| {
@@ -2565,10 +2642,25 @@ impl SessionSidebar {
             })
             .debug_selector(move || format!("session-{id}"))
             .selected(selected)
-            .on_click(move |_, _, cx| {
+            .on_click(move |event, _, cx| {
                 let _ = select.update(cx, |this, cx| {
-                    if this.presentation.matches(activation) {
+                    if !this.presentation.matches(activation) {
+                        return;
+                    }
+                    if event.modifiers().control {
+                        this.open_in_new_tab(id, cx);
+                    } else {
                         this.select(id, cx);
+                    }
+                });
+            })
+            .on_aux_click(move |event, _, cx| {
+                if !event.is_middle_click() {
+                    return;
+                }
+                let _ = open_tab.update(cx, |this, cx| {
+                    if this.presentation.matches(activation) {
+                        this.open_in_new_tab(id, cx);
                     }
                 });
             })
@@ -2827,12 +2919,14 @@ impl Render for Keystone {
                 state.ensure_history(id);
             });
         }
+        self.follow_selection(cx);
         self.update_arrangement_fitting(window, cx);
         self.reconcile_transcript_keyboard(window, cx);
         let main = match self.settings_page(cx) {
             Some(page) => page,
             None => self.arrangement_body(window, cx),
         };
+        self.activate_focused_view(window, cx);
         let customizing = self.presentation.current.customization.is_open();
         let root = v_flex()
             .id("keystone-root")
@@ -3034,6 +3128,31 @@ impl Render for Keystone {
             .on_action(
                 self.scoped_listener(cx, |this, _: &OpenPalette, window, cx| {
                     this.toggle_palette(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &session_tabs::NewTab, window, cx| {
+                    this.new_tab(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &session_tabs::CloseTab, window, cx| {
+                    this.close_active_tab(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &session_tabs::NextTab, window, cx| {
+                    this.cycle_tab(false, window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &session_tabs::PreviousTab, window, cx| {
+                    this.cycle_tab(true, window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &session_tabs::SplitRight, window, cx| {
+                    this.split_right(window, cx)
                 }),
             )
             .child(self.top_bar(session.filter(|_| self.settings.is_none()), cx))
@@ -4838,7 +4957,7 @@ mod tests {
         });
         view.update(cx, |this, cx| {
             assert!(this.replies.get_mut().pacing());
-            this.create(Provider::Codex, cx);
+            this.create(Provider::Codex, None, cx);
             assert!(
                 !this.replies.get_mut().pacing(),
                 "new sessions settle the reply being left"
@@ -5175,7 +5294,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         let (view, cx) = open_window(&path, cx);
         view.update(cx, |this, cx| {
-            this.create(Provider::Codex, cx);
+            this.create(Provider::Codex, None, cx);
             let before = this.state.read(cx).store().writes();
             this.composer.update(cx, |input, cx| {
                 input.set_value("  Exact draft\nwith whitespace  ".into(), cx)
@@ -8176,7 +8295,7 @@ mod tests {
             this.composer.update(cx, |input, cx| {
                 input.set_value("Keep this draft".into(), cx)
             });
-            this.create(Provider::Claude, cx);
+            this.create(Provider::Claude, None, cx);
             assert!(this.error.is_some());
             assert_eq!(this.state.read(cx).store().workspace().selected(), Some(1));
             assert_eq!(this.state.read(cx).store().workspace().sessions().len(), 1);
@@ -8315,7 +8434,7 @@ mod tests {
             assert!(view.error.as_deref().unwrap().contains("Draft not saved"));
         });
         view.update(cx, |view, cx| {
-            view.create(Provider::Claude, cx);
+            view.create(Provider::Claude, None, cx);
             assert_eq!(view.state.read(cx).store().workspace().selected(), Some(2));
             assert_eq!(view.state.read(cx).store().workspace().sessions().len(), 2);
             assert_eq!(view.composer.read(cx).value(), "Keep my unsaved draft");

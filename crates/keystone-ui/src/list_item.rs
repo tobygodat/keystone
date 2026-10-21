@@ -16,6 +16,7 @@ pub struct ListItem {
     selected: bool,
     on_hover: Option<HoverHandler>,
     on_click: Option<ClickHandler>,
+    on_aux_click: Option<ClickHandler>,
     focus: Option<FocusHandle>,
     debug_selector: Option<String>,
     children: SmallVec<[AnyElement; 2]>,
@@ -28,6 +29,7 @@ impl ListItem {
             selected: false,
             on_hover: None,
             on_click: None,
+            on_aux_click: None,
             focus: None,
             debug_selector: None,
             children: SmallVec::new(),
@@ -50,6 +52,15 @@ impl ListItem {
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    /// A click with the middle or right button.
+    pub fn on_aux_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_aux_click = Some(Box::new(handler));
         self
     }
 
@@ -107,6 +118,7 @@ impl RenderOnce for ListItem {
             el = crate::automation::tag(el, selector);
         }
         el.when_some(self.on_click, |d, handler| d.on_click(handler))
+            .when_some(self.on_aux_click, |d, handler| d.on_aux_click(handler))
             .when_some(self.on_hover, |d, handler| d.on_hover(handler))
     }
 }

@@ -130,6 +130,11 @@ pub enum Edit {
     },
     Close(ViewId),
     SelectTab(ViewId),
+    /// Moves a tabbed view to `index` in its tab group. The shown tab stays shown.
+    Reorder {
+        view: ViewId,
+        index: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -348,6 +353,17 @@ impl Composition {
                     return Err(Problem::NotTabbed(view));
                 };
                 *selected = views.iter().position(|&v| v == view).expect("tabbed");
+            }
+            Edit::Reorder { view, index } => {
+                let path = slot(&root, view).ok_or(Problem::UnknownView(view))?;
+                let Some(Node::Tabs { selected, views }) = node_mut(&mut root, &path) else {
+                    return Err(Problem::NotTabbed(view));
+                };
+                let shown = views[*selected];
+                let from = views.iter().position(|&v| v == view).expect("tabbed");
+                views.remove(from);
+                views.insert(index.min(views.len()), view);
+                *selected = views.iter().position(|&v| v == shown).expect("tabbed");
             }
         }
         Self::checked(root, views)
@@ -1151,5 +1167,85 @@ mod tests {
         let deepest = deepest_main(MAX_DEPTH).unwrap();
         assert_eq!(deepest.views().count(), MAX_DEPTH);
         assert_eq!(deepest_main(MAX_DEPTH + 1), Err(Problem::TooDeep));
+    }
+
+    fn open(c: &Composition, view: u32, at: Place) -> Composition {
+        c.edit(Edit::Open {
+            view: ViewId(view),
+            component: Component::Conversation,
+            at,
+            size: Size::FILL,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn reordering_a_tab_keeps_the_shown_one_and_refuses_an_untabbed_view() {
+        let c = open(&Composition::default(), 3, Place::TabWith(ViewId::MAIN));
+        let c = open(&c, 4, Place::TabWith(ViewId::MAIN));
+        let c = c.edit(Edit::SelectTab(ViewId(3))).unwrap();
+        let tabs = |c: &Composition| {
+            let (views, selected) = tabs_of(c.root()).unwrap();
+            (views.to_vec(), views[selected])
+        };
+        assert_eq!(
+            tabs(&c),
+            (vec![ViewId::MAIN, ViewId(3), ViewId(4)], ViewId(3))
+        );
+        let moved = c
+            .edit(Edit::Reorder {
+                view: ViewId::MAIN,
+                index: 9,
+            })
+            .unwrap();
+        assert_eq!(
+            tabs(&moved),
+            (vec![ViewId(3), ViewId(4), ViewId::MAIN], ViewId(3))
+        );
+        let moved = moved
+            .edit(Edit::Reorder {
+                view: ViewId(4),
+                index: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            tabs(&moved),
+            (vec![ViewId(4), ViewId(3), ViewId::MAIN], ViewId(3))
+        );
+        assert_eq!(
+            c.edit(Edit::Reorder {
+                view: COMPOSER,
+                index: 0
+            }),
+            Err(Problem::NotTabbed(COMPOSER))
+        );
+    }
+
+    #[test]
+    fn closing_a_panes_last_tab_collapses_its_split() {
+        let c = open(
+            &Composition::default(),
+            3,
+            Place::Beside {
+                target: ViewId::MAIN,
+                axis: Axis::Row,
+                after: true,
+            },
+        );
+        let c = open(&c, 4, Place::TabWith(ViewId(3)));
+        let one_pane = c
+            .edit(Edit::Close(ViewId(3)))
+            .unwrap()
+            .edit(Edit::Close(ViewId(4)))
+            .unwrap();
+        assert_eq!(one_pane, Composition::default());
+    }
+
+    fn tabs_of(node: &Node) -> Option<(&[ViewId], usize)> {
+        match node {
+            Node::Tabs { views, selected } => Some((views, *selected)),
+            Node::View { .. } => None,
+            Node::Split { children, .. } => children.iter().find_map(|c| tabs_of(&c.node)),
+        }
     }
 }

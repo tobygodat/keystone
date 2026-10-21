@@ -3,6 +3,7 @@
 
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
+use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
 use crate::{
     ContinueRecovery, FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, OpenSettings,
@@ -141,6 +142,41 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["shift-f6"],
         context: Some(APP),
         action: || Box::new(PreviousTranscript),
+    },
+    Command {
+        id: "new-tab",
+        label: "New session in a new tab",
+        keys: &["ctrl-t"],
+        context: Some(APP),
+        action: || Box::new(NewTab),
+    },
+    Command {
+        id: "close-tab",
+        label: "Close tab",
+        keys: &["ctrl-w"],
+        context: Some(APP),
+        action: || Box::new(CloseTab),
+    },
+    Command {
+        id: "next-tab",
+        label: "Next tab",
+        keys: &["ctrl-tab"],
+        context: Some(APP),
+        action: || Box::new(NextTab),
+    },
+    Command {
+        id: "previous-tab",
+        label: "Previous tab",
+        keys: &["ctrl-shift-tab"],
+        context: Some(APP),
+        action: || Box::new(PreviousTab),
+    },
+    Command {
+        id: "split-right",
+        label: "Split right",
+        keys: &["ctrl-\\"],
+        context: Some(APP),
+        action: || Box::new(SplitRight),
     },
     Command {
         id: "transcript-previous-row",

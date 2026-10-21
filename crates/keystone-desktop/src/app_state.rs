@@ -6,7 +6,10 @@ use keystone_agent::idle::{IdleCandidate, IdlePolicy};
 use keystone_agent::recovery::{self, RecoveryBatch, Snapshot, TurnEvidence};
 use keystone_agent::{Catalog, LaunchProfile};
 use keystone_core::SessionContext;
-use keystone_core::{AccountId, Applied, ProjectId, SavedComposition, WorkingDirectory};
+use keystone_core::{
+    AccountId, Applied, Composition, ProjectId, SavedComposition, SessionTabs, ViewId,
+    WorkingDirectory,
+};
 use std::collections::BTreeMap;
 
 #[cfg(all(test, feature = "ui-tests"))]
@@ -41,7 +44,6 @@ pub(crate) struct RowChange {
     pub rows: usize,
     pub changed: Vec<Range<usize>>,
     pub replies: Vec<(usize, usize, keystone_agent::ItemStatus)>,
-    pub selected: bool,
 }
 pub(crate) struct AppState {
     store: Store,
@@ -563,6 +565,24 @@ impl AppState {
         result
     }
 
+    pub(crate) fn show(
+        &mut self,
+        project: &ProjectId,
+        layout: Option<Composition>,
+        tabs: SessionTabs,
+        selected: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+
+        let result = self.store.show(project, layout, tabs, selected);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
     pub(crate) fn set_appearance(
         &mut self,
         appearance: Appearance,
@@ -697,11 +717,24 @@ impl AppState {
         now: u64,
         cx: &mut Context<Self>,
     ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        self.create_showing(provider, directory, now, None, cx)
+    }
+
+    /// Creates a session, saving `show` with it in the same write. See
+    /// [`keystone_core::Store::create_showing`].
+    pub(crate) fn create_showing(
+        &mut self,
+        provider: Provider,
+        directory: &WorkingDirectory,
+        now: u64,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
         if self.phase == Phase::Exiting {
             return Err(std::io::Error::other("Keystone is exiting.").into());
         }
 
-        let result = self.store.create(provider, directory, now);
+        let result = self.store.create_showing(provider, directory, now, show);
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -963,7 +996,6 @@ impl AppState {
             rows: conversation.rows.len(),
             changed,
             replies,
-            selected: self.store.workspace().selected() == Some(session),
         });
         self.record_loss(session, lost);
         rejected

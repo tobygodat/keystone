@@ -17,6 +17,7 @@ mod database;
 mod layout;
 mod project;
 mod session_context;
+mod tabs;
 
 pub use account::{Account, AccountId, expand_home, homes_overlap, lexical};
 pub use composition::{
@@ -28,9 +29,11 @@ pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
 };
 pub use project::ProjectId;
-use project::ProjectLayouts;
+use project::{ProjectLayouts, ProjectMap};
 use session_context::SavedSessionContext;
 pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory};
+use tabs::SavedTabs;
+pub use tabs::SessionTabs;
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
@@ -381,6 +384,8 @@ pub struct Preferences {
     sidebar_layout: SavedLayout,
     #[serde(skip_serializing_if = "ProjectLayouts::is_empty")]
     project_layouts: ProjectLayouts,
+    #[serde(skip_serializing_if = "ProjectMap::is_empty")]
+    project_tabs: ProjectMap<SavedTabs>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -409,6 +414,37 @@ impl Preferences {
             Some(saved) => saved.shown(),
             None => Composition::from_sidebar(self.sidebar_layout.shown()),
         }
+    }
+
+    /// Drops `project`'s tabs for views its layout no longer has, so a view id used
+    /// again never inherits a session.
+    fn forget_closed_tabs(&mut self, project: &ProjectId) {
+        let Some(SavedTabs::Supported(tabs)) = self.project_tabs.get(project) else {
+            return;
+        };
+        let layout = self.composition(project);
+        let mut tabs = tabs.clone();
+        tabs.retain(|view, _| layout.component(view) == Some(Component::Conversation));
+        let _ = self.project_tabs.set(
+            project,
+            (!tabs.is_empty()).then_some(SavedTabs::Supported(tabs)),
+        );
+    }
+
+    /// The session `view` of `project` holds, without copying the project's tabs.
+    pub fn held(&self, project: &ProjectId, view: ViewId) -> Option<u64> {
+        match self.project_tabs.get(project)? {
+            SavedTabs::Supported(tabs) => tabs.get(view),
+            SavedTabs::Unsupported(_) => None,
+        }
+    }
+
+    /// Which session each of `project`'s conversation views holds.
+    pub fn session_tabs(&self, project: &ProjectId) -> SessionTabs {
+        self.project_tabs
+            .get(project)
+            .map(SavedTabs::shown)
+            .unwrap_or_default()
     }
 }
 
@@ -528,6 +564,20 @@ impl Store {
         directory: &WorkingDirectory,
         now: u64,
     ) -> StoreResult<Applied<u64>> {
+        self.create_showing(provider, directory, now, None)
+    }
+
+    /// Creates a session as [`Store::create`] does and, given a project's layout and
+    /// tabs, saves them with `view` holding the new session, in the same write. Saved
+    /// layouts or tabs this build cannot change are left as they are, and the session is
+    /// still created.
+    pub fn create_showing(
+        &mut self,
+        provider: Provider,
+        directory: &WorkingDirectory,
+        now: u64,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
         let id = self.next_id;
         let next_id = id
             .checked_add(1)
@@ -554,6 +604,24 @@ impl Store {
             unknown: Map::new(),
         });
         next.selected = Some(id);
+        if let Some((project, layout, mut tabs, view)) = show {
+            let ids: std::collections::HashSet<u64> = next.sessions.iter().map(|s| s.id).collect();
+            tabs.retain(|_, session| ids.contains(&session));
+            tabs.hold(view, id);
+            let mut shown = next.preferences.clone();
+            if shown
+                .project_layouts
+                .set(project, Some(layout.into()))
+                .and_then(|_| {
+                    shown
+                        .project_tabs
+                        .set(project, Some(SavedTabs::Supported(tabs)))
+                })
+                .is_ok()
+            {
+                next.preferences = shown;
+            }
+        }
         let applied = self.commit(next, next_id)?;
         Ok(Applied {
             value: id,
@@ -680,7 +748,49 @@ impl Store {
     ) -> StoreResult<Applied<()>> {
         let mut layouts = self.workspace.preferences.project_layouts.clone();
         layouts.set(project, layout)?;
-        self.update_preferences(|preferences| preferences.project_layouts = layouts)
+        self.update_preferences(|preferences| {
+            preferences.project_layouts = layouts;
+            preferences.forget_closed_tabs(project);
+        })
+    }
+
+    /// Saves what `project`'s window shows in one write, so a crash keeps all of it or
+    /// none: its layout when given, which session each conversation view holds, and the
+    /// selected session. Tabs holding a session that no longer exists are dropped. Tabs
+    /// this version cannot read are kept until a view holds a session again.
+    pub fn show(
+        &mut self,
+        project: &ProjectId,
+        layout: Option<Composition>,
+        mut tabs: SessionTabs,
+        selected: Option<u64>,
+    ) -> StoreResult<Applied<()>> {
+        let exists = |id: u64| self.workspace.sessions.iter().any(|s| s.id == id);
+        if let Some(id) = selected.filter(|&id| !exists(id)) {
+            return Err(invalid(format!("unknown session ID {id}")).into());
+        }
+        tabs.retain(|_, session| exists(session));
+        let mut next = self.workspace.clone();
+        if let Some(layout) = layout {
+            next.preferences
+                .project_layouts
+                .set(project, Some(layout.into()))?;
+        }
+        let unreadable = matches!(
+            next.preferences.project_tabs.get(project),
+            Some(SavedTabs::Unsupported(_))
+        );
+        if !(unreadable && tabs.is_empty()) {
+            next.preferences.project_tabs.set(
+                project,
+                (!tabs.is_empty()).then_some(SavedTabs::Supported(tabs)),
+            )?;
+        }
+        next.selected = selected;
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
     }
 
     pub fn set_provider_thread(&mut self, id: u64, thread: String) -> StoreResult<Applied<()>> {
@@ -1959,6 +2069,206 @@ mod tests {
         let mut store = reopened;
         store.set_project_layout(&b, None).unwrap();
         assert_eq!(project_layouts(&path), None);
+    }
+
+    fn project_tabs(path: &Path) -> Option<Value> {
+        json(path)["workspace"]["preferences"]
+            .get("project_tabs")
+            .cloned()
+    }
+
+    #[test]
+    fn a_state_from_before_tabs_loads_with_every_view_following_the_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        seeded(&path, "");
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.workspace().preferences().session_tabs(&a).is_empty());
+        assert_eq!(store.workspace().selected(), Some(1));
+        assert_eq!(
+            store.workspace().preferences().composition(&a),
+            Composition::default()
+        );
+        store.set_draft(1, "edited".into()).unwrap();
+        assert_eq!(project_tabs(&path), None);
+    }
+
+    #[test]
+    fn show_saves_the_layout_tabs_and_selection_in_one_write_and_restores_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        for provider in [Provider::Codex, Provider::Claude, Provider::Codex] {
+            store.create(provider, &working_directory(), 1).unwrap();
+        }
+        let split = Composition::default()
+            .edit(Edit::Open {
+                view: ViewId(3),
+                component: Component::Conversation,
+                at: Place::Beside {
+                    target: ViewId::MAIN,
+                    axis: Axis::Row,
+                    after: true,
+                },
+                size: Size::Fill(std::num::NonZeroU16::MIN),
+            })
+            .unwrap();
+        let mut tabs = SessionTabs::default();
+        tabs.hold(ViewId::MAIN, 1);
+        tabs.hold(ViewId(3), 2);
+        tabs.hold(ViewId(4), 99);
+        let writes = store.writes();
+        store
+            .show(&a, Some(split.clone()), tabs.clone(), Some(2))
+            .unwrap();
+        assert_eq!(store.writes(), writes + 1);
+        store
+            .show(&a, Some(split.clone()), tabs.clone(), Some(2))
+            .unwrap();
+        assert_eq!(store.writes(), writes + 1);
+        assert_eq!(
+            project_tabs(&path),
+            Some(serde_json::json!({
+                a.path().to_str().unwrap(): [
+                    {"view": 0, "session": 1},
+                    {"view": 3, "session": 2},
+                ]
+            }))
+        );
+
+        let mut reopened = Store::open(&path).unwrap();
+        let preferences = reopened.workspace().preferences();
+        assert_eq!(preferences.composition(&a), split);
+        assert_eq!(
+            preferences.session_tabs(&a).iter().collect::<Vec<_>>(),
+            [(ViewId::MAIN, 1), (ViewId(3), 2)]
+        );
+        assert_eq!(reopened.workspace().selected(), Some(2));
+
+        let writes = reopened.writes();
+        assert!(
+            reopened
+                .show(&a, None, SessionTabs::default(), Some(99))
+                .is_err()
+        );
+        assert_eq!(reopened.writes(), writes);
+        reopened
+            .show(&a, None, SessionTabs::default(), Some(3))
+            .unwrap();
+        assert_eq!(project_tabs(&path), None);
+        let preferences = reopened.workspace().preferences();
+        assert_eq!(preferences.composition(&a), split);
+        assert_eq!(reopened.workspace().selected(), Some(3));
+
+        let mut tabs = SessionTabs::default();
+        tabs.hold(ViewId::MAIN, 1);
+        tabs.hold(ViewId(3), 2);
+        reopened.show(&a, None, tabs, Some(1)).unwrap();
+        reopened
+            .set_project_layout(&a, Some(Composition::default().into()))
+            .unwrap();
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .workspace()
+                .preferences()
+                .session_tabs(&a)
+                .iter()
+                .collect::<Vec<_>>(),
+            [(ViewId::MAIN, 1)],
+            "a layout saved without view 3 forgets its tab"
+        );
+    }
+
+    #[test]
+    fn a_session_created_in_a_tab_is_saved_with_its_tab_in_one_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let project = ProjectId::new(directory.path()).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        let first = store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap()
+            .value;
+        let mut tabs = SessionTabs::default();
+        tabs.hold(ViewId::MAIN, first);
+        let layout = Composition::default()
+            .edit(Edit::Open {
+                view: ViewId(3),
+                component: Component::Conversation,
+                at: Place::TabWith(ViewId::MAIN),
+                size: Size::Fill(std::num::NonZeroU16::MIN),
+            })
+            .unwrap();
+        let writes = store.writes();
+        let second = store
+            .create_showing(
+                Provider::Claude,
+                &working_directory(),
+                2,
+                Some((&project, layout.clone(), tabs, ViewId(3))),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(store.writes(), writes + 1);
+        let reopened = Store::open(&path).unwrap();
+        let preferences = reopened.workspace().preferences();
+        assert_eq!(reopened.workspace().selected(), Some(second));
+        assert_eq!(preferences.composition(&project), layout);
+        assert_eq!(
+            preferences
+                .session_tabs(&project)
+                .iter()
+                .collect::<Vec<_>>(),
+            [(ViewId::MAIN, first), (ViewId(3), second)]
+        );
+    }
+
+    #[test]
+    fn unreadable_tabs_are_kept_and_only_refuse_a_tab_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        seeded(&path, r#","project_tabs":"wide""#);
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.workspace().preferences().session_tabs(&a).is_empty());
+        store.set_draft(1, "edited".into()).unwrap();
+        assert!(
+            store
+                .show(&a, None, SessionTabs::default(), Some(1))
+                .is_err()
+        );
+        assert_eq!(project_tabs(&path), Some(serde_json::json!("wide")));
+
+        let mine = serde_json::json!({a.path().to_str().unwrap(): {"views": "later"}});
+        seeded(&path, &format!(r#","project_tabs":{mine}"#));
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.workspace().preferences().session_tabs(&a).is_empty());
+        store
+            .show(
+                &a,
+                Some(Composition::default()),
+                SessionTabs::default(),
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(
+            project_tabs(&path),
+            Some(mine),
+            "nothing held, so it is kept"
+        );
+
+        let foreign = serde_json::json!({"/gone": {"views": "later"}});
+        seeded(&path, &format!(r#","project_tabs":{foreign}"#));
+        let mut store = Store::open(&path).unwrap();
+        let mut tabs = SessionTabs::default();
+        tabs.hold(ViewId::MAIN, 1);
+        store.show(&a, None, tabs, Some(1)).unwrap();
+        let mut expected = foreign.clone();
+        expected[a.path().to_str().unwrap()] = serde_json::json!([{"view": 0, "session": 1}]);
+        assert_eq!(project_tabs(&path), Some(expected));
     }
 
     #[test]

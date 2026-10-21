@@ -159,6 +159,11 @@ impl Keystone {
             .capture_action(self.leave_settings::<ToggleSidebar>(cx))
             .capture_action(self.leave_settings::<crate::files::ToggleFiles>(cx))
             .capture_action(self.leave_settings::<OpenCustomize>(cx))
+            .capture_action(self.leave_settings::<crate::session_tabs::NewTab>(cx))
+            .capture_action(self.leave_settings::<crate::session_tabs::CloseTab>(cx))
+            .capture_action(self.leave_settings::<crate::session_tabs::NextTab>(cx))
+            .capture_action(self.leave_settings::<crate::session_tabs::PreviousTab>(cx))
+            .capture_action(self.leave_settings::<crate::session_tabs::SplitRight>(cx))
             .capture_action(self.scoped_listener(cx, |this, _: &SendMessage, _, cx| {
                 if this.settings.is_some() {
                     cx.stop_propagation();

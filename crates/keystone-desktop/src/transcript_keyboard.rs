@@ -179,22 +179,23 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.state.read(cx).store().workspace().selected() else {
-            return;
-        };
-        let views = self.presentation.current.arrangement.visible.clone();
+        let views: Vec<_> = self
+            .presentation
+            .current
+            .arrangement
+            .visible
+            .clone()
+            .into_iter()
+            .filter_map(|view| self.view_key(view, cx))
+            .collect();
         if views.is_empty() {
             return;
         }
-        let at = views.iter().position(|view| {
-            self.presentation.current.views.contains_focus(
-                ViewKey {
-                    view: *view,
-                    session,
-                },
-                window,
-                cx,
-            )
+        let at = views.iter().position(|key| {
+            self.presentation
+                .current
+                .views
+                .contains_focus(*key, window, cx)
         });
         let next = match (at, backwards) {
             (Some(n), false) => (n + 1) % views.len(),
@@ -202,15 +203,8 @@ impl Keystone {
             (None, false) => 0,
             (None, true) => views.len() - 1,
         };
-        self.transcript_row(
-            ViewKey {
-                view: views[next],
-                session,
-            },
-            0,
-            window,
-            cx,
-        );
+        self.activate(views[next].view, cx);
+        self.transcript_row(views[next], 0, window, cx);
     }
     pub(crate) fn focus_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.state.read(cx).store().workspace().selected() else {
@@ -220,7 +214,7 @@ impl Keystone {
             .presentation
             .current
             .views
-            .send_target(&self.presentation.current.arrangement.visible, session)
+            .send_target(&self.showing(session, cx), session)
         else {
             return;
         };
@@ -492,12 +486,12 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.state.read(cx).store().workspace().selected() else {
-            return;
-        };
         let visible = self.presentation.current.arrangement.visible.clone();
         for view in visible {
-            let key = ViewKey { view, session };
+            let Some(key) = self.view_key(view, cx) else {
+                continue;
+            };
+            let session = key.session;
             if self
                 .state
                 .read(cx)
