@@ -10,7 +10,7 @@ use crate::{
 use gpui::{
     AnyElement, App, Context, FocusHandle, FontWeight, KeyDownEvent, Window, div, prelude::*, px,
 };
-use keystone_core::{Appearance, Density, SidebarWidth, ThemeMode};
+use keystone_core::{Appearance, Density, Notifications, SidebarWidth, ThemeMode};
 use keystone_ui::prelude::*;
 
 const THEMES: [(ThemeMode, &str); 3] = [
@@ -32,12 +32,17 @@ enum Field {
     MonoFont,
     Density,
     TextSize,
+    Notifications,
+    TurnFinished,
+    Approval,
+    TurnFailed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Appearance,
     Fonts,
+    Notifications,
     Accounts,
 }
 
@@ -45,7 +50,7 @@ enum Section {
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 3] = [
+const SECTIONS: [(Section, &str, &str, Rows); 4] = [
     (
         Section::Appearance,
         "Appearance",
@@ -63,6 +68,17 @@ const SECTIONS: [(Section, &str, &str, Rows); 3] = [
         &[
             ("Interface font", Field::UiFont),
             ("Code font", Field::MonoFont),
+        ],
+    ),
+    (
+        Section::Notifications,
+        "Notifications",
+        "settings-section-notifications",
+        &[
+            ("Desktop notifications", Field::Notifications),
+            ("Turn finished", Field::TurnFinished),
+            ("Approval requested", Field::Approval),
+            ("Turn failed", Field::TurnFailed),
         ],
     ),
     (
@@ -195,6 +211,29 @@ impl Keystone {
                 this.refresh(cx);
             }
         })
+    }
+
+    fn update_notifications(
+        &mut self,
+        change: impl FnOnce(&mut Notifications),
+        cx: &mut Context<Self>,
+    ) {
+        let mut notifications = self
+            .state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .notifications();
+        change(&mut notifications);
+        self.error = match self
+            .state
+            .update(cx, |state, cx| state.set_notifications(notifications, cx))
+        {
+            Ok(applied) => crate::durability_warning(applied.durability),
+            Err(error) => Some(format!("Settings not saved. {error}")),
+        };
+        self.refresh(cx);
     }
 
     fn show_section(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -405,6 +444,37 @@ impl Keystone {
                     },
                 ))
                 .into_any_element(),
+            Field::Notifications | Field::TurnFinished | Field::Approval | Field::TurnFailed => {
+                let saved = self
+                    .state
+                    .read(cx)
+                    .store()
+                    .workspace()
+                    .preferences()
+                    .notifications();
+                let (id, on, set): (_, _, fn(&mut Notifications, bool)) = match field {
+                    Field::Notifications => ("settings-notifications", saved.enabled, |n, on| {
+                        n.enabled = on
+                    }),
+                    Field::TurnFinished => (
+                        "settings-notify-turn-finished",
+                        saved.turn_finished,
+                        |n, on| n.turn_finished = on,
+                    ),
+                    Field::Approval => ("settings-notify-approval", saved.approval, |n, on| {
+                        n.approval = on
+                    }),
+                    _ => ("settings-notify-turn-failed", saved.turn_failed, |n, on| {
+                        n.turn_failed = on
+                    }),
+                };
+                Switch::new(id, on)
+                    .disabled(!matches!(field, Field::Notifications) && !saved.enabled)
+                    .on_change(self.scoped_listener(cx, move |this, &on: &bool, _, cx| {
+                        this.update_notifications(|n| set(n, on), cx)
+                    }))
+                    .into_any_element()
+            }
             Field::TextSize => {
                 let size = saved.text_size.unwrap_or(DEFAULT_TEXT_SIZE);
                 h_flex()
@@ -502,7 +572,7 @@ mod tests {
     use gpui::{
         AppContext, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
     };
-    use keystone_core::{Appearance, Density, Store, ThemeMode};
+    use keystone_core::{Appearance, Density, Notifications, Store, ThemeMode};
     use keystone_ui::{ActiveTheme, TextSize};
     use std::path::Path;
 
@@ -929,6 +999,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn notification_switches_save_and_the_global_one_holds_the_rest(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        seeded(&path);
+        let (_view, cx) = open_window(&path, cx);
+        let saved = |path: &Path| {
+            Store::open(path)
+                .unwrap()
+                .workspace()
+                .preferences()
+                .notifications()
+        };
+        keys(cx, "ctrl-,");
+        click(cx, "settings-section-notifications");
+        assert!(
+            !shown(cx, "settings-theme"),
+            "Notifications replaces Appearance"
+        );
+        assert_eq!(saved(&path), Notifications::default(), "all on by default");
+
+        click(cx, "settings-notify-approval");
+        assert!(!saved(&path).approval);
+        click(cx, "settings-notifications");
+        assert!(!saved(&path).enabled);
+        click(cx, "settings-notify-turn-failed");
+        assert!(
+            saved(&path).turn_failed,
+            "an event switch does nothing while all are off"
+        );
+        click(cx, "settings-notifications");
+        click(cx, "settings-notify-turn-finished");
+        assert_eq!(
+            saved(&path),
+            Notifications {
+                turn_finished: false,
+                approval: false,
+                ..Notifications::default()
+            }
+        );
+    }
+
+    #[gpui::test]
     fn settings_changes_persist_preferences(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
@@ -1013,8 +1125,9 @@ mod tests {
         keys(cx, "up");
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
-        // Appearance's row holds focus; next come Fonts, Accounts, Theme, then Compact.
-        keys(cx, "tab tab tab tab");
+        // Appearance's row holds focus; next come Fonts, Notifications, Accounts, Theme,
+        // then Compact.
+        keys(cx, "tab tab tab tab tab");
         press(cx, "space");
         assert_eq!(saved(&path).density, Density::Compact);
         keys(cx, "right");
@@ -1028,10 +1141,11 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, Theme, Accounts, Fonts, and Appearance to Back.
+        // From Default back past Compact, Theme, Accounts, Notifications, Fonts, and
+        // Appearance to Back.
         keys(
             cx,
-            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
+            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
         );
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
@@ -1044,8 +1158,9 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        // Fonts' row holds focus; Accounts' row comes before the first font menu.
-        keys(cx, "ctrl-, down tab tab down");
+        // Fonts' row holds focus; Notifications' and Accounts' rows come before the
+        // first font menu.
+        keys(cx, "ctrl-, down tab tab tab down");
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");

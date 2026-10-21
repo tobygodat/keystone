@@ -101,6 +101,7 @@ pub(crate) struct AppState {
     /// The `codex` and `claude` every new connection runs, in place of the ones found.
     #[cfg(test)]
     pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
+    pub(crate) notifier: crate::notifications::Notifier,
 }
 impl EventEmitter<RuntimeChanged> for AppState {}
 
@@ -639,6 +640,20 @@ impl AppState {
         result
     }
 
+    pub(crate) fn set_notifications(
+        &mut self,
+        notifications: keystone_core::Notifications,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+
+        let result = self.store.set_notifications(notifications);
+        self.publish(cx);
+        result
+    }
+
     pub(crate) fn set_settled(
         &mut self,
         id: u64,
@@ -951,6 +966,7 @@ impl AppState {
             save_calls: 0,
             #[cfg(test)]
             test_programs: None,
+            notifier: Default::default(),
             store,
         }
     }
@@ -1226,6 +1242,7 @@ impl AppState {
         let mut sidebar_changed = false;
         let mut recover = Vec::new();
         let mut undelivered = Vec::new();
+        let mut alerts = Vec::new();
         for report in reports {
             let session = match report {
                 Report::Loaded { session, entries } => {
@@ -1311,6 +1328,15 @@ impl AppState {
                 }
                 _ => {}
             }
+            if let Some(alert) = crate::notifications::Alert::of(&event) {
+                alerts.push((session, alert));
+            }
+            // A held follow-up starts as the turn ends, so the session is not finished.
+            if matches!(event, Event::TurnStarted) {
+                alerts.retain(|&(s, alert)| {
+                    s != session || alert != crate::notifications::Alert::TurnFinished
+                });
+            }
             let failed = turn_failed(&event);
             match (&event, failed) {
                 (Event::TurnStarted, _) => self.persist(PendingSave::TurnStart(session)),
@@ -1363,6 +1389,9 @@ impl AppState {
                 });
             })
             .detach();
+        }
+        if !alerts.is_empty() {
+            cx.defer(move |cx| crate::notifications::offer(alerts, cx));
         }
         // Streamed text redraws only this view. The sidebar refreshes when a row changes.
         if sidebar_changed {

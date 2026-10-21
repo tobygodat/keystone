@@ -390,12 +390,43 @@ pub struct Appearance {
     pub text_size: Option<u8>,
 }
 
+/// Which desktop notifications Keystone sends. Each is sent only for a session the
+/// user cannot see. Missing fields load as on, so older state files notify.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct Notifications {
+    /// Off sends none, whatever each event's own switch says.
+    pub enabled: bool,
+    pub turn_finished: bool,
+    pub approval: bool,
+    pub turn_failed: bool,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            turn_finished: true,
+            approval: true,
+            turn_failed: true,
+        }
+    }
+}
+
+impl Notifications {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Preferences {
     // Before `unknown`, so its keys are taken before the map collects the rest.
     #[serde(flatten)]
     appearance: Appearance,
+    #[serde(skip_serializing_if = "Notifications::is_default")]
+    notifications: Notifications,
     sidebar_layout: SavedLayout,
     #[serde(skip_serializing_if = "ProjectLayouts::is_empty")]
     project_layouts: ProjectLayouts,
@@ -410,6 +441,10 @@ pub struct Preferences {
 impl Preferences {
     pub fn appearance(&self) -> &Appearance {
         &self.appearance
+    }
+
+    pub fn notifications(&self) -> Notifications {
+        self.notifications
     }
 
     pub fn sidebar_layout(&self) -> &SavedLayout {
@@ -753,6 +788,10 @@ impl Store {
     /// preference this version does not know stay as they are.
     pub fn set_appearance(&mut self, appearance: Appearance) -> StoreResult<Applied<()>> {
         self.update_preferences(|preferences| preferences.appearance = appearance)
+    }
+
+    pub fn set_notifications(&mut self, notifications: Notifications) -> StoreResult<Applied<()>> {
+        self.update_preferences(|preferences| preferences.notifications = notifications)
     }
 
     /// Saves exactly `layout`, readable or not, over the latest preferences, leaving
@@ -2017,6 +2056,46 @@ mod tests {
         assert!(
             saved.contains(r#""sidebar_layout":{"side":"right","width_px":360}"#),
             "{saved}"
+        );
+    }
+
+    #[test]
+    fn notifications_load_as_on_and_save_only_once_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":1,"workspace":{"sessions":[],"preferences":{"notifications":{"approval":false}}}}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.workspace().preferences().notifications(),
+            Notifications {
+                approval: false,
+                ..Notifications::default()
+            },
+            "a missing switch loads as on"
+        );
+
+        store.set_notifications(Notifications::default()).unwrap();
+        assert!(!json(&path).to_string().contains("notifications"));
+        let off = Notifications {
+            enabled: false,
+            turn_finished: false,
+            ..Notifications::default()
+        };
+        store.set_notifications(off).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.workspace().preferences().notifications(), off);
+        assert_eq!(
+            Store::open(directory.path().join("new.json"))
+                .unwrap()
+                .workspace()
+                .preferences()
+                .notifications(),
+            Notifications::default(),
+            "a new workspace notifies"
         );
     }
 

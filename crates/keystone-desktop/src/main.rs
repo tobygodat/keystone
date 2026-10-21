@@ -8,6 +8,7 @@ mod customization;
 mod customization_agent;
 mod files;
 mod model_selector;
+mod notifications;
 mod presentation;
 mod relative_time;
 mod reveal;
@@ -188,6 +189,7 @@ impl gpui::Global for DesktopApp {}
 fn install_app_state(store: Store, cx: &mut App) -> Entity<AppState> {
     let state = cx.new(|cx| AppState::new(store, cx));
     cx.set_quit_mode(gpui::QuitMode::Explicit);
+    notifications::install(cx);
     cx.set_global(DesktopApp {
         state: state.clone(),
         windows: Vec::new(),
@@ -623,7 +625,13 @@ impl Keystone {
             }),
             cx.subscribe(&search, |this, _, _: &Changed, cx| this.refresh(cx)),
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
-            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    let id = this.window_id;
+                    this.state.update(cx, |state, _| state.notifier.used(id));
+                }
+                cx.notify()
+            }),
             cx.observe_window_bounds(window, |this, window, cx| {
                 this.save_placement_soon(window, cx)
             }),
@@ -3214,6 +3222,7 @@ impl Render for Keystone {
             None => self.arrangement_body(window, cx),
         };
         self.activate_focused_view(window, cx);
+        self.note_seen(window, cx);
         let customizing = self.presentation.current.customization.is_open();
         let root = v_flex()
             .id("keystone-root")

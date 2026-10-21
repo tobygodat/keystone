@@ -61,6 +61,24 @@ write({'pid': child.pid, 'returncode': code,
        'signal': signal.Signals(-code).name if code < 0 else None})
 """
 
+# Each run's app gets this private session bus: a dbus-daemon with no activatable
+# services, so nothing the app sends over D-Bus, such as a desktop notification,
+# reaches the user's own session. A journey may own names on it, as a fake
+# notification server does.
+BUS_CONFIG = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:path={path}</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+"""
+
 
 def default_driver():
     """This checkout's driver, else the main checkout's, which git worktrees share."""
@@ -165,6 +183,8 @@ class Run:
         self.exit_files = {}
         self.app_logs = {}
         self.closed = False
+        self.bus = None
+        self.bus_address = None
         self.responses = queue.Queue()
         self.log = (self.evidence / 'actions.jsonl').open('a')
         self.stderr = (self.evidence / 'driver.stderr.log').open('w')
@@ -262,7 +282,32 @@ class Run:
         session = self.call('session_start', {'width': width, 'height': height, 'xwayland': True,
                                               'sandbox': False, 'headless': headless})
         self.env = app_env(env)
-        return {'session': session.get('structuredContent'), 'launch': self.launch()}
+        self.start_bus()
+        return {'session': session.get('structuredContent'), 'bus': self.bus_address,
+                'launch': self.launch()}
+
+    def start_bus(self):
+        config = self.scratch / 'bus.conf'
+        config.write_text(BUS_CONFIG.format(path=self.scratch / 'bus'))
+        # setpriv ends the daemon if the server dies without stopping it.
+        self.bus = subprocess.Popen(['setpriv', '--pdeathsig', 'TERM', 'dbus-daemon',
+                                     f'--config-file={config}', '--nofork', '--print-address=1'],
+                                    stdout=subprocess.PIPE, stderr=self.stderr, text=True)
+        self.bus_address = self.bus.stdout.readline().strip()
+        if not self.bus_address:
+            raise RuntimeError(f'The private session bus exited with {self.bus.wait()}')
+        self.record('bus', {'address': self.bus_address, 'pid': self.bus.pid})
+
+    def stop_bus(self):
+        if self.bus is None:
+            return
+        self.bus.terminate()
+        try:
+            self.bus.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.bus.kill()
+            self.bus.wait()
+        self.bus.stdout.close()
 
     def launch(self):
         # KS-009: once a temporary virtual keyboard such as wtype's goes away,
@@ -281,7 +326,8 @@ class Run:
         log = self.evidence / f'app-{number:02d}.stderr.log'
         result = self.call('app_launch', {'argv': [
             '/usr/bin/env', '-u', 'KEYSTONE_VISUAL_FIXTURE', f'KEYSTONE_STATE_PATH={self.state}',
-            f'KEYSTONE_AUTOMATION_PATH={self.geometry}', *extra,
+            f'KEYSTONE_AUTOMATION_PATH={self.geometry}',
+            f'DBUS_SESSION_BUS_ADDRESS={self.bus_address}', *extra,
             sys.executable, '-I', '-c', REAPER, str(status), str(log),
             str(self.binary)]})
         launched = result.get('structuredContent', {})
@@ -457,6 +503,7 @@ class Run:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
+        self.stop_bus()
         if not errors:
             try:
                 shutil.rmtree(self.scratch)

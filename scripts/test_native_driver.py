@@ -69,6 +69,7 @@ class PersistenceTest(unittest.TestCase):
         run.evidence.mkdir()
         run.sequence = 7
         run.record = Mock()
+        run.bus = None
         return run
 
     def test_projection_reads_wal_preserves_fields_and_orders_sessions(self):
@@ -169,6 +170,31 @@ class PersistenceTest(unittest.TestCase):
         run.log.close.assert_called_once()
         run.stderr.close.assert_called_once()
         self.assertEqual(run.stop(), {'already_closed': True})
+
+    def test_the_app_gets_a_private_bus_that_stop_ends(self):
+        run = self.run_without_process()
+        run.scratch = self.root / 'scratch'
+        run.scratch.mkdir()
+        run.stderr = None
+        run.start_bus()
+        self.addCleanup(run.stop_bus)
+        self.assertTrue(run.bus_address.startswith(f'unix:path={run.scratch}/bus'),
+                        run.bus_address)
+        self.assertNotIn('/run/user/', run.bus_address)
+        run.geometry = run.scratch / 'elements.json'
+        run.env = {}
+        run.trace_wayland = False
+        run.prime_keyboard = False
+        run.binary = Path('/disposable/keystone-desktop')
+        run.exit_files, run.app_logs, run.app_pids = {}, {}, []
+        run.call = Mock(side_effect=RuntimeError('stop at launch'))
+        with self.assertRaisesRegex(RuntimeError, 'stop at launch'):
+            run.launch()
+        argv = run.call.call_args.args[1]['argv']
+        self.assertIn(f'DBUS_SESSION_BUS_ADDRESS={run.bus_address}', argv)
+        bus = run.bus
+        run.stop_bus()
+        self.assertIsNotNone(bus.poll(), 'the daemon is gone')
 
     def test_failed_snapshot_still_closes_process_and_retains_scratch(self):
         run = self.run_without_process()

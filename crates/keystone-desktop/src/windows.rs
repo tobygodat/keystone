@@ -73,6 +73,7 @@ pub(crate) fn open(
         WindowOptions {
             window_bounds: Some(bounds(placement, cx)),
             titlebar: None,
+            app_id: Some("keystone".into()),
             ..Default::default()
         },
         |window, cx| {
