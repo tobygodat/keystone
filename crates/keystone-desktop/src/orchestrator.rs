@@ -1,8 +1,10 @@
 use super::*;
 use keystone_agent::mcp::{Caller, HandlerError, Server, mode_allowed};
+use keystone_core::{WorktreeContext, worktree};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
 
@@ -14,6 +16,62 @@ struct Request {
     arguments: Value,
     deadline: Instant,
     reply: Sender<Result<Value, HandlerError>>,
+    /// For a launch that names a worktree, its git work's result, found off the UI thread.
+    prepared: Option<Prepared>,
+}
+
+/// The worktree a launch works in, or why it may not.
+type Prepared = Result<Option<WorktreeContext>, String>;
+
+/// Whether a caller working in `project`, in its worktree `own` if any, may reach a
+/// session in `directory`, in its worktree `theirs` if any: the same folder, or within
+/// one repository its root and its worktrees.
+fn reachable(
+    project: &WorkingDirectory,
+    own: Option<&WorktreeContext>,
+    directory: &WorkingDirectory,
+    theirs: Option<&WorktreeContext>,
+) -> bool {
+    directory == project
+        || theirs.map_or(directory, |w| &w.repository) == own.map_or(project, |w| &w.repository)
+}
+
+const LAUNCH_FOLDER_REFUSED: &str =
+    "Launch directory must be the caller's project or a worktree of its repository";
+
+/// The worktree a launch from `project` works in. `cwd` may name a registered worktree of
+/// the caller's repository; `name` creates one, only for a caller that itself works in a
+/// worktree. Without either, a child shares the caller's folder. Runs git.
+fn launch_worktree(
+    project: &WorkingDirectory,
+    own: Option<WorktreeContext>,
+    cwd: Option<&str>,
+    name: Option<&str>,
+) -> Prepared {
+    match (cwd, name) {
+        (Some(_), Some(_)) => Err("Give cwd or worktree, not both".into()),
+        (None, Some(name)) => {
+            let own =
+                own.ok_or("Only a session working in a worktree may create another worktree")?;
+            if !worktree::is_intact(&own) {
+                return Err(
+                    "The caller's worktree folder is missing or no longer its worktree".into(),
+                );
+            }
+            let created = worktree::create(own.directory.path(), name, None)
+                .map_err(|e| format!("Worktree not created: {e}"))?;
+            Ok(Some(created))
+        }
+        (None, None) => Ok(own),
+        (Some(cwd), None) if cwd == project.as_str() => Ok(own),
+        (Some(cwd), None) => {
+            let repository = own.as_ref().map_or(project, |w| &w.repository);
+            match worktree::inspect(repository.path(), std::path::Path::new(cwd)) {
+                Ok(found) if &found.repository == repository => Ok(Some(found)),
+                _ => Err(LAUNCH_FOLDER_REFUSED.into()),
+            }
+        }
+    }
 }
 
 trait Records {
@@ -61,6 +119,10 @@ pub(super) struct Orchestrator {
     requests: Receiver<Request>,
     records: Box<dyn Records>,
     draining: bool,
+    /// The prepared worktree of the launch being answered.
+    prepared: Option<Prepared>,
+    /// Launches whose git work is running, by caller and request ID.
+    preparing: HashSet<(u64, String)>,
     #[cfg(test)]
     last_caller: Option<Caller>,
 }
@@ -73,6 +135,7 @@ struct Launch {
     model: Option<String>,
     mode: Option<String>,
     cwd: Option<String>,
+    worktree: Option<String>,
     message: String,
     #[serde(rename = "client_request_id")]
     _client_request_id: String,
@@ -142,6 +205,7 @@ impl AppState {
                 arguments,
                 deadline: Instant::now() + budget,
                 reply,
+                prepared: None,
             })
             .map_err(|_| HandlerError::from("Keystone is busy or shutting down"))?;
             wake();
@@ -167,6 +231,8 @@ impl AppState {
             requests,
             records: Box::<MemoryRecords>::default(),
             draining: false,
+            prepared: None,
+            preparing: HashSet::new(),
             #[cfg(test)]
             last_caller: None,
         });
@@ -183,17 +249,165 @@ impl AppState {
         orchestrator.draining = true;
         let requests: Vec<_> = orchestrator.requests.try_iter().take(32).collect();
         for request in requests {
-            let reply = if Instant::now() >= request.deadline {
-                Err(HandlerError::Deadline)
-            } else {
-                self.orchestrate(request.caller, &request.tool, request.arguments, cx)
-                    .map_err(HandlerError::from)
-            };
-            let _ = request.reply.send(reply);
+            match self.launch_job(&request) {
+                Some(Err(busy)) => {
+                    let _ = request.reply.send(Err(HandlerError::from(busy)));
+                }
+                Some(Ok((project, own))) => {
+                    let (cwd, name) = (
+                        request.arguments["cwd"].as_str().map(str::to_owned),
+                        request.arguments["worktree"].as_str().map(str::to_owned),
+                    );
+                    cx.spawn(async move |this, cx| {
+                        let prepared = cx
+                            .background_spawn(async move {
+                                launch_worktree(&project, own, cwd.as_deref(), name.as_deref())
+                            })
+                            .await;
+                        let _ = this.update(cx, |state, cx| {
+                            state.answer_request(
+                                Request {
+                                    prepared: Some(prepared),
+                                    ..request
+                                },
+                                cx,
+                            )
+                        });
+                    })
+                    .detach();
+                }
+                None => self.answer_request(request, cx),
+            }
         }
         if let Some(orchestrator) = &mut self.orchestrator {
             orchestrator.draining = false;
         }
+    }
+
+    /// The caller's folder and worktree when `request` is a valid, new launch whose
+    /// worktree needs git, which then runs off the UI thread, or why it must wait.
+    /// Anything else, including a request already answered, is answered at once.
+    fn launch_job(
+        &mut self,
+        request: &Request,
+    ) -> Option<Result<(WorkingDirectory, Option<WorktreeContext>), &'static str>> {
+        if request.tool != "session_launch"
+            || request.prepared.is_some()
+            || Instant::now() >= request.deadline
+        {
+            return None;
+        }
+        let cwd = request.arguments["cwd"].as_str();
+        let name = request.arguments["worktree"].as_str();
+        let (project, ceiling) = self.caller(request.caller).ok()?;
+        if name.is_none() && cwd.is_none_or(|cwd| cwd == project.as_str()) {
+            return None;
+        }
+        self.validate_launch(request.arguments.clone(), ceiling)
+            .ok()?;
+        let key = request.arguments["client_request_id"]
+            .as_str()
+            .filter(|key| !key.is_empty() && key.len() <= 128)?;
+        let input: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(&json!({"tool": request.tool, "arguments": request.arguments}))
+                .unwrap(),
+        )
+        .into();
+        let orchestrator = self.orchestrator.as_mut()?;
+        if !matches!(
+            orchestrator
+                .records
+                .lookup(request.caller.session, key, &input),
+            Ok(None)
+        ) || !orchestrator.records.has_capacity()
+        {
+            return None;
+        }
+        if !orchestrator
+            .preparing
+            .insert((request.caller.session, key.to_owned()))
+        {
+            return Some(Err("busy: this launch is still being prepared"));
+        }
+        let own = self
+            .session(request.caller.session)
+            .and_then(|s| s.worktree().cloned());
+        Some(Ok((project, own)))
+    }
+
+    /// A launch that created a worktree completes even past its deadline, so the
+    /// worktree gets its session and a retry finds the recorded answer.
+    fn answer_request(&mut self, request: Request, cx: &mut Context<Self>) {
+        let created = match (&request.prepared, request.arguments["worktree"].is_string()) {
+            (Some(Ok(Some(worktree))), true) => Some(worktree.clone()),
+            _ => None,
+        };
+        if request.prepared.is_some()
+            && let (Some(orchestrator), Some(key)) = (
+                &mut self.orchestrator,
+                request.arguments["client_request_id"].as_str(),
+            )
+        {
+            orchestrator
+                .preparing
+                .remove(&(request.caller.session, key.to_owned()));
+        }
+        let reply = if created.is_none() && Instant::now() >= request.deadline {
+            Err(HandlerError::Deadline)
+        } else {
+            if let Some(orchestrator) = &mut self.orchestrator {
+                orchestrator.prepared = request.prepared;
+            }
+            let reply = self
+                .orchestrate(request.caller, &request.tool, request.arguments, cx)
+                .map_err(|error| match &created {
+                    Some(worktree) if !error.contains("was created and is kept") => format!(
+                        "{error} The worktree {} on branch {} was created and is kept.",
+                        worktree.directory.as_str(),
+                        worktree.branch
+                    ),
+                    _ => error,
+                })
+                .map_err(HandlerError::from);
+            if let Some(orchestrator) = &mut self.orchestrator {
+                orchestrator.prepared = None;
+            }
+            reply
+        };
+        let _ = request.reply.send(reply);
+    }
+
+    /// A launch's arguments, checked before anything is created.
+    fn validate_launch(
+        &self,
+        arguments: Value,
+        ceiling: ApprovalMode,
+    ) -> Result<(Launch, Provider, Option<AccountId>, ApprovalMode), String> {
+        let launch: Launch = decode(arguments)?;
+        message(&launch.message)?;
+        let provider = match launch.provider.as_str() {
+            "claude" => Provider::Claude,
+            "codex" => Provider::Codex,
+            _ => return Err("Unknown provider".into()),
+        };
+        let account = launch_account(&self.store, provider, launch.account.as_deref())?;
+        let selected_mode = launch
+            .mode
+            .as_deref()
+            .map(mode)
+            .transpose()?
+            .unwrap_or(ceiling);
+        if !mode_allowed(selected_mode, ceiling) {
+            return Err("Target approval mode exceeds the caller's ceiling".into());
+        }
+        if launch
+            .model
+            .as_ref()
+            .is_some_and(|m| m.is_empty() || m.len() > 256)
+        {
+            return Err("model must contain 1 to 256 bytes".into());
+        }
+        Ok((launch, provider, account, selected_mode))
     }
 
     fn caller(&self, caller: Caller) -> Result<(WorkingDirectory, ApprovalMode), String> {
@@ -218,13 +432,23 @@ impl AppState {
         Ok((directory.clone(), session.approval_mode()))
     }
 
-    fn target(&self, id: u64, project: &WorkingDirectory) -> Result<ApprovalMode, String> {
+    /// The caller may reach a session in its own folder, and within one repository, the
+    /// sessions in that repository's root and its worktrees.
+    fn target(
+        &self,
+        id: u64,
+        caller: u64,
+        project: &WorkingDirectory,
+    ) -> Result<ApprovalMode, String> {
         let session = self.session(id).ok_or("Unknown target session")?;
-        match session.context() {
-            SessionContext::Recorded { directory, .. } if directory == project => {
-                Ok(session.approval_mode())
-            }
-            _ => Err("Target must belong to the caller's project".into()),
+        let SessionContext::Recorded { directory, .. } = session.context() else {
+            return Err("Target must belong to the caller's project".into());
+        };
+        let own = self.session(caller).and_then(|s| s.worktree());
+        if reachable(project, own, directory, session.worktree()) {
+            Ok(session.approval_mode())
+        } else {
+            Err("Target must belong to the caller's project".into())
         }
     }
 
@@ -249,7 +473,14 @@ impl AppState {
                 .as_str()
                 .filter(|key| !key.is_empty() && key.len() <= 128)
                 .ok_or("client_request_id must contain 1 to 128 bytes")?;
-            let records = &self.orchestrator.as_ref().unwrap().records;
+            let orchestrator = self.orchestrator.as_ref().unwrap();
+            if orchestrator
+                .preparing
+                .contains(&(caller.session, key.to_owned()))
+            {
+                return Err("busy: this launch is still being prepared".into());
+            }
+            let records = &orchestrator.records;
             if let Some(reply) = records.lookup(caller.session, key, &input)? {
                 return reply;
             }
@@ -323,39 +554,34 @@ impl AppState {
                 )
             }
             "session_launch" => {
-                let launch: Launch = decode(arguments)?;
-                message(&launch.message)?;
-                let provider = match launch.provider.as_str() {
-                    "claude" => Provider::Claude,
-                    "codex" => Provider::Codex,
-                    _ => return Err("Unknown provider".into()),
+                let (launch, provider, account, selected_mode) =
+                    self.validate_launch(arguments, ceiling)?;
+                let prepared = self.orchestrator.as_mut().unwrap().prepared.take();
+                let worktree = match prepared {
+                    Some(prepared) => prepared?,
+                    None => launch_worktree(
+                        project,
+                        self.session(caller.session)
+                            .and_then(|s| s.worktree().cloned()),
+                        launch.cwd.as_deref(),
+                        launch.worktree.as_deref(),
+                    )?,
                 };
-                let account = launch_account(&self.store, provider, launch.account.as_deref())?;
-                let selected_mode = launch
-                    .mode
-                    .as_deref()
-                    .map(mode)
-                    .transpose()?
-                    .unwrap_or(ceiling);
-                if !mode_allowed(selected_mode, ceiling) {
-                    return Err("Target approval mode exceeds the caller's ceiling".into());
+                let id = match &worktree {
+                    Some(worktree) => {
+                        self.create_worktree_unselected(provider, worktree, now_ms(), cx)
+                    }
+                    None => self.create_unselected(provider, project, now_ms(), cx),
                 }
-                if let Some(cwd) = launch.cwd
-                    && cwd != project.as_str()
-                {
-                    return Err("Launch directory must be the caller's project".into());
-                }
-                if launch
-                    .model
-                    .as_ref()
-                    .is_some_and(|m| m.is_empty() || m.len() > 256)
-                {
-                    return Err("model must contain 1 to 256 bytes".into());
-                }
-                let id = self
-                    .create_unselected(provider, project, now_ms(), cx)
-                    .map_err(|e| e.to_string())?
-                    .value;
+                .map_err(|e| match (&worktree, &launch.worktree) {
+                    (Some(worktree), Some(_)) => format!(
+                        "{e} The worktree {} on branch {} was created and is kept.",
+                        worktree.directory.as_str(),
+                        worktree.branch
+                    ),
+                    _ => e.to_string(),
+                })?
+                .value;
                 self.orchestrator
                     .as_mut()
                     .unwrap()
@@ -389,7 +615,7 @@ impl AppState {
             "session_send" => {
                 let send: SendMessage = decode(arguments)?;
                 message(&send.message)?;
-                let target_mode = self.target(send.session, project)?;
+                let target_mode = self.target(send.session, caller.session, project)?;
                 if !mode_allowed(target_mode, ceiling) {
                     return Err("Target approval mode exceeds the caller's ceiling".into());
                 }
@@ -406,7 +632,7 @@ impl AppState {
             }
             "session_read" => {
                 let read: Read = decode(arguments)?;
-                self.target(read.session, project)?;
+                self.target(read.session, caller.session, project)?;
                 let handed_off_from = self
                     .session(read.session)
                     .and_then(|session| session.handed_off_from())
@@ -500,7 +726,7 @@ impl AppState {
                 {
                     return Err("timeout must be nonnegative seconds".into());
                 }
-                self.target(wait.session, project)?;
+                self.target(wait.session, caller.session, project)?;
                 self.provider(wait.session).ok_or("Unknown target")?;
                 let running = self
                     .conversations
@@ -518,7 +744,7 @@ impl AppState {
             }
             "session_interrupt" => {
                 let interrupt: Interrupt = decode(arguments)?;
-                let target_mode = self.target(interrupt.session, project)?;
+                let target_mode = self.target(interrupt.session, caller.session, project)?;
                 if !mode_allowed(target_mode, ceiling) {
                     return Err("Target approval mode exceeds the caller's ceiling".into());
                 }

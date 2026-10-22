@@ -47,6 +47,8 @@ pub(crate) struct RowChange {
 }
 pub(crate) struct AppState {
     store: Store,
+    /// Worktree folders being removed, which nothing may start in meanwhile.
+    removing_worktrees: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub(crate) error: Option<String>,
     pub(crate) shutdown_error: Option<String>,
     /// One app-server per Codex account, keyed by account; `None` is the default.
@@ -845,6 +847,47 @@ impl AppState {
         result
     }
 
+    /// Creates a session that works in `worktree`, saving `show` with it as
+    /// [`AppState::create_showing`] does.
+    pub(crate) fn create_worktree_showing(
+        &mut self,
+        provider: Provider,
+        worktree: &keystone_core::WorktreeContext,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self
+            .store
+            .create_worktree_showing(provider, worktree, now, window, show);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Creates a session an agent starts in `worktree`, selected in no window.
+    pub(crate) fn create_worktree_unselected(
+        &mut self,
+        provider: Provider,
+        worktree: &keystone_core::WorktreeContext,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self
+            .store
+            .create_worktree_unselected(provider, worktree, now);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
     /// Creates a session an agent starts, selected in no window.
     pub(crate) fn create_unselected(
         &mut self,
@@ -1020,6 +1063,7 @@ impl AppState {
             None => logs,
         };
         Self {
+            removing_worktrees: Arc::default(),
             error: None,
             shutdown_error: None,
             codex: BTreeMap::new(),
@@ -2523,11 +2567,58 @@ impl AppState {
             })
     }
 
+    /// Marks `worktree` as being removed until the returned hold drops, so no session
+    /// starts work there meanwhile.
+    /// `None` while another removal holds it.
+    pub(crate) fn hold_worktree(
+        &self,
+        worktree: &keystone_core::WorktreeContext,
+    ) -> Option<WorktreeHold> {
+        let key = worktree.directory.as_str().to_owned();
+        if !self.removing_worktrees.lock().unwrap().insert(key.clone()) {
+            return None;
+        }
+        Some(WorktreeHold {
+            removing: self.removing_worktrees.clone(),
+            key,
+        })
+    }
+
     pub(crate) fn dispatch_directory(
         &mut self,
         session: u64,
         cx: &mut Context<Self>,
     ) -> Option<WorkingDirectory> {
+        if let Some(ConversationFolder::Recorded(directory)) = self.conversation_folder(session)
+            && self
+                .removing_worktrees
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|removing| directory.path().starts_with(removing))
+        {
+            self.folder_error(
+                session,
+                "Not sent. This folder's worktree is being removed. Your draft is kept.".into(),
+                cx,
+            );
+            return None;
+        }
+        if let Some(worktree) = self.session(session).and_then(|s| s.worktree()) {
+            let error = if !keystone_core::worktree::is_intact(worktree) {
+                Some(format!(
+                    "Not sent. This session's worktree folder is missing or is no longer its worktree: {}. Its branch {} may still exist. Your draft is kept.",
+                    worktree.directory.as_str(),
+                    worktree.branch
+                ))
+            } else {
+                None
+            };
+            if let Some(error) = error {
+                self.folder_error(session, error, cx);
+                return None;
+            }
+        }
         let result = match self.conversation_folder(session)? {
             ConversationFolder::Recorded(directory) => match std::fs::metadata(directory.path()) {
                 Ok(metadata)
@@ -2594,4 +2685,16 @@ fn usage_key(provider: Provider, account: Option<&AccountId>) -> String {
         "{provider}/{}",
         account.map_or(AccountId::DEFAULT, AccountId::as_str)
     )
+}
+
+/// See [`AppState::hold_worktree`].
+pub(crate) struct WorktreeHold {
+    removing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for WorktreeHold {
+    fn drop(&mut self) {
+        self.removing.lock().unwrap().remove(&self.key);
+    }
 }

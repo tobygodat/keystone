@@ -8,6 +8,7 @@ use crate::projects::{OpenProject, SwitchProject};
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
 use crate::windows::{self, CloseWindow, Destination, MoveTabToWindow, NewWindow, OpenInNewWindow};
+use crate::worktrees::{NewWorktreeSession, RemoveWorktree};
 use crate::{
     ContinueRecovery, FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, OpenSettings,
     Quit, RenameSession, RetryRecovery, ToggleSettle, ToggleSidebar,
@@ -202,6 +203,20 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-o"],
         context: Some(APP),
         action: || Box::new(OpenProject),
+    },
+    Command {
+        id: "new-worktree-session",
+        label: "New session in worktree…",
+        keys: &["ctrl-alt-g"],
+        context: Some(APP),
+        action: || Box::new(NewWorktreeSession),
+    },
+    Command {
+        id: "remove-worktree",
+        label: "Remove worktree…",
+        keys: &["ctrl-alt-shift-g"],
+        context: Some(APP),
+        action: || Box::new(RemoveWorktree),
     },
     Command {
         id: "new-window",

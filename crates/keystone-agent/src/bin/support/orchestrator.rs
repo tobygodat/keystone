@@ -171,6 +171,32 @@ fn read_chunk(
 }
 
 pub fn reply(text: &str, server: Option<&Server>, request: &str) -> Option<String> {
+    let target = match (
+        text.strip_prefix("orchestrator test: launch in "),
+        text.strip_prefix("orchestrator test: launch in new worktree "),
+    ) {
+        (_, Some(name)) => Some(json!({"worktree": name})),
+        (Some(cwd), None) => Some(json!({"cwd": cwd})),
+        (None, None) => None,
+    };
+    if let Some(mut launch) = target {
+        launch["provider"] = json!("claude");
+        launch["mode"] = json!("read-only");
+        launch["message"] = json!("Scripted worktree child");
+        launch["client_request_id"] = json!(format!("scripted-worktree-{request}"));
+        let result = server
+            .ok_or("missing loopback MCP configuration")
+            .and_then(|server| server.call("session_launch", launch));
+        return Some(match result {
+            Ok(child) => format!(
+                "Scripted orchestrator success: launched session {} (test data, no model call).",
+                child["session"]
+            ),
+            Err(error) => {
+                format!("Scripted orchestrator failure: {error} (test data, no model call).")
+            }
+        });
+    }
     let provider = match text {
         "orchestrator test: launch codex" => "codex",
         "orchestrator test: launch claude" => "claude",

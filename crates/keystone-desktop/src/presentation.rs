@@ -362,6 +362,13 @@ impl Keystone {
         self.settings = None;
         self.approval_menu = false;
         self.confirm_full_access = None;
+        if !self
+            .worktree_dialog
+            .as_ref()
+            .is_some_and(crate::worktrees::WorktreeDialog::busy)
+        {
+            self.worktree_dialog = None;
+        }
         self.window_drag = false;
         self.sync_draft(cx);
         self.refresh(cx);

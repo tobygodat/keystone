@@ -26,6 +26,7 @@ mod usage;
 mod view_state;
 mod widget;
 mod windows;
+mod worktrees;
 use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
@@ -398,6 +399,8 @@ struct Keystone {
     confirm_full_access: Option<FullAccessConfirmation>,
     renaming: Option<Renaming>,
     rename_input: Entity<TextInput>,
+    worktree_dialog: Option<worktrees::WorktreeDialog>,
+    worktree_input: Entity<TextInput>,
     /// Set by a press on the top bar. The first move then hands the window to the
     /// compositor, so a plain click never starts a move.
     window_drag: bool,
@@ -612,6 +615,8 @@ impl Keystone {
         });
         let search = cx.new(|cx| TextInput::new("Search", InputMode::SingleLine, cx));
         let rename_input = cx.new(|cx| TextInput::new("Session title", InputMode::SingleLine, cx));
+        let worktree_input =
+            cx.new(|cx| TextInput::new("Worktree name", InputMode::SingleLine, cx));
         let mut subscriptions = vec![
             cx.subscribe(&composer, |this, _, _: &Changed, cx| {
                 if let Some(session) = this.selected(cx) {
@@ -764,6 +769,8 @@ impl Keystone {
             confirm_full_access: None,
             renaming: None,
             rename_input,
+            worktree_dialog: None,
+            worktree_input,
             window_drag: false,
             settled_open: false,
             fixture,
@@ -1190,7 +1197,11 @@ impl Keystone {
     }
 
     /// The main column's bar: the sidebar toggle, the breadcrumb, and the window controls.
-    fn top_bar(&self, session: Option<(String, bool)>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn top_bar(
+        &self,
+        session: Option<(String, bool, Option<(String, bool)>)>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let hover = cx.theme().colors.element_hover;
         let bar = h_flex()
             .flex_shrink_0()
@@ -1229,7 +1240,7 @@ impl Keystone {
                         .color(Color::Strong),
                 )
             })
-            .when_some(session, |d, (title, settled)| {
+            .when_some(session, |d, (title, settled, branch)| {
                 d.child(Label::new("/").color(Color::Faint))
                     .child(
                         div()
@@ -1259,6 +1270,9 @@ impl Keystone {
                     .when(settled, |d| {
                         d.child(Label::new("Settled").color(Color::Muted))
                     })
+                    .children(
+                        branch.map(|(branch, missing)| worktrees::branch_chip(branch, missing)),
+                    )
                     .child(self.own_press(handoff::button(), cx))
             })
             .child(div().flex_1())
@@ -1576,6 +1590,17 @@ impl Keystone {
                     this.start(Provider::Codex, window, cx)
                 })),
         )
+        .child(
+            MenuItem::new("new-worktree", "New session in worktree…")
+                .icon(IconName::Branch)
+                .kbd("Ctrl+Alt+G")
+                .debug_selector(|| "new-worktree".into())
+                .on_click(
+                    self.scoped_listener(cx, |this, _, window, cx| {
+                        this.open_new_worktree(window, cx)
+                    }),
+                ),
+        )
     }
 
     /// The welcome screen renders no composer, so focusing it there would strand the
@@ -1616,6 +1641,7 @@ impl Keystone {
                     .gap_2()
                     .child(self.welcome_pill(Provider::Claude, cx))
                     .child(self.welcome_pill(Provider::Codex, cx))
+                    .child(self.worktree_pill(cx))
                     .child(div().flex_1())
                     .child(
                         Label::new("Ctrl N · Ctrl Shift N")
@@ -2809,6 +2835,8 @@ struct SessionRow {
     account: Option<String>,
     settled: bool,
     selected: bool,
+    /// The session's worktree branch, and whether its folder is gone.
+    branch: Option<(String, bool)>,
     attention: Option<Attention>,
     /// How long ago the session last changed, or `None` for sessions saved before times.
     time: Option<String>,
@@ -2919,6 +2947,7 @@ impl SessionSidebar {
             account,
             settled,
             selected,
+            branch,
             attention,
             time,
         } = row;
@@ -2931,10 +2960,33 @@ impl SessionSidebar {
             title
         };
         let show_settle = selected || hovered;
+        let branch = branch.map(|(branch, missing)| {
+            div()
+                .flex_none()
+                .max_w(px(120.))
+                .automation_id(format!("session-branch-{id}"))
+                .child(
+                    Label::new(if missing {
+                        "Worktree missing".to_owned()
+                    } else {
+                        branch
+                    })
+                    .size(TextSize::Sm)
+                    .color(if missing {
+                        Color::Warning
+                    } else {
+                        Color::Muted
+                    })
+                    .truncate(),
+                )
+        });
         let detail = match attention.filter(|_| !settled) {
             Some(attention) => {
                 let (reason, color) = attention_reason(attention);
-                h_flex().child(Label::new(reason).size(TextSize::Sm).color(color))
+                h_flex()
+                    .gap(px(6.))
+                    .child(Label::new(reason).size(TextSize::Sm).color(color))
+                    .children(branch)
             }
             None => h_flex()
                 .gap(px(6.))
@@ -2955,6 +3007,7 @@ impl SessionSidebar {
                                 .truncate(),
                         )
                 }))
+                .children(branch)
                 .child(
                     Label::new(excerpt)
                         .size(TextSize::Sm)
@@ -3149,10 +3202,11 @@ impl SessionSidebar {
             .filter(|(s, account)| {
                 provider_filter.is_none_or(|p| s.provider() == p)
                     && format!(
-                        "{} {} {}",
+                        "{} {} {} {}",
                         s.title(),
                         s.provider(),
-                        account.as_deref().unwrap_or_default()
+                        account.as_deref().unwrap_or_default(),
+                        s.worktree().map_or("", |w| w.branch.as_str())
                     )
                     .to_lowercase()
                     .contains(&query)
@@ -3167,6 +3221,7 @@ impl SessionSidebar {
                 account,
                 settled: session.settled(),
                 selected: Some(session.id()) == this.selected(cx),
+                branch: worktrees::branch(session),
                 attention: session.attention(
                     live.is_some_and(|c| !c.approvals.is_empty()),
                     live.is_some_and(Conversation::awaiting_widget),
@@ -3266,7 +3321,7 @@ impl Render for Keystone {
             .sessions()
             .iter()
             .find(|s| Some(s.id()) == self.selected(cx));
-        let session = current.map(|s| (s.title().to_owned(), s.settled()));
+        let session = current.map(|s| (s.title().to_owned(), s.settled(), worktrees::branch(s)));
         let selected = current.map(|s| s.id());
         if let Some(id) = selected {
             self.state.update(cx, |state, _| {
@@ -3346,6 +3401,7 @@ impl Render for Keystone {
                     }
                     if event.keystroke.key != "escape"
                         || this.renaming.is_some()
+                        || this.worktree_dialog.is_some()
                         || this.confirm_full_access.is_some()
                         || this.settings.is_some()
                     {
@@ -3383,6 +3439,22 @@ impl Render for Keystone {
                     this.toggle_files(window, cx)
                 }),
             )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &worktrees::NewWorktreeSession, window, cx| {
+                    this.open_new_worktree(window, cx)
+                },
+            ))
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &worktrees::RemoveWorktree, window, cx| match this.selected(cx) {
+                    Some(session) => this.open_remove_worktree(session, window, cx),
+                    None => {
+                        this.error = Some("No session is open here.".into());
+                        this.refresh(cx);
+                    }
+                },
+            ))
             .on_action(self.scoped_listener(
                 cx,
                 |this, _: &customization::OpenCustomize, window, cx| {
@@ -3603,6 +3675,7 @@ impl Render for Keystone {
             .children(self.borrow_dialog(cx))
             .children(self.full_access_dialog(cx))
             .children(self.rename_dialog(cx))
+            .children(self.worktree_dialog_view(cx))
             .children(self.palette_overlay(cx))
             .children(self.projects_overlay(cx))
             .children(self.context_menu_overlay(cx));

@@ -21,6 +21,7 @@ mod session_context;
 mod tabs;
 mod usage;
 mod windows;
+pub mod worktree;
 
 pub use account::{Account, AccountId, expand_home, homes_overlap, lexical};
 pub use composition::{
@@ -34,7 +35,7 @@ pub use layout::{
 pub use project::{Project, ProjectId};
 use project::{ProjectLayouts, ProjectMap};
 use session_context::SavedSessionContext;
-pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory};
+pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory, WorktreeContext};
 use tabs::SavedTabs;
 pub use tabs::SessionTabs;
 pub use usage::{AccountUsage, LimitWindow, Reading};
@@ -293,6 +294,10 @@ impl Session {
 
     pub fn context(&self) -> SessionContext<'_> {
         self.execution_context.context()
+    }
+
+    pub fn worktree(&self) -> Option<&WorktreeContext> {
+        self.execution_context.worktree()
     }
 
     pub fn settled(&self) -> bool {
@@ -697,6 +702,45 @@ impl Store {
         )
     }
 
+    pub fn create_worktree_showing(
+        &mut self,
+        provider: Provider,
+        context: &WorktreeContext,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
+        self.add_worktree_session(provider, context, now, Some(window), show)
+    }
+
+    pub fn create_worktree_unselected(
+        &mut self,
+        provider: Provider,
+        context: &WorktreeContext,
+        now: u64,
+    ) -> StoreResult<Applied<u64>> {
+        self.add_worktree_session(provider, context, now, None, None)
+    }
+
+    fn add_worktree_session(
+        &mut self,
+        provider: Provider,
+        context: &WorktreeContext,
+        now: u64,
+        window: Option<WindowId>,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
+        self.add_session(
+            |id| {
+                let mut session = Session::new(id, provider, &context.directory, now);
+                session.execution_context = SavedSessionContext::with_worktree(context);
+                session
+            },
+            window,
+            show,
+        )
+    }
+
     /// Creates a session that continues `source` on `provider`'s default account and
     /// selects it in `window`, in one save: the same folder, `source`'s title (or, for
     /// a placeholder, one naming `source`), a link back to it, and `draft` in its
@@ -722,6 +766,7 @@ impl Store {
             return Err(invalid("choose this session's folder before handing it off").into());
         };
         let directory = directory.clone();
+        let worktree = from.worktree().cloned();
         // A placeholder would give way to the handoff text's first words on Send.
         let title = match from.title_source {
             TitleSource::Placeholder => format!("Continued from session {source}"),
@@ -730,6 +775,9 @@ impl Store {
         self.add_session(
             |id| {
                 let mut session = Session::new(id, provider, &directory, now);
+                if let Some(worktree) = &worktree {
+                    session.execution_context = SavedSessionContext::with_worktree(worktree);
+                }
                 session.title = title;
                 session.title_source = TitleSource::FirstMessage;
                 session.draft = draft;

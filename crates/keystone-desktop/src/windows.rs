@@ -7,8 +7,8 @@ use crate::session_tabs::{bring_forward, conversations, replacement};
 use crate::{AppState, Keystone, durability_warning, open_windows, register_window};
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Point, Styled, Window, WindowBounds, WindowOptions, anchored, deferred, point, px,
-    size,
+    Pixels, Point, Styled, Window, WindowBounds, WindowOptions, anchored, deferred, point,
+    prelude::FluentBuilder, px, size,
 };
 use keystone_core::{
     Axis, Component, Composition, Edit, Place, Placement, Size, ViewId, WindowId, WindowView,
@@ -460,6 +460,20 @@ impl Keystone {
                     .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                         this.open_new_window(Some(session), window, cx)
                     })),
+            )
+            .when(
+                self.session(session, cx)
+                    .is_some_and(|s| s.worktree().is_some()),
+                |card| {
+                    card.child(
+                        MenuItem::new("remove-worktree", "Remove worktree…")
+                            .icon(IconName::Branch)
+                            .debug_selector(|| "menu-remove-worktree".into())
+                            .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                                this.open_remove_worktree(session, window, cx)
+                            })),
+                    )
+                },
             );
         Some(
             deferred(

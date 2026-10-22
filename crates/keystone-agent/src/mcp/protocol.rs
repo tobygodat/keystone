@@ -273,13 +273,14 @@ pub(super) fn tools() -> Vec<Value> {
         ),
         tool(
             "session_launch",
-            "Accept a new session in the caller's project; later startup failure is visible through read/wait. Startup survives the parent's turn ending, but rechecks its live generation and current approval ceiling. Account defaults to default; cwd must equal capabilities.project when supplied. Omitted mode inherits caller. Provider-settings callers are uncapped; Provider-settings targets inherit native config.",
+            "Accept a new session in the caller's project; later startup failure is visible through read/wait. Startup survives the parent's turn ending, but rechecks its live generation and current approval ceiling. Account defaults to default; cwd must equal capabilities.project or name a git worktree of the caller's repository. worktree creates a new worktree and branch keystone/<worktree> from the caller's HEAD, only when the caller itself works in a worktree; give cwd or worktree, not both. Omitted mode inherits caller. Provider-settings callers are uncapped; Provider-settings targets inherit native config.",
             json!({
                 "provider":{"type":"string","enum":["claude","codex"]},
                 "account":{"type":"string","minLength":1},
                 "model":{"type":"string","minLength":1},
                 "mode":{"type":"string","enum":["provider","read-only","ask","auto","full-access"]},
                 "cwd":{"type":"string","minLength":1},
+                "worktree":{"type":"string","minLength":1,"maxLength":64},
                 "message":message,
                 "client_request_id":request_id
             }),

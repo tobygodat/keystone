@@ -545,3 +545,205 @@ fn a_launch_account_is_default_or_one_of_that_providers_added_accounts() {
         assert!(refused.contains("Unknown"), "{named}: {refused}");
     }
 }
+
+fn git_fixture(directory: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(directory)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+}
+
+/// A repository with one commit, as the worktree journey starts from.
+fn fixture_repository() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    git_fixture(directory.path(), &["init", "--initial-branch=main"]);
+    let config = directory.path().join(".git/config");
+    let mut settings = std::fs::read_to_string(&config).unwrap();
+    settings.push_str("\n[user]\n\tname = Worktree test\n\temail = worktree@example.invalid\n");
+    std::fs::write(config, settings).unwrap();
+    std::fs::write(directory.path().join("tracked"), "base\n").unwrap();
+    git_fixture(directory.path(), &["add", "tracked"]);
+    git_fixture(directory.path(), &["commit", "-m", "base"]);
+    directory
+}
+
+fn orchestrate_turn(
+    state: &Entity<AppState>,
+    text: String,
+    cx: &mut gpui::TestAppContext,
+) -> String {
+    let before = state.read_with(cx, |state, _| transcript(state, 1).len());
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(ComposerDraft { session: 1, text }, cx))
+    });
+    wait_until(state, cx, |state| {
+        state.conversations.get(&1).is_some_and(|c| !c.running)
+            && transcript(state, 1)[before..].contains("Scripted orchestrator")
+    });
+    state.read_with(cx, |state, _| transcript(state, 1)[before..].to_owned())
+}
+
+#[gpui::test]
+fn an_agent_launches_into_its_repositorys_worktree_and_nowhere_else(cx: &mut gpui::TestAppContext) {
+    let repository = fixture_repository();
+    let worktree = keystone_core::worktree::create(repository.path(), "child", None).unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    let state = setup(repository.path(), Provider::Claude, cx);
+    let launched = orchestrate_turn(
+        &state,
+        format!(
+            "orchestrator test: launch in {}",
+            worktree.directory.as_str()
+        ),
+        cx,
+    );
+    assert!(
+        launched.contains("Scripted orchestrator success: launched session 2"),
+        "{launched}"
+    );
+    state.read_with(cx, |state, _| {
+        let child = state.session(2).unwrap();
+        assert_eq!(child.worktree(), Some(&worktree));
+        let SessionContext::Recorded { directory, .. } = child.context() else {
+            panic!("the child records its folder");
+        };
+        assert_eq!(directory, &worktree.directory);
+    });
+    let refused = orchestrate_turn(
+        &state,
+        format!(
+            "orchestrator test: launch in {}",
+            unrelated.path().canonicalize().unwrap().display()
+        ),
+        cx,
+    );
+    assert!(
+        refused.contains("Scripted orchestrator failure: tool failed"),
+        "{refused}"
+    );
+    let refused = orchestrate_turn(
+        &state,
+        "orchestrator test: launch in new worktree extra".into(),
+        cx,
+    );
+    assert!(
+        refused.contains("Scripted orchestrator failure: tool failed"),
+        "{refused}"
+    );
+    assert!(!repository.path().join(".keystone/worktrees/extra").exists());
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.store.workspace().sessions().len(), 2);
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
+#[gpui::test]
+fn an_agent_in_a_worktree_may_create_another(cx: &mut gpui::TestAppContext) {
+    let repository = fixture_repository();
+    let own = keystone_core::worktree::create(repository.path(), "parent", None).unwrap();
+    let mut store = Store::open(repository.path().join("workspace.json")).unwrap();
+    store
+        .create_worktree_unselected(Provider::Claude, &own, 1)
+        .unwrap();
+    store.set_approval_mode(1, ApprovalMode::Ask).unwrap();
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| {
+        let mut state = AppState::new(store, cx);
+        state.claude.insert(
+            None,
+            ClaudeConnection::new(Some(scripted(Provider::Claude)), state.wake.clone()),
+        );
+        state
+    });
+    let launched = orchestrate_turn(
+        &state,
+        "orchestrator test: launch in new worktree sibling".into(),
+        cx,
+    );
+    assert!(
+        launched.contains("Scripted orchestrator success: launched session 2"),
+        "{launched}"
+    );
+    state.read_with(cx, |state, _| {
+        let child = state.session(2).unwrap().worktree().unwrap();
+        assert_eq!(child.branch, "keystone/sibling");
+        assert_eq!(child.repository, own.repository);
+        assert_eq!(
+            child.directory.path(),
+            own.repository.path().join(".keystone/worktrees/sibling")
+        );
+    });
+    let caller = state.read_with(cx, |state, _| {
+        state.orchestrator.as_ref().unwrap().last_caller.unwrap()
+    });
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text: "long".into()
+            },
+            cx
+        ))
+    });
+    wait_until(&state, cx, |state| {
+        state.started(1).is_some_and(|c| c.is_running(1))
+    });
+    state.update(cx, |state, cx| {
+        let orchestrator = state.orchestrator.as_mut().unwrap();
+        orchestrator.preparing.insert((1, "held".into()));
+        let busy = state.orchestrate(
+            caller,
+            "session_launch",
+            json!({"provider":"claude","message":"never sent","client_request_id":"held"}),
+            cx,
+        );
+        assert!(busy.unwrap_err().contains("still being prepared"));
+        assert_eq!(state.store.workspace().sessions().len(), 2);
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
+#[test]
+fn only_one_repositorys_root_and_worktrees_reach_each_other() {
+    let root = tempfile::tempdir().unwrap();
+    let folder = |path: &str| {
+        let path = root.path().join(path);
+        std::fs::create_dir_all(&path).unwrap();
+        WorkingDirectory::new(&path).unwrap()
+    };
+    let repo = folder("repo");
+    let nested = folder("repo/vendor/foreign");
+    let subfolder = folder("repo/crates/x");
+    let in_worktree = |name: &str| WorktreeContext {
+        directory: folder(&format!("repo/.keystone/worktrees/{name}")),
+        repository: repo.clone(),
+        branch: format!("keystone/{name}"),
+    };
+    let (a, b) = (in_worktree("a"), in_worktree("b"));
+    assert!(
+        reachable(&repo, None, &a.directory, Some(&a)),
+        "root reaches a worktree"
+    );
+    assert!(
+        reachable(&a.directory, Some(&a), &b.directory, Some(&b)),
+        "worktree reaches a sibling"
+    );
+    assert!(
+        reachable(&a.directory, Some(&a), &repo, None),
+        "worktree reaches the root"
+    );
+    assert!(
+        reachable(&a.directory, Some(&a), &a.directory, Some(&a)),
+        "its own folder"
+    );
+    assert!(
+        !reachable(&nested, None, &a.directory, Some(&a)),
+        "a nested foreign repository does not reach the enclosing repository's worktrees"
+    );
+    assert!(!reachable(&subfolder, None, &a.directory, Some(&a)));
+    assert!(!reachable(&a.directory, Some(&a), &nested, None));
+}
