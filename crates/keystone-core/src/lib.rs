@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
@@ -550,6 +550,10 @@ pub struct Workspace {
     /// the workspace payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     prompts: Vec<Prompt>,
+    /// Unfinished commit messages, by the folder whose changes they describe. Saved
+    /// in their own projection, never in the workspace payload.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    commit_drafts: BTreeMap<String, String>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -587,6 +591,11 @@ impl Workspace {
             std::cmp::Reverse((project.last_opened(), *position))
         });
         projects.into_iter().map(|(_, project)| project).collect()
+    }
+
+    /// The unfinished commit message for `folder`, empty when there is none.
+    pub fn commit_draft(&self, folder: &str) -> &str {
+        self.commit_drafts.get(folder).map_or("", String::as_str)
     }
 
     /// The projects the user took off the list.
@@ -1375,6 +1384,20 @@ impl Store {
         self.update_session(id, |session| session.draft_attachments = attachments)
     }
 
+    /// Keeps `text` as `folder`'s unfinished commit message, or forgets it when empty.
+    pub fn set_commit_draft(&mut self, folder: &str, text: String) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        if text.is_empty() {
+            next.commit_drafts.remove(folder);
+        } else {
+            next.commit_drafts.insert(folder.to_owned(), text);
+        }
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
+    }
+
     fn update_preferences(
         &mut self,
         change: impl FnOnce(&mut Preferences),
@@ -2006,6 +2029,62 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(title(&reopened, 1), "Release notes");
         assert_eq!(title(&reopened, 2), "Notes, take two");
+    }
+
+    #[test]
+    fn commit_drafts_are_kept_per_folder_through_restarts_until_cleared() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .set_commit_draft("/repo", "Fix the build\n\nDetails".into())
+            .unwrap();
+        store
+            .set_commit_draft("/repo/.keystone/worktrees/a", "Worktree work".into())
+            .unwrap();
+        let writes = store.writes();
+        store
+            .set_commit_draft("/repo", "Fix the build\n\nDetails".into())
+            .unwrap();
+        store.set_commit_draft("/elsewhere", String::new()).unwrap();
+        assert_eq!(store.writes(), writes, "an unchanged draft writes nothing");
+
+        let before = store.database().events_after(0, 1000).unwrap().len();
+        store
+            .set_commit_draft("/repo", "Fix the build\n\nMore details".into())
+            .unwrap();
+        let events = store.database().events_after(0, 1000).unwrap();
+        let added: Vec<_> = events[before..]
+            .iter()
+            .map(|event| (event.kind.as_str(), event.payload.as_str()))
+            .collect();
+        assert_eq!(
+            added,
+            [("commit_draft.saved", r#""Fix the build\n\nMore details""#)],
+            "a draft is its own small event, never a copy of the workspace"
+        );
+        store
+            .set_commit_draft("/repo", "Fix the build\n\nDetails".into())
+            .unwrap();
+
+        let mut reopened = Store::open(&path).unwrap();
+        let workspace = reopened.workspace();
+        assert_eq!(workspace.commit_draft("/repo"), "Fix the build\n\nDetails");
+        assert_eq!(
+            workspace.commit_draft("/repo/.keystone/worktrees/a"),
+            "Worktree work"
+        );
+        assert_eq!(workspace.commit_draft("/elsewhere"), "");
+
+        reopened.set_commit_draft("/repo", String::new()).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.workspace().commit_draft("/repo"), "");
+        assert_eq!(
+            reopened
+                .workspace()
+                .commit_draft("/repo/.keystone/worktrees/a"),
+            "Worktree work"
+        );
     }
 
     #[test]

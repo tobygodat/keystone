@@ -152,6 +152,10 @@ def workspace_projection(connection):
                     f'SELECT payload FROM {table} ORDER BY position')]
                 if rows:
                     snapshot['workspace'][table] = rows
+        drafts = {key[len('commit_draft/'):]: value for key, value in connection.execute(
+            "SELECT key, value FROM metadata WHERE substr(key, 1, 13) = 'commit_draft/'")}
+        if drafts:
+            snapshot['workspace']['commit_drafts'] = drafts
         return snapshot
     finally:
         connection.rollback()

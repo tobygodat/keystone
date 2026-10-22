@@ -11,6 +11,8 @@ pub(crate) const SCHEMA_VERSION: u32 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
+/// The `metadata` keys that hold each folder's unfinished commit message.
+const COMMIT_DRAFT_PREFIX: &str = "commit_draft/";
 const SCHEMA: &str = "
 CREATE TABLE events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -449,6 +451,23 @@ impl Database {
                     .prompts
                     .push(serde_json::from_str(&row.map_err(sql_error)?)?);
             }
+            let mut statement = tx
+                .prepare("SELECT key, value FROM metadata WHERE substr(key, 1, length(?1)) = ?1")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([COMMIT_DRAFT_PREFIX], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sql_error)?;
+            for row in rows {
+                let (key, text) = row.map_err(sql_error)?;
+                if let Some(folder) = key.strip_prefix(COMMIT_DRAFT_PREFIX) {
+                    snapshot
+                        .workspace
+                        .commit_drafts
+                        .insert(folder.to_owned(), text);
+                }
+            }
             validate(&snapshot).map_err(|error| invalid(error.to_string()))?;
             Ok((snapshot, revision))
         })
@@ -759,6 +778,39 @@ fn write_projection(
         .map_err(sql_error)?;
         tx.execute("INSERT INTO prompts(id, position, payload) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET position=excluded.position, payload=excluded.payload", params![id, position as i64, payload]).map_err(sql_error)?;
     }
+    let drafts = &snapshot.workspace.commit_drafts;
+    let saved = previous.map(|workspace| &workspace.commit_drafts);
+    for folder in saved
+        .into_iter()
+        .flat_map(|saved| saved.keys())
+        .filter(|folder| !drafts.contains_key(*folder))
+    {
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('commit_draft.cleared', ?1, '\"\"')",
+            [folder],
+        )
+        .map_err(sql_error)?;
+        tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [format!("{COMMIT_DRAFT_PREFIX}{folder}")],
+        )
+        .map_err(sql_error)?;
+    }
+    for (folder, text) in drafts {
+        if saved.and_then(|saved| saved.get(folder)) == Some(text) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('commit_draft.saved', ?1, ?2)",
+            params![folder, serde_json::to_string(text)?],
+        )
+        .map_err(sql_error)?;
+        tx.execute(
+            "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![format!("{COMMIT_DRAFT_PREFIX}{folder}"), text],
+        )
+        .map_err(sql_error)?;
+    }
     let mut metadata = Snapshot {
         version: snapshot.version,
         next_id: snapshot.next_id,
@@ -769,6 +821,7 @@ fn write_projection(
     metadata.workspace.accounts.clear();
     metadata.workspace.projects.clear();
     metadata.workspace.prompts.clear();
+    metadata.workspace.commit_drafts.clear();
     let payload = serde_json::to_string(&metadata)?;
     let previous: Option<String> = tx
         .query_row(

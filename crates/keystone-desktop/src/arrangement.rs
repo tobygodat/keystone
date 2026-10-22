@@ -115,8 +115,15 @@ fn minimum(
                 }
             }
             Component::Files => [FILES_MIN, 160. + header],
+            // The message box and Commit button sit above the list.
+            Component::Changes => [FILES_MIN, 260. + header],
         },
-        Node::Tabs { .. } => [CONVERSATION_MIN, 154. + header],
+        Node::Tabs { views, .. } => {
+            let changes = views
+                .iter()
+                .any(|view| c.component(*view) == Some(Component::Changes));
+            [CONVERSATION_MIN, if changes { 260. } else { 154. } + header]
+        }
         Node::Split { axis, children } => {
             let values: Vec<_> = children
                 .iter()
@@ -184,12 +191,16 @@ fn displays(node: &Node, view: ViewId) -> bool {
     }
 }
 
+/// Files and Changes: one-of-a-kind surfaces that get a tab strip even alone.
+fn is_side_surface(component: Option<Component>) -> bool {
+    matches!(component, Some(Component::Files | Component::Changes))
+}
+
 /// Whether a strip drawn for `node` has `anchor` in front, so its "+" is on screen.
 fn strip_shows(node: &Node, c: &Composition, anchor: ViewId) -> bool {
     match node {
         Node::View { id } => {
-            *id == anchor
-                && (c.component(anchor) == Some(Component::Files) || Keystone::has_session_tabs(c))
+            *id == anchor && (is_side_surface(c.component(anchor)) || Keystone::has_session_tabs(c))
         }
         Node::Tabs { selected, views } => views[*selected] == anchor,
         Node::Split { children, .. } => children
@@ -204,6 +215,7 @@ impl Keystone {
     fn tab_label(&self, id: ViewId, c: &Composition, cx: &App) -> String {
         match c.component(id).unwrap() {
             Component::Files => label(Component::Files).to_owned(),
+            Component::Changes => self.changes.label(self.files_root(cx).ok().as_deref(), cx),
             Component::Conversation if !self.presentation.current.customization.is_open() => self
                 .view_session(id, cx)
                 .and_then(|session| self.state.read(cx).session(session))
@@ -324,6 +336,7 @@ impl Keystone {
         let session = view.and_then(|view| self.view_session(view, cx));
         match (component, view, session) {
             (Some(Component::Files), _, _) => self.focus_files(window, cx),
+            (Some(Component::Changes), _, _) => self.focus_changes(window, cx),
             (Some(Component::Conversation), Some(view), Some(session)) => self
                 .presentation
                 .current
@@ -373,6 +386,7 @@ impl Keystone {
                 .files_root(cx)
                 .ok()
                 .map(|root| self.files.browser(&root, cx).focus_handle(cx)),
+            Some(Component::Changes) => self.changes_panel(cx).map(|panel| panel.focus_handle(cx)),
             Some(Component::Conversation) => self.view_session(view, cx).map(|session| {
                 self.presentation
                     .current
@@ -673,7 +687,7 @@ impl Keystone {
     ) -> AnyElement {
         match node {
             Node::View { id }
-                if c.component(*id) == Some(Component::Files)
+                if is_side_surface(c.component(*id))
                     || (c.component(*id) == Some(Component::Conversation)
                         && Self::has_session_tabs(c)
                         && !self.presentation.current.customization.is_open()) =>
@@ -859,9 +873,12 @@ impl Keystone {
             (views.to_vec(), views.to_vec(), views.to_vec(), views[0]);
         let colors = cx.theme().colors;
         let editing = self.presentation.current.customization.is_open();
-        let lone_files = views.len() == 1 && c.component(views[0]) == Some(Component::Files);
-        let bar_id = SharedString::from(if lone_files {
-            "files".to_owned()
+        let lone = (views.len() == 1)
+            .then(|| c.component(views[0]))
+            .flatten()
+            .filter(|component| is_side_surface(Some(*component)));
+        let bar_id = SharedString::from(if let Some(component) = lone {
+            label(component).to_lowercase()
         } else {
             format!("surface-tabs-{}", views[0].0)
         });
@@ -1016,6 +1033,7 @@ impl Keystone {
         .child(MenuHeader::new("Open a surface"));
         for (component, icon, id) in [
             (Component::Files, IconName::Folder, "surface-add-files"),
+            (Component::Changes, IconName::Branch, "surface-add-changes"),
             (
                 Component::Conversation,
                 IconName::Chat,
@@ -1038,8 +1056,10 @@ impl Keystone {
                             window,
                             cx,
                         );
-                        if component == Component::Files {
-                            this.focus_files(window, cx);
+                        match component {
+                            Component::Files => this.focus_files(window, cx),
+                            Component::Changes => this.focus_changes(window, cx),
+                            _ => {}
                         }
                     })),
             );
@@ -1223,6 +1243,9 @@ impl Keystone {
             }
             Component::Files => {
                 pane = pane.child(self.file_list(cx));
+            }
+            Component::Changes => {
+                pane = pane.child(self.changes_list(cx));
             }
             Component::Conversation => {
                 self.presentation.current.arrangement.visible.push(id);

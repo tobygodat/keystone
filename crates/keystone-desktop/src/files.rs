@@ -229,6 +229,13 @@ impl fmt::Display for EditorCommand {
     }
 }
 
+/// Opens `path` in the user's editor, as a Files row does.
+pub(crate) fn open_in_editor(path: &Path) -> Result<(), String> {
+    editor_command(|name| std::env::var(name).ok())
+        .spawn(path)
+        .map_err(|notice| notice.to_string())
+}
+
 /// A lazily read tree of one folder. Node 0 is the folder itself, and `paths` holds
 /// each node's absolute path by node id.
 pub(crate) struct FileBrowser {
@@ -503,6 +510,26 @@ impl Keystone {
             self.reveal_view(files, window, cx);
             return self.focus_files(window, cx);
         }
+        let at = Place::Beside {
+            target: self.side_surface_target(cx),
+            axis: Axis::Row,
+            after: true,
+        };
+        self.open_surface(Component::Files, at, FILES_WIDTH, window, cx);
+        if let Some((files, _)) = self
+            .shown_composition(cx)
+            .views()
+            .find(|(_, c)| *c == Component::Files)
+        {
+            self.reveal_view(files, window, cx);
+            self.focus_files(window, cx);
+        }
+    }
+
+    /// The conversation a side surface such as Files opens beside: the one the user
+    /// last worked in, else the first visible or declared one.
+    pub(crate) fn side_surface_target(&self, cx: &App) -> keystone_core::ViewId {
+        let shown = self.shown_composition(cx);
         let visible: Vec<_> = self
             .presentation
             .current
@@ -512,8 +539,7 @@ impl Keystone {
             .copied()
             .filter(|view| shown.component(*view) == Some(Component::Conversation))
             .collect();
-        let target = self
-            .selected(cx)
+        self.selected(cx)
             .and_then(|session| {
                 self.presentation
                     .current
@@ -528,21 +554,7 @@ impl Keystone {
                     .find(|(_, c)| *c == Component::Conversation)
                     .map(|(id, _)| id)
             })
-            .expect("a composition has a conversation");
-        let at = Place::Beside {
-            target,
-            axis: Axis::Row,
-            after: true,
-        };
-        self.open_surface(Component::Files, at, FILES_WIDTH, window, cx);
-        if let Some((files, _)) = self
-            .shown_composition(cx)
-            .views()
-            .find(|(_, c)| *c == Component::Files)
-        {
-            self.reveal_view(files, window, cx);
-            self.focus_files(window, cx);
-        }
+            .expect("a composition has a conversation")
     }
 
     pub(crate) fn file_list(&self, cx: &mut Context<Self>) -> AnyElement {

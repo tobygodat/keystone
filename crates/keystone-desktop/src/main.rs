@@ -3,6 +3,7 @@ use app_state::{AppState, RuntimeChanged};
 mod arrangement;
 mod arrangement_editor;
 mod attachments;
+mod changes;
 mod commands;
 mod conversation;
 mod customization;
@@ -271,7 +272,13 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
     let placement = placement(window);
     let saved = view.update(cx, |view, cx| {
         view.draft_save_task = None;
-        if !view.save_draft(cx) {
+        let composer = view.save_draft(cx);
+        if let Err(error) = view.changes.save_drafts(cx) {
+            return Err(Some(format!(
+                "Window not closed. Its commit message is not saved. {error}"
+            )));
+        }
+        if !composer {
             return Err(None);
         }
         let project = view.presentation.project.clone().ok();
@@ -336,6 +343,7 @@ fn request_quit(cx: &mut App) {
         let windows = open_windows(cx);
         let mut drafts = Vec::new();
         let mut saved = Vec::new();
+        let mut unsaved = None;
         for view in &windows {
             let handle = view.read(cx).handle;
             let id = view.read(cx).window_id;
@@ -343,6 +351,9 @@ fn request_quit(cx: &mut App) {
                 view.draft_save_task = None;
                 view.composer_draft(cx)
             });
+            if let Err(error) = view.update(cx, |view, cx| view.changes.save_drafts(cx)) {
+                unsaved.get_or_insert(error);
+            }
             drafts.extend(draft.filter(|d| {
                 drafts
                     .iter()
@@ -360,6 +371,12 @@ fn request_quit(cx: &mut App) {
             if windows.is_empty() {
                 windows::reopen(state, cx);
             }
+            return;
+        }
+        if let Some(error) = unsaved {
+            state.update(cx, |state, cx| {
+                state.quit_failed(format!("A commit message is not saved. {error}"), cx)
+            });
             return;
         }
         state.update(cx, |state, cx| state.teardown(cx));
@@ -432,6 +449,7 @@ struct Keystone {
     projects: Option<projects::ProjectList>,
     prompt_list: Option<prompts::PromptList>,
     files: files::Files,
+    changes: changes::Changes,
     slash: slash_menu::SlashMenu,
     mentions: mentions::Mentions,
     attach: attachments::Attach,
@@ -466,6 +484,10 @@ impl Keystone {
                     }
                 }
             }
+        }
+        self.agent_changed_files(&changed.files, cx);
+        for (folder, text) in &changed.commit_drafts {
+            self.changes.sync_draft(folder, text, cx);
         }
         self.reveal(cx);
         if changed.sidebar {
@@ -649,6 +671,7 @@ impl Keystone {
                 if window.is_window_active() {
                     let id = this.window_id;
                     this.state.update(cx, |state, _| state.notifier.used(id));
+                    this.refresh_changes(cx);
                 }
                 cx.notify()
             }),
@@ -799,6 +822,7 @@ impl Keystone {
             projects: None,
             prompt_list: None,
             files: files::Files::default(),
+            changes: changes::Changes::default(),
             slash,
             mentions,
             attach: attachments::Attach::new(cx),
@@ -3515,6 +3539,11 @@ impl Render for Keystone {
             .on_action(
                 self.scoped_listener(cx, |this, _: &files::ToggleFiles, window, cx| {
                     this.toggle_files(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &changes::ToggleChanges, window, cx| {
+                    this.toggle_changes(window, cx)
                 }),
             )
             .on_action(self.scoped_listener(
@@ -9939,6 +9968,7 @@ fn bind_keys(cx: &mut App) {
     customization::bind_keys(cx);
     cx.bind_keys(commands::bindings());
     files::bind_keys(cx);
+    changes::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new(
             "tab",

@@ -321,11 +321,11 @@ impl Reply {
 fn instruction(ask: &Ask) -> String {
     format!(
         "Arrange the Keystone desktop's presentation. All occurrences bind to the active session. \
-         There is exactly one composer, at least one conversation, zero or one session_list, and zero or one files. \
+         There is exactly one composer, at least one conversation, zero or one session_list, zero or one files, and zero or one changes. \
          Each declared occurrence ID is placed exactly once. Keep an existing ID only for its existing component. \
          Splits have axis row or column and at least two children. A child has node and size. \
          Sizes are \"auto\", {{\"px\":320}}, or {{\"fill\":1}}, with positive integer values up to 65535. \
-         Views are {{\"kind\":\"view\",\"id\":0}}. Tabs contain conversations and files only, \
+         Views are {{\"kind\":\"view\",\"id\":0}}. Tabs contain conversations, files and changes only, \
          {{\"kind\":\"tabs\",\"selected\":0,\"views\":[0,3]}}. \
          Splits are {{\"kind\":\"split\",\"axis\":\"row\",\"children\":[...]}}. \
          Maximum depth is 32 and node budget is 256. Do not add semantic fields. \

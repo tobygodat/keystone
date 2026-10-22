@@ -71,6 +71,7 @@ pub fn label(component: Component) -> &'static str {
         Component::Conversation => "Conversation",
         Component::Composer => "Composer",
         Component::Files => "Files",
+        Component::Changes => "Changes",
     }
 }
 
@@ -668,7 +669,18 @@ impl Keystone {
                                     Action::AddFiles,
                                     false,
                                 ))
-                            }),
+                            })
+                            .when(
+                                !current.views().any(|(_, c)| c == Component::Changes),
+                                |d| {
+                                    d.child(act(
+                                        "component-add-changes",
+                                        "Add changes",
+                                        Action::AddChanges,
+                                        false,
+                                    ))
+                                },
+                            ),
                     ),
             )
             .child(

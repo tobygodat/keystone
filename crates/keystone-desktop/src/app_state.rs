@@ -39,6 +39,11 @@ enum PendingSave {
 pub(crate) struct RuntimeChanged {
     pub rows: Vec<RowChange>,
     pub sidebar: bool,
+    /// Sessions whose agent finished a file change or a turn, so their folders'
+    /// changes may differ.
+    pub files: Vec<u64>,
+    /// Folders whose saved commit message changed, with the new message.
+    pub commit_drafts: Vec<(String, String)>,
 }
 pub(crate) struct RowChange {
     pub session: u64,
@@ -432,6 +437,31 @@ impl AppState {
         self.changes.sidebar = true;
         self.publish(cx);
         result
+    }
+
+    pub(crate) fn commit_draft(&self, folder: &str) -> String {
+        self.store.workspace().commit_draft(folder).to_owned()
+    }
+
+    /// Saves `folder`'s commit message and shows it in every window's Changes view.
+    pub(crate) fn set_commit_draft(
+        &mut self,
+        folder: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.phase == Phase::Exiting {
+            return Err("Keystone is exiting.".into());
+        }
+        if self.store.workspace().commit_draft(folder) == text {
+            return Ok(());
+        }
+        self.store
+            .set_commit_draft(folder, text.clone())
+            .map_err(|error| error.to_string())?;
+        self.changes.commit_drafts.push((folder.to_owned(), text));
+        self.publish(cx);
+        Ok(())
     }
 
     pub(crate) fn set_approval_mode(
@@ -1566,6 +1596,11 @@ impl AppState {
                 alerts.retain(|&(s, alert)| {
                     s != session || alert != crate::notifications::Alert::TurnFinished
                 });
+            }
+            if matches!(&event, Event::ItemCompleted(item) if matches!(item.kind, ItemKind::FileChange { .. }))
+                || matches!(event, Event::TurnCompleted { .. })
+            {
+                self.changes.files.push(session);
             }
             let failed = turn_failed(&event);
             match (&event, failed) {

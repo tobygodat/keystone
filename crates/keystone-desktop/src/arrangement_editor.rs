@@ -31,6 +31,7 @@ pub enum Action {
     Duplicate(ViewId),
     AddSessionList,
     AddFiles,
+    AddChanges,
     Reset,
     Ask { provider: Provider, prompt: String },
     Retry,
@@ -329,11 +330,15 @@ impl Customization {
                     })
                     .map_err(|e| e.to_string())
             }),
-            Action::AddFiles => self.allocate().and_then(|view| {
+            add @ (Action::AddFiles | Action::AddChanges) => self.allocate().and_then(|view| {
                 current
                     .edit(Edit::Open {
                         view,
-                        component: Component::Files,
+                        component: if add == Action::AddFiles {
+                            Component::Files
+                        } else {
+                            Component::Changes
+                        },
                         at: keystone_core::Place::Beside {
                             target: current
                                 .views()

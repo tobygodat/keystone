@@ -2,6 +2,7 @@
 //! row's shortcut hint cannot drift from the binding that runs it.
 
 use crate::attachments::AttachFiles;
+use crate::changes::ToggleChanges;
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::handoff::HandOff;
@@ -65,6 +66,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-e"],
         context: Some(APP),
         action: || Box::new(ToggleFiles),
+    },
+    Command {
+        id: "toggle-changes",
+        label: "Toggle changes",
+        keys: &["ctrl-shift-g"],
+        context: Some(APP),
+        action: || Box::new(ToggleChanges),
     },
     Command {
         id: "focus-search",

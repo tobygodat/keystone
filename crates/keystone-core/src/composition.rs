@@ -29,19 +29,22 @@ pub enum Component {
     Conversation,
     Composer,
     Files,
+    /// The repository's changed files, with staging and commit.
+    Changes,
 }
 
 impl Component {
-    pub const ALL: [Component; 4] = [
+    pub const ALL: [Component; 5] = [
         Component::SessionList,
         Component::Conversation,
         Component::Composer,
         Component::Files,
+        Component::Changes,
     ];
 
     pub fn allows(self, count: usize) -> bool {
         match self {
-            Self::SessionList | Self::Files => count <= 1,
+            Self::SessionList | Self::Files | Self::Changes => count <= 1,
             Self::Conversation => count >= 1,
             Self::Composer => count == 1,
         }
@@ -49,7 +52,7 @@ impl Component {
 
     /// Whether occurrences of this component can share an area as tabs.
     pub fn is_surface(self) -> bool {
-        matches!(self, Self::Conversation | Self::Files)
+        matches!(self, Self::Conversation | Self::Files | Self::Changes)
     }
 }
 
@@ -170,7 +173,7 @@ impl fmt::Display for Problem {
             Self::TabNotSurface(view) => {
                 write!(
                     f,
-                    "view {} is tabbed but is not a conversation or files view",
+                    "view {} is tabbed but is not a conversation, files or changes view",
                     view.0
                 )
             }
@@ -984,6 +987,38 @@ mod tests {
             Composition::default()
                 .views()
                 .all(|(_, c)| c != Component::Files)
+        );
+    }
+
+    #[test]
+    fn changes_tabs_with_files_and_a_conversation_but_opens_only_once() {
+        let (files, changes) = (ViewId(7), ViewId(8));
+        let open = |view, component| Edit::Open {
+            view,
+            component,
+            at: Place::TabWith(ViewId::MAIN),
+            size: Size::FILL,
+        };
+        let both = Composition::default()
+            .edit(open(files, Component::Files))
+            .unwrap()
+            .edit(open(changes, Component::Changes))
+            .unwrap();
+        assert_eq!(
+            root(&both)["children"][1]["node"]["children"][0]["node"],
+            json!({"kind": "tabs", "selected": 2, "views": [0, 7, 8]})
+        );
+        assert_eq!(
+            serde_json::to_value(&both).unwrap()["views"][4],
+            json!({"id": 8, "component": "changes"})
+        );
+        assert_eq!(
+            serde_json::from_value::<Composition>(serde_json::to_value(&both).unwrap()).unwrap(),
+            both
+        );
+        assert_eq!(
+            both.edit(open(ViewId(9), Component::Changes)),
+            Err(Problem::Count(Component::Changes))
         );
     }
 

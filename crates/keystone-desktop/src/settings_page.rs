@@ -208,6 +208,7 @@ impl Keystone {
             .capture_action(self.leave_settings::<ToggleSettle>(cx))
             .capture_action(self.leave_settings::<ToggleSidebar>(cx))
             .capture_action(self.leave_settings::<crate::files::ToggleFiles>(cx))
+            .capture_action(self.leave_settings::<crate::changes::ToggleChanges>(cx))
             .capture_action(self.leave_settings::<OpenCustomize>(cx))
             .capture_action(self.leave_settings::<crate::session_tabs::NewTab>(cx))
             .capture_action(self.leave_settings::<crate::session_tabs::CloseTab>(cx))

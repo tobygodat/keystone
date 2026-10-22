@@ -1,8 +1,8 @@
 //! Provider integration for Keystone, independent of the UI.
 //!
 //! Drivers translate a provider's wire protocol into [`Event`]s and never do IO. The
-//! [`host`] module owns child processes, [`log`] stores completed items, and [`worker`]
-//! keeps blocking work off the UI thread. See
+//! [`host`] module owns child processes, [`log`] stores completed items, [`worker`]
+//! keeps blocking work off the UI thread, and [`git`] runs the user's own git. See
 //! `docs/design/providers.md`.
 
 pub mod claude;
@@ -11,6 +11,7 @@ mod commands;
 mod connection;
 mod driver;
 pub mod find;
+pub mod git;
 pub mod host;
 pub mod idle;
 mod item;
