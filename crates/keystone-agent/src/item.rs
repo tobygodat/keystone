@@ -129,6 +129,9 @@ pub enum Event {
         /// turn on. Its interruption is then not a failure.
         stopped: bool,
     },
+    /// The failed turn ending in this batch was refused by the account's usage limit.
+    /// Arrives just before that turn's [`Event::TurnCompleted`].
+    UsageLimit(keystone_core::UsageLimit),
     /// A request failed outside any turn, such as starting the conversation.
     Failed {
         message: String,

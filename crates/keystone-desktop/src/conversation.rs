@@ -11,6 +11,7 @@ use keystone_agent::surface::{self, Status, Surface};
 use keystone_agent::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
 };
+use keystone_core::UsageLimit;
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,10 +22,11 @@ const LOCAL: &str = "local:";
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
     Item(Item),
-    /// A turn that did not complete normally.
+    /// A turn that did not complete normally, and the usage limit that refused it.
     TurnEnded {
         status: TurnStatus,
         error: Option<String>,
+        limit: Option<UsageLimit>,
     },
     /// A recorded approval decision.
     Decision {
@@ -119,6 +121,8 @@ pub struct Conversation {
     changed: BTreeSet<usize>,
     /// Widgets edited since they were last logged, by the call that showed them.
     unsaved_surfaces: BTreeSet<String>,
+    /// The usage limit the provider said refused the turn now ending.
+    limit: Option<UsageLimit>,
 }
 
 /// Identifies a run of the app in the log. Each conversation takes a new one, unique
@@ -359,10 +363,19 @@ impl Conversation {
                     }
                 }
                 Entry::Recovery { .. } | Entry::ProviderExited => None,
-                Entry::TurnEnded { status, error, .. } => {
+                Entry::TurnEnded {
+                    status,
+                    error,
+                    limit,
+                    ..
+                } => {
                     open_turn = false;
                     ended = true;
-                    (status != TurnStatus::Completed).then_some(Row::TurnEnded { status, error })
+                    (status != TurnStatus::Completed).then_some(Row::TurnEnded {
+                        status,
+                        error,
+                        limit,
+                    })
                 }
             };
             if let Some(row) = row {
@@ -424,6 +437,7 @@ impl Conversation {
             self.rows.push(Row::TurnEnded {
                 status: TurnStatus::Interrupted,
                 error: Some("Keystone closed during this turn".into()),
+                limit: None,
             });
             self.closed_marker = Some(self.rows.len() - 1);
         }
@@ -630,6 +644,33 @@ impl Conversation {
         self.error = None;
     }
 
+    /// The usage limit that refused the latest turn, while nothing came after it.
+    pub fn usage_limit(&self) -> Option<&UsageLimit> {
+        if self.running || self.is_loading() {
+            return None;
+        }
+        match self.rows.last()? {
+            Row::TurnEnded {
+                limit: Some(limit), ..
+            } => Some(limit),
+            _ => None,
+        }
+    }
+
+    /// Whether row `index` takes a place in the transcript. The turn end that the usage
+    /// limit card stands for does not when the error named the limit and its reset, as
+    /// the card then says all it said.
+    pub fn shows(&self, index: usize) -> bool {
+        self.rows.get(index).is_some_and(|row| {
+            visible(row)
+                && !(index + 1 == self.rows.len()
+                    && self.recovery.is_none()
+                    && self.usage_limit().is_some_and(|limit| {
+                        !limit.inferred && limit.label.is_some() && limit.resets_at.is_some()
+                    }))
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
             && !self.running
@@ -700,25 +741,33 @@ impl Conversation {
                 };
                 self.log_surface(index);
             }
+            Event::UsageLimit(limit) => self.limit = Some(limit),
             Event::TurnCompleted { status, error, .. } => {
                 self.running = false;
                 self.approvals.clear();
                 self.settle_unfinished();
+                let limit = self.limit.take().filter(|_| status == TurnStatus::Failed);
                 let shown = status != TurnStatus::Completed;
                 let entry = Entry::TurnEnded {
                     status,
                     error: error.clone(),
+                    limit: limit.clone(),
                     seq: shown.then(|| self.seq(self.rows.len())),
                     run: shown.then_some(self.run.0),
                 };
                 self.write(entry, true);
                 if shown {
-                    self.push(Row::TurnEnded { status, error });
+                    self.push(Row::TurnEnded {
+                        status,
+                        error,
+                        limit,
+                    });
                 }
                 self.turn_start = self.rows.len();
             }
             Event::Failed { message } => {
                 self.running = false;
+                self.limit = None;
                 self.settle_unfinished();
                 self.error = Some(message);
                 self.turn_start = self.rows.len();
@@ -1546,7 +1595,8 @@ mod tests {
                 },
                 Row::TurnEnded {
                     status: TurnStatus::Interrupted,
-                    error: None
+                    error: None,
+                    limit: None,
                 },
             ]
         );
@@ -2103,7 +2153,8 @@ mod tests {
             log.restore().rows.last(),
             Some(Row::TurnEnded {
                 status: TurnStatus::Interrupted,
-                error: Some(_)
+                error: Some(_),
+                ..
             })
         ));
     }

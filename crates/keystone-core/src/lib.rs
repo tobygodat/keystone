@@ -49,7 +49,7 @@ use session_context::SavedSessionContext;
 pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory, WorktreeContext};
 use tabs::SavedTabs;
 pub use tabs::SessionTabs;
-pub use usage::{AccountUsage, LimitWindow, Reading};
+pub use usage::{AccountUsage, LimitWindow, Reading, UsageLimit};
 use windows::SavedWindows;
 pub use windows::{Placement, WindowId, WindowView};
 
@@ -213,6 +213,10 @@ pub struct Session {
     /// session, leaving that one unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handed_off_from: Option<u64>,
+    /// When the user asked Keystone to continue this session after its usage limit
+    /// resets, in unix milliseconds. Keystone sends nothing on its own otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continue_at: Option<u64>,
     /// The pull request last made or found for the session's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pull_request: Option<PullRequest>,
@@ -301,6 +305,7 @@ impl Session {
             model_locked: Some(false),
             account: None,
             handed_off_from: None,
+            continue_at: None,
             pull_request: None,
             unknown: Map::new(),
         }
@@ -366,6 +371,11 @@ impl Session {
     /// The session this one was handed off from, if any.
     pub fn handed_off_from(&self) -> Option<u64> {
         self.handed_off_from
+    }
+
+    /// When the user asked to continue after the usage limit resets, if they did.
+    pub fn continue_at(&self) -> Option<u64> {
+        self.continue_at
     }
 
     pub fn pull_request(&self) -> Option<&PullRequest> {
@@ -966,8 +976,12 @@ impl Store {
 
     /// Records a turn the provider started on its own, such as one opened by a steer
     /// that arrived after the previous turn ended.
+    /// A new turn, whoever started it, replaces any continue the user scheduled.
     pub fn record_turn_start(&mut self, id: u64) -> StoreResult<Applied<()>> {
-        self.update_session(id, |session| session.last_turn = Some(LastTurn::Running))
+        self.update_session(id, |session| {
+            session.last_turn = Some(LastTurn::Running);
+            session.continue_at = None;
+        })
     }
 
     /// Records the end of a turn without acknowledging its reply.
@@ -992,6 +1006,12 @@ impl Store {
                 session.title_source = TitleSource::Renamed;
             }
         })
+    }
+
+    /// Schedules, or with `None` cancels, the continue the user asked for after the
+    /// session's usage limit resets.
+    pub fn set_continue_at(&mut self, id: u64, at: Option<u64>) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.continue_at = at)
     }
 
     pub fn set_settled(&mut self, id: u64, settled: bool) -> StoreResult<Applied<()>> {
@@ -3084,6 +3104,32 @@ mod tests {
             store.workspace().sessions()[1].handed_off_from(),
             Some(source)
         );
+    }
+
+    #[test]
+    fn a_scheduled_continue_survives_a_reopen_and_cancels_to_nothing_saved() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        let folder = WorkingDirectory::new(directory.path()).unwrap();
+        let id = store.create(Provider::Claude, &folder, 1).unwrap().value;
+        store.set_continue_at(id, Some(1_800_000_000_000)).unwrap();
+        let mut reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.workspace().sessions()[0].continue_at(),
+            Some(1_800_000_000_000)
+        );
+        reopened.record_turn_start(id).unwrap();
+        assert_eq!(
+            reopened.workspace().sessions()[0].continue_at(),
+            None,
+            "a turn, whoever started it, cancels the schedule"
+        );
+        reopened.set_continue_at(id, Some(5)).unwrap();
+        reopened.set_continue_at(id, None).unwrap();
+        assert_eq!(reopened.workspace().sessions()[0].continue_at(), None);
+        let saved = reopened.saved_snapshot().unwrap().to_string();
+        assert!(!saved.contains("continue_at"), "{saved}");
     }
 
     #[test]

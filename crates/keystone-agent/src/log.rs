@@ -54,6 +54,10 @@ pub enum Entry {
     TurnEnded {
         status: TurnStatus,
         error: Option<String>,
+        /// The account's usage limit refused the turn. Builds before it read the
+        /// failure alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<keystone_core::UsageLimit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2291,6 +2295,7 @@ mod tests {
             entry: Entry::TurnEnded {
                 status: TurnStatus::Failed,
                 error: Some("\"".repeat(8192)),
+                limit: None,
                 seq: Some(n),
                 run: Some(1),
             },
@@ -2308,6 +2313,7 @@ mod tests {
                 entry: Entry::TurnEnded {
                     status: TurnStatus::Interrupted,
                     error: None,
+                    limit: None,
                     seq: Some(0),
                     run: Some(1),
                 },
@@ -2391,6 +2397,7 @@ mod tests {
                 entry: Entry::TurnEnded {
                     status: TurnStatus::Failed,
                     error: Some("failed".into()),
+                    limit: None,
                     seq: Some(2 * n + 1),
                     run: Some(1),
                 },
@@ -2549,6 +2556,7 @@ mod tests {
                 entry: Entry::TurnEnded {
                     status: TurnStatus::Failed,
                     error: Some(error),
+                    limit: None,
                     seq: Some(1),
                     run: Some(1),
                 },
@@ -2698,6 +2706,7 @@ mod tests {
                 entry: Entry::TurnEnded {
                     status: TurnStatus::Failed,
                     error: Some(error.clone()),
+                    limit: None,
                     seq: Some(0),
                     run: Some(1),
                 },
@@ -2724,6 +2733,7 @@ mod tests {
             entry: Entry::TurnEnded {
                 status: TurnStatus::Failed,
                 error: Some("e".repeat(1024 * 1024)),
+                limit: None,
                 seq: Some(2),
                 run: Some(1),
             },

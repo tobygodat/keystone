@@ -692,6 +692,7 @@ fn a_provider_exit_whose_check_never_saved_is_checked_on_the_next_start(
         Entry::TurnEnded {
             status: TurnStatus::Failed,
             error: Some("Claude Code stopped with exit code 3".into()),
+            limit: None,
             seq: Some(1),
             run: Some(1),
         },

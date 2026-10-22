@@ -1153,6 +1153,16 @@ impl CodexDriver {
                         "interrupted" => TurnStatus::Interrupted,
                         _ => TurnStatus::Failed,
                     };
+                    // Codex says which limit refused the turn only in the message, so the
+                    // limit carries no name or reset time.
+                    if status == TurnStatus::Failed
+                        && note.turn.error.as_ref().is_some_and(|e| {
+                            e.codex_error_info.as_ref().and_then(Value::as_str)
+                                == Some("usageLimitExceeded")
+                        })
+                    {
+                        out.event(session, Event::UsageLimit(Default::default()));
+                    }
                     let error = note.turn.error.map(|e| e.message);
                     out.event(
                         session,
@@ -1443,6 +1453,10 @@ struct RpcError {
     message: String,
     #[serde(default)]
     code: Option<i64>,
+    /// A turn error's kind, such as `usageLimitExceeded`: a string, or an object for
+    /// the kinds that carry an HTTP status.
+    #[serde(rename = "codexErrorInfo", default)]
+    codex_error_info: Option<Value>,
 }
 
 #[derive(Deserialize)]

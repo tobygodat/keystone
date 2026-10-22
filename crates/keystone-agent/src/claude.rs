@@ -18,7 +18,7 @@ use crate::item::{
 use crate::mcp::{Caller, Issuer};
 use crate::surface;
 use keystone_core::integrations::{Health, ServerStatus};
-use keystone_core::{ApprovalMode, LimitWindow};
+use keystone_core::{ApprovalMode, LimitWindow, UsageLimit};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
@@ -234,6 +234,11 @@ pub struct ClaudeDriver {
     approvals: HashMap<RequestId, Pending>,
     /// An API error Claude reported as a synthetic assistant message, for the result.
     api_error: Option<String>,
+    /// The usage limit that refused this turn's request, for its end.
+    limit: Option<UsageLimit>,
+    /// The limit the latest rejected `rate_limit_event` named. Claude sends one when an
+    /// account's limit refuses a request, before the error it reports.
+    rejected: Option<UsageLimit>,
     /// How to sign this process's account in, when it is not the default account.
     sign_in: Option<String>,
     /// The approval mode the process was launched with.
@@ -342,6 +347,8 @@ impl ClaudeDriver {
             denied: HashSet::new(),
             approvals: HashMap::new(),
             api_error: None,
+            limit: None,
+            rejected: None,
             sign_in: None,
             launched: mode,
             mode,
@@ -672,6 +679,14 @@ impl ClaudeDriver {
         if envelope.kind == "rate_limit_event" {
             return match serde_json::from_slice::<RateLimitEvent>(line) {
                 Ok(event) => {
+                    // Evidence for this turn's end only: a rejection between turns says
+                    // nothing about the next one. Nor does one that extra usage carries past.
+                    if self.turn.is_some()
+                        && event.rate_limit_info.status.as_deref() == Some("rejected")
+                        && !event.rate_limit_info.is_using_overage
+                    {
+                        self.rejected = Some(event.rate_limit_info.limit(false));
+                    }
                     let windows = event.rate_limit_info.windows();
                     if !windows.is_empty() {
                         out.event(self.session, Event::Usage(windows));
@@ -1215,9 +1230,15 @@ impl ClaudeDriver {
         self.tools.clear();
         self.ui_calls.clear();
         self.api_error = None;
+        self.rejected = None;
         // Requests from this turn can no longer be answered.
         for request in std::mem::take(&mut self.approvals).into_keys() {
             out.event(self.session, Event::ApprovalResolved { request });
+        }
+        if let Some(limit) = self.limit.take()
+            && status == TurnStatus::Failed
+        {
+            out.event(self.session, Event::UsageLimit(limit));
         }
         out.event(
             self.session,
@@ -1447,6 +1468,23 @@ impl ClaudeDriver {
                 },
                 _ => text,
             });
+            // Claude 2.1.301 names an account's usage limit with `api_error`; without it,
+            // a rate-limit error after a rejected `rate_limit_event` is taken as one.
+            self.limit = match (assistant.error.as_deref(), assistant.api_error.as_deref()) {
+                (_, Some(USAGE_LIMIT)) => Some(
+                    assistant
+                        .api_error_params
+                        .and_then(|params| params.rate_limit_info)
+                        .map(|info| info.limit(false))
+                        .or_else(|| self.rejected.clone())
+                        .unwrap_or_default(),
+                ),
+                (Some("rate_limit"), None) => self.rejected.clone().map(|limit| UsageLimit {
+                    inferred: true,
+                    ..limit
+                }),
+                _ => None,
+            };
             return;
         }
         if let Some(usage) = &assistant.message.usage {
@@ -2002,7 +2040,13 @@ impl ClaudeDriver {
             };
         }
         let api_error = self.api_error.take();
+        if !failed {
+            self.limit = None;
+        } else if self.limit.is_none() && result.api_error.as_deref() == Some(USAGE_LIMIT) {
+            self.limit = Some(self.rejected.clone().unwrap_or_default());
+        }
         let Some(turn) = &mut self.turn else {
+            self.limit = None;
             if failed {
                 out.event(
                     self.session,
@@ -2242,6 +2286,17 @@ struct Delta {
 struct Assistant {
     message: AssistantMessage,
     error: Option<String>,
+    api_error: Option<String>,
+    api_error_params: Option<ApiErrorParams>,
+}
+
+/// The `api_error` kind Claude gives a request an account's usage limit refused. Its
+/// `api_error_params.rate_limit_info` has the shape of a `rate_limit_event`'s.
+const USAGE_LIMIT: &str = "usage_limit_reached";
+
+#[derive(Deserialize)]
+struct ApiErrorParams {
+    rate_limit_info: Option<RateLimitInfo>,
 }
 
 #[derive(Deserialize)]
@@ -2285,6 +2340,8 @@ struct RateLimitInfo {
     status: Option<String>,
     resets_at: Option<u64>,
     rate_limit_type: Option<String>,
+    #[serde(default)]
+    is_using_overage: bool,
     /// A fraction of the window, 0-1, and above 1 past the limit.
     utilization: Option<f64>,
     #[serde(default)]
@@ -2299,6 +2356,18 @@ struct UnifiedWindow {
 }
 
 impl RateLimitInfo {
+    /// The limit this report names and when it resets.
+    fn limit(&self, inferred: bool) -> UsageLimit {
+        UsageLimit {
+            label: self
+                .rate_limit_type
+                .as_deref()
+                .map(|kind| limit_window(kind, 0.0, None).label),
+            resets_at: self.resets_at,
+            inferred,
+        }
+    }
+
     /// Every window the event carries: each of `unifiedWindows`, and the limiting
     /// window it names when that is not among them. A rejected window with no
     /// utilization is full.
@@ -2474,6 +2543,7 @@ struct ResultMessage {
     result: Option<String>,
     #[serde(default)]
     errors: Vec<String>,
+    api_error: Option<String>,
 }
 
 #[cfg(test)]
@@ -2642,6 +2712,149 @@ mod tests {
         assert_eq!(
             usage[2],
             vec![limit_window("seven_day_opus", 100.0, Some(1_800_600_000))]
+        );
+    }
+
+    /// A second turn after [`idle_driver`]'s, fed `lines` then its lifecycle end: the
+    /// usage limits and turn ends it reports, in order.
+    fn second_turn(driver: &mut ClaudeDriver, turn: u64, lines: &[&str]) -> Vec<Event> {
+        let lifecycle = |state: &str| {
+            format!(
+                r#"{{"type":"command_lifecycle","command_uuid":"{}","state":"{state}"}}"#,
+                message_uuid(7, turn)
+            )
+        };
+        let mut out = Outputs::default();
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "again".into(),
+                images: Vec::new(),
+            },
+            &mut out,
+        );
+        out.events.clear();
+        driver.on_line(lifecycle("started").as_bytes(), &mut out);
+        for line in lines {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        driver.on_line(lifecycle("completed").as_bytes(), &mut out);
+        out.events
+            .into_iter()
+            .map(|(_, event)| event)
+            .filter(|event| matches!(event, Event::UsageLimit(_) | Event::TurnCompleted { .. }))
+            .collect()
+    }
+
+    /// Claude 2.1.301's frames for a request an account's usage limit refused, as its
+    /// stream-json output builds them: a synthetic assistant message with `error`
+    /// `rate_limit` and `api_error` `usage_limit_reached`, then an error result.
+    const LIMIT_MESSAGE: &str = r#"{"type":"assistant","message":{"id":"limit","model":"<synthetic>","content":[{"type":"text","text":"You've hit your 5-hour limit · resets 3pm"}]},"parent_tool_use_id":null,"error":"rate_limit","is_api_error_message":true,"api_error_status":429,"api_error":"usage_limit_reached","api_error_params":{"rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":1800000000,"isUsingOverage":false}}}"#;
+    const LIMIT_RESULT: &str = r#"{"type":"result","subtype":"success","is_error":true,"result":"You've hit your 5-hour limit · resets 3pm","api_error_status":429,"api_error":"usage_limit_reached"}"#;
+
+    fn failed(events: &[Event]) -> Option<&str> {
+        events.iter().find_map(|event| match event {
+            Event::TurnCompleted {
+                status: TurnStatus::Failed,
+                error,
+                ..
+            } => Some(error.as_deref().unwrap_or("")),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_usage_limit_error_ends_the_turn_naming_the_limit_and_its_reset() {
+        let (mut driver, _) = idle_driver();
+        let events = second_turn(&mut driver, 2, &[LIMIT_MESSAGE, LIMIT_RESULT]);
+        assert_eq!(
+            events[0],
+            Event::UsageLimit(UsageLimit {
+                label: Some("5-hour".into()),
+                resets_at: Some(1_800_000_000),
+                inferred: false,
+            })
+        );
+        assert_eq!(
+            failed(&events),
+            Some("You've hit your 5-hour limit · resets 3pm")
+        );
+        assert_eq!(events.len(), 2, "{events:?}");
+    }
+
+    #[test]
+    fn a_rate_limit_error_after_a_rejected_report_is_a_labelled_inferred_limit() {
+        let (mut driver, _) = idle_driver();
+        let events = second_turn(
+            &mut driver,
+            2,
+            &[
+                r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day","resetsAt":1800500000},"uuid":"u","session_id":"s1"}"#,
+                r#"{"type":"assistant","message":{"id":"limit","content":[{"type":"text","text":"limit"}]},"parent_tool_use_id":null,"error":"rate_limit"}"#,
+                r#"{"type":"result","subtype":"success","is_error":true,"result":"limit"}"#,
+            ],
+        );
+        assert_eq!(
+            events[0],
+            Event::UsageLimit(UsageLimit {
+                label: Some("Weekly".into()),
+                resets_at: Some(1_800_500_000),
+                inferred: true,
+            })
+        );
+        assert_eq!(failed(&events), Some("limit"));
+        let overage = second_turn(
+            &mut driver,
+            3,
+            &[
+                r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":1800000000,"isUsingOverage":true},"uuid":"u","session_id":"s1"}"#,
+                r#"{"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"slow down"}]},"parent_tool_use_id":null,"error":"rate_limit"}"#,
+                r#"{"type":"result","subtype":"success","is_error":true,"result":"x"}"#,
+            ],
+        );
+        assert_eq!(
+            overage.len(),
+            1,
+            "a rejection extra usage carries is no limit: {overage:?}"
+        );
+    }
+
+    #[test]
+    fn other_rate_limit_errors_and_later_failures_are_not_usage_limits() {
+        let (mut driver, _) = idle_driver();
+        let throttle = second_turn(
+            &mut driver,
+            2,
+            &[
+                r#"{"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"API Error: Request rejected (429) · slow down"}]},"parent_tool_use_id":null,"error":"rate_limit"}"#,
+                r#"{"type":"result","subtype":"success","is_error":true,"result":"x"}"#,
+            ],
+        );
+        assert!(failed(&throttle).is_some());
+        assert_eq!(
+            throttle.len(),
+            1,
+            "a throttle is no usage limit: {throttle:?}"
+        );
+        let mut out = Outputs::default();
+        driver.on_line(
+            br#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":1800000000},"uuid":"u","session_id":"s1"}"#,
+            &mut out,
+        );
+        driver.on_line(LIMIT_MESSAGE.as_bytes(), &mut out);
+        driver.on_line(LIMIT_RESULT.as_bytes(), &mut out);
+        let later = second_turn(
+            &mut driver,
+            3,
+            &[
+                r#"{"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"slow down"}]},"parent_tool_use_id":null,"error":"rate_limit"}"#,
+                r#"{"type":"result","subtype":"success","is_error":true,"result":"x"}"#,
+            ],
+        );
+        assert_eq!(
+            later.len(),
+            1,
+            "a limit or rejection reported between turns never reaches the next: {later:?}"
         );
     }
 

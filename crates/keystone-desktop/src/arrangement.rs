@@ -1898,12 +1898,10 @@ impl Keystone {
                     .conversations()
                     .get(&key.session)
                     .is_some_and(|c| {
-                        c.rows
-                            .iter()
-                            .enumerate()
+                        (0..c.rows.len())
                             .rev()
-                            .find(|(_, r)| crate::conversation::visible(r))
-                            .is_some_and(|(last, _)| row < last)
+                            .find(|&n| c.shows(n))
+                            .is_some_and(|last| row < last)
                     })
             })
         {

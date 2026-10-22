@@ -47,6 +47,9 @@
 //! `thread/start` and `thread/resume` are followed by `mcpServer/startupStatus/updated`
 //! for each MCP server the thread gets (see [`start_mcp_servers`]).
 //!
+//! An account whose `CODEX_HOME` holds a `.fake-usage-limit` file is at its usage
+//! limit (see `support/limit.rs`): each turn fails with `usageLimitExceeded`.
+//!
 //! A prompt containing "usage NN" ends its turn with synthetic, labelled
 //! `account/rateLimits/updated` (the 5-hour window at NN%) and `thread/tokenUsage/updated`
 //! notifications.
@@ -63,6 +66,8 @@ use std::time::Duration;
 mod images;
 #[path = "support/orchestrator.rs"]
 mod orchestrator;
+#[path = "support/limit.rs"]
+mod support_limit;
 #[path = "support/widgets.rs"]
 mod widgets;
 
@@ -676,6 +681,9 @@ fn run_turn(
     notify(out, "item/started", with(json!({"item": user})));
     notify(out, "item/completed", with(json!({"item": user})));
 
+    if let Some(reset) = support_limit::limited_until(support_limit::codex_home()) {
+        return limit(out, thread, turn_id, reset);
+    }
     if text.contains("run") {
         let item_id = format!("exec-{turn_id}");
         let command = "echo scripted";
@@ -925,6 +933,26 @@ fn stream(
         thread::sleep(delay);
     }
     sent
+}
+
+/// The account's usage limit refuses the turn, as Codex 0.163.0's schema describes it:
+/// the account's synthetic, labelled 5-hour window at 100% resetting at `reset`, then
+/// a failed turn whose error kind is `usageLimitExceeded`.
+fn limit(out: &Out, thread: &str, turn_id: &str, reset: u64) {
+    emit(
+        out,
+        json!({"method": "account/rateLimits/updated", "params": {"keystoneFake": "synthetic test data", "rateLimits": {
+            "limitId": "codex", "limitName": null,
+            "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": reset},
+            "secondary": null, "rateLimitReachedType": "rate_limit_reached"}}}),
+    );
+    notify(
+        out,
+        "turn/completed",
+        json!({"threadId": thread, "turn": {"id": turn_id, "status": "failed", "error": {
+            "message": "You've hit your usage limit. (synthetic test data)",
+            "codexErrorInfo": "usageLimitExceeded", "additionalDetails": null}}}),
+    );
 }
 
 fn finish(out: &Out, thread: &str, turn_id: &str, status: &str) {

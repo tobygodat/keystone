@@ -53,6 +53,9 @@
 //! `KEYSTONE_FAKE_IMAGE_RECEIPT` set, each image's media type and byte hash is appended
 //! there (see `support/images.rs`), and the reply names them.
 //!
+//! An account whose config home holds a `.fake-usage-limit` file is at its usage limit
+//! (see `support/limit.rs`): each turn fails on it, in Claude Code 2.1.301's frames.
+//!
 //! A prompt containing "usage NN" gives its reply's last assistant message token usage
 //! (NN/2 % of a 200,000-token context) and, before its `result`, a synthetic, labelled
 //! `rate_limit_event` with the 5-hour window at NN%. `get_usage` is not scripted.
@@ -115,6 +118,8 @@ use std::time::{Duration, Instant};
 mod images;
 #[path = "support/orchestrator.rs"]
 mod orchestrator;
+#[path = "support/limit.rs"]
+mod support_limit;
 #[path = "support/widgets.rs"]
 mod widgets;
 
@@ -1186,6 +1191,9 @@ fn answer(
     mode: &str,
     delay: Duration,
 ) -> &'static str {
+    if let Some(reset) = support_limit::limited_until(support_limit::claude_home()) {
+        return limit(out, session, turn, reset);
+    }
     let mut mode = mode.to_owned();
     let mut left_plan = "";
     if text.contains("exit plan") && mode == "plan" {
@@ -1547,6 +1555,35 @@ fn released(shared: &Shared) -> bool {
         }
         thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// The account's usage limit refuses the request, in Claude Code 2.1.301's frames: a
+/// rejected `rate_limit_event`, a synthetic assistant message with `error`
+/// `rate_limit` and `api_error` `usage_limit_reached`, then an error result.
+fn limit(out: &Out, session: &str, turn: u64, reset: u64) -> &'static str {
+    let info = json!({"status": "rejected", "rateLimitType": "five_hour", "resetsAt": reset,
+                      "isUsingOverage": false});
+    emit(
+        out,
+        json!({"type": "rate_limit_event", "keystone_fake": "synthetic test data",
+               "rate_limit_info": info, "uuid": format!("fake-limit-{}-{turn}", std::process::id()),
+               "session_id": session}),
+    );
+    let text = "You've hit your 5-hour limit (synthetic test data)";
+    emit(
+        out,
+        json!({"type": "assistant", "message": {"id": format!("fake-limit-{}-{turn}", std::process::id()),
+               "model": "<synthetic>", "content": [{"type": "text", "text": text}]},
+               "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true,
+               "api_error_status": 429, "api_error": "usage_limit_reached",
+               "api_error_params": {"rate_limit_info": info}}),
+    );
+    emit(
+        out,
+        json!({"type": "result", "subtype": "success", "is_error": true, "result": text,
+               "api_error_status": 429, "api_error": "usage_limit_reached"}),
+    );
+    "completed"
 }
 
 fn stopped(out: &Out) -> &'static str {

@@ -1,5 +1,5 @@
 use crate::Keystone;
-use crate::conversation::{self, Row};
+use crate::conversation::Row;
 use crate::view_state::{CopyTarget, ViewKey};
 use gpui::{App, ClipboardItem, Context, FocusHandle, Window};
 use keystone_agent::{ItemKind, ItemStatus};
@@ -239,12 +239,8 @@ impl Keystone {
                 .focus(window, cx);
             return;
         }
-        let rows: Vec<_> = conversation
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| conversation::visible(row))
-            .map(|(n, _)| n)
+        let rows: Vec<_> = (0..conversation.rows.len())
+            .filter(|&n| conversation.shows(n))
             .collect();
         let list = self
             .presentation
@@ -509,8 +505,7 @@ impl Keystone {
                     .read(cx)
                     .conversations()
                     .get(&session)
-                    .and_then(|c| c.rows.get(row))
-                    .is_none_or(|row| !conversation::visible(row))
+                    .is_none_or(|c| !c.shows(row))
             });
             if hidden_row
                 && (keyboard.action_focus.is_focused(window)

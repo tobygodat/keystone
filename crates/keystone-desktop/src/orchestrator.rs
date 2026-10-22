@@ -660,9 +660,14 @@ impl AppState {
                             }
                             json!({"position":index,"item":shown,"truncated":shown != *item})
                         }
-                        Row::TurnEnded { status, error } => {
+                        Row::TurnEnded {
+                            status,
+                            error,
+                            limit,
+                        } => {
                             let shown = error.as_deref().map(cap);
                             json!({"position":index,"turn_ended":status,"error":shown,
+                            "usage_limit":limit,
                             "truncated":shown.as_deref() != error.as_deref()})
                         }
                         Row::Decision { action, allowed } => {

@@ -34,6 +34,22 @@ impl Reading {
     }
 }
 
+/// Why a turn failed when the account's usage limit refused it: which limit and when
+/// it resets, as far as the provider said.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct UsageLimit {
+    /// The limit's name, such as `5-hour`, when the provider named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// When the limit resets, in unix seconds, when the provider said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<u64>,
+    /// Recognised from a rejected rate-limit report beside a rate-limit error, not from
+    /// the provider's own usage-limit error kind.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inferred: bool,
+}
+
 /// How long a window that reset stays listed, as "reset", before it is forgotten.
 const KEEP_AFTER_RESET_MS: u64 = 24 * 60 * 60_000;
 
@@ -77,6 +93,15 @@ impl AccountUsage {
             .iter()
             .filter(|r| !r.is_reset(now_ms))
             .max_by(|a, b| a.window.used_percent.total_cmp(&b.window.used_percent))
+    }
+
+    /// The full window that resets last, among those that have not reset: the
+    /// account has no room until then. `None` when no window is full.
+    pub fn full_until(&self, now_ms: u64) -> Option<&Reading> {
+        self.readings
+            .iter()
+            .filter(|r| r.window.used_percent >= 100.0 && !r.is_reset(now_ms))
+            .max_by_key(|r| r.window.resets_at.unwrap_or(u64::MAX))
     }
 }
 
@@ -125,6 +150,44 @@ mod tests {
         assert!(usage.readings[0].is_reset(100_000));
         assert_eq!(usage.peak(100_000).unwrap().window.id, "seven_day");
         assert!(usage.peak(10_000_000).is_none());
+    }
+
+    #[test]
+    fn the_account_is_full_until_its_last_full_window_resets() {
+        let mut usage = AccountUsage::default();
+        usage.record(
+            vec![
+                window("five_hour", 100.0, Some(100)),
+                window("seven_day", 100.0, Some(5_000)),
+                window("seven_day_opus", 99.0, Some(9_000)),
+            ],
+            0,
+        );
+        assert_eq!(usage.full_until(0).unwrap().window.id, "seven_day");
+        assert_eq!(usage.full_until(4_999_999).unwrap().window.id, "seven_day");
+        assert!(usage.full_until(5_000_000).is_none());
+        usage.record(vec![window("five_hour", 100.0, None)], 1);
+        assert_eq!(
+            usage.full_until(5_000_000).unwrap().window.id,
+            "five_hour",
+            "a full window with no reset time has no room in sight"
+        );
+    }
+
+    #[test]
+    fn a_usage_limit_saves_only_what_the_provider_said() {
+        assert_eq!(serde_json::to_string(&UsageLimit::default()).unwrap(), "{}");
+        let limit = UsageLimit {
+            label: Some("5-hour".into()),
+            resets_at: Some(1_800_000_000),
+            inferred: true,
+        };
+        let text = serde_json::to_string(&limit).unwrap();
+        assert_eq!(
+            text,
+            r#"{"label":"5-hour","resets_at":1800000000,"inferred":true}"#
+        );
+        assert_eq!(serde_json::from_str::<UsageLimit>(&text).unwrap(), limit);
     }
 
     #[test]

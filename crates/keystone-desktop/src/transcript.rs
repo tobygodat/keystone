@@ -106,7 +106,7 @@ fn activity_toggle(
         .into_any_element()
 }
 
-/// The content of a row that [`crate::conversation::visible`] accepts. `index` is the
+/// The content of a row that [`crate::conversation::Conversation::shows`] accepts. `index` is the
 /// row's place in the conversation, and `reply` the parsed Markdown of a reply row.
 pub fn row(
     row: &Row,
@@ -361,14 +361,22 @@ pub fn row(
                     .into_any_element()
             }
         },
-        Row::TurnEnded { status, error } => {
-            let (text, color) = match status {
-                TurnStatus::Interrupted => ("Stopped", Color::Muted),
+        Row::TurnEnded {
+            status,
+            error,
+            limit,
+        } => {
+            let (text, color) = match (status, limit) {
+                (TurnStatus::Interrupted, _) => ("Stopped", Color::Muted),
+                (_, Some(_)) => ("Usage limit reached", Color::Warning),
                 _ => ("Failed", Color::Danger),
             };
-            let text = match error {
-                Some(error) => format!("{text}: {error}"),
-                None => text.to_owned(),
+            // Under the usage limit card, the provider's own words, which the card's
+            // headline does not repeat.
+            let text = match (limit, error) {
+                (Some(_), Some(error)) => error.clone(),
+                (_, Some(error)) => format!("{text}: {error}"),
+                (_, None) => text.to_owned(),
             };
             Label::new(text)
                 .size(TextSize::Ui)

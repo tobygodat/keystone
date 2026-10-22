@@ -44,7 +44,7 @@ enum PendingSave {
 enum SendKind {
     /// The composer's draft, cleared once it is sent.
     Draft,
-    /// A widget's action. The draft stays.
+    /// A widget's action, or the continue after a usage limit. The draft stays.
     Widget,
     /// A launched session's result. Only ever a new turn, never a steer.
     Result,
@@ -175,6 +175,16 @@ fn sweep_attachments(
 
 /// Most Claude store reads at once. A read stuck on a slow disk keeps its slot.
 const RECOVERY_READERS: usize = 2;
+
+/// What Continue sends to a session its usage limit stopped. Toby may change it.
+pub(crate) const CONTINUE_TEXT: &str = "Your usage limit has reset. Continue where you left off, \
+     without repeating work that is already done.";
+
+/// How often a due continue checks again while its history loads or a quit is saving.
+const CONTINUE_POLL_MS: u64 = 250;
+
+/// How long a due continue waits to retry after its cancellation could not be saved.
+const CONTINUE_RETRY_MS: u64 = 5_000;
 
 /// How long a widget edit waits before it is logged, so typing logs the widget once
 /// rather than at every key.
@@ -1254,7 +1264,7 @@ impl AppState {
             Some(bytes) => logs.with_budget(bytes),
             None => logs,
         };
-        Self {
+        let state = Self {
             removing_worktrees: Arc::default(),
             error: None,
             shutdown_error: None,
@@ -1315,7 +1325,14 @@ impl AppState {
             notifier: Default::default(),
             attachments,
             store,
+        };
+        // Continues the user scheduled before a restart still go once they are due.
+        for session in state.store.workspace().sessions() {
+            if let Some(at) = session.continue_at() {
+                Self::wait_to_continue(session.id(), at, at.saturating_sub(now_ms()), cx);
+            }
         }
+        state
     }
     pub(crate) fn store(&self) -> &Store {
         &self.store
@@ -2482,6 +2499,116 @@ impl AppState {
         self.send_message_from(draft, None, SendKind::Draft, cx)
     }
 
+    /// Sends [`CONTINUE_TEXT`] to a session whose last turn hit its usage limit, at the
+    /// user's request. The composer's draft is left as it is.
+    pub(crate) fn continue_after_limit(&mut self, session: u64, cx: &mut Context<Self>) -> bool {
+        // Only while the conversation still ends at the limit, after applying whatever
+        // arrived: never into a turn the provider started meanwhile, and never twice.
+        self.pump(cx);
+        if self.conversation(session).usage_limit().is_none() {
+            return false;
+        }
+        let draft = ComposerDraft {
+            session,
+            text: CONTINUE_TEXT.into(),
+            attachments: Vec::new(),
+        };
+        if self.send_message_from(draft, None, SendKind::Widget, cx) {
+            return true;
+        }
+        let conversation = self.conversation(session);
+        if conversation.error.is_none() {
+            conversation.error =
+                Some("Continue was not sent. Press Continue on the card to try again.".into());
+        }
+        self.commit(session);
+        self.publish(cx);
+        false
+    }
+
+    /// Saves the user's request to continue `session` at `at` (unix milliseconds), and
+    /// waits for it. `None` cancels it.
+    pub(crate) fn schedule_continue(
+        &mut self,
+        session: u64,
+        at: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Running
+            || at.is_some() && self.conversation(session).usage_limit().is_none()
+        {
+            return;
+        }
+        if let Err(error) = self.store.set_continue_at(session, at) {
+            self.conversation(session).error = Some(match at {
+                Some(_) => format!("Continue was not scheduled. {error}"),
+                None => format!("The scheduled continue could not be cancelled. {error}"),
+            });
+            self.commit(session);
+        } else if let Some(at) = at {
+            Self::wait_to_continue(session, at, at.saturating_sub(now_ms()), cx);
+        }
+        self.refresh(cx);
+    }
+
+    /// Wakes after `delay_ms` to send the continue scheduled for `at`, if it still is.
+    /// Long waits wake every minute to read the wall clock again, since the timer's
+    /// clock stops while the computer sleeps.
+    fn wait_to_continue(session: u64, at: u64, delay_ms: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(
+                    delay_ms.min(crate::limit::CLOCK_CHECK_MS),
+                ))
+                .await;
+            let _ = this.update(cx, |this, cx| this.continue_when_due(session, at, cx));
+        })
+        .detach();
+    }
+
+    /// The scheduled continue for `at` is due. It is cancelled before it is sent, so
+    /// it goes at most once. Gone when the user cancelled or moved it, or a turn
+    /// started; dropped, saying so, when the conversation no longer ends at the limit.
+    fn continue_when_due(&mut self, session: u64, at: u64, cx: &mut Context<Self>) {
+        if self.phase == Phase::Exiting
+            || self.session(session).and_then(|s| s.continue_at()) != Some(at)
+        {
+            return;
+        }
+        let now = now_ms();
+        if now < at {
+            return Self::wait_to_continue(session, at, at - now, cx);
+        }
+        // A quit in progress may still fail, and the history decides whether the
+        // conversation still ends at the limit.
+        if self.phase != Phase::Running || self.conversation(session).is_loading() {
+            return Self::wait_to_continue(session, at, CONTINUE_POLL_MS, cx);
+        }
+        if let Err(error) = self.store.set_continue_at(session, None) {
+            self.conversation(session).error = Some(format!(
+                "The scheduled continue is waiting: Keystone could not save that it is going, so it tries again shortly. {error}"
+            ));
+            self.commit(session);
+            self.refresh(cx);
+            return Self::wait_to_continue(session, at, CONTINUE_RETRY_MS, cx);
+        }
+        self.refresh(cx);
+        self.pump(cx);
+        if self.conversation(session).usage_limit().is_none() {
+            let conversation = self.conversation(session);
+            if !conversation.running {
+                conversation.error = Some(
+                    "The scheduled continue was not sent: this conversation no longer ends at its usage limit."
+                        .into(),
+                );
+                self.commit(session);
+                self.publish(cx);
+            }
+            return;
+        }
+        self.continue_after_limit(session, cx);
+    }
+
     /// Writes an input's value into a widget. The widget is logged a moment later, so
     /// typing logs it once.
     pub(crate) fn edit_widget(
@@ -2726,6 +2853,19 @@ impl AppState {
         if let Err(error) = self.store.sync_pending() {
             self.conversation(id).error = Some(format!(
                 "Not sent. Could not finish saving changes. Your draft is kept. Send will retry saving. {error}"
+            ));
+            self.commit(id);
+            self.refresh(cx);
+            return false;
+        }
+        // A message the user sends replaces any continue they scheduled. Cancelled first,
+        // so a restart can never send that continue as well; a send that then fails leaves
+        // it cancelled and the card offers it again.
+        if session.continue_at().is_some()
+            && let Err(error) = self.store.set_continue_at(id, None)
+        {
+            self.conversation(id).error = Some(format!(
+                "Not sent: the scheduled continue could not be cancelled first. {error}"
             ));
             self.commit(id);
             self.refresh(cx);

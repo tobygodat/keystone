@@ -1417,3 +1417,52 @@ fn rate_limit_and_token_usage_notifications_become_usage_events() {
     );
     assert_eq!(driver.unknown, 0);
 }
+
+#[test]
+fn a_turn_failed_on_the_usage_limit_reports_an_unnamed_limit() {
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    // Codex 0.163.0's schema: `turn.error.codexErrorInfo` is a camelCase kind, or an
+    // object for the kinds that carry an HTTP status.
+    for (turn, info, limited) in [
+        ("a", r#""usageLimitExceeded""#, true),
+        ("b", r#""rateLimitExceeded""#, false),
+        (
+            "c",
+            r#"{"httpConnectionFailed":{"httpStatusCode":429}}"#,
+            false,
+        ),
+    ] {
+        driver.command(
+            Command::Send {
+                session: SESSION,
+                text: "one".into(),
+                images: Vec::new(),
+            },
+            &mut out,
+        );
+        feed(&mut driver, &[started(turn)]);
+        let failed = format!(
+            r#"{{"method":"turn/completed","params":{{"threadId":"{THREAD}","turn":{{"id":"{turn}","status":"failed","error":{{"message":"You've hit your usage limit.","codexErrorInfo":{info},"additionalDetails":null}}}}}}}}"#
+        );
+        let events: Vec<_> = feed(&mut driver, &[failed])
+            .events
+            .into_iter()
+            .map(|(_, event)| event)
+            .filter(|e| matches!(e, Event::UsageLimit(_) | Event::TurnCompleted { .. }))
+            .collect();
+        let expected_end = Event::TurnCompleted {
+            status: TurnStatus::Failed,
+            error: Some("You've hit your usage limit.".into()),
+            stopped: false,
+        };
+        if limited {
+            assert_eq!(
+                events,
+                vec![Event::UsageLimit(Default::default()), expected_end]
+            );
+        } else {
+            assert_eq!(events, vec![expected_end], "{info}");
+        }
+    }
+}

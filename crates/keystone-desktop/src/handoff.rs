@@ -65,7 +65,7 @@ fn entry(row: &Row, position: usize, provider: Provider) -> Option<(bool, String
             ItemKind::Tool { name } => line(format!("Used {name} · {}", status_word(item.status))),
             ItemKind::Other { name } => line(format!("{name} · {}", status_word(item.status))),
         },
-        Row::TurnEnded { status, error } => {
+        Row::TurnEnded { status, error, .. } => {
             let word = match status {
                 TurnStatus::Completed => "completed",
                 TurnStatus::Interrupted => "interrupted",
@@ -284,10 +284,30 @@ impl Keystone {
     /// with the handoff text as its draft and the model selector open on the other
     /// provider, so the user chooses where it continues before sending.
     pub(crate) fn hand_off(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session(cx) else {
+        let Some(id) = self.selected(cx) else {
             return;
         };
-        let (id, provider) = (session.id(), session.provider());
+        let Some(provider) = self.provider(id, cx) else {
+            return;
+        };
+        self.hand_off_to(id, other(provider), None, window, cx);
+    }
+
+    /// Hands session `id` off to `target`. With an `account`, the new session runs on
+    /// it and the model menu stays closed, since the destination is chosen; without
+    /// one it starts on `target`'s default account with the menu open.
+    pub(crate) fn hand_off_to(
+        &mut self,
+        id: u64,
+        target: Provider,
+        account: Option<Option<keystone_core::AccountId>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(id, cx) else {
+            return;
+        };
+        let provider = session.provider();
         if !session.started() {
             self.error =
                 Some("Nothing to hand off yet: this session has not sent anything.".into());
@@ -320,7 +340,6 @@ impl Keystone {
             &conversation.rows,
             BUDGET_TOKENS,
         );
-        let target = other(provider);
         // Beside other views or tabs, the new session opens in a tab beside the source,
         // as New tab does, so the source stays in view. A lone view follows the selection.
         let shown = self.saved_composition(cx);
@@ -356,12 +375,36 @@ impl Keystone {
         let Some(new) = self.selected(cx).filter(|selected| *selected != id) else {
             return;
         };
+        // The work goes on in the new session, so the source's scheduled continue must
+        // not send as well.
+        if self
+            .state
+            .read(cx)
+            .session(id)
+            .and_then(|s| s.continue_at())
+            .is_some()
+        {
+            self.state
+                .update(cx, |state, cx| state.schedule_continue(id, None, cx));
+        }
         if let Some(view) = opened.filter(|&view| self.session_tabs(cx).get(view) == Some(new)) {
             self.presentation.current.customization.forget_undo();
             self.presentation.current.arrangement.seen = Some(Some(new));
             self.show_fitted(view, cx);
         }
-        self.model_menu = Some(new);
+        match account {
+            Some(account) => {
+                let result = self.state.update(cx, |state, cx| {
+                    state.set_provider_account(new, target, account, cx)
+                });
+                if let Err(error) = result {
+                    self.error = Some(format!(
+                        "The new session stays on the default account. {error}"
+                    ));
+                }
+            }
+            None => self.model_menu = Some(new),
+        }
         self.request_catalog(new, target, cx);
         self.composer.focus_handle(cx).focus(window, cx);
         cx.notify();
@@ -532,6 +575,7 @@ mod tests {
             Row::TurnEnded {
                 status: TurnStatus::Failed,
                 error: Some("Rate limited".into()),
+                limit: None,
             },
         ];
         let text = &build(source(), &rows, BUDGET_TOKENS);

@@ -11,6 +11,7 @@ mod customization_agent;
 mod files;
 mod handoff;
 mod integrations;
+mod limit;
 mod mentions;
 mod model_selector;
 mod notes;
@@ -415,6 +416,8 @@ struct Keystone {
     /// The recovery card's Continue and Retry buttons, in the view the composer sends
     /// to, so Tab reaches them.
     recovery_focus: (FocusHandle, FocusHandle),
+    /// Usage-limit resets a redraw is already waiting for, in unix milliseconds.
+    limit_wakes: std::cell::RefCell<std::collections::HashSet<u64>>,
     new_menu: bool,
     filter_menu: bool,
     provider_filter: Option<Provider>,
@@ -796,6 +799,7 @@ impl Keystone {
             _subscriptions: subscriptions,
             draft_save_task: None,
             focus: cx.focus_handle(),
+            limit_wakes: Default::default(),
             recovery_focus: (
                 cx.focus_handle().tab_stop(true),
                 cx.focus_handle().tab_stop(true),
@@ -2497,7 +2501,7 @@ impl Keystone {
             && (keyboard.is_some_and(|k| k.action_focus.is_focused(window))
                 || self.presentation.current.views.focused_region(key, window));
         let content = match conversation.rows.get(index) {
-            Some(row) if conversation::visible(row) => {
+            Some(row) if conversation.shows(index) => {
                 let result = match row {
                     Row::Item(item) if item.kind == ItemKind::UserMessage => {
                         let state = self.state.read(cx);
@@ -2739,6 +2743,9 @@ impl Keystone {
         } else if let Some(recovery) = &conversation.recovery {
             empty = false;
             view = view.child(self.recovery_card(key, recovery, cx));
+        } else if let Some(limit) = conversation.usage_limit() {
+            empty = false;
+            view = view.child(self.limit_card(key, limit, cx));
         } else if conversation.running {
             empty = false;
             view = view.child(
@@ -5069,6 +5076,7 @@ mod tests {
             log.append(&Entry::TurnEnded {
                 status: TurnStatus::Completed,
                 error: None,
+                limit: None,
                 seq: None,
                 run: None,
             })
