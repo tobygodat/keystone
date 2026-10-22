@@ -320,7 +320,7 @@ fn global_runtime_loads_sends_answers_and_logs_both_providers_without_a_view(
         completed(state, 1) && completed(state, 2)
     });
     state.update(cx, |state, cx| {
-        state.save(Vec::new(), Vec::new(), cx).unwrap()
+        state.save(Vec::new(), Vec::new(), Vec::new(), cx).unwrap()
     });
     state.read_with(cx, |state, _| {
         assert!(state.error.is_none());
@@ -433,7 +433,7 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
         completed(state, 1) && completed(state, 2)
     });
     state.update(cx, |state, cx| {
-        state.save(Vec::new(), Vec::new(), cx).unwrap()
+        state.save(Vec::new(), Vec::new(), Vec::new(), cx).unwrap()
     });
     state.read_with(cx, |state, _| {
         for id in [1, 2] {
@@ -576,7 +576,7 @@ fn explicit_teardown_ends_only_owned_providers_descendants_and_catalog_probe(
     let unrelated = Unrelated::new();
     let pids = owned_processes(&state, dir.path(), cx);
     state.update(cx, |state, cx| {
-        state.save(Vec::new(), Vec::new(), cx).unwrap();
+        state.save(Vec::new(), Vec::new(), Vec::new(), cx).unwrap();
         state.teardown(cx);
         assert_eq!(state.phase, Phase::Exiting);
         assert!(state.codex.is_empty() && state.claude.is_empty());

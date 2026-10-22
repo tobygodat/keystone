@@ -72,6 +72,7 @@ pub fn label(component: Component) -> &'static str {
         Component::Composer => "Composer",
         Component::Files => "Files",
         Component::Changes => "Changes",
+        Component::Notes => "Notes",
     }
 }
 

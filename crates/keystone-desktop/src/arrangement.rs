@@ -114,7 +114,7 @@ fn minimum(
                     [0., 0.]
                 }
             }
-            Component::Files => [FILES_MIN, 160. + header],
+            Component::Files | Component::Notes => [FILES_MIN, 160. + header],
             // The message box and Commit button sit above the list.
             Component::Changes => [FILES_MIN, 260. + header],
         },
@@ -191,9 +191,12 @@ fn displays(node: &Node, view: ViewId) -> bool {
     }
 }
 
-/// Files and Changes: one-of-a-kind surfaces that get a tab strip even alone.
+/// Files, Changes and Notes: one-of-a-kind surfaces that get a tab strip even alone.
 fn is_side_surface(component: Option<Component>) -> bool {
-    matches!(component, Some(Component::Files | Component::Changes))
+    matches!(
+        component,
+        Some(Component::Files | Component::Changes | Component::Notes)
+    )
 }
 
 /// Whether a strip drawn for `node` has `anchor` in front, so its "+" is on screen.
@@ -214,7 +217,7 @@ impl Keystone {
     /// occurrence id.
     fn tab_label(&self, id: ViewId, c: &Composition, cx: &App) -> String {
         match c.component(id).unwrap() {
-            Component::Files => label(Component::Files).to_owned(),
+            component @ (Component::Files | Component::Notes) => label(component).to_owned(),
             Component::Changes => self.changes.label(self.files_root(cx).ok().as_deref(), cx),
             Component::Conversation if !self.presentation.current.customization.is_open() => self
                 .view_session(id, cx)
@@ -336,6 +339,7 @@ impl Keystone {
         let session = view.and_then(|view| self.view_session(view, cx));
         match (component, view, session) {
             (Some(Component::Files), _, _) => self.focus_files(window, cx),
+            (Some(Component::Notes), _, _) => self.focus_notes(window, cx),
             (Some(Component::Changes), _, _) => self.focus_changes(window, cx),
             (Some(Component::Conversation), Some(view), Some(session)) => self
                 .presentation
@@ -380,6 +384,9 @@ impl Keystone {
                     cx,
                 )
             });
+        }
+        if self.shown_composition(cx).component(view) == Some(Component::Notes) {
+            return self.notes_contain_focus(window, cx);
         }
         let handle = match self.shown_composition(cx).component(view) {
             Some(Component::Files) => self
@@ -430,6 +437,10 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A view that was just opened can leave too little room, so the window fits its
+        // views as tabs from the next frame. The choice keeps the view in front then; a
+        // frame that is not fitted clears it.
+        self.presentation.current.arrangement.tab = Some(view);
         if !self.presentation.current.arrangement.fitted {
             return self.select_tab(view, window, cx);
         }
@@ -439,9 +450,42 @@ impl Keystone {
             .filter(|(_, component)| component.is_surface())
             .map(|(id, _)| id)
             .collect();
-        self.presentation.current.arrangement.tab = Some(view);
         self.focus_replacing(&surfaces, view, window, cx);
         cx.notify();
+    }
+
+    /// Closes the `component` view (Files or Notes, of which a layout holds at most
+    /// one) when it has focus, brings an open one forward and focuses it, or opens one
+    /// `width` wide to the right of the side surface target, and focuses it.
+    pub(crate) fn toggle_surface(
+        &mut self,
+        component: Component,
+        width: Size,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.shown_composition(cx);
+        if let Some((open, _)) = shown.views().find(|(_, c)| *c == component) {
+            if self.view_contains_focus(open, window, cx) {
+                return self.edit_surfaces(Edit::Close(open), window, cx);
+            }
+            self.reveal_view(open, window, cx);
+            return self.focus_view(Some(open), window, cx);
+        }
+        let at = Place::Beside {
+            target: self.side_surface_target(cx),
+            axis: Axis::Row,
+            after: true,
+        };
+        self.open_surface(component, at, width, window, cx);
+        if let Some((open, _)) = self
+            .shown_composition(cx)
+            .views()
+            .find(|(_, c)| *c == component)
+        {
+            self.reveal_view(open, window, cx);
+            self.focus_view(Some(open), window, cx);
+        }
     }
 
     /// Opens a new occurrence of `component` at `at` with a fresh view id.
@@ -1033,6 +1077,7 @@ impl Keystone {
         .child(MenuHeader::new("Open a surface"));
         for (component, icon, id) in [
             (Component::Files, IconName::Folder, "surface-add-files"),
+            (Component::Notes, IconName::Note, "surface-add-notes"),
             (Component::Changes, IconName::Branch, "surface-add-changes"),
             (
                 Component::Conversation,
@@ -1058,6 +1103,7 @@ impl Keystone {
                         );
                         match component {
                             Component::Files => this.focus_files(window, cx),
+                            Component::Notes => this.focus_notes(window, cx),
                             Component::Changes => this.focus_changes(window, cx),
                             _ => {}
                         }
@@ -1243,6 +1289,9 @@ impl Keystone {
             }
             Component::Files => {
                 pane = pane.child(self.file_list(cx));
+            }
+            Component::Notes => {
+                pane = pane.child(self.note_pane(cx));
             }
             Component::Changes => {
                 pane = pane.child(self.changes_list(cx));

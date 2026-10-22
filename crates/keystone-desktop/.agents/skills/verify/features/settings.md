@@ -31,5 +31,5 @@ Change the theme, fonts, density, and text size, and keep the choice across rest
 ## Gotchas
 
 - The font menus list only installed candidates, plus a saved font that is no longer installed. A headless desktop may offer few choices.
-- While the page is open, Ctrl+K still opens the palette over the page. A command aimed at the hidden workspace (new session, search, composer, rename, settle, sidebar, Files via Ctrl+Shift+E or Toggle files, Customize) closes the page first, then runs. `settings_yields_to_workspace` in `settings_page.rs` lists them. Ctrl+Enter does nothing on the page.
+- While the page is open, Ctrl+K still opens the palette over the page. A command aimed at the hidden workspace (new session, search, composer, rename, settle, sidebar, Files via Ctrl+Shift+E or Toggle files, Notes via Ctrl+Shift+J or Toggle notes, Customize) closes the page first, then runs. `settings_yields_to_workspace` in `settings_page.rs` lists them. Ctrl+Enter does nothing on the page.
 - `text_size` and `mono_font` are absent from older workspaces and load as the defaults (13 px, the first installed code font).

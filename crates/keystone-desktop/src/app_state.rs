@@ -305,11 +305,13 @@ impl AppState {
         self.publish(cx);
     }
 
-    /// Saves every window's draft, placement and project in one write, then everything
-    /// still waiting to be saved. The one save path for Quit, however it was asked for.
+    /// Saves each unsaved project note, then every window's draft, placement and project
+    /// in one write, then everything still waiting to be saved. The one save path for
+    /// Quit, however it was asked for.
     pub(crate) fn save(
         &mut self,
         drafts: Vec<ComposerDraft>,
+        notes: Vec<(ProjectId, String)>,
         windows: Vec<(WindowId, Placement, Option<ProjectId>)>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
@@ -324,6 +326,11 @@ impl AppState {
         let mut errors = Vec::new();
         let sessions: Vec<u64> = drafts.iter().map(|d| d.session).collect();
         let drafts = drafts.into_iter().map(|d| (d.session, d.text)).collect();
+        for (project, text) in notes {
+            if let Err(error) = self.store.set_note(&project, text) {
+                errors.push(format!("Note not saved. {error}"));
+            }
+        }
         match self.store.save_for_quit(drafts, windows, crate::now_ms()) {
             Ok(_) => self.pending.retain(
                 |update| !matches!(update, PendingSave::Draft(id, _) if sessions.contains(id)),
@@ -471,6 +478,20 @@ impl AppState {
             self.retry_updates();
         }
         self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    pub(crate) fn set_note(
+        &mut self,
+        project: &ProjectId,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self.store.set_note(project, text);
         self.publish(cx);
         result
     }

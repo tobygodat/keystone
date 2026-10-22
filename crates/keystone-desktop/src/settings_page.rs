@@ -208,6 +208,7 @@ impl Keystone {
             .capture_action(self.leave_settings::<ToggleSettle>(cx))
             .capture_action(self.leave_settings::<ToggleSidebar>(cx))
             .capture_action(self.leave_settings::<crate::files::ToggleFiles>(cx))
+            .capture_action(self.leave_settings::<crate::notes::ToggleNotes>(cx))
             .capture_action(self.leave_settings::<crate::changes::ToggleChanges>(cx))
             .capture_action(self.leave_settings::<OpenCustomize>(cx))
             .capture_action(self.leave_settings::<crate::session_tabs::NewTab>(cx))
@@ -1306,6 +1307,29 @@ mod tests {
             assert!(shown(cx, "files-tab-0"), "the Files surface is visible");
             keys(cx, "ctrl-shift-e");
             assert!(!shown(cx, "files-tab-0"), "focused Files closes");
+            settings_shortcuts_work(cx);
+        }
+    }
+
+    #[gpui::test]
+    fn settings_notes_commands_leave_the_page(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        seeded(&path);
+        let (_view, cx) = open_window(&path, cx);
+        for palette in [false, true] {
+            keys(cx, "ctrl-,");
+            if palette {
+                keys(cx, "ctrl-k");
+                cx.simulate_input("Toggle notes");
+                keys(cx, "enter");
+            } else {
+                keys(cx, "ctrl-shift-j");
+            }
+            assert!(!shown(cx, "settings-page"), "Notes leaves Settings");
+            assert!(shown(cx, "notes-editor"), "the Notes surface is visible");
+            keys(cx, "ctrl-shift-j");
+            assert!(!shown(cx, "notes-editor"), "focused Notes closes");
             settings_shortcuts_work(cx);
         }
     }

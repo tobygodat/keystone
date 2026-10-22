@@ -5,7 +5,7 @@ use gpui::{
     AnyElement, App, AppContext, ClipboardItem, Context, Entity, Focusable, IntoElement,
     KeyBinding, Render, WeakEntity, Window, div, prelude::*, px,
 };
-use keystone_core::{Axis, Component, Edit, Place};
+use keystone_core::Component;
 use keystone_ui::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -498,32 +498,8 @@ impl Keystone {
         }
     }
 
-    /// Closes the Files view when its tree has focus, brings an open one forward and
-    /// focuses it, or opens one to the right of the conversation the user last worked
-    /// in, else the first visible or declared one, and focuses its tree.
     pub(crate) fn toggle_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.shown_composition(cx);
-        if let Some((files, _)) = shown.views().find(|(_, c)| *c == Component::Files) {
-            if self.view_contains_focus(files, window, cx) {
-                return self.edit_surfaces(Edit::Close(files), window, cx);
-            }
-            self.reveal_view(files, window, cx);
-            return self.focus_files(window, cx);
-        }
-        let at = Place::Beside {
-            target: self.side_surface_target(cx),
-            axis: Axis::Row,
-            after: true,
-        };
-        self.open_surface(Component::Files, at, FILES_WIDTH, window, cx);
-        if let Some((files, _)) = self
-            .shown_composition(cx)
-            .views()
-            .find(|(_, c)| *c == Component::Files)
-        {
-            self.reveal_view(files, window, cx);
-            self.focus_files(window, cx);
-        }
+        self.toggle_surface(Component::Files, FILES_WIDTH, window, cx);
     }
 
     /// The conversation a side surface such as Files opens beside: the one the user

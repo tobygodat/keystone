@@ -6,6 +6,7 @@ use crate::changes::ToggleChanges;
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::handoff::HandOff;
+use crate::notes::ToggleNotes;
 use crate::projects::{OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
@@ -66,6 +67,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-e"],
         context: Some(APP),
         action: || Box::new(ToggleFiles),
+    },
+    Command {
+        id: "toggle-notes",
+        label: "Toggle notes",
+        keys: &["ctrl-shift-j"],
+        context: Some(APP),
+        action: || Box::new(ToggleNotes),
     },
     Command {
         id: "toggle-changes",
@@ -549,6 +557,21 @@ mod tests {
                     .any(|binding| binding.action().name() == name),
                 "{name} has no binding"
             );
+        }
+    }
+
+    /// Two open branches can each pick the same free chord; merging both must fail here.
+    #[test]
+    fn no_two_commands_share_a_key_in_one_context() {
+        let mut keys = HashSet::new();
+        for command in COMMANDS {
+            for key in command.keys {
+                assert!(
+                    keys.insert((command.context, *key)),
+                    "{key} is bound twice, the second time to {}",
+                    command.id
+                );
+            }
         }
     }
 

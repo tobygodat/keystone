@@ -13,6 +13,7 @@ mod handoff;
 mod integrations;
 mod mentions;
 mod model_selector;
+mod notes;
 mod notifications;
 mod presentation;
 mod projects;
@@ -278,7 +279,7 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
                 "Window not closed. Its commit message is not saved. {error}"
             )));
         }
-        if !composer {
+        if !composer || !view.save_notes(cx) {
             return Err(None);
         }
         let project = view.presentation.project.clone().ok();
@@ -342,6 +343,7 @@ fn request_quit(cx: &mut App) {
     cx.defer(move |cx| {
         let windows = open_windows(cx);
         let mut drafts = Vec::new();
+        let mut notes = Vec::new();
         let mut saved = Vec::new();
         let mut unsaved = None;
         for view in &windows {
@@ -359,13 +361,18 @@ fn request_quit(cx: &mut App) {
                     .iter()
                     .all(|o: &ComposerDraft| o.session != d.session)
             }));
+            for note in view.read(cx).unsaved_notes(cx) {
+                if notes.iter().all(|(project, _)| project != &note.0) {
+                    notes.push(note);
+                }
+            }
             let project = view.read(cx).presentation.project.clone().ok();
             if let Ok(placement) = handle.update(cx, |_, window, _| placement(window)) {
                 saved.push((id, placement, project));
             }
         }
         if state
-            .update(cx, |state, cx| state.save(drafts, saved, cx))
+            .update(cx, |state, cx| state.save(drafts, notes, saved, cx))
             .is_err()
         {
             if windows.is_empty() {
@@ -450,6 +457,7 @@ struct Keystone {
     prompt_list: Option<prompts::PromptList>,
     files: files::Files,
     changes: changes::Changes,
+    notes: notes::Notes,
     slash: slash_menu::SlashMenu,
     mentions: mentions::Mentions,
     attach: attachments::Attach,
@@ -823,6 +831,7 @@ impl Keystone {
             prompt_list: None,
             files: files::Files::default(),
             changes: changes::Changes::default(),
+            notes: notes::Notes::default(),
             slash,
             mentions,
             attach: attachments::Attach::new(cx),
@@ -1003,7 +1012,9 @@ impl Keystone {
         self.draft_save_task = None;
         let drafts = self.composer_draft(cx).into_iter().collect();
         self.state
-            .update(cx, |state, cx| state.save(drafts, Vec::new(), cx))
+            .update(cx, |state, cx| {
+                state.save(drafts, Vec::new(), Vec::new(), cx)
+            })
             .is_ok()
     }
 
@@ -3579,6 +3590,16 @@ impl Render for Keystone {
                 }),
             )
             .on_action(
+                self.scoped_listener(cx, |this, _: &notes::ToggleNotes, window, cx| {
+                    this.toggle_surface(
+                        keystone_core::Component::Notes,
+                        notes::NOTES_WIDTH,
+                        window,
+                        cx,
+                    )
+                }),
+            )
+            .on_action(
                 self.scoped_listener(cx, |this, _: &changes::ToggleChanges, window, cx| {
                     this.toggle_changes(window, cx)
                 }),
@@ -3763,6 +3784,11 @@ impl Render for Keystone {
                     this.choose_attachments(window, cx)
                 },
             ))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &prompts::InsertPrompt, window, cx| {
+                    this.open_prompt_list(window, cx)
+                }),
+            )
             .on_action(
                 self.scoped_listener(cx, |this, _: &prompts::InsertPrompt, window, cx| {
                     this.open_prompt_list(window, cx)

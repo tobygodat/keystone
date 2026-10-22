@@ -236,7 +236,7 @@ fn a_schema_2_database_gains_the_project_list() {
     let database = path.with_extension("sqlite3");
     rusqlite::Connection::open(&database)
         .unwrap()
-        .execute_batch("DROP TABLE projects; DROP TABLE prompts; DROP TABLE deliveries; PRAGMA user_version=2;")
+        .execute_batch("DROP TABLE projects; DROP TABLE prompts; DROP TABLE deliveries; DROP TABLE notes; PRAGMA user_version=2;")
         .unwrap();
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.workspace().sessions().len(), 1);

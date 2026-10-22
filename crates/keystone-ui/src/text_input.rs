@@ -181,6 +181,7 @@ pub struct TextInput {
     is_selecting: bool,
     text_size: TextSize,
     text_color: Color,
+    fill: bool,
 }
 
 impl EventEmitter<Changed> for TextInput {}
@@ -206,7 +207,15 @@ impl TextInput {
             is_selecting: false,
             text_size: TextSize::Base,
             text_color: Color::Default,
+            fill: false,
         }
+    }
+
+    /// A multiline field that fills its container's height and scrolls inside it,
+    /// instead of growing with its text up to eight rows.
+    pub fn fill_height(mut self) -> Self {
+        self.fill = true;
+        self
     }
 
     pub fn text_style(mut self, size: TextSize, color: Color) -> Self {
@@ -217,6 +226,11 @@ impl TextInput {
 
     pub fn value(&self) -> &str {
         &self.content
+    }
+
+    /// The selection in bytes of `value`; empty at the cursor when nothing is selected.
+    pub fn selected_range(&self) -> Range<usize> {
+        self.selected_range.clone()
     }
 
     pub fn set_value(&mut self, value: String, cx: &mut Context<Self>) {
@@ -1062,10 +1076,13 @@ impl Element for TextElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
+        if self.input.read(cx).fill {
+            style.size.height = relative(1.).into();
+        }
         let text_style = window.text_style();
         let line_height = window.line_height();
         let input = self.input.clone();
@@ -1079,7 +1096,9 @@ impl Element for TextElement {
                 })
                 .max(px(1.));
             let input = input.read(cx);
-            let height = if input.mode == InputMode::Multiline {
+            let height = if let (true, Some(height)) = (input.fill, known.height) {
+                height
+            } else if input.mode == InputMode::Multiline {
                 let rows = wrapped_rows(&input.content, width, &measured_style, 8, window);
                 (line_height * rows).max(px(28.))
             } else {
@@ -1281,6 +1300,7 @@ impl Render for TextInput {
             .w_full()
             // A single line is centred in a 28 px field that still takes clicks.
             .when(self.mode == InputMode::SingleLine, |d| d.h(px(28.)))
+            .when(self.fill, |d| d.h_full())
             .overflow_hidden()
             .text_size(self.text_size.px())
             .line_height(px(20.))

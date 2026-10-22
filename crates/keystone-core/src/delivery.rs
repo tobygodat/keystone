@@ -187,8 +187,11 @@ mod tests {
     #[test]
     fn schema_3_and_prompts_schema_4_databases_gain_deliveries() {
         for (version, removed) in [
-            (3, "DROP TABLE deliveries; DROP TABLE prompts;"),
-            (4, "DROP TABLE deliveries;"),
+            (
+                3,
+                "DROP TABLE notes; DROP TABLE deliveries; DROP TABLE prompts;",
+            ),
+            (4, "DROP TABLE notes; DROP TABLE deliveries;"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("workspace.json");
@@ -241,7 +244,7 @@ mod tests {
                 .query_one("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(schema, crate::database::SCHEMA_VERSION);
-            assert_eq!(schema, 5);
+            assert_eq!(schema, 6);
         }
     }
 

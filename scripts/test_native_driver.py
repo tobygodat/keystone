@@ -117,6 +117,15 @@ class PersistenceTest(unittest.TestCase):
         self.assertEqual([p['title'] for p in driver.read_workspace(self.state)['workspace']['prompts']],
                          ['First', 'Second'])
 
+    def test_projection_reads_notes_when_the_table_exists(self):
+        self.assertNotIn('notes', driver.read_workspace(self.state)['workspace'])
+        self.writer.execute('CREATE TABLE notes(project TEXT, position INTEGER, payload TEXT)')
+        self.writer.execute('INSERT INTO notes VALUES(?, ?, ?)',
+                            ('/a', 0, json.dumps({'project': '/a', 'text': 'Remember'})))
+        self.writer.commit()
+        self.assertEqual(driver.read_workspace(self.state)['workspace']['notes'],
+                         [{'project': '/a', 'text': 'Remember'}])
+
     def test_projection_uses_one_consistent_read_transaction(self):
         with driver.closing(driver.open_database(self.database)) as connection:
             writer = self.writer

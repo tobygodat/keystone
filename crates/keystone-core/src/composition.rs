@@ -31,20 +31,22 @@ pub enum Component {
     Files,
     /// The repository's changed files, with staging and commit.
     Changes,
+    Notes,
 }
 
 impl Component {
-    pub const ALL: [Component; 5] = [
+    pub const ALL: [Component; 6] = [
         Component::SessionList,
         Component::Conversation,
         Component::Composer,
         Component::Files,
         Component::Changes,
+        Component::Notes,
     ];
 
     pub fn allows(self, count: usize) -> bool {
         match self {
-            Self::SessionList | Self::Files | Self::Changes => count <= 1,
+            Self::SessionList | Self::Files | Self::Changes | Self::Notes => count <= 1,
             Self::Conversation => count >= 1,
             Self::Composer => count == 1,
         }
@@ -52,7 +54,10 @@ impl Component {
 
     /// Whether occurrences of this component can share an area as tabs.
     pub fn is_surface(self) -> bool {
-        matches!(self, Self::Conversation | Self::Files | Self::Changes)
+        matches!(
+            self,
+            Self::Conversation | Self::Files | Self::Changes | Self::Notes
+        )
     }
 }
 

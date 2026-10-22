@@ -184,9 +184,12 @@ fn schema_2_and_projects_schema_3_databases_gain_an_empty_prompt_list() {
     for (version, removed) in [
         (
             2,
-            "DROP TABLE deliveries; DROP TABLE prompts; DROP TABLE projects;",
+            "DROP TABLE notes; DROP TABLE deliveries; DROP TABLE prompts; DROP TABLE projects;",
         ),
-        (3, "DROP TABLE deliveries; DROP TABLE prompts;"),
+        (
+            3,
+            "DROP TABLE notes; DROP TABLE deliveries; DROP TABLE prompts;",
+        ),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");

@@ -650,7 +650,7 @@ fn a_provider_that_exits_while_keystone_runs_has_its_reply_completed_and_its_out
                 assert_eq!(reports[0].turn, TurnEvidence::Unknown);
                 assert!(!state.send_message(draft("next"), cx));
             }
-            state.save(Vec::new(), Vec::new(), cx).unwrap();
+            state.save(Vec::new(), Vec::new(), Vec::new(), cx).unwrap();
         });
         let restored = restored(&dir.join("sessions"), 1);
         state.read_with(cx, |state, _| {

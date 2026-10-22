@@ -18,6 +18,7 @@ mod database;
 mod delivery;
 pub mod integrations;
 mod layout;
+mod note;
 mod project;
 mod prompt;
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub use delivery::{Delivery, DeliveryState};
 pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
 };
+pub use note::Note;
 pub use project::{Project, ProjectId};
 use project::{ProjectLayouts, ProjectMap};
 pub use prompt::{Prompt, PromptFields};
@@ -567,14 +569,18 @@ pub struct Workspace {
     /// the workspace payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     prompts: Vec<Prompt>,
-    /// Unfinished commit messages, by the folder whose changes they describe. Saved
-    /// in their own projection, never in the workspace payload.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    commit_drafts: BTreeMap<String, String>,
     /// Launched sessions' results on their way to their parents, in launch order.
     /// Saved in their own projection, never in the workspace payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     deliveries: Vec<Delivery>,
+    /// Each project's note. Saved in their own projection, never in the workspace
+    /// payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<Note>,
+    /// Unfinished commit messages, by the folder whose changes they describe. Saved
+    /// in their own projection, never in the workspace payload.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    commit_drafts: BTreeMap<String, String>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -1598,7 +1604,8 @@ fn validate(snapshot: &Snapshot) -> StoreResult<()> {
             return Err(invalid("invalid or duplicate prompt ID").into());
         }
     }
-    delivery::validate(&snapshot.workspace)
+    delivery::validate(&snapshot.workspace)?;
+    note::validate(&snapshot.workspace)
 }
 
 /// Where a new session goes: selected in a window, saving `show` with it as

@@ -146,7 +146,7 @@ def workspace_projection(connection):
             'SELECT payload FROM workspace WHERE singleton=1').fetchone()[0])
         snapshot['workspace']['sessions'] = [json.loads(row[0]) for row in connection.execute(
             'SELECT payload FROM sessions ORDER BY position')]
-        for table in ('accounts', 'projects', 'prompts', 'deliveries'):
+        for table in ('accounts', 'projects', 'prompts', 'deliveries', 'notes'):
             if connection.execute(f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}'").fetchone():
                 rows = [json.loads(row[0]) for row in connection.execute(
                     f'SELECT payload FROM {table} ORDER BY position')]
