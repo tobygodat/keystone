@@ -2,8 +2,8 @@
 //!
 //! Drivers translate a provider's wire protocol into [`Event`]s and never do IO. The
 //! [`host`] module owns child processes, [`log`] stores completed items, [`worker`]
-//! keeps blocking work off the UI thread, and [`git`] runs the user's own git. See
-//! `docs/design/providers.md`.
+//! keeps blocking work off the UI thread, and [`git`] and [`github`] run the user's
+//! own git and gh. See `docs/design/providers.md`.
 
 pub mod claude;
 pub mod codex;
@@ -12,6 +12,7 @@ mod connection;
 mod driver;
 pub mod find;
 pub mod git;
+pub mod github;
 pub mod host;
 pub mod idle;
 mod item;

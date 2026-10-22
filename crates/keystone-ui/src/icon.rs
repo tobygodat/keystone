@@ -41,6 +41,7 @@ icons! {
     Right => "icons/right.svg", "<path d='m10 6 6 6-6 6'/>";
     Up => "icons/up.svg", "<path d='m5 12 7-7 7 7 M12 5v15'/>";
     Down => "icons/down.svg", "<path d='m5 12 7 7 7-7 M12 19V4'/>";
+    PullRequest => "icons/pull-request.svg", "<circle cx='6' cy='5' r='2'/><circle cx='6' cy='19' r='2'/><circle cx='18' cy='19' r='2'/><path d='M6 7v10 M18 17v-8a3 3 0 0 0-3-3h-4 M13 3.5 10.5 6 13 8.5'/>";
     Folder => "icons/folder.svg", "<path d='M3 6h6l2 3h10v11H3Z M3 6V4h6l2 2h7v3'/>";
     Refresh => "icons/refresh.svg", "<path d='M20 12a8 8 0 1 1-2.4-5.7 M20 4v5h-5'/>";
     Copy => "icons/copy.svg", "<rect x='8' y='8' width='12' height='12' rx='2'/><path d='M16 8V4H4v12h4'/>";

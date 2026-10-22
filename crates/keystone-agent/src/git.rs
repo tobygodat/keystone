@@ -45,15 +45,21 @@ pub enum Error {
     /// `git` could not be started at all.
     Spawn(String),
     /// git ran and failed. `output` is its stdout and stderr as they arrived,
-    /// including any hook's output.
-    Failed { command: String, output: String },
+    /// including any hook's output. `code` is its exit code, if it exited.
+    Failed {
+        command: String,
+        output: String,
+        code: Option<i32>,
+    },
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Spawn(error) => write!(f, "Couldn't run git: {error}"),
-            Self::Failed { command, output } if output.trim().is_empty() => {
+            Self::Failed {
+                command, output, ..
+            } if output.trim().is_empty() => {
                 write!(f, "{command} failed")
             }
             Self::Failed { output, .. } => f.write_str(output.trim_end()),
@@ -73,9 +79,20 @@ pub struct Branch {
     /// The commit HEAD names, or `None` before the first commit.
     pub oid: Option<String>,
     pub upstream: Option<String>,
+    /// The upstream is set but its branch is gone from the remote.
+    pub gone: bool,
     /// Commits ahead of and behind the upstream, when there is one.
     pub ahead: u32,
     pub behind: u32,
+    /// The branch is on the remote it pushes to, where a pull request comes from:
+    /// with a push remote configured, that remote has a branch of the same name;
+    /// otherwise its upstream is a branch of the same name, as after a first push.
+    /// A branch started from another, such as `origin/main`, is not. A push remote
+    /// whose fetch refspecs keep no copy of the branch can't be checked, so the branch
+    /// counts as published and gh says if it is not.
+    pub published: bool,
+    /// Commits not yet on the published branch.
+    pub unpushed: u32,
 }
 
 /// One-letter states of porcelain v2: `.` unchanged, `M` modified, `T` type changed,
@@ -129,7 +146,13 @@ pub struct Committed {
 /// a signing program or a credential helper that asks on the terminal fails at once
 /// instead of waiting for an answer nobody can type.
 fn git(folder: &Path) -> Command {
-    let mut command = Command::new("git");
+    program(Path::new("git"), folder)
+}
+
+/// `program` in `folder`, set up as [`git`] describes. Programs that run git
+/// themselves, such as `gh`, need the same.
+pub(crate) fn program(program: &Path, folder: &Path) -> Command {
+    let mut command = Command::new(program);
     for name in LOCAL_ENV {
         command.env_remove(name);
     }
@@ -150,11 +173,18 @@ fn git(folder: &Path) -> Command {
 }
 
 fn describe(command: &Command) -> String {
-    let args: Vec<_> = command
+    let program = Path::new(command.get_program())
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let args = command
         .get_args()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-    format!("git {}", args.join(" "))
+        .map(|arg| arg.to_string_lossy().into_owned());
+    std::iter::once(program)
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn tail(bytes: &[u8]) -> String {
@@ -164,7 +194,7 @@ fn tail(bytes: &[u8]) -> String {
 
 /// How a command's output is collected.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Output {
+pub(crate) enum Output {
     /// Stdout alone is returned, so warnings on stderr never reach a parser. A
     /// failure reports stderr.
     Separate,
@@ -174,7 +204,7 @@ enum Output {
 }
 
 /// Runs `command` with `input` on stdin.
-fn run(mut command: Command, input: Option<Vec<u8>>, output: Output) -> Result<Vec<u8>> {
+pub(crate) fn run(mut command: Command, input: Option<Vec<u8>>, output: Output) -> Result<Vec<u8>> {
     let name = describe(&command);
     let spawn = |error: io::Error| Error::Spawn(error.to_string());
     let (reader, writer) = io::pipe().map_err(spawn)?;
@@ -213,6 +243,7 @@ fn run(mut command: Command, input: Option<Vec<u8>>, output: Output) -> Result<V
         return Err(Error::Failed {
             command: name,
             output: tail(&written),
+            code: status.code(),
         });
     }
     Ok(written)
@@ -292,13 +323,82 @@ pub fn status(folder: &Path) -> Result<Status> {
         &format!("--untracked-files={untracked}"),
     ]);
     let output = run(command, None, Output::Separate)?;
-    let (branch, entries) = parse_status(&output);
+    let (mut branch, entries) = parse_status(&output);
+    if let Some(head) = &branch.head {
+        (branch.published, branch.unpushed) = publication(&root, head, &branch);
+    }
     Ok(Status {
         root,
         branch,
         entries,
         untracked_hidden,
     })
+}
+
+/// Whether `head` is published and how many commits it has that are not, as
+/// [`Branch::published`] describes. A config or ref that can't be read counts as
+/// not published, so it never hides the list.
+fn publication(root: &Path, head: &str, branch: &Branch) -> (bool, u32) {
+    if let Ok(Some(remote)) = push_remote(root, head) {
+        let Some(copy) = remote_copy(root, &remote, head) else {
+            return (true, 0);
+        };
+        let mut command = git(root);
+        command.args([
+            "rev-list",
+            "--count",
+            &format!("{copy}..refs/heads/{head}"),
+            "--",
+        ]);
+        return match run(command, None, Output::Separate) {
+            Ok(count) => (true, text(&count).trim().parse().unwrap_or(0)),
+            Err(_) => (false, 0),
+        };
+    }
+    let own = branch.upstream.is_some()
+        && !branch.gone
+        && config(root, &format!("branch.{head}.merge"))
+            .ok()
+            .flatten()
+            .is_some_and(|merge| merge == format!("refs/heads/{head}"));
+    (own, if own { branch.ahead } else { 0 })
+}
+
+/// Where `remote`'s fetch refspecs keep their copy of its branch `head`, such as
+/// `refs/remotes/origin/feature`. `None` when none of them fetches it.
+fn remote_copy(root: &Path, remote: &str, head: &str) -> Option<String> {
+    let mut command = git(root);
+    command.args(["config", "--get-all", &format!("remote.{remote}.fetch")]);
+    let refspecs = text(&run(command, None, Output::Separate).ok()?);
+    let source = format!("refs/heads/{head}");
+    refspecs.lines().find_map(|refspec| {
+        let (from, to) = refspec.trim().trim_start_matches('+').split_once(':')?;
+        match (from.split_once('*'), to.split_once('*')) {
+            (None, None) => (from == source).then(|| to.to_owned()),
+            (Some((prefix, suffix)), Some((into, after))) => {
+                let name = source.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                Some(format!("{into}{name}{after}"))
+            }
+            _ => None,
+        }
+    })
+}
+
+/// The branch checked out in `root`, or `None` on a detached HEAD.
+pub fn current_branch(root: &Path) -> Result<Option<String>> {
+    let mut command = git(root);
+    command.args(["symbolic-ref", "--quiet", "HEAD"]);
+    match run(command, None, Output::Separate) {
+        Ok(name) => {
+            let name = text(&name);
+            let name = name.trim_end();
+            Ok(Some(
+                name.strip_prefix("refs/heads/").unwrap_or(name).to_owned(),
+            ))
+        }
+        Err(Error::Failed { output, .. }) if output.trim().is_empty() => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -326,8 +426,12 @@ pub fn parse_status(output: &[u8]) -> (Branch, Vec<Entry>) {
                 match key {
                     "branch.oid" if value != "(initial)" => branch.oid = Some(value.into()),
                     "branch.head" if value != "(detached)" => branch.head = Some(value.into()),
-                    "branch.upstream" => branch.upstream = Some(value.into()),
+                    "branch.upstream" => {
+                        branch.upstream = Some(value.into());
+                        branch.gone = true;
+                    }
                     "branch.ab" => {
+                        branch.gone = false;
                         for count in value.split(' ') {
                             if let Some(n) = count.strip_prefix('+') {
                                 branch.ahead = n.parse().unwrap_or(0);
@@ -452,6 +556,125 @@ pub fn commit(root: &Path, message: &str) -> Result<Committed> {
     Ok(Committed { summary })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PushError {
+    /// The branch needs a remote and the repository has none.
+    NoRemote,
+    /// The branch needs a remote, and none of several is `origin` or configured as
+    /// the one to push to.
+    UnclearRemote(Vec<String>),
+    /// git ran and failed; a rejected push says so in its output.
+    Failed(Error),
+}
+
+impl fmt::Display for PushError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoRemote => f.write_str("This repository has no remote."),
+            Self::UnclearRemote(remotes) => write!(
+                f,
+                "This repository has several remotes ({}) and none is set to push to.",
+                remotes.join(", ")
+            ),
+            Self::Failed(error) => error.fmt(f),
+        }
+    }
+}
+
+impl From<Error> for PushError {
+    fn from(error: Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// `git config --get key`, or `None` when it is not set.
+fn config(root: &Path, key: &str) -> Result<Option<String>> {
+    let mut command = git(root);
+    command.args(["config", "--get", key]);
+    match run(command, None, Output::Separate) {
+        Ok(value) => Ok(Some(text(&value).trim_end().to_owned())),
+        Err(Error::Failed { output, .. }) if output.trim().is_empty() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The default branch of the checked-out branch's remote, such as `main`, as the
+/// remote's `HEAD` was last fetched. `None` when it is not known.
+pub fn default_branch(root: &Path) -> Option<String> {
+    let branch = current_branch(root).ok()??;
+    let remote = config(root, &format!("branch.{branch}.remote"))
+        .ok()
+        .flatten()
+        .filter(|remote| remote != ".")
+        .unwrap_or_else(|| "origin".into());
+    let mut command = git(root);
+    command.args([
+        "symbolic-ref",
+        "--quiet",
+        &format!("refs/remotes/{remote}/HEAD"),
+    ]);
+    let target = text(&run(command, None, Output::Separate).ok()?);
+    let name = target
+        .trim_end()
+        .strip_prefix(&format!("refs/remotes/{remote}/"))?;
+    Some(name.to_owned())
+}
+
+/// The remote the user set for pushing `branch`: its `pushRemote`, else
+/// `remote.pushDefault`.
+fn push_remote(root: &Path, branch: &str) -> Result<Option<String>> {
+    match config(root, &format!("branch.{branch}.pushRemote"))? {
+        Some(remote) => Ok(Some(remote)),
+        None => config(root, "remote.pushDefault"),
+    }
+}
+
+/// Pushes local `branch` to the branch of the same name on its push remote, and never
+/// forces. The refspec is spelled out in full, so a configured push refspec, mirror
+/// or matching setting never picks other branches, and no branch name can turn into
+/// refspec syntax. The remote is the branch's `pushRemote`, then
+/// `remote.pushDefault`, its upstream's remote, `origin`, or the only remote.
+///
+/// The pushed branch becomes the upstream when there is none, or when the upstream
+/// is another branch, such as `origin/main` it was started from, and no push remote
+/// is configured. A configured push remote keeps the upstream as it is. Returns git's
+/// own output, which a rejected push's error carries too.
+pub fn push(root: &Path, branch: &str) -> std::result::Result<String, PushError> {
+    let upstream = config(root, &format!("branch.{branch}.remote"))?.filter(|r| r != ".");
+    let own = config(root, &format!("branch.{branch}.merge"))?.as_deref()
+        == Some(&format!("refs/heads/{branch}"));
+    let configured = push_remote(root, branch)?;
+    let set_upstream = upstream.is_none() || (!own && configured.is_none());
+    let remote = match configured.or_else(|| upstream.clone()) {
+        Some(remote) => remote,
+        None => {
+            let mut list = git(root);
+            list.arg("remote");
+            let names: Vec<String> = text(&run(list, None, Output::Separate)?)
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            match names.as_slice() {
+                [] => return Err(PushError::NoRemote),
+                [only] => only.clone(),
+                _ if names.iter().any(|name| name == "origin") => "origin".into(),
+                _ => return Err(PushError::UnclearRemote(names)),
+            }
+        }
+    };
+    let mut command = git(root);
+    command.args(["push", "--no-follow-tags", "--recurse-submodules=no"]);
+    if set_upstream {
+        command.arg("--set-upstream");
+    }
+    command.args([
+        "--",
+        &remote,
+        &format!("refs/heads/{branch}:refs/heads/{branch}"),
+    ]);
+    Ok(text(&run(command, None, Output::Merged)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,8 +735,11 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
                 head: Some("feature/x".into()),
                 oid: Some("1234".into()),
                 upstream: Some("origin/feature/x".into()),
+                gone: false,
                 ahead: 2,
                 behind: 3,
+                published: false,
+                unpushed: 0,
             }
         );
         assert_eq!(
@@ -704,6 +930,348 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
         stage(root, &["x.rs".into()]).unwrap();
         let error = commit(root, "verify commit").unwrap_err();
         assert_eq!(error.to_string(), "rust: x.rs\nno terminal");
+    }
+
+    fn commit_file(root: &Path, name: &str, message: &str) {
+        fs::write(root.join(name), message).unwrap();
+        stage(root, &[name.into()]).unwrap();
+        commit(root, message).unwrap();
+    }
+
+    #[test]
+    fn push_sets_an_upstream_then_pushes_and_a_rejection_forces_nothing() {
+        let dir = repository();
+        let root = dir.path();
+        let remote = tempfile::tempdir().unwrap();
+        sh(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        commit_file(root, "a.txt", "first");
+        assert_eq!(push(root, "main"), Err(PushError::NoRemote));
+        sh(
+            root,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        sh(root, &["switch", "-q", "-c", "feature"]);
+
+        let output = push(root, "feature").unwrap();
+        assert!(output.contains("[new branch]"), "{output}");
+        let pushed = |name: &str| sh(remote.path(), &["rev-parse", name]);
+        assert_eq!(pushed("feature"), sh(root, &["rev-parse", "HEAD"]));
+        let branch = super::status(root).unwrap().branch;
+        assert_eq!(branch.upstream.as_deref(), Some("origin/feature"));
+        assert_eq!((branch.ahead, branch.behind), (0, 0));
+        assert!(branch.published);
+
+        commit_file(root, "b.txt", "second");
+        assert_eq!(super::status(root).unwrap().branch.ahead, 1);
+        push(root, "feature").unwrap();
+        assert_eq!(pushed("feature"), sh(root, &["rev-parse", "HEAD"]));
+        assert_eq!(super::status(root).unwrap().branch.ahead, 0);
+
+        let other = tempfile::tempdir().unwrap();
+        sh(
+            other.path(),
+            &[
+                "clone",
+                "-q",
+                "-b",
+                "feature",
+                remote.path().to_str().unwrap(),
+                ".",
+            ],
+        );
+        for (key, value) in [
+            ("user.name", "Other"),
+            ("user.email", "o@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ".git/hooks"),
+        ] {
+            sh(other.path(), &["config", key, value]);
+        }
+        sh(
+            other.path(),
+            &["commit", "-q", "--allow-empty", "-m", "theirs"],
+        );
+        sh(other.path(), &["push", "-q"]);
+        let theirs = pushed("feature");
+        commit_file(root, "c.txt", "ours");
+        let Err(PushError::Failed(error)) = push(root, "feature") else {
+            panic!("a diverged push must fail");
+        };
+        assert!(error.to_string().contains("[rejected]"), "{error}");
+        assert_eq!(pushed("feature"), theirs, "nothing was forced");
+    }
+
+    #[test]
+    fn a_push_sends_only_the_branch_and_no_tags() {
+        let dir = repository();
+        let root = dir.path();
+        let origin = with_origin(root);
+        sh(root, &["config", "push.followTags", "true"]);
+        sh(root, &["switch", "-q", "-c", "feature"]);
+        commit_file(root, "f.txt", "feature");
+        sh(root, &["tag", "-a", "-m", "v1", "v1"]);
+        let output = push(root, "feature").unwrap();
+        assert!(!output.contains("v1"), "{output}");
+        assert_eq!(sh(origin.path(), &["tag", "--list"]), "");
+    }
+
+    #[test]
+    fn a_branch_whose_upstream_is_gone_is_not_published() {
+        let dir = repository();
+        let root = dir.path();
+        let origin = with_origin(root);
+        sh(root, &["switch", "-q", "-c", "feature"]);
+        push(root, "feature").unwrap();
+        assert!(super::status(root).unwrap().branch.published);
+        sh(origin.path(), &["branch", "-q", "-D", "feature"]);
+        sh(root, &["fetch", "-q", "--prune", "origin"]);
+        let branch = super::status(root).unwrap().branch;
+        assert_eq!(branch.upstream.as_deref(), Some("origin/feature"));
+        assert!(branch.gone && !branch.published);
+    }
+
+    #[test]
+    fn a_branch_started_from_another_gets_its_own_upstream() {
+        let dir = repository();
+        let root = dir.path();
+        let remote = tempfile::tempdir().unwrap();
+        sh(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        commit_file(root, "a.txt", "first");
+        sh(
+            root,
+            &["remote", "add", "upstream", remote.path().to_str().unwrap()],
+        );
+        sh(root, &["push", "-q", "-u", "upstream", "main"]);
+        sh(
+            root,
+            &["switch", "-q", "-c", "topic", "--track", "upstream/main"],
+        );
+        commit_file(root, "b.txt", "topic work");
+        assert!(!super::status(root).unwrap().branch.published);
+        push(root, "topic").unwrap();
+        assert_eq!(
+            sh(remote.path(), &["rev-parse", "main"]),
+            sh(root, &["rev-parse", "HEAD~1"]),
+            "main is untouched"
+        );
+        assert_eq!(
+            super::status(root).unwrap().branch.upstream.as_deref(),
+            Some("upstream/topic")
+        );
+        assert_eq!(
+            default_branch(root),
+            None,
+            "the remote's HEAD was never read"
+        );
+        sh(root, &["remote", "set-head", "upstream", "main"]);
+        assert_eq!(default_branch(root).as_deref(), Some("main"));
+
+        sh(root, &["switch", "-q", "-c", "loose"]);
+        sh(root, &["remote", "add", "fork", "/nowhere"]);
+        assert_eq!(
+            push(root, "loose"),
+            Err(PushError::UnclearRemote(vec![
+                "fork".into(),
+                "upstream".into()
+            ]))
+        );
+        sh(root, &["config", "remote.pushDefault", "upstream"]);
+        push(root, "loose").unwrap();
+        assert_eq!(
+            sh(remote.path(), &["rev-parse", "loose"]),
+            sh(root, &["rev-parse", "HEAD"])
+        );
+    }
+
+    /// A repository with `main` committed and pushed to a bare `origin`, which is
+    /// returned.
+    fn with_origin(root: &Path) -> tempfile::TempDir {
+        let remote = tempfile::tempdir().unwrap();
+        sh(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        commit_file(root, "a.txt", "first");
+        sh(
+            root,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        sh(root, &["push", "-q", "-u", "origin", "main"]);
+        remote
+    }
+
+    #[test]
+    fn push_names_its_branch_so_push_settings_and_odd_names_never_reach_other_branches() {
+        let dir = repository();
+        let root = dir.path();
+        let remote = with_origin(root);
+        let main = sh(remote.path(), &["rev-parse", "main"]);
+        sh(root, &["switch", "-q", "-c", "feature"]);
+        commit_file(root, "b.txt", "feature work");
+        push(root, "feature").unwrap();
+        sh(
+            root,
+            &[
+                "config",
+                "remote.origin.push",
+                "+refs/heads/feature:refs/heads/main",
+            ],
+        );
+        sh(root, &["config", "push.default", "matching"]);
+        commit_file(root, "c.txt", "more feature work");
+        push(root, "feature").unwrap();
+        assert_eq!(
+            sh(remote.path(), &["rev-parse", "main"]),
+            main,
+            "a forcing push refspec in the config never moves main"
+        );
+        assert_eq!(
+            sh(remote.path(), &["rev-parse", "feature"]),
+            sh(root, &["rev-parse", "HEAD"])
+        );
+        sh(root, &["config", "--unset", "remote.origin.push"]);
+
+        let feature = sh(remote.path(), &["rev-parse", "feature"]);
+        sh(root, &["switch", "-q", "-c", "+feature", "main"]);
+        commit_file(root, "d.txt", "plus work");
+        push(root, "+feature").unwrap();
+        assert_eq!(
+            sh(remote.path(), &["rev-parse", "feature"]),
+            feature,
+            "a branch named +feature is not a forced push of feature"
+        );
+        assert_eq!(
+            sh(remote.path(), &["rev-parse", "refs/heads/+feature"]),
+            sh(root, &["rev-parse", "HEAD"])
+        );
+
+        sh(root, &["switch", "-q", "main"]);
+        commit_file(root, "e.txt", "on main meanwhile");
+        let before = sh(remote.path(), &["rev-parse", "main"]);
+        sh(root, &["switch", "-q", "feature"]);
+        commit_file(root, "f.txt", "feature again");
+        sh(root, &["switch", "-q", "main"]);
+        push(root, "feature").unwrap();
+        assert_eq!(
+            sh(remote.path(), &["rev-parse", "main"]),
+            before,
+            "the branch asked for is pushed, not whatever HEAD became"
+        );
+        assert_eq!(
+            sh(remote.path(), &["rev-parse", "feature"]),
+            sh(root, &["rev-parse", "feature"])
+        );
+    }
+
+    #[test]
+    fn a_push_remote_gets_the_branch_and_the_upstream_stays() {
+        let dir = repository();
+        let root = dir.path();
+        let _origin = with_origin(root);
+        let fork = tempfile::tempdir().unwrap();
+        sh(fork.path(), &["init", "-q", "--bare", "-b", "main"]);
+        sh(
+            root,
+            &["remote", "add", "fork", fork.path().to_str().unwrap()],
+        );
+        sh(root, &["switch", "-q", "-c", "feature"]);
+        push(root, "feature").unwrap();
+        sh(root, &["config", "remote.pushDefault", "fork"]);
+        let status = super::status(root).unwrap();
+        assert_eq!(
+            (status.branch.ahead, status.branch.published),
+            (0, false),
+            "up to date with origin, but not yet on the push remote"
+        );
+        push(root, "feature").unwrap();
+        assert_eq!(
+            sh(fork.path(), &["rev-parse", "feature"]),
+            sh(root, &["rev-parse", "HEAD"]),
+            "up to date with origin, the push still reaches the push remote"
+        );
+        assert_eq!(
+            super::status(root).unwrap().branch.upstream.as_deref(),
+            Some("origin/feature"),
+            "a triangular setup keeps its upstream"
+        );
+
+        sh(
+            root,
+            &["switch", "-q", "-c", "topic", "--track", "origin/main"],
+        );
+        commit_file(root, "t.txt", "topic work");
+        assert!(!super::status(root).unwrap().branch.published);
+        push(root, "topic").unwrap();
+        let after = super::status(root).unwrap().branch;
+        assert_eq!(after.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(
+            (after.published, after.unpushed, after.ahead),
+            (true, 0, 1),
+            "nothing is left to push to the fork, though it is ahead of origin/main"
+        );
+        assert_eq!(
+            sh(fork.path(), &["rev-parse", "topic"]),
+            sh(root, &["rev-parse", "HEAD"])
+        );
+        commit_file(root, "u.txt", "more topic work");
+        assert_eq!(super::status(root).unwrap().branch.unpushed, 1);
+
+        sh(root, &["config", "--unset-all", "remote.fork.fetch"]);
+        sh(
+            root,
+            &[
+                "config",
+                "remote.fork.fetch",
+                "+refs/heads/*:refs/remotes/mine/*",
+            ],
+        );
+        sh(root, &["fetch", "-q", "fork"]);
+        assert_eq!(
+            super::status(root).unwrap().branch.unpushed,
+            1,
+            "a fetch refspec with its own folder is followed"
+        );
+        sh(root, &["config", "--unset-all", "remote.fork.fetch"]);
+        sh(
+            root,
+            &[
+                "config",
+                "remote.fork.fetch",
+                "+refs/heads/main:refs/remotes/fork/main",
+            ],
+        );
+        let unfetched = super::status(root).unwrap().branch;
+        assert_eq!(
+            (unfetched.published, unfetched.unpushed),
+            (true, 0),
+            "a push remote that never fetches the branch can't be checked, so gh decides"
+        );
+    }
+
+    #[test]
+    fn a_branch_named_like_a_tag_is_still_the_current_branch() {
+        let dir = repository();
+        let root = dir.path();
+        let _origin = with_origin(root);
+        sh(root, &["switch", "-q", "-c", "release"]);
+        sh(root, &["tag", "release"]);
+        sh(root, &["remote", "set-head", "origin", "main"]);
+        assert_eq!(current_branch(root).unwrap().as_deref(), Some("release"));
+        sh(root, &["switch", "-q", "--detach"]);
+        assert_eq!(current_branch(root).unwrap(), None);
+    }
+
+    #[test]
+    fn an_upstream_whose_name_only_ends_like_the_branch_is_not_its_own() {
+        let dir = repository();
+        let root = dir.path();
+        let _origin = with_origin(root);
+        sh(root, &["push", "-q", "origin", "main:team/leaf"]);
+        sh(root, &["fetch", "-q", "origin"]);
+        sh(
+            root,
+            &["switch", "-q", "-c", "leaf", "--track", "origin/team/leaf"],
+        );
+        let branch = super::status(root).unwrap().branch;
+        assert_eq!(branch.upstream.as_deref(), Some("origin/team/leaf"));
+        assert!(!branch.published);
     }
 
     #[test]

@@ -1329,6 +1329,7 @@ impl Keystone {
                     .children(
                         branch.map(|(branch, missing)| worktrees::branch_chip(branch, missing)),
                     )
+                    .children(self.pull_request_link(cx))
                     .child(self.own_press(handoff::button(), cx))
             })
             .child(div().flex_1())

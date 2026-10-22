@@ -103,6 +103,13 @@ pub enum LastTurn {
     Failed,
 }
 
+/// A pull request made, or found, for a session's branch through the user's `gh`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
+}
+
 /// Why a session needs the user, in priority order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Attention {
@@ -202,6 +209,9 @@ pub struct Session {
     /// session, leaving that one unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handed_off_from: Option<u64>,
+    /// The pull request last made or found for the session's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull_request: Option<PullRequest>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -287,6 +297,7 @@ impl Session {
             model_locked: Some(false),
             account: None,
             handed_off_from: None,
+            pull_request: None,
             unknown: Map::new(),
         }
     }
@@ -351,6 +362,10 @@ impl Session {
     /// The session this one was handed off from, if any.
     pub fn handed_off_from(&self) -> Option<u64> {
         self.handed_off_from
+    }
+
+    pub fn pull_request(&self) -> Option<&PullRequest> {
+        self.pull_request.as_ref()
     }
 
     /// Whether the session has sent anything to its provider. The provider and model
@@ -803,6 +818,7 @@ impl Store {
         };
         let directory = directory.clone();
         let worktree = from.worktree().cloned();
+        let pull_request = from.pull_request.clone();
         // A placeholder would give way to the handoff text's first words on Send.
         let title = match from.title_source {
             TitleSource::Placeholder => format!("Continued from session {source}"),
@@ -818,6 +834,7 @@ impl Store {
                 session.title_source = TitleSource::FirstMessage;
                 session.draft = draft;
                 session.handed_off_from = Some(source);
+                session.pull_request = pull_request;
                 session
             },
             Some(window),
@@ -1382,6 +1399,14 @@ impl Store {
         attachments: Vec<Attachment>,
     ) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.draft_attachments = attachments)
+    }
+
+    pub fn set_pull_request(
+        &mut self,
+        id: u64,
+        pull_request: PullRequest,
+    ) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.pull_request = Some(pull_request))
     }
 
     /// Keeps `text` as `folder`'s unfinished commit message, or forgets it when empty.
@@ -2084,6 +2109,44 @@ mod tests {
                 .workspace()
                 .commit_draft("/repo/.keystone/worktrees/a"),
             "Worktree work"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_is_saved_on_its_session_through_restarts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let project = WorkingDirectory::new(directory.path()).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Codex, &project, 1).unwrap();
+        store.create(Provider::Claude, &project, 2).unwrap();
+        let pull_request = PullRequest {
+            number: 12,
+            url: "https://github.com/owner/repo/pull/12".into(),
+        };
+        store.set_pull_request(1, pull_request.clone()).unwrap();
+        let writes = store.writes();
+        store.set_pull_request(1, pull_request.clone()).unwrap();
+        assert_eq!(
+            store.writes(),
+            writes,
+            "the same pull request writes nothing"
+        );
+        assert!(store.set_pull_request(9, pull_request.clone()).is_err());
+
+        let reopened = Store::open(&path).unwrap();
+        let sessions = reopened.workspace().sessions();
+        assert_eq!(sessions[0].pull_request(), Some(&pull_request));
+        assert_eq!(sessions[1].pull_request(), None);
+        assert_eq!(
+            serde_json::to_value(&sessions[0]).unwrap()["pull_request"],
+            serde_json::json!({"number": 12, "url": "https://github.com/owner/repo/pull/12"})
+        );
+        assert!(
+            serde_json::to_value(&sessions[1])
+                .unwrap()
+                .get("pull_request")
+                .is_none()
         );
     }
 
@@ -2997,6 +3060,39 @@ mod tests {
             store.workspace().sessions()[1].handed_off_from(),
             Some(source)
         );
+    }
+
+    #[test]
+    fn a_handoff_keeps_the_pull_request_of_its_branch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let project = WorkingDirectory::new(directory.path()).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Claude, &project, 1).unwrap();
+        let pull_request = PullRequest {
+            number: 7,
+            url: "https://github.com/owner/repo/pull/7".into(),
+        };
+        store.set_pull_request(1, pull_request.clone()).unwrap();
+        let handed = store
+            .hand_off(
+                1,
+                Provider::Codex,
+                "context".into(),
+                2,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap()
+            .value;
+        let reopened = Store::open(&path).unwrap();
+        let new = reopened
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|session| session.id() == handed)
+            .unwrap();
+        assert_eq!(new.pull_request(), Some(&pull_request));
     }
 
     #[test]

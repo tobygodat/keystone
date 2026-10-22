@@ -464,6 +464,23 @@ impl AppState {
         Ok(())
     }
 
+    /// Saves the pull request made or found for `session`'s branch, and shows it.
+    pub(crate) fn set_pull_request(
+        &mut self,
+        session: u64,
+        pull_request: keystone_core::PullRequest,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.phase == Phase::Exiting {
+            return Err("Keystone is exiting.".into());
+        }
+        self.store
+            .set_pull_request(session, pull_request)
+            .map_err(|error| error.to_string())?;
+        self.publish(cx);
+        Ok(())
+    }
+
     pub(crate) fn set_approval_mode(
         &mut self,
         id: u64,

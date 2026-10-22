@@ -1,5 +1,6 @@
 //! The Changes surface: the session folder's repository as a list of changed files,
-//! with staging and commit through the user's own git. There is no diff view.
+//! with staging, commit and push through the user's own git, and pull requests
+//! through the user's own `gh`. There is no diff view.
 
 use crate::app_state::AppState;
 use crate::arrangement_editor::FILES_WIDTH;
@@ -9,9 +10,10 @@ use gpui::{
     AnyElement, App, AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, IntoElement, KeyBinding, Render, Task, WeakEntity, Window, div, prelude::*, px,
 };
-use keystone_agent::git::{self, Entry, Status};
+use keystone_agent::git::{self, Entry, PushError, Status};
+use keystone_agent::github;
 use keystone_agent::worker::Worker;
-use keystone_core::{Axis, Component, Edit, Place};
+use keystone_core::{Axis, Component, Edit, Place, PullRequest};
 use keystone_ui::prelude::*;
 use keystone_ui::text_input::Changed;
 use std::cell::RefCell;
@@ -248,12 +250,70 @@ fn rows(status: &Status) -> Vec<Row> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Notice {
     Committed(String),
-    /// A git command failed; the output is git's and its hooks', as they wrote it.
+    /// git's output from a push that worked.
+    Pushed(String),
+    /// A pull request made, or found already open, and saved on the session.
+    PullRequest {
+        lead: &'static str,
+        pull_request: PullRequest,
+    },
+    /// A command failed; the output is git's and its hooks', or gh's, as they wrote it.
     Failed {
         title: &'static str,
         output: String,
     },
+    /// Something to do in a terminal first, with the command to run there. `id`
+    /// names the case for tests and native verification.
+    Hint {
+        id: &'static str,
+        title: String,
+        command: &'static str,
+        output: Option<String>,
+    },
     Info(&'static str),
+}
+
+impl Notice {
+    /// What to tell the user when gh can't make a pull request.
+    fn github(error: github::Error) -> Self {
+        match error {
+            github::Error::Missing => Notice::Hint {
+                id: "changes-hint-gh-missing",
+                title: "GitHub CLI (gh) is not installed. Install it from cli.github.com, then sign in from a terminal:".into(),
+                command: github::SIGN_IN,
+                output: None,
+            },
+            github::Error::SignedOut { output } => Notice::Hint {
+                id: "changes-hint-gh-signed-out",
+                title: "GitHub CLI is not signed in, or its login could not be checked. Sign in from a terminal, then try again:".into(),
+                command: github::SIGN_IN,
+                output: Some(output),
+            },
+            github::Error::Exists(pull_request) => Notice::PullRequest {
+                lead: "This branch already has pull request",
+                pull_request,
+            },
+            github::Error::Failed { output } => Notice::Failed {
+                title: "Couldn't create the pull request. Your text is kept.",
+                output,
+            },
+        }
+    }
+}
+
+/// The form `gh pr create` is filled from.
+struct PullRequestForm {
+    /// The session the form was opened for, which the pull request is saved on.
+    session: Option<u64>,
+    /// The branch the form was opened for. gh works on the checked-out branch, so
+    /// creating is refused once another is checked out.
+    branch: String,
+    title: Entity<TextInput>,
+    body: Entity<TextInput>,
+    base: Entity<TextInput>,
+    draft: bool,
+    /// What gh is doing for the form.
+    busy: Option<&'static str>,
 }
 
 pub(crate) struct ChangesPanel {
@@ -272,6 +332,11 @@ pub(crate) struct ChangesPanel {
     reading: Option<bool>,
     /// The message a commit in flight took, so a success clears only that text.
     committing: Option<String>,
+    pushing: bool,
+    /// The session this panel was last drawn for, which a new pull request form is
+    /// opened for.
+    session: Option<u64>,
+    form: Option<PullRequestForm>,
     notice: Option<Notice>,
     /// The message changed since it was last saved.
     unsaved: bool,
@@ -321,6 +386,9 @@ impl ChangesPanel {
             focus: cx.focus_handle(),
             reading: None,
             committing: None,
+            pushing: false,
+            session: None,
+            form: None,
             notice: None,
             unsaved: false,
             draft_task: None,
@@ -568,6 +636,407 @@ impl ChangesPanel {
         self.refresh(cx);
     }
 
+    /// Pushes the branch shown, giving it an upstream when it needs one. Never forces.
+    fn push(&mut self, cx: &mut Context<Self>) {
+        if self.pushing || self.committing.is_some() {
+            return;
+        }
+        let Some((root, Some(branch))) = self
+            .status()
+            .map(|status| (status.root.clone(), status.branch.head.clone()))
+        else {
+            return;
+        };
+        self.pushing = true;
+        self.notice = None;
+        cx.notify();
+        self.run(
+            move || git::push(&root, &branch),
+            |this, result, cx| {
+                this.pushing = false;
+                this.notice = Some(match result {
+                    Ok(output) => Notice::Pushed(output),
+                    Err(PushError::NoRemote) => Notice::Hint {
+                        id: "changes-hint-no-remote",
+                        title: "This repository has no remote. Add one from a terminal, then push:"
+                            .into(),
+                        command: "git remote add origin <url>",
+                        output: None,
+                    },
+                    Err(PushError::UnclearRemote(remotes)) => Notice::Hint {
+                        id: "changes-hint-unclear-remote",
+                        title: format!(
+                            "This repository has several remotes ({}) and none is set to push to. Choose one from a terminal:",
+                            remotes.join(", ")
+                        ),
+                        command: "git config remote.pushDefault <remote>",
+                        output: None,
+                    },
+                    Err(PushError::Failed(error)) => {
+                        let output = error.to_string();
+                        let rejected = output.contains("[rejected]")
+                            || output.contains("[remote rejected]");
+                        Notice::Failed {
+                            title: if rejected {
+                                "Push rejected. Nothing was forced."
+                            } else {
+                                "Push failed."
+                            },
+                            output,
+                        }
+                    }
+                });
+                cx.notify();
+            },
+            cx,
+        );
+        self.refresh(cx);
+    }
+
+    /// Opens the pull request form, titled after the session, for a published branch
+    /// with nothing left to push. Whether gh is signed in shows when it creates.
+    fn open_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.form.is_some() || self.session.is_none() {
+            return;
+        }
+        let Some(status) = self.status() else {
+            return;
+        };
+        let Some(branch) = status.branch.head.clone() else {
+            return;
+        };
+        if !status.branch.published {
+            self.notice = Some(Notice::Info(
+                "Push the branch before creating a pull request.",
+            ));
+            return cx.notify();
+        }
+        if status.branch.unpushed > 0 {
+            self.notice = Some(Notice::Info(
+                "Push your latest commits before creating a pull request.",
+            ));
+            return cx.notify();
+        }
+        if let Err(error) = github::locate() {
+            self.notice = Some(Notice::github(error));
+            return cx.notify();
+        }
+        let root = status.root.clone();
+        let title = self
+            .session
+            .zip(self.state.upgrade())
+            .and_then(|(id, state)| Some(state.read(cx).session(id)?.title().to_owned()))
+            .unwrap_or_default();
+        let input = |placeholder: &str, mode, value: String, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                let mut input =
+                    TextInput::new(placeholder, mode, cx).text_style(TextSize::Ui, Color::Strong);
+                input.set_value(value, cx);
+                input
+            })
+        };
+        let form = PullRequestForm {
+            session: self.session,
+            branch,
+            title: input("Title", InputMode::SingleLine, title, cx),
+            body: input("Description", InputMode::Multiline, String::new(), cx),
+            base: input("Default branch", InputMode::SingleLine, String::new(), cx),
+            draft: false,
+            busy: None,
+        };
+        form.title.focus_handle(cx).focus(window, cx);
+        let base = form.base.downgrade();
+        self.form = Some(form);
+        self.notice = None;
+        cx.notify();
+        self.run(
+            move || git::default_branch(&root),
+            move |_, default, cx| {
+                if let (Some(default), Some(base)) = (default, base.upgrade())
+                    && base.read(cx).value().is_empty()
+                {
+                    base.update(cx, |input, cx| input.set_value(default, cx));
+                }
+            },
+            cx,
+        );
+    }
+
+    /// `gh pr create` from the form. The new pull request, or the one gh says the
+    /// branch already has, is saved on the session the form was opened for, even
+    /// when this window has closed by the time gh answers.
+    fn create_pull_request(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.status().map(|status| status.root.clone()) else {
+            return;
+        };
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        if form.busy.is_some() {
+            return;
+        }
+        let request = github::Request {
+            title: form.title.read(cx).value().trim().to_owned(),
+            body: form.body.read(cx).value().to_owned(),
+            base: form.base.read(cx).value().trim().to_owned(),
+            draft: form.draft,
+        };
+        if request.title.is_empty() {
+            self.notice = Some(Notice::Info("Give the pull request a title."));
+            return cx.notify();
+        }
+        form.busy = Some("Creating…");
+        let (session, branch) = (form.session, form.branch.clone());
+        self.notice = None;
+        cx.notify();
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        let (sender, receiver) = oneshot::channel();
+        worker.run(move || {
+            let result = match git::current_branch(&root) {
+                Ok(Some(current)) if current == branch => github::create(&root, &request),
+                Ok(current) => Err(github::Error::Failed {
+                    output: format!(
+                        "The form is for {branch}, but {} is checked out now. Check out {branch}, or close the form and open it again.",
+                        current.as_deref().unwrap_or("no branch")
+                    ),
+                }),
+                Err(error) => Err(github::Error::Failed {
+                    output: error.to_string(),
+                }),
+            };
+            let _ = sender.send(result);
+        });
+        let state = self.state.clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.await else {
+                return;
+            };
+            let notice = match result {
+                Ok(pull_request) => Notice::PullRequest {
+                    lead: "Created pull request",
+                    pull_request,
+                },
+                Err(error) => Notice::github(error),
+            };
+            let saved = match (&notice, session) {
+                (Notice::PullRequest { pull_request, .. }, Some(id)) => state
+                    .update(cx, |state, cx| {
+                        state.set_pull_request(id, pull_request.clone(), cx)
+                    })
+                    .unwrap_or_else(|_| Err("Keystone is closing.".into())),
+                _ => Ok(()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(form) = &mut this.form {
+                    form.busy = None;
+                }
+                if let Notice::PullRequest { pull_request, .. } = &notice {
+                    this.form = None;
+                    if let Err(output) = saved {
+                        this.notice = Some(Notice::Failed {
+                            title: "The pull request was made, but not saved on the session.",
+                            output: format!("{}\n{output}", pull_request.url),
+                        });
+                        return cx.notify();
+                    }
+                }
+                this.notice = Some(notice);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Closes the form, unless gh is still working for it.
+    fn cancel_form(&mut self, cx: &mut Context<Self>) {
+        if self.form.as_ref().is_some_and(|form| form.busy.is_none()) {
+            self.form = None;
+            cx.notify();
+        }
+    }
+
+    /// The upstream and its ahead and behind counts, with Push and Create pull request.
+    fn sync_row(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let branch = &self.status()?.branch;
+        let published = branch.published;
+        let (state, tip) = match (&branch.head, &branch.upstream) {
+            (None, _) => ("Not on a branch".to_owned(), None),
+            (Some(_), Some(upstream)) if published => (upstream.clone(), None),
+            (Some(_), Some(upstream)) => (
+                "Not pushed yet".to_owned(),
+                Some(format!("Started from {upstream}")),
+            ),
+            (Some(_), None) if published => ("Published".to_owned(), None),
+            (Some(_), None) => ("Not pushed yet".to_owned(), None),
+        };
+        let can_push = branch.head.is_some() && !self.pushing && self.committing.is_none();
+        let push_tip = if branch.head.is_none() {
+            "Check out a branch to push it"
+        } else if published {
+            "Push"
+        } else {
+            "Push and publish the branch"
+        };
+        Some(
+            h_flex()
+                .flex_shrink_0()
+                .h(px(30.))
+                .pl(px(12.))
+                .pr_1()
+                .gap_1()
+                .child(
+                    div()
+                        .id("changes-upstream")
+                        .automation_id("changes-upstream")
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            Label::new(state)
+                                .size(TextSize::Sm)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                        .when_some(tip, |d, tip| d.tooltip(Tooltip::text(tip).builder())),
+                )
+                .children(
+                    branch
+                        .upstream
+                        .as_ref()
+                        .filter(|_| (branch.ahead, branch.behind) != (0, 0))
+                        .map(|upstream| {
+                            div()
+                                .id("changes-sync")
+                                .automation_id("changes-sync")
+                                .tooltip(
+                                    Tooltip::text(format!("Ahead of and behind {upstream}"))
+                                        .builder(),
+                                )
+                                .child(
+                                    Label::new(format!("↑{} ↓{}", branch.ahead, branch.behind))
+                                        .size(TextSize::Sm)
+                                        .color(Color::Muted),
+                                )
+                        }),
+                )
+                .child(
+                    Button::new(
+                        "changes-push",
+                        if self.pushing { "Pushing…" } else { "Push" },
+                    )
+                    .icon(IconName::Up)
+                    .size(ButtonSize::Compact)
+                    .disabled(!can_push)
+                    .debug_selector(|| "changes-push".into())
+                    .tooltip(Tooltip::text(push_tip))
+                    .on_click(cx.listener(|this, _, _, cx| this.push(cx))),
+                )
+                .child(
+                    IconButton::new("changes-create-pr", IconName::PullRequest)
+                        .size(ButtonSize::Compact)
+                        .disabled(!published || self.session.is_none() || self.form.is_some())
+                        .debug_selector(|| "changes-create-pr".into())
+                        .tooltip(Tooltip::text(match (published, self.session) {
+                            (false, _) => "Push the branch before creating a pull request",
+                            (true, None) => "Select a session to create a pull request for",
+                            (true, Some(_)) => "Create pull request",
+                        }))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_form(window, cx))),
+                ),
+        )
+    }
+
+    fn field(
+        id: &'static str,
+        input: &Entity<TextInput>,
+        multiline: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        let focus = input.clone();
+        div()
+            .id(id)
+            .automation_id(id)
+            .w_full()
+            .when(multiline, |d| d.min_h(px(64.)).max_h(px(160.)))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.background)
+            .cursor(gpui::CursorStyle::IBeam)
+            .on_click(move |_, window, cx| focus.focus_handle(cx).focus(window, cx))
+            .child(input.clone())
+    }
+
+    fn form(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let form = self.form.as_ref()?;
+        let panel = cx.weak_entity();
+        Some(
+            v_flex()
+                .flex_shrink_0()
+                .px(px(12.))
+                .pb_2()
+                .gap_2()
+                .automation_id("changes-pr-form")
+                .child(
+                    Label::new("New pull request")
+                        .size(TextSize::Ui)
+                        .weight(FontWeight::MEDIUM),
+                )
+                .child(Self::field("changes-pr-title", &form.title, false, cx))
+                .child(Self::field("changes-pr-body", &form.body, true, cx))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Label::new("Into").size(TextSize::Sm).color(Color::Muted))
+                        .child(div().flex_1().min_w_0().child(Self::field(
+                            "changes-pr-base",
+                            &form.base,
+                            false,
+                            cx,
+                        ))),
+                )
+                .child(
+                    Switch::new("changes-pr-draft", form.draft)
+                        .label("Draft")
+                        .on_change(move |on, _, cx| {
+                            if let Some(panel) = panel.upgrade() {
+                                panel.update(cx, |panel, cx| {
+                                    if let Some(form) = &mut panel.form {
+                                        form.draft = *on;
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new(
+                                "changes-pr-create",
+                                form.busy.unwrap_or("Create pull request"),
+                            )
+                            .style(ButtonStyle::Filled)
+                            .disabled(form.busy.is_some())
+                            .debug_selector(|| "changes-pr-create".into())
+                            .tooltip(Tooltip::text("Create with gh · Ctrl+Enter"))
+                            .on_click(cx.listener(|this, _, _, cx| this.create_pull_request(cx))),
+                        )
+                        .child(
+                            Button::new("changes-pr-cancel", "Cancel")
+                                .disabled(form.busy.is_some())
+                                .debug_selector(|| "changes-pr-cancel".into())
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_form(cx))),
+                        ),
+                ),
+        )
+    }
+
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let branch = self.status().map(|status| &status.branch);
         let name = match branch {
@@ -581,9 +1050,6 @@ impl ChangesPanel {
                 .file_name()
                 .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
         };
-        let sync = branch
-            .filter(|branch| branch.upstream.is_some() && (branch.ahead, branch.behind) != (0, 0))
-            .map(|branch| format!("↑{} ↓{}", branch.ahead, branch.behind));
         h_flex()
             .flex_shrink_0()
             .h(px(34.))
@@ -607,11 +1073,6 @@ impl ChangesPanel {
                             .truncate(),
                     ),
             )
-            .children(sync.map(|sync| {
-                div()
-                    .automation_id("changes-sync")
-                    .child(Label::new(sync).size(TextSize::Sm).color(Color::Muted))
-            }))
             .child(
                 IconButton::new("changes-refresh", IconName::Refresh)
                     .size(ButtonSize::Compact)
@@ -665,10 +1126,28 @@ impl ChangesPanel {
 
     fn notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let colors = cx.theme().colors;
-        let (title, color, output) = match self.notice.as_ref()? {
-            Notice::Committed(summary) => (summary.as_str(), Color::Success, None),
-            Notice::Info(text) => (*text, Color::Muted, None),
-            Notice::Failed { title, output } => (*title, Color::Danger, Some(output.clone())),
+        let notice = self.notice.as_ref()?;
+        let (title, color, output) = match notice {
+            Notice::Committed(summary) => (summary.clone(), Color::Success, None),
+            Notice::Pushed(output) => ("Pushed.".into(), Color::Success, Some(output.clone())),
+            Notice::PullRequest { lead, pull_request } => (
+                format!("{lead} #{}.", pull_request.number),
+                Color::Success,
+                None,
+            ),
+            Notice::Info(text) => ((*text).into(), Color::Muted, None),
+            Notice::Failed { title, output } => {
+                ((*title).into(), Color::Danger, Some(output.clone()))
+            }
+            Notice::Hint { title, output, .. } => (title.clone(), Color::Warning, output.clone()),
+        };
+        let (command, id) = match notice {
+            Notice::Hint { command, id, .. } => (Some(*command), *id),
+            _ => (None, "changes-notice-title"),
+        };
+        let link = match notice {
+            Notice::PullRequest { pull_request, .. } => Some(pull_request.url.clone()),
+            _ => None,
         };
         Some(
             v_flex()
@@ -681,9 +1160,11 @@ impl ChangesPanel {
                     h_flex()
                         .gap_2()
                         .child(
-                            div().flex_1().min_w_0().child(
-                                Label::new(title.to_owned()).size(TextSize::Ui).color(color),
-                            ),
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .automation_id(id)
+                                .child(Label::new(title).size(TextSize::Ui).color(color)),
                         )
                         .child(
                             IconButton::new("changes-notice-dismiss", IconName::Close)
@@ -696,6 +1177,65 @@ impl ChangesPanel {
                                 })),
                         ),
                 )
+                .children(link.map(|url| {
+                    let (open, copy) = (url.clone(), url.clone());
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id("changes-pr-link")
+                                .automation_id("changes-pr-link")
+                                .min_w_0()
+                                .flex_shrink(1.)
+                                .cursor_pointer()
+                                .child(
+                                    Label::new(url)
+                                        .size(TextSize::Sm)
+                                        .color(Color::Accent)
+                                        .truncate(),
+                                )
+                                .tooltip(Tooltip::text("Open in the browser").builder())
+                                .on_click(move |_, _, cx| cx.open_url(&open)),
+                        )
+                        .child(
+                            IconButton::new("changes-pr-copy", IconName::Copy)
+                                .size(ButtonSize::Compact)
+                                .debug_selector(|| "changes-pr-copy".into())
+                                .tooltip(Tooltip::text("Copy link"))
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                                }),
+                        )
+                }))
+                .children(command.map(|command| {
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .px_2()
+                                .py_1()
+                                .rounded(px(6.))
+                                .bg(colors.background)
+                                .border_1()
+                                .border_color(colors.border)
+                                .font_mono(cx)
+                                .text_size(TextSize::Sm.px())
+                                .text_color(colors.text)
+                                .automation_id("changes-hint-command")
+                                .child(command),
+                        )
+                        .child(
+                            IconButton::new("changes-hint-copy", IconName::Copy)
+                                .size(ButtonSize::Compact)
+                                .debug_selector(|| "changes-hint-copy".into())
+                                .tooltip(Tooltip::text("Copy command"))
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(command.into()))
+                                }),
+                        )
+                }))
                 .children(output.filter(|o| !o.trim().is_empty()).map(|output| {
                     div()
                         .id("changes-output")
@@ -956,15 +1496,61 @@ impl Render for ChangesPanel {
             .size_full()
             .track_focus(&self.focus)
             .key_context("Changes")
-            .on_action(cx.listener(|this, _: &SendMessage, _, cx| this.commit(cx)))
+            .on_action(cx.listener(|this, _: &SendMessage, _, cx| {
+                if this.form.is_some() {
+                    this.create_pull_request(cx)
+                } else {
+                    this.commit(cx)
+                }
+            }))
             .child(self.header(cx))
-            .child(self.commit_box(cx))
+            .children(self.sync_row(cx))
+            .when_some(self.form(cx), |d, form| d.child(form))
+            .when(self.form.is_none(), |d| d.child(self.commit_box(cx)))
             .children(self.notice(cx))
             .child(self.list(cx))
     }
 }
 
 impl Keystone {
+    /// The selected session's pull request as `#N` in the top bar, opening it in the
+    /// browser.
+    pub(crate) fn pull_request_link(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.selected(cx)?;
+        let pull_request = self
+            .state
+            .read(cx)
+            .session(session)?
+            .pull_request()?
+            .clone();
+        let hover = cx.theme().colors.element_hover;
+        let url = pull_request.url.clone();
+        Some(
+            self.own_press(
+                h_flex()
+                    .id("session-pull-request")
+                    .automation_id("session-pull-request")
+                    .flex_shrink_0()
+                    .px(px(6.))
+                    .py(px(2.))
+                    .gap_1()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .child(
+                        Icon::new(IconName::PullRequest)
+                            .size(px(14.))
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(format!("#{}", pull_request.number)).color(Color::Muted))
+                    .tooltip(Tooltip::text(pull_request.url).builder())
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                cx,
+            )
+            .into_any_element(),
+        )
+    }
+
     pub(crate) fn changes_panel(&self, cx: &mut Context<Self>) -> Option<Entity<ChangesPanel>> {
         let folder = self.files_root(cx).ok()?;
         Some(self.changes.panel(&folder, &self.state, cx))
@@ -1053,6 +1639,18 @@ impl Keystone {
             Ok(folder) => {
                 let known = self.changes.panels.borrow().contains_key(&folder);
                 let panel = self.changes.panel(&folder, &self.state, cx);
+                let session = self.selected(cx);
+                panel.update(cx, |panel, cx| {
+                    if panel
+                        .form
+                        .as_ref()
+                        .is_some_and(|form| form.session != session && form.busy.is_none())
+                    {
+                        panel.form = None;
+                        cx.notify();
+                    }
+                    panel.session = session;
+                });
                 if self.changes.shown.borrow().as_ref() != Some(&folder) {
                     *self.changes.shown.borrow_mut() = Some(folder);
                     if known {
@@ -1832,6 +2430,402 @@ mod ui_tests {
             settled(&view, cx) && shown(&view, cx) == ["Staged · 1", "M kept.txt"]
         });
         assert_eq!(notice(&view, cx), None, "the stale failure is gone");
+    }
+
+    /// Puts a stand-in `gh` first on `PATH`, once for the whole process. It runs the
+    /// repository's own `.git/fake-gh` when there is one, so each test scripts its
+    /// own, and otherwise acts signed out, as gh does with no login. It never reaches
+    /// GitHub or the user's gh login.
+    fn fake_gh() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("keystone-fake-gh-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            let gh = dir.join("gh");
+            fs::write(
+                &gh,
+                "#!/bin/sh\n\
+                 [ -x \"$PWD/.git/fake-gh\" ] && exec \"$PWD/.git/fake-gh\" \"$@\"\n\
+                 echo 'To get started with GitHub CLI, please run:  gh auth login' >&2\n\
+                 exit 4\n",
+            )
+            .unwrap();
+            fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let path =
+                std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)))
+                    .unwrap();
+            // SAFETY: as for the scripted providers; every test only adds to PATH.
+            unsafe { std::env::set_var("PATH", path) };
+        });
+    }
+
+    /// This repository's gh: it records each call's arguments, one per line, then
+    /// runs `script`.
+    fn script_gh(repo: &Path, script: &str) {
+        let path = repo.join(".git/fake-gh");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> .git/fake-gh-argv\n[ \"$1\" = pr ] && {{ cat; echo; }} >> .git/fake-gh-argv\necho --- >> .git/fake-gh-argv\n{script}"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// `fixture` with its first commit on a bare `origin`, whose HEAD is `main`, and
+    /// `feature` checked out with one commit more.
+    fn with_remote(repo: &Path) -> tempfile::TempDir {
+        fixture(repo);
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(
+            repo,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(repo, &["remote", "set-head", "origin", "main"]);
+        git(repo, &["switch", "-q", "-c", "feature"]);
+        git(repo, &["commit", "-q", "-am", "feature work"]);
+        remote
+    }
+
+    fn settled_all(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> bool {
+        settled(view, cx)
+            && panel(view, cx).read_with(cx, |panel, _| {
+                !panel.pushing && panel.form.as_ref().is_none_or(|form| form.busy.is_none())
+            })
+    }
+
+    fn upstream(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> Option<String> {
+        panel(view, cx).read_with(cx, |panel, _| panel.status()?.branch.upstream.clone())
+    }
+
+    fn form_value(
+        view: &Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+        field: fn(&PullRequestForm) -> &Entity<TextInput>,
+    ) -> Option<String> {
+        panel(view, cx).read_with(cx, |panel, cx| {
+            Some(field(panel.form.as_ref()?).read(cx).value().to_owned())
+        })
+    }
+
+    fn saved_pull_request(
+        view: &Entity<Keystone>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<PullRequest> {
+        view.read_with(cx, |view, cx| {
+            view.state.read(cx).session(1)?.pull_request().cloned()
+        })
+    }
+
+    #[gpui::test]
+    fn push_sets_the_upstream_and_a_new_pull_request_is_saved_on_the_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fake_gh();
+        let (project, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let repo = project.path();
+        let remote = with_remote(repo);
+        let (view, cx) = open_keystone(repo, state.path(), cx);
+        cx.simulate_keystrokes("ctrl-shift-g");
+        until(cx, "first status", |cx| settled_all(&view, cx));
+        assert_eq!(upstream(&view, cx), None);
+        click(cx, "changes-create-pr");
+        assert!(
+            cx.debug_bounds("changes-pr-form").is_none(),
+            "no pull request before the branch is pushed"
+        );
+
+        click(cx, "changes-push");
+        until(cx, "pushed", |cx| settled_all(&view, cx));
+        assert_eq!(
+            git(remote.path(), &["rev-parse", "feature"]),
+            git(repo, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(upstream(&view, cx).as_deref(), Some("origin/feature"));
+        assert!(
+            matches!(notice(&view, cx), Some(Notice::Pushed(output)) if output.contains("[new branch]"))
+        );
+
+        script_gh(
+            repo,
+            "[ \"$1\" = auth ] && exit 0\n\
+             echo 'Warning: 2 uncommitted changes' >&2\n\
+             echo https://github.com/owner/repo/pull/12\n",
+        );
+        click(cx, "changes-create-pr");
+        until(cx, "gh checked", |cx| settled_all(&view, cx));
+        assert_eq!(
+            form_value(&view, cx, |form| &form.title).as_deref(),
+            Some("New Claude session"),
+            "the title starts as the session's"
+        );
+        assert_eq!(
+            form_value(&view, cx, |form| &form.base).as_deref(),
+            Some("main"),
+            "the base starts as the remote's default branch"
+        );
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("Push from Changes");
+        click(cx, "changes-pr-body");
+        cx.simulate_input("Adds a push button.");
+        click(cx, "changes-pr-draft");
+        cx.simulate_keystrokes("ctrl-enter");
+        until(cx, "created", |cx| {
+            settled_all(&view, cx)
+                && panel(&view, cx).read_with(cx, |panel, _| panel.form.is_none())
+        });
+        assert_eq!(
+            fs::read_to_string(repo.join(".git/fake-gh-argv")).unwrap(),
+            "pr\ncreate\n--title\nPush from Changes\n--body-file\n-\n--base\nmain\n--draft\nAdds a push button.\n---\n"
+        );
+        let created = PullRequest {
+            number: 12,
+            url: "https://github.com/owner/repo/pull/12".into(),
+        };
+        assert_eq!(
+            notice(&view, cx),
+            Some(Notice::PullRequest {
+                lead: "Created pull request",
+                pull_request: created.clone()
+            })
+        );
+        assert!(cx.debug_bounds("changes-pr-link").is_some());
+        assert_eq!(saved_pull_request(&view, cx), Some(created));
+        assert!(
+            cx.debug_bounds("session-pull-request").is_some(),
+            "the top bar shows the session's pull request"
+        );
+        assert_eq!(
+            git(repo, &["log", "-1", "--format=%s"]),
+            "feature work\n",
+            "Ctrl+Enter in the form commits nothing"
+        );
+
+        script_gh(
+            repo,
+            "[ \"$1\" = auth ] && exit 0\n\
+             echo 'a pull request for branch \"feature\" into branch \"main\" already exists:' >&2\n\
+             echo https://github.com/owner/repo/pull/7 >&2\n\
+             exit 1\n",
+        );
+        click(cx, "changes-create-pr");
+        until(cx, "gh checked again", |cx| settled_all(&view, cx));
+        click(cx, "changes-pr-create");
+        until(cx, "found the existing one", |cx| {
+            settled_all(&view, cx)
+                && panel(&view, cx).read_with(cx, |panel, _| panel.form.is_none())
+        });
+        let existing = PullRequest {
+            number: 7,
+            url: "https://github.com/owner/repo/pull/7".into(),
+        };
+        assert_eq!(
+            notice(&view, cx),
+            Some(Notice::PullRequest {
+                lead: "This branch already has pull request",
+                pull_request: existing.clone()
+            })
+        );
+        assert_eq!(saved_pull_request(&view, cx), Some(existing));
+    }
+
+    #[gpui::test]
+    fn a_missing_remote_a_rejected_push_and_a_signed_out_gh_say_what_to_do(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fake_gh();
+        let (project, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let repo = project.path();
+        fixture(repo);
+        let (view, cx) = open_keystone(repo, state.path(), cx);
+        cx.simulate_keystrokes("ctrl-shift-g");
+        until(cx, "first status", |cx| settled_all(&view, cx));
+        click(cx, "changes-push");
+        until(cx, "no remote", |cx| settled_all(&view, cx));
+        assert!(matches!(
+            notice(&view, cx),
+            Some(Notice::Hint {
+                command: "git remote add origin <url>",
+                ..
+            })
+        ));
+        assert!(cx.debug_bounds("changes-hint-command").is_some());
+
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(
+            repo,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        click(cx, "changes-push");
+        until(cx, "pushed", |cx| settled_all(&view, cx));
+        assert_eq!(upstream(&view, cx).as_deref(), Some("origin/main"));
+
+        let other = tempfile::tempdir().unwrap();
+        git(
+            other.path(),
+            &["clone", "-q", remote.path().to_str().unwrap(), "."],
+        );
+        for (key, value) in [
+            ("user.name", "Other"),
+            ("user.email", "other@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ".git/hooks"),
+        ] {
+            git(other.path(), &["config", key, value]);
+        }
+        git(
+            other.path(),
+            &["commit", "-q", "--allow-empty", "-m", "theirs"],
+        );
+        git(other.path(), &["push", "-q"]);
+        let theirs = git(remote.path(), &["rev-parse", "main"]);
+        git(repo, &["commit", "-q", "-am", "ours"]);
+        click(cx, "changes-refresh");
+        until(cx, "ahead", |cx| settled_all(&view, cx));
+        click(cx, "changes-push");
+        until(cx, "rejected", |cx| settled_all(&view, cx));
+        assert!(
+            matches!(
+                notice(&view, cx),
+                Some(Notice::Failed { title: "Push rejected. Nothing was forced.", output })
+                    if output.contains("[rejected]")
+            ),
+            "{:?}",
+            notice(&view, cx)
+        );
+        assert!(cx.debug_bounds("changes-output").is_some());
+        assert_eq!(git(remote.path(), &["rev-parse", "main"]), theirs);
+
+        click(cx, "changes-create-pr");
+        assert_eq!(
+            notice(&view, cx),
+            Some(Notice::Info(
+                "Push your latest commits before creating a pull request."
+            )),
+            "gh would refuse a branch with unpushed commits"
+        );
+        git(repo, &["pull", "-q", "--rebase"]);
+        click(cx, "changes-push");
+        until(cx, "pushed after the rebase", |cx| settled_all(&view, cx));
+        assert_eq!(
+            git(remote.path(), &["rev-parse", "main"]),
+            git(repo, &["rev-parse", "HEAD"])
+        );
+
+        click(cx, "changes-create-pr");
+        until(cx, "form open", |cx| settled_all(&view, cx));
+        click(cx, "changes-pr-create");
+        until(cx, "gh answered", |cx| settled_all(&view, cx));
+        assert!(
+            matches!(
+                notice(&view, cx),
+                Some(Notice::Hint { id: "changes-hint-gh-signed-out", command: "gh auth login", output: Some(output), .. })
+                    if output.contains("gh auth login")
+            ),
+            "{:?}",
+            notice(&view, cx)
+        );
+        assert_eq!(
+            form_value(&view, cx, |form| &form.title).as_deref(),
+            Some("New Claude session"),
+            "a signed-out gh keeps the form and its text"
+        );
+        assert_eq!(saved_pull_request(&view, cx), None);
+
+        git(repo, &["switch", "-q", "-c", "other"]);
+        script_gh(repo, "echo https://github.com/owner/repo/pull/99\n");
+        click(cx, "changes-pr-create");
+        until(cx, "refused", |cx| settled_all(&view, cx));
+        assert!(
+            matches!(
+                notice(&view, cx),
+                Some(Notice::Failed { output, .. })
+                    if output.contains("The form is for main, but other is checked out now")
+            ),
+            "{:?}",
+            notice(&view, cx)
+        );
+        assert!(
+            !repo.join(".git/fake-gh-argv").exists(),
+            "gh never ran for another branch"
+        );
+        assert_eq!(saved_pull_request(&view, cx), None);
+    }
+
+    #[gpui::test]
+    fn a_pull_request_is_saved_on_the_session_its_form_was_opened_for_even_once_closed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fake_gh();
+        let (project, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let repo = project.path();
+        let _remote = with_remote(repo);
+        git(repo, &["push", "-q", "-u", "origin", "feature"]);
+        {
+            let mut store = Store::open(state.path().join("workspace.json")).unwrap();
+            let directory = WorkingDirectory::new(repo).unwrap();
+            store.create(Provider::Claude, &directory, 1).unwrap();
+            store.create(Provider::Codex, &directory, 2).unwrap();
+            store.rename(1, "First session").unwrap();
+            let shown = keystone_core::ProjectId::new(repo).unwrap();
+            store
+                .open_project(keystone_core::WindowId::FIRST, &shown, None, Some(1), 1)
+                .unwrap();
+        }
+        script_gh(
+            repo,
+            "sleep 0.3\necho https://github.com/owner/repo/pull/3\n",
+        );
+        let (view, cx) = open_keystone(repo, state.path(), cx);
+        view.update(cx, |view, cx| view.select(1, cx));
+        cx.simulate_keystrokes("ctrl-shift-g");
+        until(cx, "first status", |cx| settled_all(&view, cx));
+        click(cx, "changes-create-pr");
+        until(cx, "gh checked", |cx| settled_all(&view, cx));
+        assert_eq!(
+            form_value(&view, cx, |form| &form.title).as_deref(),
+            Some("First session")
+        );
+
+        view.update(cx, |view, cx| view.select(2, cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("changes-pr-form").is_none(),
+            "an idle form closes when another session is selected"
+        );
+        view.update(cx, |view, cx| view.select(1, cx));
+        cx.run_until_parked();
+        click(cx, "changes-create-pr");
+        until(cx, "form open again", |cx| settled_all(&view, cx));
+        click(cx, "changes-pr-create");
+        view.update(cx, |view, cx| view.select(2, cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |view, cx| view.selected(cx)), Some(2));
+        assert!(
+            cx.debug_bounds("changes-pr-form").is_some(),
+            "a form gh is working for stays"
+        );
+        view.update(cx, |view, _| view.changes.panels.borrow_mut().clear());
+        cx.run_until_parked();
+        let saved = |cx: &mut gpui::VisualTestContext, id: u64| {
+            view.read_with(cx, |view, cx| {
+                view.state.read(cx).session(id)?.pull_request().cloned()
+            })
+        };
+        until(cx, "saved after the panel is gone", |cx| {
+            saved(cx, 1).is_some()
+        });
+        assert_eq!(saved(cx, 1).map(|pr| pr.number), Some(3));
+        assert_eq!(
+            saved(cx, 2),
+            None,
+            "not on the session selected since the form opened"
+        );
     }
 
     #[gpui::test]
