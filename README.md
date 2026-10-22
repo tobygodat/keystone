@@ -46,8 +46,9 @@ The driver was proved against the actual GPUI binary. It runs as the `keystone-v
 
 ## Run checks
 
-- Run `bash scripts/check.sh` for formatting, the theme color check, and core behavior tests.
+- Run `bash scripts/check.sh` for formatting, the theme color check, and core behavior tests. Every lane first checks that [docs/ui-strings.txt](docs/ui-strings.txt), the inventory of interface text, matches the sources. After changing interface text, run `python3 scripts/ui-strings.py` and review the diff.
 - Run `bash scripts/check.sh ui` for GPUI simulated-input tests of the app and its components.
+- Run `python3 scripts/screen-walk.py walk` to screenshot each surface at 1920×1080 and 720 px wide on a private headless desktop with the scripted providers. See [docs/verification/screen-walk.md](docs/verification/screen-walk.md).
 - Run `bash scripts/check.sh core-fast` for the same core checks with the nextest runner. Opt-in; see [docs/dev-iteration.md](docs/dev-iteration.md).
 - Run `bash scripts/check.sh build` to compile the native application and the component gallery.
 - Run `python scripts/perf.py --note "what changed"` to record build and render timings. See [performance](docs/performance.md).

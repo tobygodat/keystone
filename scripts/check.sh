@@ -12,6 +12,8 @@ if grep -rnP '\b(rgba?|hsla|black|white|transparent_black|transparent_white|red|
   echo 'Colors belong in crates/keystone-ui/src/theme.rs. Use a theme token or Color.' >&2
   exit 1
 fi
+python3 scripts/test_ui_strings.py
+python3 scripts/ui-strings.py --check
 case "${1:-core}" in
   core) cargo test -p keystone-core -p keystone-agent --locked ;;
   core-fast)
