@@ -5,6 +5,7 @@ use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::handoff::HandOff;
 use crate::projects::{OpenProject, SwitchProject};
+use crate::prompts::InsertPrompt;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
 use crate::windows::{self, CloseWindow, Destination, MoveTabToWindow, NewWindow, OpenInNewWindow};
@@ -112,6 +113,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-r"],
         context: Some(APP),
         action: || Box::new(RetryRecovery),
+    },
+    Command {
+        id: "insert-prompt",
+        label: "Insert prompt…",
+        keys: &["ctrl-shift-i"],
+        context: Some(APP),
+        action: || Box::new(InsertPrompt),
     },
     Command {
         id: "open-settings",
@@ -407,6 +415,7 @@ impl Keystone {
             .projects
             .take()
             .and_then(|list| list.restore)
+            .or_else(|| self.prompt_list.take().and_then(|list| list.restore))
             .or_else(|| window.focused(cx));
         let state = cx.new(|cx| CommandPaletteState::new(items, cx));
         state.focus_handle(cx).focus(window, cx);

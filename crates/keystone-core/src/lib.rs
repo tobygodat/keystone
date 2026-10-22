@@ -17,6 +17,10 @@ mod database;
 pub mod integrations;
 mod layout;
 mod project;
+mod prompt;
+#[cfg(test)]
+#[path = "prompt_tests.rs"]
+mod prompt_tests;
 mod session_context;
 mod tabs;
 mod usage;
@@ -34,6 +38,7 @@ pub use layout::{
 };
 pub use project::{Project, ProjectId};
 use project::{ProjectLayouts, ProjectMap};
+pub use prompt::{Prompt, PromptFields};
 use session_context::SavedSessionContext;
 pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory, WorktreeContext};
 use tabs::SavedTabs;
@@ -531,6 +536,10 @@ pub struct Workspace {
     /// Saved in their own projection, never in the workspace payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     projects: Vec<Project>,
+    /// Saved prompts, in the user's order. Saved in their own projection, never in
+    /// the workspace payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    prompts: Vec<Prompt>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -576,6 +585,14 @@ impl Workspace {
             .iter()
             .filter(|project| project.removed())
             .map(Project::id)
+    }
+
+    pub fn prompts(&self) -> &[Prompt] {
+        &self.prompts
+    }
+
+    pub fn prompt(&self, id: u64) -> Option<&Prompt> {
+        self.prompts.iter().find(|prompt| prompt.id() == id)
     }
 }
 
@@ -1241,6 +1258,79 @@ impl Store {
         Ok(label)
     }
 
+    /// Saves a new prompt at the end of the list. Returns its ID.
+    pub fn add_prompt(&mut self, fields: PromptFields) -> StoreResult<Applied<u64>> {
+        let checked = fields.check(&self.workspace.prompts, None)?;
+        let id = self.next_id;
+        let next_id = id
+            .checked_add(1)
+            .ok_or_else(|| invalid("session ID space exhausted"))?;
+        let mut next = self.workspace.clone();
+        next.prompts.push(Prompt::new(id, checked));
+        let applied = self.commit(next, next_id)?;
+        Ok(Applied {
+            value: id,
+            durability: applied.durability,
+            revision: applied.revision,
+        })
+    }
+
+    /// Replaces a prompt's title, text, shortcut and project. Its place in the list
+    /// and its use count stay.
+    pub fn edit_prompt(&mut self, id: u64, fields: PromptFields) -> StoreResult<Applied<()>> {
+        let checked = fields.check(&self.workspace.prompts, Some(id))?;
+        self.update_prompt(id, |prompt| prompt.apply(checked))
+    }
+
+    /// Counts one more insert of the prompt.
+    pub fn count_prompt_use(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        self.update_prompt(id, Prompt::count_use)
+    }
+
+    /// Moves a prompt to `to` in the list, clamped to its end.
+    pub fn move_prompt(&mut self, id: u64, to: usize) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        let from = next
+            .prompts
+            .iter()
+            .position(|prompt| prompt.id() == id)
+            .ok_or_else(|| invalid(format!("unknown prompt {id}")))?;
+        let prompt = next.prompts.remove(from);
+        let to = to.min(next.prompts.len());
+        next.prompts.insert(to, prompt);
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
+    }
+
+    pub fn remove_prompt(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        if self.workspace.prompt(id).is_none() {
+            return Err(invalid(format!("unknown prompt {id}")).into());
+        }
+        let mut next = self.workspace.clone();
+        next.prompts.retain(|prompt| prompt.id() != id);
+        self.commit(next, self.next_id)
+    }
+
+    fn update_prompt(
+        &mut self,
+        id: u64,
+        change: impl FnOnce(&mut Prompt),
+    ) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        let prompt = next
+            .prompts
+            .iter_mut()
+            .find(|prompt| prompt.id() == id)
+            .ok_or_else(|| invalid(format!("unknown prompt {id}")))?;
+        change(prompt);
+        if next == self.workspace {
+            return Ok(self.finish_sync());
+        }
+        self.commit(next, self.next_id)
+    }
+
     /// Fixes the session's provider, account and model, for just before its first
     /// message is sent. A send whose later saves fail still leaves them fixed.
     pub fn lock_model(&mut self, id: u64) -> StoreResult<Applied<()>> {
@@ -1424,6 +1514,16 @@ fn validate(snapshot: &Snapshot) -> StoreResult<()> {
             || !accounts.insert(account.id())
         {
             return Err(invalid("invalid or duplicate account ID").into());
+        }
+    }
+    let mut prompts = HashSet::new();
+    for prompt in &snapshot.workspace.prompts {
+        if prompt.id() == 0
+            || prompt.id() >= snapshot.next_id
+            || ids.contains(&prompt.id())
+            || !prompts.insert(prompt.id())
+        {
+            return Err(invalid("invalid or duplicate prompt ID").into());
         }
     }
     Ok(())

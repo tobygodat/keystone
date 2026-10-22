@@ -292,6 +292,7 @@ impl Keystone {
             .take()
             .and_then(|list| list.restore)
             .or_else(|| self.palette.take().and_then(|palette| palette.restore))
+            .or_else(|| self.prompt_list.take().and_then(|list| list.restore))
             .or_else(|| window.focused(cx));
         let items = self.project_items(cx);
         let state = cx.new(|cx| {

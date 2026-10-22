@@ -573,6 +573,20 @@ impl AppState {
         result
     }
 
+    /// Applies one change to the saved prompts, which windows show from the store.
+    pub(crate) fn change_prompts<T>(
+        &mut self,
+        change: impl FnOnce(&mut keystone_core::Store) -> Result<Applied<T>, Box<dyn std::error::Error>>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<T>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = change(&mut self.store);
+        self.publish(cx);
+        result
+    }
+
     /// Removes an account no session uses, ending any model probe still running on
     /// it. Its folder stays on disk.
     pub(crate) fn remove_account(

@@ -14,12 +14,14 @@ mod model_selector;
 mod notifications;
 mod presentation;
 mod projects;
+mod prompts;
 mod relative_time;
 mod reveal;
 mod session_tabs;
 mod settings;
 mod settings_accounts;
 mod settings_page;
+mod settings_prompts;
 mod slash_menu;
 mod transcript;
 mod transcript_keyboard;
@@ -426,6 +428,7 @@ struct Keystone {
     palette: Option<commands::Palette>,
     /// The open project list.
     projects: Option<projects::ProjectList>,
+    prompt_list: Option<prompts::PromptList>,
     files: files::Files,
     slash: slash_menu::SlashMenu,
     mentions: mentions::Mentions,
@@ -791,6 +794,7 @@ impl Keystone {
             customize_agent: None,
             palette: None,
             projects: None,
+            prompt_list: None,
             files: files::Files::default(),
             slash,
             mentions,
@@ -3647,6 +3651,11 @@ impl Render for Keystone {
                 }),
             )
             .on_action(
+                self.scoped_listener(cx, |this, _: &prompts::InsertPrompt, window, cx| {
+                    this.open_prompt_list(window, cx)
+                }),
+            )
+            .on_action(
                 self.scoped_listener(cx, |this, _: &session_tabs::NewTab, window, cx| {
                     this.new_tab(window, cx)
                 }),
@@ -3711,6 +3720,7 @@ impl Render for Keystone {
             .children(self.worktree_dialog_view(cx))
             .children(self.palette_overlay(cx))
             .children(self.projects_overlay(cx))
+            .children(self.prompt_list_overlay(cx))
             .children(self.context_menu_overlay(cx));
         let root = self.settings_yields_to_workspace(root, cx);
         self.on_arrangement_drag(root, cx)

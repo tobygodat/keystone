@@ -212,7 +212,7 @@ fn a_schema_1_database_migrates_once_and_keeps_its_workspace() {
     {
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
-            .execute_batch("DROP TABLE accounts; DROP TABLE projects; PRAGMA user_version=1;")
+            .execute_batch("DROP TABLE accounts; DROP TABLE projects; DROP TABLE prompts; PRAGMA user_version=1;")
             .unwrap();
     }
     assert!(Database::open_read_only(&path).is_err());
@@ -252,11 +252,17 @@ fn a_newer_schema_is_still_refused() {
     drop(Store::open(&path).unwrap());
     rusqlite::Connection::open(path.with_extension("sqlite3"))
         .unwrap()
-        .execute_batch("PRAGMA user_version=4;")
+        .execute_batch(&format!(
+            "PRAGMA user_version={};",
+            crate::database::SCHEMA_VERSION + 1
+        ))
         .unwrap();
     let refused = Store::open(&path).err().unwrap();
     assert!(
-        refused.to_string().contains("schema version 4"),
+        refused.to_string().contains(&format!(
+            "schema version {}",
+            crate::database::SCHEMA_VERSION + 1
+        )),
         "{refused}"
     );
 }

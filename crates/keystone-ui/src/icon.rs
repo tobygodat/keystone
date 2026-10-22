@@ -40,6 +40,7 @@ icons! {
     Left => "icons/left.svg", "<path d='m14 6-6 6 6 6'/>";
     Right => "icons/right.svg", "<path d='m10 6 6 6-6 6'/>";
     Up => "icons/up.svg", "<path d='m5 12 7-7 7 7 M12 5v15'/>";
+    Down => "icons/down.svg", "<path d='m5 12 7 7 7-7 M12 19V4'/>";
     Folder => "icons/folder.svg", "<path d='M3 6h6l2 3h10v11H3Z M3 6V4h6l2 2h7v3'/>";
     Copy => "icons/copy.svg", "<rect x='8' y='8' width='12' height='12' rx='2'/><path d='M16 8V4H4v12h4'/>";
     Close => "icons/close.svg", "<path d='m6 6 12 12 M18 6 6 18'/>";

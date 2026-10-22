@@ -33,8 +33,9 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Integrations](integrations.md) covers Settings → Integrations: each account's MCP servers, skills and plugins with scope and source file, names without secret values, and server status from running sessions.
 - [Multiple windows](windows.md) covers new windows by keyboard, sidebar and tab menus, each window's own tabs, panes, selection and project, one session in two windows, closing a window while its work runs, the last window, and restoring every window after Quit or a crash.
 - [Notifications](notifications.md) covers desktop notifications for a finished turn, an approval request or a failed turn in a session nobody sees, their coalescing, opening a session from one, and their switches in Settings.
+- [Saved prompts](prompts.md) covers the prompt library in Settings → Prompts, global and project scope, inserting from the / menu and the palette's Insert prompt…, shortcuts that a provider command shares, and restart.
 - [Command palette](palette.md) covers opening with Ctrl+K or Ctrl+Shift+P, filtering, running a command, dismissing with focus restored, and dialog blocking.
 
 ## Coverage rules
 
-For each run, record the entry points actually exercised. Do not mark an entire feature complete when only a shortcut passed. Record precondition failures rather than removing the failing step. PR viewing and saved prompts remain separate scope, as do model controls beyond the draft's provider and model choice (effort, fast mode, service tier, switching after the first Send). Composition controls have their own native evidence requirements.
+For each run, record the entry points actually exercised. Do not mark an entire feature complete when only a shortcut passed. Record precondition failures rather than removing the failing step. PR viewing remains separate scope, as do model controls beyond the draft's provider and model choice (effort, fast mode, service tier, switching after the first Send). Composition controls have their own native evidence requirements.

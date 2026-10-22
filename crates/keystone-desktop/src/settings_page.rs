@@ -45,13 +45,14 @@ enum Section {
     Notifications,
     Accounts,
     Integrations,
+    Prompts,
 }
 
 /// A section's rows, each a label and its control.
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 5] = [
+const SECTIONS: [(Section, &str, &str, Rows); 6] = [
     (
         Section::Appearance,
         "Appearance",
@@ -94,6 +95,7 @@ const SECTIONS: [(Section, &str, &str, Rows); 5] = [
         "settings-section-integrations",
         &[],
     ),
+    (Section::Prompts, "Prompts", "settings-section-prompts", &[]),
 ];
 
 /// The open settings page: the section it shows and a focus handle per tab stop. Only
@@ -109,6 +111,7 @@ pub(crate) struct SettingsPage {
     text_size: FocusHandle,
     pub(crate) accounts: crate::settings_accounts::AccountsPage,
     pub(crate) integrations: crate::integrations::IntegrationsPage,
+    pub(crate) prompts: crate::settings_prompts::PromptsPage,
 }
 
 impl SettingsPage {
@@ -125,6 +128,7 @@ impl SettingsPage {
             text_size: stop(),
             accounts: crate::settings_accounts::AccountsPage::new(cx),
             integrations: crate::integrations::IntegrationsPage::new(cx),
+            prompts: crate::settings_prompts::PromptsPage::new(cx),
         }
     }
 
@@ -159,11 +163,20 @@ impl Keystone {
 
     /// Opens the page on Accounts, as the usage meter does.
     pub(crate) fn open_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_section(Section::Accounts, window, cx)
+    }
+
+    /// Opens the page on Prompts, the prompt library.
+    pub(crate) fn open_prompts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_section(Section::Prompts, window, cx)
+    }
+
+    fn open_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.is_none() {
             self.toggle_settings(window, cx);
         }
         if let Some(page) = &mut self.settings {
-            page.section = Section::Accounts;
+            page.section = section;
             window.focus(&page.sections[page.section_index()], cx);
         }
         self.refresh(cx);
@@ -201,6 +214,7 @@ impl Keystone {
             .capture_action(self.leave_settings::<crate::session_tabs::NextTab>(cx))
             .capture_action(self.leave_settings::<crate::session_tabs::PreviousTab>(cx))
             .capture_action(self.leave_settings::<crate::session_tabs::SplitRight>(cx))
+            .capture_action(self.leave_settings::<crate::prompts::InsertPrompt>(cx))
             .capture_action(self.scoped_listener(cx, |this, _: &SendMessage, _, cx| {
                 if this.settings.is_some() {
                     cx.stop_propagation();
@@ -318,6 +332,9 @@ impl Keystone {
                     })
                     .when(page.section == Section::Integrations, |d| {
                         d.child(self.integrations_section(page, cx))
+                    })
+                    .when(page.section == Section::Prompts, |d| {
+                        d.child(self.prompts_section(page, cx))
                     })
                     .children(self.error_line(cx).map(|error| {
                         div()
@@ -1150,8 +1167,8 @@ mod tests {
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
         // Appearance's row holds focus; next come Fonts, Notifications, Accounts,
-        // Integrations, Theme, then Compact.
-        keys(cx, "tab tab tab tab tab tab");
+        // Integrations, Prompts, Theme, then Compact.
+        keys(cx, "tab tab tab tab tab tab tab");
         press(cx, "space");
         assert_eq!(saved(&path).density, Density::Compact);
         keys(cx, "right");
@@ -1165,11 +1182,11 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, Theme, Integrations, Accounts, Notifications,
+        // From Default back past Compact, Theme, Prompts, Integrations, Accounts, Notifications,
         // Fonts, and Appearance to Back.
         keys(
             cx,
-            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
+            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
         );
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
@@ -1182,9 +1199,9 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        // Fonts' row holds focus; Notifications', Accounts' and Integrations' rows come
+        // Fonts' row holds focus; Notifications', Accounts', Integrations' and Prompts' rows come
         // before the first font menu.
-        keys(cx, "ctrl-, down tab tab tab tab down");
+        keys(cx, "ctrl-, down tab tab tab tab tab down");
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");

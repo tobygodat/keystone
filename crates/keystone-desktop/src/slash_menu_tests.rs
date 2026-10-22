@@ -117,7 +117,7 @@ fn shown(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> Vec<(String, &'
             .map(|(.., entries)| {
                 entries
                     .into_iter()
-                    .map(|e| (e.command.invocation.clone(), source_label(&e.command)))
+                    .map(|e| (e.item.label().to_owned(), source_label(&e.item)))
                     .collect()
             })
             .unwrap_or_default()
@@ -255,8 +255,9 @@ fn shown_first(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> String {
             view.state.read(cx).commands(1, Provider::Claude),
             Provider::Claude,
             "fixture",
+            &[],
         );
-        first[0].command.invocation.clone()
+        first[0].item.label().to_owned()
     })
 }
 
@@ -464,4 +465,219 @@ fn an_account_command_named_like_a_terminal_only_one_sends_once_listed(cx: &mut 
     wait(cx, &view, |view, cx| {
         view.state.read(cx).session(1).unwrap().started()
     });
+}
+
+/// Saved prompts this window's project offers join the menu with source Saved, by
+/// shortcut or title; another project's are left out. A command of the same name is
+/// listed first and its prompt says the command wins. Choosing a prompt fills the
+/// composer with its text, counts the use and sends nothing.
+#[gpui::test]
+fn saved_prompts_join_the_menu_and_a_command_of_the_same_name_wins(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(Provider::Claude, cx);
+    let project = keystone_core::ProjectId::new(&dir.path().join("project")).unwrap();
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let other = keystone_core::ProjectId::new(&other).unwrap();
+    let body = "Check the tests.\nCheck the docs.";
+    view.update(cx, |view, cx| {
+        view.state.update(cx, |state, cx| {
+            for (title, text, shortcut, project) in [
+                ("Review checklist", body, "rev", None),
+                (
+                    "Project notes",
+                    "Mind the layout.",
+                    "",
+                    Some(project.clone()),
+                ),
+                ("Elsewhere", "Not here.", "elsewhere", Some(other.clone())),
+                ("Shadowed", "Mine.", "/fixture-review", None),
+            ] {
+                state
+                    .change_prompts(
+                        |store| {
+                            store.add_prompt(keystone_core::PromptFields {
+                                title: title.into(),
+                                body: text.into(),
+                                shortcut: shortcut.into(),
+                                project,
+                            })
+                        },
+                        cx,
+                    )
+                    .unwrap();
+            }
+        })
+    });
+    cx.simulate_input("/");
+    wait(cx, &view, listed);
+    let all = shown(&view, cx);
+    assert_eq!(
+        &all[..2],
+        [("/rev".into(), "Saved"), ("Project notes".into(), "Saved")]
+    );
+    let at = |row: (&str, &str)| all.iter().position(|(l, s)| (l.as_str(), *s) == row);
+    assert!(
+        at(("/fixture-review", "User")) < at(("/fixture-review", "Saved · command wins")),
+        "the command comes first without a query too: {all:?}"
+    );
+    assert_eq!(all.last().unwrap().1, "Saved · command wins");
+    assert!(!all.iter().any(|(label, _)| label == "/elsewhere"));
+
+    cx.simulate_input("fixture-review");
+    assert_eq!(
+        &shown(&view, cx)[..2],
+        [
+            ("/fixture-review".into(), "User"),
+            ("/fixture-review".into(), "Saved · command wins"),
+        ],
+        "the command comes first"
+    );
+
+    cx.simulate_keystrokes("ctrl-a");
+    cx.simulate_input("/rev");
+    assert_eq!(shown(&view, cx)[0], ("/rev".into(), "Saved"));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        draft(&view, cx),
+        body,
+        "the composer holds the prompt's text"
+    );
+    let saved = Store::open(dir.path().join("workspace.json")).unwrap();
+    assert_eq!(saved.workspace().sessions()[0].draft(), body);
+    assert!(!saved.workspace().sessions()[0].started());
+    assert_eq!(saved.workspace().prompts()[0].uses(), 1);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("project/.fake-claude-messages")).unwrap(),
+        "",
+        "nothing is sent"
+    );
+
+    // The library says so too, once the account has listed its commands.
+    let shadowed = saved.workspace().prompts()[3].id();
+    cx.simulate_keystrokes("ctrl-,");
+    cx.run_until_parked();
+    let section = cx.debug_bounds("settings-section-prompts").unwrap();
+    cx.simulate_click(section.center(), gpui::Modifiers::none());
+    wait(cx, &view, listed);
+    let conflict: &'static str = format!("prompt-conflict-{shadowed}").leak();
+    assert!(cx.debug_bounds(conflict).is_some());
+    let review = saved.workspace().prompts()[0].id();
+    assert!(
+        cx.debug_bounds(format!("prompt-conflict-{review}").leak())
+            .is_none()
+    );
+}
+
+/// Opening the library before any `/` asks the account for its commands, so a
+/// shortcut one of them shares is flagged there.
+#[gpui::test]
+fn the_library_asks_for_commands_to_flag_a_shortcut_one_shares(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(Provider::Claude, cx);
+    let id = view.update(cx, |view, cx| {
+        view.state.update(cx, |state, cx| {
+            state
+                .change_prompts(
+                    |store| {
+                        store.add_prompt(keystone_core::PromptFields {
+                            title: "Mine".into(),
+                            body: "Mine.".into(),
+                            shortcut: "fixture-review".into(),
+                            project: None,
+                        })
+                    },
+                    cx,
+                )
+                .unwrap()
+                .value
+        })
+    });
+    cx.simulate_keystrokes("ctrl-,");
+    cx.run_until_parked();
+    let section = cx.debug_bounds("settings-section-prompts").unwrap();
+    cx.simulate_click(section.center(), gpui::Modifiers::none());
+    wait(cx, &view, listed);
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(format!("prompt-conflict-{id}").leak())
+            .is_some()
+    );
+}
+
+/// While the account's list loads, Enter and Tab never insert a prompt with a
+/// shortcut, since a command may yet take its name; a click on its row still does.
+#[gpui::test]
+fn enter_waits_for_the_command_list_before_inserting_a_shortcut_prompt(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("project");
+    std::fs::create_dir_all(&folder).unwrap();
+    let silent = dir.path().join("silent");
+    std::fs::write(&silent, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    std::fs::set_permissions(&silent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+    let id = store
+        .create(
+            Provider::Claude,
+            &WorkingDirectory::new(&folder).unwrap(),
+            1,
+        )
+        .unwrap()
+        .value;
+    store.select(id).unwrap();
+    store
+        .add_prompt(keystone_core::PromptFields {
+            title: "Mine".into(),
+            body: "Mine.".into(),
+            shortcut: "fixture-review".into(),
+            project: None,
+        })
+        .unwrap();
+    store
+        .add_prompt(keystone_core::PromptFields {
+            title: "Log".into(),
+            body: "Log.".into(),
+            shortcut: "log".into(),
+            project: None,
+        })
+        .unwrap();
+    cx.update(|cx| {
+        keystone_ui::init(cx);
+        crate::bind_keys(cx);
+    });
+    cx.executor().allow_parking();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(store, cx);
+            state.test_programs = Some((silent.clone(), silent.clone()));
+            state
+        });
+        Keystone::new(state, false, window, cx)
+    });
+    view.update_in(cx, |this, window, cx| {
+        this.composer.focus_handle(cx).focus(window, cx)
+    });
+    cx.simulate_input("/fixture-review");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, cx| {
+        view.state.read(cx).commands(id, Provider::Claude).is_none()
+    }));
+    assert_eq!(shown(&view, cx)[0], ("/fixture-review".into(), "Saved"));
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(draft(&view, cx), "/fixture-review", "the keyboard waits");
+    let row = cx.debug_bounds("slash-menu-list-row-0").unwrap();
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(draft(&view, cx), "Mine.", "a click chooses it");
+
+    // `/log` waits behind `/login` here; Enter acts on neither until the list is in.
+    cx.simulate_keystrokes("ctrl-a backspace");
+    cx.simulate_input("/log");
+    cx.run_until_parked();
+    assert_eq!(shown(&view, cx)[0].0, "/login");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(draft(&view, cx), "/log");
+    assert_eq!(shown(&view, cx)[0].0, "/login", "no Terminal only notice");
 }
