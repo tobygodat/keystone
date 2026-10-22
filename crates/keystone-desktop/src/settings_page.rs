@@ -1089,7 +1089,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        assert_eq!(height(cx, "settings"), px(32.));
+        assert_eq!(height(cx, "settings"), px(28.));
         let row = height(cx, "session-1");
         assert!(!shown(cx, "settings-page"));
 
@@ -1105,7 +1105,7 @@ mod tests {
         click(cx, "density-compact");
         assert_eq!(saved(&path).density, Density::Compact);
         cx.update(|_, cx| assert_eq!(cx.theme().density, keystone_ui::Density::Compact));
-        assert_eq!(height(cx, "settings"), px(28.));
+        assert_eq!(height(cx, "settings"), px(24.));
 
         assert!(!shown(cx, "settings-ui-font"));
         click(cx, "settings-section-fonts");

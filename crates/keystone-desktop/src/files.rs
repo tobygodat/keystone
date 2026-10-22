@@ -403,7 +403,7 @@ impl Render for FileBrowser {
                             .flex_1()
                             .min_w_0()
                             .gap_2()
-                            .child(Icon::new(icon).size(px(14.)).color(Color::Muted))
+                            .child(Icon::new(icon).size(px(16.)).color(Color::Muted))
                             .child(
                                 div()
                                     .flex_1()

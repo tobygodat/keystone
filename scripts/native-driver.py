@@ -104,6 +104,15 @@ def timestamp():
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
 
+def png_size(path):
+    """The pixel size in a PNG's header, so a caller can see the capture was not scaled."""
+    with open(path, 'rb') as file:
+        header = file.read(24)
+    if header[:8] != b'\x89PNG\r\n\x1a\n':
+        raise ValueError(f'{path} is not a PNG')
+    return int.from_bytes(header[16:20], 'big'), int.from_bytes(header[20:24], 'big')
+
+
 def digest(path):
     with open(path, 'rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -569,7 +578,7 @@ TOOLS = [
     ('start', 'Build nothing; launch the --binary build (default target/debug/keystone-desktop) on a new '
      'private desktop with an '
      'empty disposable workspace and a new evidence directory. One run at a time.',
-     schema({'width': {'type': 'integer', 'default': 1280}, 'height': {'type': 'integer', 'default': 900},
+     schema({'width': {'type': 'integer', 'default': 1920}, 'height': {'type': 'integer', 'default': 1080},
              'headless': {'type': 'boolean', 'default': True,
                           'description': 'false shows the desktop as a host window'},
              'env': {'type': 'object', 'additionalProperties': {'type': 'string'},
@@ -628,7 +637,7 @@ class Server:
             evidence = ROOT / '.audit' / f'verify-{time.strftime("%Y%m%dT%H%M%S")}-{os.getpid()}'
             self.run = Run(self.args.driver, ROOT, evidence, self.args.binary,
                            self.args.trace_wayland)
-            started = self.run.start(arguments.get('width', 1280), arguments.get('height', 900),
+            started = self.run.start(arguments.get('width', 1920), arguments.get('height', 1080),
                                      arguments.get('headless', True), arguments.get('env'))
             return {**started, 'evidence': str(evidence), 'state': str(self.run.state),
                     'database': str(database_path(self.run.state))}, None
@@ -639,7 +648,9 @@ class Server:
             result = run.call('screenshot')
             image = next(c for c in result['content'] if c.get('type') == 'image')
             saved = next(c for c in result['_evidence']['content'] if c.get('type') == 'image')
-            return {**result.get('structuredContent', {}), 'path': saved['path']}, image
+            width, height = png_size(saved['path'])
+            return {**result.get('structuredContent', {}), 'path': saved['path'],
+                    'width': width, 'height': height}, image
         if name == 'elements':
             return run.elements(arguments.get('window')), None
         if name == 'click':

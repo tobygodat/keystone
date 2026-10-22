@@ -62,7 +62,7 @@ pub(crate) fn branch_chip(branch: String, missing: bool) -> impl IntoElement {
         .gap(px(5.))
         .child(
             Icon::new(IconName::Branch)
-                .size(px(14.))
+                .size(px(16.))
                 .color(Color::Muted),
         )
         .child(
@@ -101,7 +101,7 @@ impl Keystone {
             .hover(move |s| s.bg(colors.element_filled_hover))
             .child(
                 Icon::new(IconName::Branch)
-                    .size(px(14.))
+                    .size(px(16.))
                     .color(Color::Muted),
             )
             .child(

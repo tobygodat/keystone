@@ -657,7 +657,7 @@ impl RenderOnce for Tree {
                 let depth = state.model.depth(row);
                 let entry = state.entry(row);
                 let theme = cx.theme();
-                let (height, fill) = (theme.density.control(px(24.)), theme.colors.selection_fill);
+                let (height, fill) = (theme.density.control(px(26.)), theme.colors.selection_fill);
                 let chevron = div()
                     .id(("chevron", ix))
                     .flex_none()
@@ -675,7 +675,7 @@ impl RenderOnce for Tree {
                             };
                             let handlers = handlers.clone();
                             d.cursor_pointer()
-                                .child(Icon::new(icon).size(px(12.)).color(Color::Muted))
+                                .child(Icon::new(icon).size(px(16.)).color(Color::Muted))
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
                                     handlers.run(window, cx, |state, cx| {

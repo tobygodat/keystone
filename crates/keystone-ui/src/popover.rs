@@ -214,7 +214,7 @@ impl RenderOnce for MenuItem {
             .cursor_pointer()
             .when(self.highlighted, |d| d.bg(hover))
             .hover(move |s| s.bg(hover))
-            .when_some(self.icon, |d, icon| d.child(Icon::new(icon).size(px(14.))))
+            .when_some(self.icon, |d, icon| d.child(Icon::new(icon).size(px(16.))))
             .when_some(self.checked, |d, checked| {
                 d.child(div().size(px(14.)).flex_shrink_0().when(checked, |d| {
                     d.child(

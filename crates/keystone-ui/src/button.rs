@@ -284,7 +284,7 @@ impl RenderOnce for Button {
                 ButtonSize::Large => px(12.),
             })
             .when_some(self.icon, |d, icon| {
-                d.child(Icon::new(icon).size(px(14.)).color(color))
+                d.child(Icon::new(icon).size(px(16.)).color(color))
             })
             .child(Label::new(self.label).size(text).color(color))
     }

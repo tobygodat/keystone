@@ -69,6 +69,7 @@ impl RenderOnce for Label {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         div()
             .text_size(self.size.px())
+            .line_height(self.size.line_height())
             .text_color(self.color.to_hsla(cx))
             .font_weight(self.weight)
             .when(

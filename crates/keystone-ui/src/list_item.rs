@@ -99,7 +99,7 @@ impl RenderOnce for ListItem {
             .min_w_0()
             .px(px(10.))
             .py(theme.density.pad(px(7.)))
-            .gap(px(3.))
+            .gap(px(2.))
             .rounded(radius::ROW)
             .cursor_pointer()
             .when(self.selected, |d| {

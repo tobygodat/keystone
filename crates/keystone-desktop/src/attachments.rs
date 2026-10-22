@@ -516,7 +516,7 @@ pub(crate) fn chip(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(Icon::new(IconName::File).size(px(14.)).color(Color::Muted))
+                        .child(Icon::new(IconName::File).size(px(16.)).color(Color::Muted))
                         .into_any_element()
                 }),
         )

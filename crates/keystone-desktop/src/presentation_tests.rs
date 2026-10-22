@@ -1060,11 +1060,11 @@ fn a_400px_composer_keeps_a_model_target_and_every_action_through_a_turn(cx: &mu
             let send = cx.debug_bounds("send").unwrap();
             let field = cx.debug_bounds("composer-field").unwrap();
             assert!(
-                selector.size.width >= px(56.) && selector.size.height >= px(28.),
+                selector.size.width >= px(56.) && selector.size.height >= px(24.),
                 "{selector:?}"
             );
             assert!(selector.right() <= folder.left() && folder.right() <= approval.left());
-            assert_eq!(folder.size.width, px(28.));
+            assert_eq!(folder.size.width, px(24.));
             assert!(send.right() <= field.right() + px(12.), "Send at {send:?}");
             for &id in actions {
                 let action = cx

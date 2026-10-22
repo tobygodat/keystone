@@ -124,7 +124,7 @@ impl Render for TreePage {
                     h_flex()
                         .gap_2()
                         .min_w_0()
-                        .child(Icon::new(icon).size(px(14.)).color(Color::Muted))
+                        .child(Icon::new(icon).size(px(16.)).color(Color::Muted))
                         .child(Label::new(entry.name.clone()).truncate())
                         .into_any_element()
                 })

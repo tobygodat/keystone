@@ -64,6 +64,13 @@ impl TextSize {
                 TextSize::Title => 24.,
             })
     }
+
+    /// The line height for this size, rounded to an even number of pixels so text
+    /// rows and the controls that center them land on whole pixels.
+    pub fn line_height(self) -> Pixels {
+        let ratio = if self == TextSize::Title { 1.25 } else { 1.4 };
+        ((self.px() * ratio) / 2.).round() * 2.
+    }
 }
 
 /// Back-to-front surface levels. Each maps to a background, a hairline border,
@@ -85,5 +92,14 @@ mod tests {
         assert_eq!(TextSize::Base.px(), px(15.));
         set_text_scale(1.);
         assert_eq!(TextSize::Base.px(), px(13.));
+    }
+
+    #[test]
+    fn line_heights_are_even_whole_pixels() {
+        let heights = TextSize::ALL.map(TextSize::line_height);
+        assert_eq!(heights, [14., 16., 16., 18., 20., 30.].map(px));
+        set_text_scale(16. / 13.);
+        assert_eq!(TextSize::Base.line_height(), px(22.));
+        set_text_scale(1.);
     }
 }

@@ -454,7 +454,7 @@ impl RenderOnce for CommandPalette {
             .hairline_b(cx)
             .child(
                 Icon::new(IconName::Search)
-                    .size(px(14.))
+                    .size(px(16.))
                     .color(Color::Muted),
             )
             .child(field);

@@ -31,22 +31,27 @@ pub enum Density {
 impl Density {
     pub const ALL: [Density; 3] = [Density::Compact, Density::Default, Density::Spacious];
 
-    /// A control or bar height. Each step away from `Default` changes it by 4 px.
+    /// A control or bar height: `base` at `Spacious`, seven eighths of it at `Default` and
+    /// three quarters at `Compact`, rounded to an even number of pixels so content centers
+    /// on whole pixels. Nothing shrinks below 20 px, so controls keep a usable target.
     pub fn control(self, base: Pixels) -> Pixels {
-        base + px(match self {
-            Density::Compact => -4.,
-            Density::Default => 0.,
-            Density::Spacious => 4.,
-        })
+        let scale = match self {
+            Density::Compact => 0.75,
+            Density::Default => 0.875,
+            Density::Spacious => 1.,
+        };
+        ((base * scale / 2.).round() * 2.).max(base.min(px(20.)))
     }
 
-    /// Vertical padding inside a row.
+    /// Vertical padding inside a row, in whole pixels.
     pub fn pad(self, base: Pixels) -> Pixels {
-        base * match self {
-            Density::Compact => 0.5,
-            Density::Default => 1.,
-            Density::Spacious => 1.5,
-        }
+        (base
+            * match self {
+                Density::Compact => 0.5,
+                Density::Default => 0.75,
+                Density::Spacious => 1.,
+            })
+        .round()
     }
 }
 
@@ -297,6 +302,21 @@ impl Colors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn density_sizes_are_even_whole_pixels() {
+        let controls = Density::ALL.map(|d| [16., 24., 28., 44.].map(|base| d.control(px(base))));
+        assert_eq!(
+            controls,
+            [
+                [16., 20., 22., 34.],
+                [16., 22., 24., 38.],
+                [16., 24., 28., 44.]
+            ]
+            .map(|row| row.map(px))
+        );
+        assert_eq!(Density::ALL.map(|d| d.pad(px(7.))), [4., 5., 7.].map(px));
+    }
 
     #[test]
     fn another_interface_font_drops_inter_display_and_features() {

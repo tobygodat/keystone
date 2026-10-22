@@ -1058,7 +1058,7 @@ impl ChangesPanel {
             .gap_2()
             .child(
                 Icon::new(IconName::Branch)
-                    .size(px(14.))
+                    .size(px(16.))
                     .color(Color::Muted),
             )
             .child(
@@ -1539,7 +1539,7 @@ impl Keystone {
                     .hover(move |s| s.bg(hover))
                     .child(
                         Icon::new(IconName::PullRequest)
-                            .size(px(14.))
+                            .size(px(16.))
                             .color(Color::Muted),
                     )
                     .child(Label::new(format!("#{}", pull_request.number)).color(Color::Muted))

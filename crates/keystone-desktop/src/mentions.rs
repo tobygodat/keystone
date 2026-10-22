@@ -572,7 +572,7 @@ fn file_row(found: &Found, highlighted: bool, height: Pixels, cx: &mut App) -> A
         .gap(spacing::SM)
         .rounded(radius::MENU_ROW)
         .when(highlighted, |d| d.bg(cx.theme().colors.selection_fill))
-        .child(Icon::new(IconName::File).size(px(14.)).color(Color::Muted))
+        .child(Icon::new(IconName::File).size(px(16.)).color(Color::Muted))
         .child(
             div()
                 .flex_1()

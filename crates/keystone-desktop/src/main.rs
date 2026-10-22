@@ -1546,7 +1546,7 @@ impl Keystone {
                             .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                                 this.search.focus_handle(cx).focus(window, cx)
                             }))
-                            .child(Icon::new(IconName::Search).size(px(15.)))
+                            .child(Icon::new(IconName::Search).size(px(16.)))
                             .child(
                                 div()
                                     .flex_1()
@@ -1840,7 +1840,7 @@ impl Keystone {
                                     } else {
                                         colors.element_disabled
                                     })
-                                    .child(Icon::new(IconName::Up).size(px(15.)).color(
+                                    .child(Icon::new(IconName::Up).size(px(16.)).color(
                                         if can_send {
                                             Color::Custom(colors.text_inverse)
                                         } else {
@@ -3514,6 +3514,7 @@ impl Render for Keystone {
             .font_ui(cx)
             .text_color(text)
             .text_size(TextSize::Base.px())
+            .line_height(TextSize::Base.line_height())
             .track_focus(&self.focus)
             .key_context(if customizing {
                 "Keystone Customize"
@@ -10005,7 +10006,7 @@ mod tests {
             .debug_bounds(format!("transcript-row-{shown}").leak())
             .unwrap();
         assert!(
-            report.right() <= row.right() && report.size.height > px(60.),
+            report.right() <= row.right() && report.size.height > TextSize::Ui.line_height() * 3.,
             "the report wraps inside its row: {report:?} in {row:?}"
         );
         view.read_with(cx, |view, cx| {

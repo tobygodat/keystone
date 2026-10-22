@@ -358,5 +358,31 @@ class WindowsTest(unittest.TestCase):
             driver.Run.elements(run)
 
 
+
+class CaptureSizeTest(unittest.TestCase):
+    def test_start_defaults_to_a_full_hd_desktop(self):
+        server = driver.Server.__new__(driver.Server)
+        server.run = None
+        server.args = SimpleNamespace(driver='driver', binary='binary', trace_wayland=False)
+        started = Mock(return_value={})
+        original = driver.Run
+        driver.Run = Mock(return_value=SimpleNamespace(start=started, state=Path('/tmp/state.json')))
+        try:
+            server.handle('start', {})
+        finally:
+            driver.Run = original
+        self.assertEqual(started.call_args.args[:2], (1920, 1080))
+        start = next(tool for tool in driver.TOOLS if tool[0] == 'start')
+        self.assertEqual((start[2]['properties']['width']['default'],
+                          start[2]['properties']['height']['default']), (1920, 1080))
+
+    def test_png_size_reads_the_saved_pixels(self):
+        with tempfile.NamedTemporaryFile(suffix='.png') as file:
+            file.write(b'\x89PNG\r\n\x1a\n' + b'\x00\x00\x00\rIHDR'
+                       + (1920).to_bytes(4, 'big') + (1080).to_bytes(4, 'big'))
+            file.flush()
+            self.assertEqual(driver.png_size(file.name), (1920, 1080))
+
+
 if __name__ == '__main__':
     unittest.main()
