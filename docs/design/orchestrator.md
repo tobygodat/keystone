@@ -17,10 +17,10 @@ access is provided.
 | Tool | Behavior |
 | --- | --- |
 | `capabilities {}` | Lists both providers, their currently loaded model catalogs (for the caller's account on its own provider, otherwise the default account) and their accounts: `default` plus each added account's ID and name. A loading catalog can be queried again. |
-| `session_launch {provider, account?, model?, mode?, cwd?, message, client_request_id}` | Creates and starts a session in the caller's project. `provider` is `claude` or `codex`; `account` is `default` (the default, the inherited environment) or an added account's ID such as `claude-work`; an unknown ID or another provider's account is refused. An omitted mode inherits the caller's mode. |
+| `session_launch {provider, account?, model?, mode?, cwd?, message, client_request_id}` | Creates and starts a session in the caller's project. `provider` is `claude` or `codex`; `account` is `default` (the default, the inherited environment) or an added account's ID such as `claude-work`; an unknown ID or another provider's account is refused. An omitted mode inherits the caller's mode. When the launched session's first turn ends, its result starts the caller's next turn (see Results of launched sessions). |
 | `session_send {session, message, client_request_id}` | Steers an already running target immediately, or returns busy. It never starts an idle target or queues a follow-up. |
 | `session_read {session, after?, limit?}` | Reads transcript rows, with zero-based positions. `after` is exclusive; `limit` defaults to 50 and is bounded to 1–200. `next` does not advance past a streaming row, so polling does not miss its completion. `handed_off_from` names the session a handoff continued, so a session started from a handoff can read the rows its handoff text left out. |
-| `session_wait {session, timeout?}` | Waits for the target's current work to end. The timeout defaults to 50 seconds and is capped at 50 seconds; `timed_out` distinguishes the cutoff from completion. Call again to keep waiting. |
+| `session_wait {session, timeout?}` | Waits for the target's current work to end. The timeout defaults to 50 seconds and is capped at 50 seconds; `timed_out` distinguishes the cutoff from completion. Call again to keep waiting. A wait that sees a launched session's turn end marks its result observed, so it starts no turn. |
 | `session_interrupt {session}` | Stops the current target turn through the same runtime path as the Stop button. Codex also cancels an initial message waiting for its thread to open. Work still queued on a connection worker returns busy rather than acknowledging a stop it cannot apply immediately. |
 
 Every call requires a live Keystone caller process with a running turn. Every
@@ -56,6 +56,68 @@ short wait can take longer than requested. The whole wait still has a 50-second
 dispatch bound. Once a snapshot exists, a dispatch deadline at the cutoff returns
 that last snapshot with `timed_out: true`; authorization and other runtime errors
 remain errors. If the first snapshot cannot be obtained, no state is fabricated.
+
+## Results of launched sessions
+
+A launch saves a durable delivery record with the new session, in the same SQLite
+transaction: the launched session (`child`), the session that launched it
+(`parent`) and its state. `session_read` reports `created_by` from this record, so it
+survives restarts. When the child's turn ends, its result is saved as `ready`: how the
+turn ended (finished, stopped or failed with its error) and its last reply, with both
+ends kept when long. The result then starts the parent's next turn as a message:
+
+```
+Result from session 12 (“Fix the flaky test”), which you launched.
+It finished.
+Read its whole transcript with session_read.
+
+<the child's last reply>
+```
+
+The parent's transcript shows that message as a "Result from" card naming the child,
+not as a user message. One record is delivered once, for the launch's first turn end;
+later turns of the child, such as a user continuing it, deliver nothing more. So a
+child that itself launches a session and ends its turn sends its parent that turn's
+reply; the parent reads the child's later work with `session_read` or `session_wait`.
+
+A result goes only to a parent that is idle: no running turn, no recovery holding its
+next message, no approval request or widget waiting for the user, and not settled.
+A parent busy with a turn gets the result once that turn ends, in a new turn, never as
+a steer. A settled parent is never woken; the result waits until the user un-settles
+it. Each held result is listed under the parent's last row with what it waits for.
+Several results for one parent go one turn at a time. There is no queue UI.
+
+A parent the user handed off is not woken: its results go to the newest session that
+continues it, once that session has sent its first message (the handoff's context).
+
+Delivery uses the same path as Send: a parent whose Claude process was evicted is
+resumed with its own account, model and conversation; a parent whose history is not
+loaded is loaded first, and recovery's gate (the check, then any acknowledgement) runs
+before anything is sent. A send refused before it reaches the provider, such as a
+missing folder or account, shows its error in the parent and keeps the result ready
+for the next attempt. A provider that accepts the message and then fails to start the
+turn (a process that cannot start, a resume that fails) shows the error after the
+result card in the parent, as it does for a typed message; the result counts as
+delivered and is not sent again, so the user continues from there.
+
+If the parent's own `session_wait` sees the child's turn end while its result is ready,
+the record becomes `observed` and no turn is started for it. A launch whose task was
+never sent (`sent: false`) is `unsent` and delivers nothing.
+
+`delivered` is saved with the message before the message is written to the provider,
+so a crash or restart never sends a result twice. A crash in the moment between that
+save and the provider write can leave a result marked delivered that the provider never
+received and the parent's transcript never shows; the delivery record and the child's
+own transcript still hold it. A ready result survives a restart and is delivered by the
+next start once its parent is idle. A child whose turn end was saved but whose result
+was not, because Keystone closed in between, has its result saved at the next start. A
+child whose turn was cut off by a restart has no result until a later turn of it ends;
+that turn, even one the user starts, then delivers as the first.
+
+The transcript shows a message as a result card only when it is exactly the message a
+delivery record holds as delivered to that parent, so text written to look like a
+result stays an ordinary message. A result whose `delivered` save fails stays ready and
+is tried again at the next update.
 
 ## Approval ceiling
 
@@ -107,15 +169,11 @@ connected.
 
 ## In-memory seam and deliberate limits
 
-The runtime's small `Records` trait isolates idempotency receipts and
-`created_by: Session(parent)` relationships from the transport. V1 uses an
-in-memory implementation; a restart loses these records, and request IDs must not
-be reused across app restarts as a durability guarantee. Session creation, text
-and turn state still use the existing runtime's storage methods. This unit does
-not change the Store or neutral log implementation; the SQLite work can replace
-the records implementation later.
+The runtime's small `Records` trait isolates idempotency receipts from the
+transport. It is in memory; a restart loses them, and request IDs must not be
+reused across app restarts as a durability guarantee. Parent relationships live in
+the durable delivery records above.
 
-There are no durable deliveries, completion wakes, idle-parent turns, queue UI,
-account switching or remote machines here. A child finishing cannot start its
-parent's next turn. Those require later units rather than implicit behavior in
-`session_send`.
+`session_send` stays steer-only: it never starts an idle target or queues a
+follow-up. Only a launched session's own result may start its parent's turn. There
+is no queue UI, account switching or remote machine support here.

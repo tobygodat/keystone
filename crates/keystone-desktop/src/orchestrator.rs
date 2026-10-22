@@ -1,6 +1,6 @@
 use super::*;
 use keystone_agent::mcp::{Caller, HandlerError, Server, mode_allowed};
-use keystone_core::{WorktreeContext, worktree};
+use keystone_core::{DeliveryState, WorktreeContext, worktree};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -78,14 +78,11 @@ trait Records {
     fn lookup(&self, caller: u64, key: &str, input: &[u8; 32]) -> Result<Option<Reply>, String>;
     fn has_capacity(&self) -> bool;
     fn record(&mut self, caller: u64, key: String, input: [u8; 32], reply: Reply);
-    fn child(&mut self, session: u64, parent: u64);
-    fn created_by(&self, session: u64) -> Option<u64>;
 }
 
 #[derive(Default)]
 struct MemoryRecords {
     requests: HashMap<(u64, String), ([u8; 32], Reply)>,
-    parents: HashMap<u64, u64>,
 }
 
 impl Records for MemoryRecords {
@@ -103,14 +100,6 @@ impl Records for MemoryRecords {
 
     fn record(&mut self, caller: u64, key: String, input: [u8; 32], reply: Reply) {
         self.requests.insert((caller, key), (input, reply));
-    }
-
-    fn child(&mut self, session: u64, parent: u64) {
-        self.parents.insert(session, parent);
-    }
-
-    fn created_by(&self, session: u64) -> Option<u64> {
-        self.parents.get(&session).copied()
     }
 }
 
@@ -550,7 +539,8 @@ impl AppState {
                 Ok(
                     json!({"providers":providers,"project":project.as_str(),"mode_ceiling":ceiling.slug(),
                     "provider_settings":"inherits the provider's own setting; no Ask ceiling",
-                    "send":"steer-only; idle or unsteerable targets return busy", "wait_max_seconds":50}),
+                    "send":"steer-only; idle or unsteerable targets return busy", "wait_max_seconds":50,
+                    "results":"when a session you launched ends its turn, its result starts your next turn once you are idle, unless your session_wait saw it end first"}),
                 )
             }
             "session_launch" => {
@@ -568,10 +558,14 @@ impl AppState {
                     )?,
                 };
                 let id = match &worktree {
-                    Some(worktree) => {
-                        self.create_worktree_unselected(provider, worktree, now_ms(), cx)
-                    }
-                    None => self.create_unselected(provider, project, now_ms(), cx),
+                    Some(worktree) => self.create_worktree_unselected(
+                        provider,
+                        worktree,
+                        now_ms(),
+                        caller.session,
+                        cx,
+                    ),
+                    None => self.create_unselected(provider, project, now_ms(), caller.session, cx),
                 }
                 .map_err(|e| match (&worktree, &launch.worktree) {
                     (Some(worktree), Some(_)) => format!(
@@ -582,11 +576,6 @@ impl AppState {
                     _ => e.to_string(),
                 })?
                 .value;
-                self.orchestrator
-                    .as_mut()
-                    .unwrap()
-                    .records
-                    .child(id, caller.session);
                 let setup = (|| -> Result<(), String> {
                     self.set_provider_account(id, provider, account, cx)
                         .map_err(|e| e.to_string())?;
@@ -597,6 +586,7 @@ impl AppState {
                     Ok(())
                 })();
                 if let Err(error) = setup {
+                    self.persist(PendingSave::Delivery(id, DeliveryState::Unsent));
                     return Ok(
                         json!({"session":id,"sent":false,"error":error,"created_by":{"session":caller.session}}),
                     );
@@ -608,9 +598,12 @@ impl AppState {
                         attachments: Vec::new(),
                     },
                     Some(caller),
-                    true,
+                    SendKind::Draft,
                     cx,
                 );
+                if !sent {
+                    self.persist(PendingSave::Delivery(id, DeliveryState::Unsent));
+                }
                 Ok(json!({"session":id,"sent":sent,"created_by":{"session":caller.session}}))
             }
             "session_send" => {
@@ -711,11 +704,10 @@ impl AppState {
                 let load_error = conversation.load_error.as_deref().map(cap);
                 let save_error = conversation.save_error.as_deref().map(cap);
                 let created_by = self
-                    .orchestrator
-                    .as_ref()
-                    .unwrap()
-                    .records
-                    .created_by(read.session);
+                    .store
+                    .workspace()
+                    .delivery(read.session)
+                    .map(|delivery| delivery.parent());
                 Ok(
                     json!({"session":read.session,"loading":false,"running":running,"rows":rows,
                     "next":next,"has_more":begin.saturating_add(rows.len())<total,
@@ -746,6 +738,35 @@ impl AppState {
                     .get(&wait.session)
                     .and_then(|c| c.error.as_deref())
                     .map(keystone_agent::cap_output);
+                // The parent saw its launched session's turn end, so no turn of its own
+                // is started for the result.
+                // A result still being saved counts as ended too.
+                let ended = |state: &DeliveryState| {
+                    match state {
+                    DeliveryState::Ready { .. } => true,
+                    DeliveryState::Working => {
+                        self.finished.contains_key(&wait.session)
+                            || self.pending.iter().any(|save| {
+                                matches!(save, PendingSave::Delivery(child, DeliveryState::Ready { .. }) if *child == wait.session)
+                            })
+                    }
+                    _ => false,
+                }
+                };
+                if !running
+                    && self
+                        .store
+                        .workspace()
+                        .delivery(wait.session)
+                        .is_some_and(|d| {
+                            (d.parent() == caller.session
+                                || self.recipient(d.parent()) == caller.session)
+                                && ended(d.state())
+                        })
+                {
+                    self.finished.remove(&wait.session);
+                    self.persist(PendingSave::Delivery(wait.session, DeliveryState::Observed));
+                }
                 Ok(json!({"session":wait.session,"running":running,"error":error}))
             }
             "session_interrupt" => {
@@ -777,8 +798,6 @@ mod tests {
         );
         assert_eq!(records.lookup(2, "key", &input).unwrap(), None);
         assert!(records.lookup(1, "key", &[2; 32]).is_err());
-        records.child(3, 1);
-        assert_eq!(records.created_by(3), Some(1));
     }
 }
 

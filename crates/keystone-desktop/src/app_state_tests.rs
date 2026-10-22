@@ -1132,6 +1132,9 @@ mod recovery;
 #[path = "idle_tests.rs"]
 mod idle;
 
+#[path = "delivery_tests.rs"]
+mod delivery;
+
 #[gpui::test]
 fn an_account_never_shows_usage_left_under_its_id(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

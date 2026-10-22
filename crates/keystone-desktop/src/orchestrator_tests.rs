@@ -117,9 +117,18 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
                 Provider::Codex => Provider::Claude,
             }
         );
-        let orchestrator = state.orchestrator.as_ref().unwrap();
-        assert_eq!(orchestrator.records.created_by(2), Some(1));
-        let caller = orchestrator.last_caller.unwrap();
+        let delivery = state.store.workspace().delivery(2).unwrap();
+        assert_eq!(delivery.parent(), 1);
+        assert_eq!(
+            *delivery.state(),
+            keystone_core::DeliveryState::Observed,
+            "the parent's own wait saw the child end, so no turn is started for it"
+        );
+        assert!(
+            !transcript(state, 1).contains("Result from session"),
+            "an observed result starts no turn"
+        );
+        let caller = state.orchestrator.as_ref().unwrap().last_caller.unwrap();
         assert!(state.caller(caller).unwrap_err().contains("running turn"));
     });
     let caller = state.read_with(cx, |state, _| {
@@ -440,8 +449,13 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
             cx
         ))
     });
+    // The provider's copy of the message follows its turn start, which is when the
+    // parent's agent counts as running for the orchestrator.
     wait_until(&state, cx, |state| {
         state.started(1).is_some_and(|c| c.is_running(1))
+            && state.conversations[&1].rows.iter().any(|row| {
+                matches!(row, Row::Item(item) if item.text == "long" && !item.id.starts_with("local:"))
+            })
     });
     let caller = state.read_with(cx, |state, _| {
         state.orchestrator.as_ref().unwrap().last_caller.unwrap()
@@ -516,6 +530,92 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
     let resume = launches[1].iter().position(|a| a == "--resume").unwrap();
     assert_eq!(launches[1][resume + 1], thread);
     state.update(cx, |state, cx| state.teardown(cx));
+}
+
+/// A scripted agent launches a session on the other provider and ends its turn, or
+/// keeps streaming. Either way the launched session's result starts exactly one later
+/// turn of the parent, after the turn that launched it.
+fn delegation_scenario(provider: Provider, busy: bool, cx: &mut gpui::TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let state = setup(directory.path(), provider, cx);
+    let target = match provider {
+        Provider::Claude => "codex",
+        Provider::Codex => "claude",
+    };
+    let suffix = if busy { " while busy" } else { "" };
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text: format!("orchestrator test: delegate {target}{suffix}"),
+                attachments: Vec::new(),
+            },
+            cx
+        ))
+    });
+    wait_until(&state, cx, |state| {
+        state.conversations.get(&1).is_some_and(|c| !c.running)
+            && transcript(state, 1).contains("You wrote: Result from session 2")
+    });
+    state.update(cx, |state, cx| {
+        assert!(matches!(
+            *state.store.workspace().delivery(2).unwrap().state(),
+            keystone_core::DeliveryState::Delivered { .. }
+        ));
+        let rows = &state.conversations[&1].rows;
+        let position = |found: &dyn Fn(&keystone_agent::Item) -> bool| {
+            rows.iter()
+                .position(|row| matches!(row, Row::Item(item) if found(item)))
+                .unwrap()
+        };
+        let started = position(&|item| item.text.starts_with("Scripted delegation started"));
+        let results: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                matches!(row, Row::Item(item) if state.result_source(1, &item.text) == Some(2))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(results.len(), 1, "{rows:?}");
+        assert!(
+            started < results[0],
+            "the result follows the launching turn"
+        );
+        let read = crate::app_state::delivery::parse(match &rows[results[0]] {
+            Row::Item(item) => &item.text,
+            _ => unreachable!(),
+        })
+        .unwrap();
+        assert_eq!(read.outcome, "It finished.");
+        assert!(
+            read.reply.contains("Scripted delegated task"),
+            "{}",
+            read.reply
+        );
+        assert_eq!(state.store.workspace().selected(), Some(1));
+        state.teardown(cx);
+    });
+}
+
+#[gpui::test]
+fn an_idle_codex_parent_gets_its_claude_childs_result(cx: &mut gpui::TestAppContext) {
+    delegation_scenario(Provider::Codex, false, cx);
+}
+
+#[gpui::test]
+fn an_idle_claude_parent_gets_its_codex_childs_result(cx: &mut gpui::TestAppContext) {
+    delegation_scenario(Provider::Claude, false, cx);
+}
+
+#[gpui::test]
+fn a_busy_codex_parent_gets_its_claude_childs_result_after_its_turn(cx: &mut gpui::TestAppContext) {
+    delegation_scenario(Provider::Codex, true, cx);
+}
+
+#[gpui::test]
+fn a_busy_claude_parent_gets_its_codex_childs_result_after_its_turn(cx: &mut gpui::TestAppContext) {
+    delegation_scenario(Provider::Claude, true, cx);
 }
 
 #[test]
@@ -659,7 +759,13 @@ fn an_agent_in_a_worktree_may_create_another(cx: &mut gpui::TestAppContext) {
     let own = keystone_core::worktree::create(repository.path(), "parent", None).unwrap();
     let mut store = Store::open(repository.path().join("workspace.json")).unwrap();
     store
-        .create_worktree_unselected(Provider::Claude, &own, 1)
+        .create_worktree_showing(
+            Provider::Claude,
+            &own,
+            1,
+            keystone_core::WindowId::FIRST,
+            None,
+        )
         .unwrap();
     store.set_approval_mode(1, ApprovalMode::Ask).unwrap();
     cx.executor().allow_parking();
@@ -688,6 +794,8 @@ fn an_agent_in_a_worktree_may_create_another(cx: &mut gpui::TestAppContext) {
             child.directory.path(),
             own.repository.path().join(".keystone/worktrees/sibling")
         );
+        // A worktree launch brings its result back like any other.
+        assert_eq!(state.store.workspace().delivery(2).unwrap().parent(), 1);
     });
     let caller = state.read_with(cx, |state, _| {
         state.orchestrator.as_ref().unwrap().last_caller.unwrap()

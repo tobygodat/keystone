@@ -394,12 +394,21 @@ fn an_agent_started_session_is_selected_in_no_window_and_each_window_lists_its_o
     let second = store.open_window(None, None, None).unwrap().value;
     let writes = store.writes();
     let child = store
-        .create_unselected(Provider::Codex, &working_directory(), 9)
+        .create_unselected(Provider::Codex, &working_directory(), 9, 3)
         .unwrap()
         .value;
-    assert_eq!(store.writes(), writes + 1);
+    assert_eq!(
+        store.writes(),
+        writes + 1,
+        "the session and its delivery in one write"
+    );
     let workspace = store.workspace();
     assert!(workspace.sessions().iter().any(|s| s.id() == child));
+    let delivery = workspace.delivery(child).unwrap();
+    assert_eq!(
+        (delivery.parent(), delivery.state()),
+        (3, &crate::DeliveryState::Working)
+    );
     assert_eq!(workspace.selected_in(WindowId::FIRST), Some(3));
     assert_eq!(workspace.selected_in(second), None);
 

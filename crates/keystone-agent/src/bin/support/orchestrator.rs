@@ -170,7 +170,64 @@ fn read_chunk(
     Ok(())
 }
 
+/// What a scripted delegation asks its launched session to do. The launched session
+/// answers it like any message.
+pub const DELEGATED_TASK: &str = "Scripted delegated task";
+
+/// `orchestrator test: delegate <provider>` launches a session on `provider` with a
+/// task whose reply streams for a while and ends this turn at once, so the launched
+/// session's result arrives while this session is idle. `... while busy` gives it a
+/// short task and keeps this turn streaming, so the result arrives while this session
+/// is still busy.
+fn delegate(text: &str, server: Option<&Server>, request: &str) -> Option<String> {
+    let (provider, busy) = match text.strip_prefix("orchestrator test: delegate ")? {
+        "codex" => ("codex", false),
+        "claude" => ("claude", false),
+        "codex while busy" => ("codex", true),
+        "claude while busy" => ("claude", true),
+        _ => return None,
+    };
+    // Steps make the launched session's reply outlast this turn's short one.
+    let mut task = DELEGATED_TASK.to_owned();
+    if !busy {
+        task.push(':');
+        for n in 1..=40 {
+            task.push_str(&format!(" step{n}"));
+        }
+    }
+    let launched = server
+        .ok_or("missing loopback MCP configuration")
+        .and_then(|server| {
+            server.call(
+                "session_launch",
+                json!({"provider":provider,"account":"default","mode":"read-only",
+                    "message":task,"client_request_id":format!("scripted-delegate-{request}")}),
+            )
+        });
+    Some(match launched {
+        Ok(child) if child["sent"] == true => {
+            let mut reply = format!(
+                "Scripted delegation started: child session={}. Its result starts my next turn (test data, no model call).",
+                child["session"]
+            );
+            if busy {
+                for n in 1..=120 {
+                    reply.push_str(&format!(" busy{n}"));
+                }
+            }
+            reply
+        }
+        Ok(_) => {
+            "Scripted delegation failure: the task was not sent (test data, no model call).".into()
+        }
+        Err(error) => format!("Scripted delegation failure: {error} (test data, no model call)."),
+    })
+}
+
 pub fn reply(text: &str, server: Option<&Server>, request: &str) -> Option<String> {
+    if let Some(reply) = delegate(text, server, request) {
+        return Some(reply);
+    }
     let target = match (
         text.strip_prefix("orchestrator test: launch in "),
         text.strip_prefix("orchestrator test: launch in new worktree "),
@@ -470,6 +527,27 @@ mod tests {
                     ]
                 );
             }
+        }
+    }
+
+    #[test]
+    fn only_exact_delegation_triggers_launch_and_without_a_server_they_fail() {
+        for text in [
+            "orchestrator test: delegate",
+            "orchestrator test: delegate gemini",
+            "orchestrator test: delegate codex ",
+        ] {
+            assert!(delegate(text, None, "parent-1").is_none(), "{text}");
+        }
+        for text in [
+            "orchestrator test: delegate codex",
+            "orchestrator test: delegate claude while busy",
+        ] {
+            assert!(
+                delegate(text, None, "parent-1")
+                    .unwrap()
+                    .starts_with("Scripted delegation failure:")
+            );
         }
     }
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
@@ -48,7 +48,7 @@ CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 /// Forward migrations, one per schema version after 1, each run in the opening
 /// IMMEDIATE transaction that also records the new `user_version`. A build that
 /// knows fewer versions refuses a newer database.
-const MIGRATIONS: [&str; 3] = [
+const MIGRATIONS: [&str; 4] = [
     "
 CREATE TABLE accounts (
     id TEXT PRIMARY KEY,
@@ -66,6 +66,13 @@ CREATE TABLE projects (
     "
 CREATE TABLE prompts (
     id TEXT PRIMARY KEY,
+    position INTEGER NOT NULL,
+    payload TEXT NOT NULL CHECK(json_valid(payload))
+);
+",
+    "
+CREATE TABLE deliveries (
+    child TEXT PRIMARY KEY,
     position INTEGER NOT NULL,
     payload TEXT NOT NULL CHECK(json_valid(payload))
 );
@@ -468,6 +475,18 @@ impl Database {
                         .insert(folder.to_owned(), text);
                 }
             }
+            let mut statement = tx
+                .prepare("SELECT payload FROM deliveries ORDER BY position")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?;
+            for row in rows {
+                snapshot
+                    .workspace
+                    .deliveries
+                    .push(serde_json::from_str(&row.map_err(sql_error)?)?);
+            }
             validate(&snapshot).map_err(|error| invalid(error.to_string()))?;
             Ok((snapshot, revision))
         })
@@ -811,6 +830,20 @@ fn write_projection(
         )
         .map_err(sql_error)?;
     }
+    // Deliveries are only added and changed, never removed.
+    for (position, delivery) in snapshot.workspace.deliveries.iter().enumerate() {
+        if previous.is_some_and(|workspace| workspace.deliveries.get(position) == Some(delivery)) {
+            continue;
+        }
+        let payload = serde_json::to_string(delivery)?;
+        let child = delivery.child().to_string();
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('delivery.upserted', ?1, ?2)",
+            params![child, payload],
+        )
+        .map_err(sql_error)?;
+        tx.execute("INSERT INTO deliveries(child, position, payload) VALUES (?1, ?2, ?3) ON CONFLICT(child) DO UPDATE SET position=excluded.position, payload=excluded.payload", params![child, position as i64, payload]).map_err(sql_error)?;
+    }
     let mut metadata = Snapshot {
         version: snapshot.version,
         next_id: snapshot.next_id,
@@ -822,6 +855,7 @@ fn write_projection(
     metadata.workspace.projects.clear();
     metadata.workspace.prompts.clear();
     metadata.workspace.commit_drafts.clear();
+    metadata.workspace.deliveries.clear();
     let payload = serde_json::to_string(&metadata)?;
     let previous: Option<String> = tx
         .query_row(

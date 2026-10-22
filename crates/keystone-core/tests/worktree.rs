@@ -208,10 +208,11 @@ fn session_v2_is_atomic_reloads_and_survives_handoff_alongside_v1() {
         .value;
     assert_eq!(store.writes(), 1);
     let second = store
-        .create_worktree_unselected(Provider::Codex, &context, 2)
+        .create_worktree_unselected(Provider::Codex, &context, 2, first)
         .unwrap()
         .value;
     assert_eq!(store.workspace().selected(), Some(first));
+    assert_eq!(store.workspace().delivery(second).unwrap().parent(), first);
     store
         .create(
             Provider::Codex,
@@ -268,7 +269,7 @@ fn failed_worktree_session_creation_leaves_no_partial_session_or_metadata() {
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     assert!(
         store
-            .create_worktree_unselected(Provider::Codex, &context, 1)
+            .create_worktree_showing(Provider::Codex, &context, 1, WindowId::FIRST, None)
             .is_err()
     );
     assert_eq!(store.writes(), 0);
@@ -276,7 +277,7 @@ fn failed_worktree_session_creation_leaves_no_partial_session_or_metadata() {
     assert_eq!(store.saved_snapshot().unwrap(), before);
     lock.execute_batch("ROLLBACK").unwrap();
     store
-        .create_worktree_unselected(Provider::Codex, &context, 1)
+        .create_worktree_showing(Provider::Codex, &context, 1, WindowId::FIRST, None)
         .unwrap();
     assert_eq!(store.workspace().sessions()[0].worktree(), Some(&context));
 }

@@ -29,6 +29,8 @@ pub struct RowControls {
     pub selection_start: Option<Box<dyn Fn(&mut Window, &mut App) -> Option<FocusHandle>>>,
     /// What a widget row's inputs and Buttons do.
     pub widget: Option<crate::widget::WidgetControl>,
+    /// For a launched session's delivered result, that session's title.
+    pub result: Option<SharedString>,
 }
 
 pub fn activity_name(item: &Item) -> Option<String> {
@@ -119,10 +121,17 @@ pub fn row(
         activity,
         selection_start,
         widget,
+        result,
     } = controls;
     let colors = cx.theme().colors;
     match row {
         Row::Item(item) => match &item.kind {
+            ItemKind::UserMessage
+                if let Some((title, read)) =
+                    result.zip(crate::app_state::delivery::parse(&item.text)) =>
+            {
+                result_row(index, &title, &read, reply, &item.text, &action, cx)
+            }
             ItemKind::UserMessage => h_flex()
                 .group("user-message")
                 .justify_end()
@@ -384,6 +393,91 @@ pub fn row(
         .color(Color::Muted)
         .into_any_element(),
     }
+}
+
+/// A launched session's result that started this turn: who it came from, how its turn
+/// ended, and its reply. It came from an agent, so it sits with the agent's rows rather
+/// than in a user bubble.
+fn result_row(
+    index: usize,
+    title: &str,
+    read: &crate::app_state::delivery::ResultMessage<'_>,
+    reply: Option<Arc<Document>>,
+    text: &str,
+    action: &Option<(CopyTarget, FocusHandle)>,
+    cx: &App,
+) -> AnyElement {
+    let colors = cx.theme().colors;
+    let (status, color, detail) = match read.outcome {
+        "It finished." => ("Finished", Color::Muted, None),
+        "It was stopped." => ("Stopped", Color::Muted, None),
+        outcome => (
+            "Failed",
+            Color::Danger,
+            Some(
+                outcome
+                    .strip_prefix("It failed: ")
+                    .unwrap_or(outcome)
+                    .to_owned(),
+            ),
+        ),
+    };
+    v_flex()
+        .automation_id(format!("result-{index}"))
+        .surface(Elevation::Raised, cx)
+        .overflow_hidden()
+        .child(
+            h_flex()
+                .min_h(px(38.))
+                .pl_3()
+                .pr_1()
+                .py_1()
+                .gap_2()
+                .hairline_b(cx)
+                .text_size(TextSize::Ui.px())
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            Label::new("Result from")
+                                .size(TextSize::Ui)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(colors.text_strong)
+                                .child(format!("\u{201c}{title}\u{201d}")),
+                        ),
+                )
+                .child(badge(status, color, cx))
+                .child(
+                    CopyButton::new(("copy-result", index), "Copy result", text.to_owned())
+                        .keyboard(
+                            action
+                                .as_ref()
+                                .filter(|(n, _)| *n == CopyTarget::Row)
+                                .map(|(_, f)| f),
+                        ),
+                ),
+        )
+        .child(
+            v_flex()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .when_some(detail, |d, detail| {
+                    d.child(Label::new(detail).size(TextSize::Ui).color(Color::Danger))
+                })
+                .child(Markdown::new(
+                    SharedString::from(format!("result-reply-{index}")),
+                    reply.unwrap_or_else(|| Arc::new(Document::parse(read.reply))),
+                )),
+        )
+        .into_any_element()
 }
 
 /// A report row: badges, then the headline, then a line per detail.

@@ -15,6 +15,7 @@ mod account_tests;
 pub mod attachment;
 mod composition;
 mod database;
+mod delivery;
 pub mod integrations;
 mod layout;
 mod project;
@@ -35,6 +36,7 @@ pub use composition::{
     Size, ViewId,
 };
 pub use database::{Database, StoredEvent, database_path};
+pub use delivery::{Delivery, DeliveryState};
 pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
 };
@@ -569,6 +571,10 @@ pub struct Workspace {
     /// in their own projection, never in the workspace payload.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     commit_drafts: BTreeMap<String, String>,
+    /// Launched sessions' results on their way to their parents, in launch order.
+    /// Saved in their own projection, never in the workspace payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deliveries: Vec<Delivery>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -713,16 +719,6 @@ impl Store {
         self.create_showing(provider, directory, now, WindowId::FIRST, None)
     }
 
-    /// Creates a session without selecting it in any window, for work an agent starts.
-    pub fn create_unselected(
-        &mut self,
-        provider: Provider,
-        directory: &WorkingDirectory,
-        now: u64,
-    ) -> StoreResult<Applied<u64>> {
-        self.create_session(provider, directory, now, None, None)
-    }
-
     /// Creates a session and selects it in `window`. Given a project's layout and
     /// tabs, saves them for `window` with `view` holding the new session, in the same
     /// write. Saved layouts or tabs this build cannot change are left as they are, and
@@ -735,21 +731,24 @@ impl Store {
         window: WindowId,
         show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
     ) -> StoreResult<Applied<u64>> {
-        self.create_session(provider, directory, now, Some(window), show)
+        self.add_session(
+            |id| Session::new(id, provider, directory, now),
+            Opening::Window(window, show),
+        )
     }
 
-    fn create_session(
+    /// Creates a session an agent in `parent` launches, selected in no window, with
+    /// its delivery in the same write, so a launched session always has one.
+    pub fn create_unselected(
         &mut self,
         provider: Provider,
         directory: &WorkingDirectory,
         now: u64,
-        window: Option<WindowId>,
-        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        parent: u64,
     ) -> StoreResult<Applied<u64>> {
         self.add_session(
             |id| Session::new(id, provider, directory, now),
-            window,
-            show,
+            Opening::Launched(parent),
         )
     }
 
@@ -761,16 +760,19 @@ impl Store {
         window: WindowId,
         show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
     ) -> StoreResult<Applied<u64>> {
-        self.add_worktree_session(provider, context, now, Some(window), show)
+        self.add_worktree_session(provider, context, now, Opening::Window(window, show))
     }
 
+    /// Creates a session an agent in `parent` launches in `context`, as
+    /// [`Store::create_unselected`] does.
     pub fn create_worktree_unselected(
         &mut self,
         provider: Provider,
         context: &WorktreeContext,
         now: u64,
+        parent: u64,
     ) -> StoreResult<Applied<u64>> {
-        self.add_worktree_session(provider, context, now, None, None)
+        self.add_worktree_session(provider, context, now, Opening::Launched(parent))
     }
 
     fn add_worktree_session(
@@ -778,8 +780,7 @@ impl Store {
         provider: Provider,
         context: &WorktreeContext,
         now: u64,
-        window: Option<WindowId>,
-        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        place: Opening,
     ) -> StoreResult<Applied<u64>> {
         self.add_session(
             |id| {
@@ -787,8 +788,7 @@ impl Store {
                 session.execution_context = SavedSessionContext::with_worktree(context);
                 session
             },
-            window,
-            show,
+            place,
         )
     }
 
@@ -837,8 +837,7 @@ impl Store {
                 session.pull_request = pull_request;
                 session
             },
-            Some(window),
-            show,
+            Opening::Window(window, show),
         )
     }
 
@@ -847,8 +846,7 @@ impl Store {
     fn add_session(
         &mut self,
         make: impl FnOnce(u64) -> Session,
-        window: Option<WindowId>,
-        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        place: Opening,
     ) -> StoreResult<Applied<u64>> {
         let id = self.next_id;
         let next_id = id
@@ -857,21 +855,29 @@ impl Store {
         let mut next = self.workspace.clone();
         next.sessions.push(make(id));
         let sessions: HashSet<u64> = next.sessions.iter().map(|s| s.id).collect();
-        if let Some(window) = window {
-            let shown = next.shown_mut(window)?;
-            *shown.selected = Some(id);
-            if let Some((project, layout, mut tabs, view)) = show {
-                tabs.retain(|_, session| sessions.contains(&session));
-                tabs.hold(view, id);
-                let (mut layouts, mut saved_tabs) = (shown.layouts.clone(), shown.tabs.clone());
-                if layouts
-                    .set(project, Some(layout.into()))
-                    .and_then(|_| saved_tabs.set(project, Some(SavedTabs::Supported(tabs))))
-                    .is_ok()
-                {
-                    *shown.layouts = layouts;
-                    *shown.tabs = saved_tabs;
+        match place {
+            Opening::Window(window, show) => {
+                let shown = next.shown_mut(window)?;
+                *shown.selected = Some(id);
+                if let Some((project, layout, mut tabs, view)) = show {
+                    tabs.retain(|_, session| sessions.contains(&session));
+                    tabs.hold(view, id);
+                    let (mut layouts, mut saved_tabs) = (shown.layouts.clone(), shown.tabs.clone());
+                    if layouts
+                        .set(project, Some(layout.into()))
+                        .and_then(|_| saved_tabs.set(project, Some(SavedTabs::Supported(tabs))))
+                        .is_ok()
+                    {
+                        *shown.layouts = layouts;
+                        *shown.tabs = saved_tabs;
+                    }
                 }
+            }
+            Opening::Launched(parent) => {
+                if !sessions.contains(&parent) {
+                    return Err(invalid(format!("unknown session ID {parent}")).into());
+                }
+                next.deliveries.push(Delivery::launched(id, parent));
             }
         }
         let applied = self.commit(next, next_id)?;
@@ -1592,7 +1598,18 @@ fn validate(snapshot: &Snapshot) -> StoreResult<()> {
             return Err(invalid("invalid or duplicate prompt ID").into());
         }
     }
-    Ok(())
+    delivery::validate(&snapshot.workspace)
+}
+
+/// Where a new session goes: selected in a window, saving `show` with it as
+/// [`Store::create_showing`] does, or launched by an agent in a session, with the
+/// delivery that brings its result back.
+enum Opening<'a> {
+    Window(
+        WindowId,
+        Option<(&'a ProjectId, Composition, SessionTabs, ViewId)>,
+    ),
+    Launched(u64),
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

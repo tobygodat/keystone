@@ -295,3 +295,71 @@ fn a_conversation_that_is_not_being_saved_keeps_its_process(cx: &mut gpui::TestA
         state.test_claude().is_some_and(|c| c.pid(1).is_none())
     });
 }
+
+/// A launched session's result for a dormant parent resumes it lazily, as a Send does:
+/// the same account, model and conversation, with the result as the message.
+#[gpui::test]
+fn a_result_for_an_evicted_parent_resumes_it_on_its_own_account(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let clock = Arc::new(ManualClock::default());
+    let (state, home) = idle_app(dir, &clock, cx);
+    send(&state, "hello", cx);
+    residency(&state, "armed", cx);
+    clock.advance(TEN_MINUTES + Duration::from_secs(1));
+    wait_until(cx, &state, |state| {
+        state.test_claude().is_some_and(|c| c.pid(1).is_none())
+    });
+    let thread = state.read_with(cx, |state, _| {
+        state
+            .session(1)
+            .unwrap()
+            .provider_thread()
+            .unwrap()
+            .to_owned()
+    });
+    let directory = WorkingDirectory::new(dir).unwrap();
+    state.update(cx, |state, cx| {
+        let child = state
+            .create_unselected(Provider::Codex, &directory, 2, 1, cx)
+            .unwrap()
+            .value;
+        state.ensure_history(child);
+    });
+    wait_until(cx, &state, |state| {
+        state.conversations.get(&2).is_some_and(|c| !c.is_loading())
+    });
+    state.update(cx, |state, cx| {
+        let end = Event::TurnCompleted {
+            status: keystone_agent::TurnStatus::Completed,
+            error: None,
+            stopped: false,
+        };
+        state.receive(Vec::new(), vec![(2, Event::TurnStarted), (2, end)], cx);
+        state.pump(cx);
+    });
+    wait_until(cx, &state, |state| {
+        let conversation = &state.conversations[&1];
+        !conversation.running
+            && conversation.rows.iter().any(|row| {
+                matches!(row, Row::Item(item) if item.kind == ItemKind::AgentMessage
+                    && item.text.contains("You wrote: Result from session 2"))
+            })
+    });
+    let launches = launches(dir);
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    assert_eq!(launches[1]["CLAUDE_CONFIG_DIR"], home.to_str().unwrap());
+    assert_eq!(flag(&launches[1], "--model"), Some("fake-haiku"));
+    assert_eq!(flag(&launches[1], "--resume"), Some(thread.as_str()));
+    let messages = std::fs::read_to_string(dir.join(".fake-claude-messages")).unwrap();
+    let messages: Vec<String> = messages
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(messages.len(), 2);
+    assert!(
+        messages[1].starts_with("Result from session 2 ("),
+        "{messages:?}"
+    );
+    assert!(messages[1].contains("It sent no reply."));
+}

@@ -1151,3 +1151,83 @@ fn an_unreadable_history_holds_send_until_the_user_continues(cx: &mut gpui::Test
         assert_eq!(state.conversations[&1].recovery, None);
     });
 }
+
+/// A launched session's result for a parent whose last turn needs a recovery check waits
+/// for the check, and for the user's acknowledgement, before it starts the parent's turn
+/// on its own account.
+#[gpui::test]
+fn a_result_waits_for_its_parents_recovery_check_and_acknowledgement(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::app_state::delivery::{self, Hold};
+    use keystone_core::DeliveryState;
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let (mut store, _, _) = claude_workspace(dir);
+    killed_turn(&dir.join("sessions"), 1, "u1", "hello");
+    let directory = WorkingDirectory::new(dir).unwrap();
+    let child = store
+        .create_unselected(Provider::Codex, &directory, 2, 1)
+        .unwrap()
+        .value;
+    let message = delivery::message(
+        child,
+        "Child",
+        &delivery::Outcome::Finished,
+        Some("Child is done."),
+    );
+    store
+        .set_delivery(child, DeliveryState::Ready { message })
+        .unwrap();
+    let claude = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("keystone-fake-claude");
+    cx.executor().allow_parking();
+    // Nothing asks for the parent's history: the ready result loads it at startup.
+    let state = cx.new(|cx| {
+        let mut state = AppState::new(store, cx);
+        state.test_programs = Some((PathBuf::from("/nonexistent-codex"), claude));
+        state
+    });
+    wait_until(cx, &state, settled);
+    state.update(cx, |state, cx| {
+        assert!(matches!(
+            state.conversations[&1].recovery,
+            Some(Recovery::Unavailable(_))
+        ));
+        assert_eq!(
+            state.waiting_results(1),
+            [(child, "New Codex session".to_owned(), Hold::Recovery)]
+        );
+        assert!(matches!(
+            state.store.workspace().delivery(child).unwrap().state(),
+            DeliveryState::Ready { .. }
+        ));
+        assert!(state.claude.is_empty(), "nothing was sent or resumed");
+        state.continue_after_recovery(1, cx);
+    });
+    wait_until(cx, &state, |state| {
+        let conversation = &state.conversations[&1];
+        !conversation.running
+            && conversation.rows.iter().any(|row| {
+                matches!(row, Row::Item(item) if item.kind == ItemKind::AgentMessage
+                    && item.text.contains("You wrote: Result from session 2"))
+            })
+    });
+    state.update(cx, |state, cx| {
+        assert!(matches!(
+            *state.store.workspace().delivery(child).unwrap().state(),
+            DeliveryState::Delivered { .. }
+        ));
+        assert_eq!(state.test_claude_accounts().len(), 1);
+        assert!(
+            state.test_claude_accounts()[0].is_some(),
+            "the parent's own account"
+        );
+        state.teardown(cx);
+    });
+}

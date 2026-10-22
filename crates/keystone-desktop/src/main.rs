@@ -2487,10 +2487,30 @@ impl Keystone {
                 || self.presentation.current.views.focused_region(key, window));
         let content = match conversation.rows.get(index) {
             Some(row) if conversation::visible(row) => {
+                let result = match row {
+                    Row::Item(item) if item.kind == ItemKind::UserMessage => {
+                        let state = self.state.read(cx);
+                        state
+                            .result_source(session, &item.text)
+                            .and_then(|child| state.session(child))
+                            .map(|child| gpui::SharedString::from(child.title().to_owned()))
+                    }
+                    _ => None,
+                };
                 let reply = match row {
                     Row::Item(item) if item.kind == ItemKind::AgentMessage => {
                         Some(self.replies.borrow_mut().document((session, index), item))
                     }
+                    // A result's reply is the launched session's Markdown.
+                    Row::Item(item) if result.is_some() => app_state::delivery::parse(&item.text)
+                        .map(|read| {
+                            let reply = keystone_agent::Item {
+                                text: read.reply.to_owned(),
+                                status: keystone_agent::ItemStatus::Completed,
+                                ..item.clone()
+                            };
+                            self.replies.borrow_mut().document((session, index), &reply)
+                        }),
                     _ => None,
                 };
                 let activity = match row {
@@ -2557,6 +2577,7 @@ impl Keystone {
                         activity,
                         selection_start,
                         widget,
+                        result,
                     },
                     cx,
                 ))
@@ -2717,6 +2738,21 @@ impl Keystone {
                     .child(div().size(px(6.)).rounded_full().bg(colors.accent))
                     .child(
                         Label::new("Working…")
+                            .size(TextSize::Ui)
+                            .color(Color::Muted),
+                    ),
+            );
+        }
+        for (child, title, hold) in self.state.read(cx).waiting_results(session) {
+            empty = false;
+            view = view.child(
+                div()
+                    .automation_id(arrangement::selector(
+                        &format!("result-waiting-{child}"),
+                        key.view,
+                    ))
+                    .child(
+                        Label::new(hold.notice(&title))
                             .size(TextSize::Ui)
                             .color(Color::Muted),
                     ),

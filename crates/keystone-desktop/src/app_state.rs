@@ -19,6 +19,9 @@ mod tests;
 #[path = "orchestrator.rs"]
 mod orchestrator;
 
+#[path = "delivery.rs"]
+pub(crate) mod delivery;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Phase {
     Running,
@@ -33,6 +36,18 @@ enum PendingSave {
     Message(u64, String, u64),
     Draft(u64, String),
     DraftAttachments(u64, Vec<keystone_core::Attachment>),
+    Delivery(u64, keystone_core::DeliveryState),
+}
+
+/// What a message is, which decides what sending it may do.
+#[derive(Clone, Copy, PartialEq)]
+enum SendKind {
+    /// The composer's draft, cleared once it is sent.
+    Draft,
+    /// A widget's action. The draft stays.
+    Widget,
+    /// A launched session's result. Only ever a new turn, never a steer.
+    Result,
 }
 
 #[derive(Default)]
@@ -104,6 +119,17 @@ pub(crate) struct AppState {
     pub(crate) config_env: keystone_agent::ConfigEnv,
     /// What each session last reported about its MCP servers. Kept for the run only.
     mcp_status: BTreeMap<u64, SessionMcpStatus>,
+    /// Launched sessions whose turn ended, by session, with how it ended. Each one's
+    /// result is saved as ready once its history has loaded.
+    finished: HashMap<u64, delivery::Outcome>,
+    /// Something changed that may let a ready result start its parent's turn.
+    deliveries_due: bool,
+    /// Set while ready results are being sent, so a send's own pump does not send
+    /// them again.
+    delivering: bool,
+    /// Sessions with a widget press that goes as a message after the current batch. A
+    /// result waits for it, so the press is not sent into the result's turn.
+    pressing: std::collections::HashSet<u64>,
     /// Idle eviction for new Claude connections, in place of the debug-build setting.
     #[cfg(test)]
     pub(crate) test_idle: Option<IdlePolicy>,
@@ -372,12 +398,22 @@ impl AppState {
                     self.store.set_draft_attachments(*id, attachments.clone()),
                     "Draft not saved",
                 ),
+                PendingSave::Delivery(child, state) => (
+                    self.store.set_delivery(*child, state.clone()),
+                    "Could not save a launched session's result",
+                ),
             };
             if let Err(error) = result {
                 self.error = Some(format!("{message}. {error}"));
                 return;
             }
-            self.pending.pop_front();
+            // A result whose ready save waited goes now.
+            if let Some(PendingSave::Delivery(_, keystone_core::DeliveryState::Ready { .. })) =
+                self.pending.pop_front()
+            {
+                self.deliveries_due = true;
+                (self.wake)();
+            }
             self.changes.sidebar = true;
         }
         self.error = None;
@@ -815,6 +851,9 @@ impl AppState {
             return Err(std::io::Error::other(reason).into());
         }
         let result = self.store.set_settled(id, settled);
+        if !settled {
+            self.deliveries_due();
+        }
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -986,12 +1025,14 @@ impl AppState {
         result
     }
 
-    /// Creates a session an agent starts in `worktree`, selected in no window.
+    /// Creates a session an agent in `parent` starts in `worktree`, as
+    /// [`AppState::create_unselected`] does.
     pub(crate) fn create_worktree_unselected(
         &mut self,
         provider: Provider,
         worktree: &keystone_core::WorktreeContext,
         now: u64,
+        parent: u64,
         cx: &mut Context<Self>,
     ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
         if self.phase == Phase::Exiting {
@@ -999,24 +1040,28 @@ impl AppState {
         }
         let result = self
             .store
-            .create_worktree_unselected(provider, worktree, now);
+            .create_worktree_unselected(provider, worktree, now, parent);
         self.changes.sidebar = true;
         self.publish(cx);
         result
     }
 
-    /// Creates a session an agent starts, selected in no window.
+    /// Creates a session an agent in `parent` starts, selected in no window, with the
+    /// record that brings its result back to `parent`.
     pub(crate) fn create_unselected(
         &mut self,
         provider: Provider,
         directory: &WorkingDirectory,
         now: u64,
+        parent: u64,
         cx: &mut Context<Self>,
     ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
         if self.phase == Phase::Exiting {
             return Err(std::io::Error::other("Keystone is exiting.").into());
         }
-        let result = self.store.create_unselected(provider, directory, now);
+        let result = self
+            .store
+            .create_unselected(provider, directory, now, parent);
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -1169,6 +1214,8 @@ impl AppState {
         let wake: Wake = Arc::new(move || {
             let _ = wake_tx.unbounded_send(());
         });
+        // The first pump sends results that were ready when Keystone last closed.
+        wake();
         let logs = Logs::with_database(store.database(), wake.clone());
         let attachments = keystone_core::attachment::Attachments::in_data_dir(
             store.path().parent().unwrap_or(std::path::Path::new(".")),
@@ -1230,6 +1277,11 @@ impl AppState {
             #[cfg(test)]
             config_env: keystone_agent::ConfigEnv::default(),
             mcp_status: BTreeMap::new(),
+            finished: delivery::unsaved_results(store.workspace()),
+            // Results saved before a restart may be ready for their parents.
+            deliveries_due: true,
+            delivering: false,
+            pressing: Default::default(),
             #[cfg(test)]
             test_idle: None,
             reviewing: HashMap::new(),
@@ -1501,6 +1553,8 @@ impl AppState {
             self.finish_recovery(session, ticket, result, cx);
         }
         self.start_reads();
+        self.save_results();
+        self.deliver_results(cx);
     }
 
     pub(crate) fn receive(
@@ -1545,6 +1599,7 @@ impl AppState {
                     // Events held during the load, such as an approval or a turn's
                     // end, apply only now.
                     sidebar_changed = true;
+                    self.deliveries_due = true;
                     session
                 }
                 Report::Checkpoint {
@@ -1600,6 +1655,7 @@ impl AppState {
                     continue;
                 }
                 Event::ActionUndelivered { call, text } => {
+                    self.pressing.insert(session);
                     undelivered.push((session, call, text));
                     continue;
                 }
@@ -1620,6 +1676,20 @@ impl AppState {
                 self.changes.files.push(session);
             }
             let failed = turn_failed(&event);
+            if failed.is_some() {
+                self.deliveries_due = true;
+                // A result whose save is queued is already taken.
+                if matches!(
+                    self.store.workspace().delivery(session).map(|d| d.state()),
+                    Some(keystone_core::DeliveryState::Working)
+                ) && !self.pending.iter().any(
+                    |save| matches!(save, PendingSave::Delivery(child, _) if *child == session),
+                ) {
+                    self.finished
+                        .entry(session)
+                        .or_insert_with(|| delivery::Outcome::of(&event));
+                }
+            }
             match (&event, failed) {
                 (Event::TurnStarted, _) => self.persist(PendingSave::TurnStart(session)),
                 (_, Some(failed)) => self.persist(PendingSave::TurnEnd(session, failed, now_ms())),
@@ -1634,6 +1704,10 @@ impl AppState {
                 );
             let thread = self.conversation(session).apply(event);
             self.commit(session);
+            // Before the batch's later events, so the result is this turn's reply.
+            if failed.is_some() && self.finished.contains_key(&session) {
+                self.save_results();
+            }
             if let Some(thread) = thread {
                 let known = self
                     .store
@@ -1647,6 +1721,7 @@ impl AppState {
             }
         }
 
+        self.save_results();
         // After the batch: an exit's turn end is applied before its check starts.
         for session in recover {
             match self.conversations.get(&session) {
@@ -1665,9 +1740,13 @@ impl AppState {
         if !undelivered.is_empty() {
             cx.spawn(async move |this, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    for (session, call, text) in undelivered {
-                        this.send_widget_action(session, &call, &text, cx);
+                    for (session, call, text) in &undelivered {
+                        this.send_widget_action(*session, call, text, cx);
                     }
+                    for (session, ..) in undelivered {
+                        this.pressing.remove(&session);
+                    }
+                    this.deliveries_due();
                 });
             })
             .detach();
@@ -2199,6 +2278,7 @@ impl AppState {
                 self.recoveries.remove(&session);
                 conversation.recovery = self.reviewing.remove(&session).map(Recovery::Review);
                 self.commit(session);
+                self.deliveries_due = true;
             }
         }
         self.refresh(cx);
@@ -2232,6 +2312,7 @@ impl AppState {
             }),
             None => {
                 self.recoveries.remove(&session);
+                self.deliveries_due = true;
                 let earlier = self.reviewing.remove(&session);
                 report
                     .needs_acknowledgement()
@@ -2261,6 +2342,7 @@ impl AppState {
                 self.send_unloaded.insert(session);
             }
             self.commit(session);
+            self.deliveries_due();
             self.refresh(cx);
         }
     }
@@ -2376,7 +2458,7 @@ impl AppState {
     }
 
     pub(crate) fn send_message(&mut self, draft: ComposerDraft, cx: &mut Context<Self>) -> bool {
-        self.send_message_from(draft, None, true, cx)
+        self.send_message_from(draft, None, SendKind::Draft, cx)
     }
 
     /// Writes an input's value into a widget. The widget is logged a moment later, so
@@ -2472,7 +2554,7 @@ impl AppState {
             text: keystone_agent::surface::message_for(call, action),
             attachments: Vec::new(),
         };
-        if self.send_message_from(draft, None, false, cx) {
+        if self.send_message_from(draft, None, SendKind::Widget, cx) {
             return;
         }
         let conversation = self.conversation(session);
@@ -2488,7 +2570,7 @@ impl AppState {
         &mut self,
         draft: ComposerDraft,
         caller: Option<keystone_agent::mcp::Caller>,
-        clear_draft: bool,
+        kind: SendKind,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.phase != Phase::Running {
@@ -2554,6 +2636,13 @@ impl AppState {
                 self.wait_for_history(id, cx);
                 return false;
             }
+        }
+        // A result waits for a turn that started meanwhile rather than steering it.
+        if kind == SendKind::Result
+            && (self.conversations.get(&id).is_some_and(|c| c.running)
+                || self.started(id).is_some_and(|c| c.is_running(id)))
+        {
+            return false;
         }
         let Some(directory) = self.dispatch_directory(id, cx) else {
             return false;
@@ -2659,7 +2748,7 @@ impl AppState {
             .push_sent(&text, draft.attachments.clone());
         self.commit(id);
         self.persist(PendingSave::Message(id, text.clone(), now_ms()));
-        if clear_draft {
+        if kind == SendKind::Draft {
             self.persist(PendingSave::Draft(id, String::new()));
             if !draft.attachments.is_empty() {
                 self.persist(PendingSave::DraftAttachments(id, Vec::new()));

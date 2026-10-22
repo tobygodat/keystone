@@ -523,21 +523,23 @@ fn an_approval_asked_with_no_window_open_opens_the_window_again(cx: &mut TestApp
 fn an_agent_started_session_changes_no_windows_selection(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");
-    Store::open(&path)
+    let mut store = Store::open(&path).unwrap();
+    let parent = store
+        .create(Provider::Codex, &working_directory(), 1)
         .unwrap()
-        .open_window(None, None, None)
-        .unwrap();
+        .value;
+    store.open_window(None, None, None).unwrap();
+    drop(store);
     let state = launch(&path, cx);
     let child = state.update(cx, |state, cx| {
         state
-            .create_unselected(Provider::Codex, &working_directory(), 1, cx)
+            .create_unselected(Provider::Codex, &working_directory(), 1, parent, cx)
             .unwrap()
             .value
     });
     cx.run_until_parked();
-    for id in [WindowId::FIRST, WindowId(1)] {
-        assert_eq!(selected(&view_in(id, cx), cx), None);
-    }
+    assert_eq!(selected(&view_in(WindowId::FIRST, cx), cx), Some(parent));
+    assert_eq!(selected(&view_in(WindowId(1), cx), cx), None);
     assert!(
         cx.read(|cx| state.read(cx).session(child).is_some()),
         "it is in every sidebar"

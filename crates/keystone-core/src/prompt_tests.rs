@@ -182,8 +182,11 @@ fn a_global_prompt_shows_in_every_project_and_a_project_prompt_only_in_its_own()
 #[test]
 fn schema_2_and_projects_schema_3_databases_gain_an_empty_prompt_list() {
     for (version, removed) in [
-        (2, "DROP TABLE prompts; DROP TABLE projects;"),
-        (3, "DROP TABLE prompts;"),
+        (
+            2,
+            "DROP TABLE deliveries; DROP TABLE prompts; DROP TABLE projects;",
+        ),
+        (3, "DROP TABLE deliveries; DROP TABLE prompts;"),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
