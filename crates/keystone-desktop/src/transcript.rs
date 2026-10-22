@@ -33,6 +33,11 @@ pub struct RowControls {
     pub result: Option<SharedString>,
     /// A message row's Fork from here control.
     pub fork: Option<ForkControl>,
+    /// A finished reply's Second opinion control: its selector and what it does.
+    pub second_opinion: Option<(
+        String,
+        Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+    )>,
 }
 
 pub struct ForkControl {
@@ -151,6 +156,7 @@ pub fn row(
         widget,
         result,
         fork,
+        second_opinion,
     } = controls;
     let colors = cx.theme().colors;
     match row {
@@ -242,7 +248,22 @@ pub fn row(
                             )
                             .when_some(fork.filter(|_| row_copy), |d, fork| {
                                 d.child(fork_button(index, fork, &action))
-                            }),
+                            })
+                            .when_some(
+                                second_opinion.filter(|_| row_copy),
+                                |d, (selector, ask)| {
+                                    d.child(
+                                        IconButton::new(("second-opinion", index), IconName::Chat)
+                                            .size(ButtonSize::Compact)
+                                            .aria_label("Ask for a second opinion on this reply")
+                                            .tooltip(Tooltip::text("Second opinion on this reply…"))
+                                            .debug_selector(move || selector)
+                                            .on_click(move |event, window, cx| {
+                                                ask(event, window, cx)
+                                            }),
+                                    )
+                                },
+                            ),
                     )
                     .into_any_element()
             }

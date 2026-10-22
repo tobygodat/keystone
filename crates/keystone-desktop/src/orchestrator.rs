@@ -273,6 +273,21 @@ impl AppState {
         }
     }
 
+    /// Whether `id` is a second opinion, or a handoff or fork that carries one on.
+    fn reviews(&self, id: u64) -> bool {
+        let mut current = self.session(id);
+        while let Some(session) = current {
+            if session.second_opinion() {
+                return true;
+            }
+            current = session
+                .handed_off_from()
+                .or(session.forked_from())
+                .and_then(|from| self.session(from));
+        }
+        false
+    }
+
     /// The caller's folder and worktree when `request` is a valid, new launch whose
     /// worktree needs git, which then runs off the UI thread, or why it must wait.
     /// Anything else, including a request already answered, is answered at once.
@@ -289,7 +304,9 @@ impl AppState {
         let cwd = request.arguments["cwd"].as_str();
         let name = request.arguments["worktree"].as_str();
         let (project, ceiling) = self.caller(request.caller).ok()?;
-        if name.is_none() && cwd.is_none_or(|cwd| cwd == project.as_str()) {
+        if (name.is_none() && cwd.is_none_or(|cwd| cwd == project.as_str()))
+            || self.reviews(request.caller.session)
+        {
             return None;
         }
         self.validate_launch(request.arguments.clone(), ceiling)
@@ -501,6 +518,17 @@ impl AppState {
         arguments: Value,
         cx: &mut Context<Self>,
     ) -> Reply {
+        // Through the orchestrator a second opinion only reads. A launch's result would
+        // start its turn, and steering or stopping its source, or work whose result goes
+        // there, would change what it reviews. Its handoffs and forks carry on the review,
+        // so they are held to the same.
+        if matches!(
+            tool,
+            "session_launch" | "session_send" | "session_interrupt"
+        ) && self.reviews(caller.session)
+        {
+            return Err("A second opinion cannot launch, send to or stop sessions".into());
+        }
         match tool {
             "capabilities" => {
                 if arguments != json!({}) {
@@ -628,10 +656,10 @@ impl AppState {
             "session_read" => {
                 let read: Read = decode(arguments)?;
                 self.target(read.session, caller.session, project)?;
-                let handed_off_from = self
-                    .session(read.session)
-                    .and_then(|session| session.handed_off_from())
-                    .map(|session| json!({"session":session}));
+                let handed_off_from = self.session(read.session).and_then(|session| {
+                    let from = session.handed_off_from()?;
+                    Some(json!({"session":from,"second_opinion":session.second_opinion()}))
+                });
                 let conversation = self.conversation(read.session);
                 if conversation.is_loading() {
                     return Ok(

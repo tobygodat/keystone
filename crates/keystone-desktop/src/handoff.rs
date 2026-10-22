@@ -172,6 +172,18 @@ const SHORTEN_MIN_TOKENS: usize = 256;
 /// title is cut to one line, so the text stays within any budget that holds the
 /// opening line and the note.
 pub(crate) fn build(source: Source, rows: &[Row], budget: usize) -> String {
+    build_as("Continuing from", source, rows, budget, "")
+}
+
+/// [`build`], with the opening line starting with `lead` rather than "Continuing from",
+/// and `after` following the text within the budget, beside the cursor.
+pub(crate) fn build_as(
+    lead: &str,
+    source: Source,
+    rows: &[Row],
+    budget: usize,
+    after: &str,
+) -> String {
     let Source {
         id,
         title,
@@ -179,13 +191,13 @@ pub(crate) fn build(source: Source, rows: &[Row], budget: usize) -> String {
         folder,
     } = source;
     let mut text = format!(
-        "Continuing from Keystone session {id}, \u{201c}{}\u{201d} ({}), in {folder}. \
+        "{lead} Keystone session {id}, \u{201c}{}\u{201d} ({}), in {folder}. \
          That session is unchanged. Its conversation follows, oldest first: messages in full \
          and one line per tool call, without reasoning or tool output.",
         one_line(title),
         provider_name(provider),
     );
-    let room = budget.saturating_sub(tokens(&text) + NOTE_TOKENS);
+    let room = budget.saturating_sub(tokens(&text) + NOTE_TOKENS + tokens(after));
     let mut kept = Vec::new();
     let mut used = 0;
     let mut full = false;
@@ -259,8 +271,9 @@ pub(crate) fn build(source: Source, rows: &[Row], budget: usize) -> String {
             thousands(budget),
         )
     };
-    let used = tokens(&text) + tokens(&footer(budget));
+    let used = tokens(&text) + tokens(&footer(budget)) + tokens(after);
     text.push_str(&footer(used));
+    text.push_str(after);
     text
 }
 
@@ -272,7 +285,28 @@ pub(crate) fn button() -> impl IntoElement {
         .on_click(|_, window, cx| window.dispatch_action(Box::new(HandOff), cx))
 }
 
-fn other(provider: Provider) -> Provider {
+/// A session's provider, with its account when that provider has more than its default.
+pub(crate) fn provider_label(
+    session: &keystone_core::Session,
+    accounts: &[keystone_core::Account],
+) -> String {
+    match account_label(session.provider(), session.account(), accounts) {
+        Some(account) => format!("{} · {account}", provider_name(session.provider())),
+        None => provider_name(session.provider()).to_owned(),
+    }
+}
+
+/// What the user is told when the selected session cannot be carried into a new one:
+/// it has sent nothing, has no folder, or its history is still loading or unreadable.
+pub(crate) struct Refusals {
+    pub unsent: &'static str,
+    pub no_folder: &'static str,
+    pub loading: &'static str,
+    pub unreadable: &'static str,
+}
+
+/// The provider a handoff or second opinion goes to unless the user picks another.
+pub(crate) fn other(provider: Provider) -> Provider {
     match provider {
         Provider::Claude => Provider::Codex,
         Provider::Codex => Provider::Claude,
@@ -304,42 +338,18 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.session(id, cx) else {
+        let refusals = Refusals {
+            unsent: "Nothing to hand off yet: this session has not sent anything.",
+            no_folder: "Choose this session's folder before handing it off.",
+            loading: "This conversation is still loading. Hand off once it shows.",
+            unreadable: "This conversation's saved history could not be read, so a handoff \
+                         would leave it out. Restart Keystone to read it again, then hand off.",
+        };
+        let Some((_, text)) = self.carry(id, &refusals, cx, |source, rows| {
+            build(source, rows, BUDGET_TOKENS)
+        }) else {
             return;
         };
-        let provider = session.provider();
-        if !session.started() {
-            self.error =
-                Some("Nothing to hand off yet: this session has not sent anything.".into());
-            return self.refresh(cx);
-        }
-        let SessionContext::Recorded { directory, .. } = session.context() else {
-            self.error = Some("Choose this session's folder before handing it off.".into());
-            return self.refresh(cx);
-        };
-        let state = self.state.read(cx);
-        let Some(conversation) = state.conversations().get(&id).filter(|c| !c.is_loading()) else {
-            self.error = Some("This conversation is still loading. Hand off once it shows.".into());
-            return self.refresh(cx);
-        };
-        if conversation.load_error.is_some() {
-            self.error = Some(
-                "This conversation's saved history could not be read, so a handoff would leave it \
-                 out. Restart Keystone to read it again, then hand off."
-                    .into(),
-            );
-            return self.refresh(cx);
-        }
-        let text = build(
-            Source {
-                id,
-                title: session.title(),
-                provider,
-                folder: directory.as_str(),
-            },
-            &conversation.rows,
-            BUDGET_TOKENS,
-        );
         let window_id = self.window_id;
         let Some(new) = self.create_beside(id, false, cx, |state, show, cx| {
             state.hand_off(id, target, text, now_ms(), window_id, show, cx)
@@ -374,6 +384,58 @@ impl Keystone {
         self.request_catalog(new, target, cx);
         self.composer.focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    /// Opens the model selector of `session`, a new unsent session on `provider`, and
+    /// focuses its composer, so the user chooses where it runs and reviews the draft.
+    pub(crate) fn open_model_menu(
+        &mut self,
+        session: u64,
+        provider: Provider,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.model_menu = Some(session);
+        self.request_catalog(session, provider, cx);
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Session `id`'s provider, with the text `text` makes of its conversation. `None`,
+    /// with the matching refusal shown, while the session has sent nothing, has no
+    /// folder, or its history is still loading or could not be read.
+    pub(crate) fn carry(
+        &mut self,
+        id: u64,
+        refusals: &Refusals,
+        cx: &mut Context<Self>,
+        text: impl FnOnce(Source, &[Row]) -> String,
+    ) -> Option<(Provider, String)> {
+        let session = self.session(id, cx)?;
+        let provider = session.provider();
+        let state = self.state.read(cx);
+        let refusal = if !session.started() {
+            refusals.unsent
+        } else if let SessionContext::Recorded { directory, .. } = session.context() {
+            match state.conversations().get(&id).filter(|c| !c.is_loading()) {
+                None => refusals.loading,
+                Some(conversation) if conversation.load_error.is_some() => refusals.unreadable,
+                Some(conversation) => {
+                    let source = Source {
+                        id,
+                        title: session.title(),
+                        provider,
+                        folder: directory.as_str(),
+                    };
+                    return Some((provider, text(source, &conversation.rows)));
+                }
+            }
+        } else {
+            refusals.no_folder
+        };
+        self.error = Some(refusal.into());
+        self.refresh(cx);
+        None
     }
 
     /// Creates a session from `source`, the selected one, with `create`. It opens in a
@@ -432,25 +494,25 @@ impl Keystone {
     }
 
     /// "Continued from" and "Continued in" rows for the session in `key`'s view, each
-    /// opening the other session, and "Forked from" and "Forked in" rows for forks.
-    /// `None` when it has no such links.
+    /// opening the other session, "Forked from" and "Forked in" rows for forks, then
+    /// its second opinion rows. `None` when it has no such links.
     pub(crate) fn handoff_links(&self, key: ViewKey, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let opinions = self.second_opinion_rows(key, cx);
         let workspace = self.state.read(cx).store().workspace();
         let sessions = workspace.sessions();
         let describe = |session: &keystone_core::Session| {
-            let provider =
-                match account_label(session.provider(), session.account(), workspace.accounts()) {
-                    Some(account) => format!("{} · {account}", provider_name(session.provider())),
-                    None => provider_name(session.provider()).to_owned(),
-                };
-            (session.id(), session.title().to_owned(), provider)
+            (
+                session.id(),
+                session.title().to_owned(),
+                provider_label(session, workspace.accounts()),
+            )
         };
         let shown = sessions.iter().find(|s| s.id() == key.session)?;
         let source = |from: Option<u64>| {
             from.and_then(|from| sessions.iter().find(|s| s.id() == from))
                 .map(describe)
         };
-        let from = source(shown.handed_off_from())
+        let from = source(shown.handed_off_from().filter(|_| !shown.second_opinion()))
             .map(|link| {
                 (
                     "Continued from",
@@ -469,7 +531,7 @@ impl Keystone {
                 )
             }));
         let to = sessions.iter().filter(|s| s.started()).filter_map(|s| {
-            if s.handed_off_from() == Some(key.session) {
+            if s.handed_off_from() == Some(key.session) && !s.second_opinion() {
                 let selector = format!("handoff-to-{}", s.id());
                 Some(("Continued in", selector, IconName::Handoff, describe(s)))
             } else if s.forked_from() == Some(key.session) {
@@ -484,6 +546,7 @@ impl Keystone {
             .map(|(lead, selector, icon, (id, title, provider))| {
                 self.link_row(key, lead, &selector, icon, id, title, provider, cx)
             })
+            .chain(opinions)
             .collect::<Vec<_>>();
         if rows.is_empty() {
             return None;
@@ -507,7 +570,7 @@ impl Keystone {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn link_row(
+    pub(crate) fn link_row(
         &self,
         key: ViewKey,
         lead: &'static str,

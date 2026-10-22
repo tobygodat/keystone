@@ -158,7 +158,8 @@ impl AppState {
     }
 
     /// The session a result for `parent` goes to: the newest session that continues
-    /// `parent` through handoffs and has sent its first message, else `parent`.
+    /// `parent` through handoffs and has sent its first message, else `parent`. A
+    /// second opinion only reads the session it is on, so it continues nothing.
     pub(crate) fn recipient(&self, parent: u64) -> u64 {
         self.store
             .workspace()
@@ -179,7 +180,10 @@ impl AppState {
             if id == parent {
                 return true;
             }
-            current = self.session(id).and_then(|s| s.handed_off_from());
+            current = self
+                .session(id)
+                .filter(|s| !s.second_opinion())
+                .and_then(|s| s.handed_off_from());
         }
         false
     }

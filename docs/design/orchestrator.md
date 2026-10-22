@@ -19,7 +19,7 @@ access is provided.
 | `capabilities {}` | Lists both providers, their currently loaded model catalogs (for the caller's account on its own provider, otherwise the default account) and their accounts: `default` plus each added account's ID and name. A loading catalog can be queried again. |
 | `session_launch {provider, account?, model?, mode?, cwd?, message, client_request_id}` | Creates and starts a session in the caller's project. `provider` is `claude` or `codex`; `account` is `default` (the default, the inherited environment) or an added account's ID such as `claude-work`; an unknown ID or another provider's account is refused. An omitted mode inherits the caller's mode. When the launched session's first turn ends, its result starts the caller's next turn (see Results of launched sessions). |
 | `session_send {session, message, client_request_id}` | Steers an already running target immediately, or returns busy. It never starts an idle target or queues a follow-up. |
-| `session_read {session, after?, limit?}` | Reads transcript rows, with zero-based positions. `after` is exclusive; `limit` defaults to 50 and is bounded to 1–200. `next` does not advance past a streaming row, so polling does not miss its completion. `handed_off_from` names the session a handoff continued, so a session started from a handoff can read the rows its handoff text left out. |
+| `session_read {session, after?, limit?}` | Reads transcript rows, with zero-based positions. `after` is exclusive; `limit` defaults to 50 and is bounded to 1–200. `next` does not advance past a streaming row, so polling does not miss its completion. `handed_off_from` is `{session, second_opinion}`: the session a handoff or second opinion continued, so a session started from either can read the rows its handoff text left out. A second opinion, and a handoff or fork of one, only reads: its `session_launch`, `session_send` and `session_interrupt` calls are refused in every approval mode. |
 | `session_wait {session, timeout?}` | Waits for the target's current work to end. The timeout defaults to 50 seconds and is capped at 50 seconds; `timed_out` distinguishes the cutoff from completion. Call again to keep waiting. A wait that sees a launched session's turn end marks its result observed, so it starts no turn. |
 | `session_interrupt {session}` | Stops the current target turn through the same runtime path as the Stop button. Codex also cancels an initial message waiting for its thread to open. Work still queued on a connection worker returns busy rather than acknowledging a stop it cannot apply immediately. |
 
@@ -89,6 +89,8 @@ Several results for one parent go one turn at a time. There is no queue UI.
 
 A parent the user handed off is not woken: its results go to the newest session that
 continues it, once that session has sent its first message (the handoff's context).
+A second opinion continues nothing: it never receives its source's results, and since it
+cannot launch a session, no result ever goes to it.
 
 Delivery uses the same path as Send: a parent whose Claude process was evicted is
 resumed with its own account, model and conversation; a parent whose history is not

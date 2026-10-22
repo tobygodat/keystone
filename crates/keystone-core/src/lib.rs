@@ -230,6 +230,11 @@ pub struct Session {
     /// handoff text instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_point: Option<ForkPoint>,
+    /// Whether this session is a second opinion on [`Session::handed_off_from`]: it
+    /// carries that session's conversation with a question, starts read-only, and its
+    /// replies wait for the user there, never starting a turn on their own.
+    #[serde(default, skip_serializing_if = "is_default")]
+    second_opinion: bool,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -329,6 +334,7 @@ impl Session {
             pull_request: None,
             forked_from: None,
             fork_point: None,
+            second_opinion: false,
             unknown: Map::new(),
         }
     }
@@ -412,6 +418,11 @@ impl Session {
     /// Where the provider forks the source's conversation, for a native fork.
     pub fn fork_point(&self) -> Option<&ForkPoint> {
         self.fork_point.as_ref()
+    }
+
+    /// Whether this session is a second opinion on the one it was handed off from.
+    pub fn second_opinion(&self) -> bool {
+        self.second_opinion
     }
 
     /// Whether the session has sent anything to its provider. The provider and model
@@ -855,6 +866,35 @@ impl Store {
         window: WindowId,
         show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
     ) -> StoreResult<Applied<u64>> {
+        self.continue_from(source, provider, draft, now, window, show, false)
+    }
+
+    /// Creates a second opinion on `source` as [`Store::hand_off`] creates a
+    /// continuation, linked the same way and marked as a second opinion. It is titled
+    /// as one and starts read-only, which the user can change before sending.
+    pub fn second_opinion(
+        &mut self,
+        source: u64,
+        provider: Provider,
+        draft: String,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
+        self.continue_from(source, provider, draft, now, window, show, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn continue_from(
+        &mut self,
+        source: u64,
+        provider: Provider,
+        draft: String,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        second_opinion: bool,
+    ) -> StoreResult<Applied<u64>> {
         let from = self
             .workspace
             .sessions
@@ -868,9 +908,11 @@ impl Store {
         let worktree = from.worktree().cloned();
         let pull_request = from.pull_request.clone();
         // A placeholder would give way to the handoff text's first words on Send.
-        let title = match from.title_source {
-            TitleSource::Placeholder => format!("Continued from session {source}"),
-            _ => from.title.clone(),
+        let title = match (second_opinion, from.title_source) {
+            (false, TitleSource::Placeholder) => format!("Continued from session {source}"),
+            (false, _) => from.title.clone(),
+            (true, TitleSource::Placeholder) => format!("Second opinion on session {source}"),
+            (true, _) => format!("Second opinion: {}", from.title),
         };
         self.add_session(
             |id| {
@@ -883,6 +925,10 @@ impl Store {
                 session.draft = draft;
                 session.handed_off_from = Some(source);
                 session.pull_request = pull_request;
+                if second_opinion {
+                    session.second_opinion = true;
+                    session.approval_mode = ApprovalMode::ReadOnly;
+                }
                 session
             },
             Opening::Window(window, show),
@@ -3410,5 +3456,102 @@ mod tests {
             .fork(1, None, String::new(), 1, WindowId::FIRST, None)
             .unwrap_err();
         assert!(refused.to_string().contains("folder"), "{refused}");
+    }
+
+    #[test]
+    fn a_second_opinion_is_a_read_only_linked_session_and_leaves_its_source_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        let folder = working_directory();
+        let source = store.create(Provider::Claude, &folder, 1).unwrap().value;
+        store
+            .set_approval_mode(source, ApprovalMode::FullAccess)
+            .unwrap();
+        store
+            .record_message(source, "Fix the login bug", 2)
+            .unwrap();
+        store.set_draft(source, "half a thought".into()).unwrap();
+        let image = Attachment {
+            sha256: "ab".repeat(32),
+            media_type: "image/png".into(),
+            name: "shot.png".into(),
+        };
+        store.set_draft_attachments(source, vec![image]).unwrap();
+        let before = store.workspace().sessions()[0].clone();
+        let writes = store.writes();
+
+        let opinion = store
+            .second_opinion(
+                source,
+                Provider::Codex,
+                "context and a question".into(),
+                5,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap()
+            .value;
+
+        assert_eq!(store.writes(), writes + 1, "one save");
+        assert_eq!(store.workspace().selected(), Some(opinion));
+        let reopened = Store::open(&path).unwrap();
+        let sessions = reopened.workspace().sessions();
+        assert_eq!(sessions[0], before);
+        assert!(!sessions[0].second_opinion());
+        let new = &sessions[1];
+        assert!(new.second_opinion());
+        assert_eq!(new.handed_off_from(), Some(source));
+        assert_eq!(new.provider(), Provider::Codex);
+        assert_eq!(new.approval_mode(), ApprovalMode::ReadOnly);
+        assert_eq!(new.draft(), "context and a question");
+        assert!(new.draft_attachments().is_empty());
+        assert_eq!(new.title(), "Second opinion: Fix the login bug");
+        assert!(!new.started());
+        assert_eq!(new.context(), sessions[0].context());
+
+        store
+            .set_provider_account(opinion, Provider::Claude, None)
+            .unwrap();
+        store.record_message(opinion, "context", 6).unwrap();
+        let new = store.workspace().sessions().last().unwrap();
+        assert_eq!(new.approval_mode(), ApprovalMode::ReadOnly);
+        assert_eq!(new.title(), "Second opinion: Fix the login bug");
+        assert!(new.second_opinion());
+
+        let placeholder = store.create(Provider::Codex, &folder, 7).unwrap().value;
+        store
+            .second_opinion(
+                placeholder,
+                Provider::Claude,
+                String::new(),
+                8,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            store.workspace().sessions().last().unwrap().title(),
+            format!("Second opinion on session {placeholder}")
+        );
+        let handed = store
+            .hand_off(
+                source,
+                Provider::Codex,
+                String::new(),
+                9,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap()
+            .value;
+        let handed = store
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| s.id() == handed)
+            .unwrap();
+        assert!(!handed.second_opinion());
+        assert_eq!(handed.approval_mode(), ApprovalMode::Provider);
     }
 }

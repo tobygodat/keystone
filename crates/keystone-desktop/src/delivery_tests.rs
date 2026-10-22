@@ -536,6 +536,104 @@ fn a_handed_off_parents_result_goes_to_the_session_that_continues_it(
 }
 
 #[gpui::test]
+fn a_second_opinion_never_takes_a_result_or_sends_one(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launched(dir.path(), 1, cx);
+    let opinions = [1, 3].map(|source| {
+        state.update(cx, |state, cx| {
+            let opinion = state
+                .second_opinion(
+                    source,
+                    Provider::Claude,
+                    String::new(),
+                    4,
+                    WindowId::FIRST,
+                    None,
+                    cx,
+                )
+                .unwrap()
+                .value;
+            state.ensure_history(opinion);
+            assert!(state.send_message(
+                ComposerDraft {
+                    session: opinion,
+                    text: "question".into(),
+                    attachments: Vec::new(),
+                },
+                cx,
+            ));
+            opinion
+        })
+    });
+    // A handoff of a second opinion carries on the review, not the session it is on.
+    let continued = state.update(cx, |state, cx| {
+        let continued = state
+            .hand_off(
+                opinions[0],
+                Provider::Claude,
+                String::new(),
+                5,
+                WindowId::FIRST,
+                None,
+                cx,
+            )
+            .unwrap()
+            .value;
+        state.ensure_history(continued);
+        assert!(state.send_message(
+            ComposerDraft {
+                session: continued,
+                text: "question".into(),
+                attachments: Vec::new(),
+            },
+            cx,
+        ));
+        continued
+    });
+    let opinions = [opinions[0], opinions[1], continued];
+    wait_until(cx, &state, |state| {
+        opinions.iter().all(|opinion| {
+            state.conversations.get(opinion).is_some_and(|c| {
+                !c.running
+                    && c.rows.iter().any(|row| {
+                        matches!(row, Row::Item(item) if item.kind == ItemKind::AgentMessage
+                            && item.text.contains("You wrote: question"))
+                    })
+            })
+        })
+    });
+    state.update(cx, |state, cx| {
+        state.deliveries_due();
+        state.pump(cx);
+    });
+    let before = state.read_with(cx, |state, _| {
+        assert_eq!(
+            state.recipient(1),
+            1,
+            "a sent second opinion does not continue it"
+        );
+        assert_eq!(state.store.workspace().deliveries().len(), 1);
+        assert!(results(state, 1).is_empty());
+        assert!(
+            !state.conversations[&1].running,
+            "an opinion's reply wakes no one"
+        );
+        opinions.map(|opinion| state.conversations[&opinion].rows.clone())
+    });
+    child_finishes(&state, finished(), cx);
+    wait_until(cx, &state, |state| answered(state, 1));
+    state.read_with(cx, |state, _| {
+        assert_eq!(results(state, 1).len(), 1);
+        for (opinion, rows) in opinions.iter().zip(&before) {
+            assert!(!state.conversations[opinion].running);
+            assert_eq!(&state.conversations[opinion].rows, rows);
+            assert!(state.waiting_results(*opinion).is_empty());
+        }
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
+#[gpui::test]
 fn an_unsent_handoff_leaves_the_result_with_its_parent(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let state = launched(dir.path(), 1, cx);

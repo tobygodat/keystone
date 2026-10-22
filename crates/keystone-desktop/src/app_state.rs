@@ -1034,6 +1034,29 @@ impl AppState {
         result
     }
 
+    /// Asks for a second opinion on `source` in `window`, saving `show` with the new
+    /// session. See [`keystone_core::Store::second_opinion`].
+    pub(crate) fn second_opinion(
+        &mut self,
+        source: u64,
+        provider: Provider,
+        draft: String,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self
+            .store
+            .second_opinion(source, provider, draft, now, window, show);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
     /// Forks `source` in `window`, saving `show` with the new session. See
     /// [`keystone_core::Store::fork`]. A native fork's conversation starts as `log`, the
     /// source's rows it keeps, shown at once and saved as the fork's own log.

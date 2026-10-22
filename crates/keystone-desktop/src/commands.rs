@@ -10,6 +10,7 @@ use crate::handoff::HandOff;
 use crate::notes::ToggleNotes;
 use crate::projects::{OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
+use crate::second_opinion::AskSecondOpinion;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
 use crate::windows::{self, CloseWindow, Destination, MoveTabToWindow, NewWindow, OpenInNewWindow};
@@ -117,6 +118,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-h"],
         context: Some(APP),
         action: || Box::new(HandOff),
+    },
+    Command {
+        id: "second-opinion",
+        label: "Ask for a second opinion…",
+        keys: &["ctrl-alt-o"],
+        context: Some(APP),
+        action: || Box::new(AskSecondOpinion),
     },
     Command {
         id: "settle-session",

@@ -22,6 +22,7 @@ mod projects;
 mod prompts;
 mod relative_time;
 mod reveal;
+mod second_opinion;
 mod session_tabs;
 mod settings;
 mod settings_accounts;
@@ -1347,6 +1348,7 @@ impl Keystone {
                     )
                     .children(self.pull_request_link(cx))
                     .child(self.own_press(handoff::button(), cx))
+                    .child(self.own_press(second_opinion::button(), cx))
             })
             .child(div().flex_1())
             .when(self.settings.is_none(), |d| {
@@ -2593,6 +2595,18 @@ impl Keystone {
                         })),
                     }
                 });
+                let second_opinion = reply.is_some().then(|| {
+                    let selector =
+                        arrangement::selector(&format!("second-opinion-{index}"), key.view);
+                    let ask =
+                        self.scoped_listener(cx, move |this, _: &gpui::ClickEvent, window, cx| {
+                            this.second_opinion_on_reply(key, index, window, cx)
+                        });
+                    (
+                        selector.to_string(),
+                        Box::new(ask) as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+                    )
+                });
                 Some(transcript::row(
                     row,
                     index,
@@ -2605,6 +2619,7 @@ impl Keystone {
                         widget,
                         result,
                         fork,
+                        second_opinion,
                     },
                     cx,
                 ))
@@ -3764,6 +3779,18 @@ impl Render for Keystone {
                     this.hand_off(window, cx)
                 }),
             )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &second_opinion::AskSecondOpinion, window, cx| {
+                    this.second_opinion_here(window, cx)
+                },
+            ))
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &second_opinion::AskAboutConversation, window, cx| {
+                    this.ask_second_opinion(None, window, cx)
+                },
+            ))
             .on_action(
                 self.scoped_listener(cx, |this, _: &FocusSearch, window, cx| {
                     if !this.arrangement_has_sidebar(cx) {
@@ -9459,6 +9486,11 @@ mod tests {
     mod fork {
         use super::*;
         include!("fork_tests.rs");
+    }
+
+    mod second_opinion {
+        use super::*;
+        include!("second_opinion_tests.rs");
     }
 
     fn open_with_session<'a>(

@@ -184,7 +184,10 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
         let linked = state
             .orchestrate(caller, "session_read", json!({"session":handed}), cx)
             .unwrap();
-        assert_eq!(linked["handed_off_from"], json!({"session":1}));
+        assert_eq!(
+            linked["handed_off_from"],
+            json!({"session":1,"second_opinion":false})
+        );
         let unlinked = state
             .orchestrate(caller, "session_read", json!({"session":2}), cx)
             .unwrap();
@@ -371,6 +374,253 @@ fn claude_agent_launches_and_reads_codex(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn codex_agent_launches_and_reads_claude(cx: &mut gpui::TestAppContext) {
     cross_provider_scenario(Provider::Codex, cx);
+}
+
+#[gpui::test]
+fn a_second_opinion_reads_but_never_launches_steers_or_stops_in_any_mode(
+    cx: &mut gpui::TestAppContext,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let state = setup(directory.path(), Provider::Claude, cx);
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text: "hello".into(),
+                attachments: Vec::new(),
+            },
+            cx
+        ))
+    });
+    wait_until(&state, cx, |state| {
+        state
+            .conversations
+            .get(&1)
+            .is_some_and(|c| !c.running && !c.rows.is_empty())
+    });
+    let (opinion, other) = state.update(cx, |state, cx| {
+        let project = WorkingDirectory::new(directory.path()).unwrap();
+        let other = state
+            .create_unselected(Provider::Claude, &project, 2, 1, cx)
+            .unwrap()
+            .value;
+        let opinion = state
+            .second_opinion(
+                1,
+                Provider::Codex,
+                String::new(),
+                2,
+                WindowId::FIRST,
+                None,
+                cx,
+            )
+            .unwrap()
+            .value;
+        assert!(state.send_message(
+            ComposerDraft {
+                session: opinion,
+                text: "orchestrator test: launch claude".into(),
+                attachments: Vec::new(),
+            },
+            cx
+        ));
+        (opinion, other)
+    });
+    wait_until(&state, cx, |state| {
+        state
+            .conversations
+            .get(&opinion)
+            .is_some_and(|c| !c.running)
+            && transcript(state, opinion).contains("Scripted orchestrator")
+    });
+    assert_eq!(
+        state.read_with(cx, |state, _| state.store.workspace().sessions().len()),
+        3,
+        "the second opinion launched nothing"
+    );
+    let caller = state.read_with(cx, |state, _| {
+        state.orchestrator.as_ref().unwrap().last_caller.unwrap()
+    });
+    assert_eq!(caller.session, opinion);
+    state.update(cx, |state, cx| {
+        for session in [1, opinion] {
+            assert!(state.send_message(
+                ComposerDraft {
+                    session,
+                    text: "long".into(),
+                    attachments: Vec::new(),
+                },
+                cx
+            ));
+        }
+    });
+    wait_until(&state, cx, |state| {
+        [1, opinion]
+            .into_iter()
+            .all(|id| state.started(id).is_some_and(|c| c.is_running(id)))
+    });
+    let source = state.read_with(cx, |state, _| state.conversations[&1].rows.clone());
+    state.update(cx, |state, cx| {
+        // The user may widen its mode; it still only reads.
+        for mode in [ApprovalMode::ReadOnly, ApprovalMode::Auto] {
+            if mode != ApprovalMode::ReadOnly {
+                state.set_approval_mode(opinion, mode, cx).unwrap();
+            }
+            for target in [1, other] {
+                for (tool, arguments) in [
+                    (
+                        "session_send",
+                        json!({"session":target,"message":"do it my way",
+                            "client_request_id":format!("opinion-send-{target}-{mode:?}")}),
+                    ),
+                    ("session_interrupt", json!({"session":target})),
+                    (
+                        "session_launch",
+                        json!({"provider":"claude","message":"child",
+                            "client_request_id":format!("opinion-launch-{target}-{mode:?}")}),
+                    ),
+                ] {
+                    let refused = state.orchestrate(caller, tool, arguments, cx).unwrap_err();
+                    assert!(
+                        refused
+                            .contains("A second opinion cannot launch, send to or stop sessions"),
+                        "{tool} {target} {mode:?}: {refused}"
+                    );
+                }
+            }
+        }
+        let read = state
+            .orchestrate(caller, "session_read", json!({"session":1}), cx)
+            .unwrap();
+        assert!(!read["rows"].as_array().unwrap().is_empty());
+        let own = state
+            .orchestrate(caller, "session_read", json!({"session":opinion}), cx)
+            .unwrap();
+        assert_eq!(
+            own["handed_off_from"],
+            json!({"session":1,"second_opinion":true})
+        );
+        assert!(
+            state.started(1).is_some_and(|c| c.is_running(1)),
+            "the source still runs"
+        );
+        assert_eq!(
+            state.conversations[&1].rows, source,
+            "the source is untouched"
+        );
+        state.stop_turn(1, cx);
+        state.stop_turn(opinion, cx);
+    });
+    wait_until(&state, cx, |state| {
+        [1, opinion]
+            .into_iter()
+            .all(|id| !state.started(id).is_some_and(|c| c.is_running(id)))
+    });
+}
+
+/// A second opinion's handoffs and forks carry on its review, so they launch nothing
+/// either, and a refused worktree launch is refused before git creates anything.
+#[gpui::test]
+fn a_second_opinions_handoffs_and_forks_launch_nothing_and_make_no_worktree(
+    cx: &mut gpui::TestAppContext,
+) {
+    let repository = fixture_repository();
+    let own = keystone_core::worktree::create(repository.path(), "parent", None).unwrap();
+    let mut store = Store::open(repository.path().join("workspace.json")).unwrap();
+    store
+        .create_worktree_showing(
+            Provider::Claude,
+            &own,
+            1,
+            keystone_core::WindowId::FIRST,
+            None,
+        )
+        .unwrap();
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| {
+        let mut state = AppState::new(store, cx);
+        state.claude.insert(
+            None,
+            ClaudeConnection::new(Some(scripted(Provider::Claude)), state.wake.clone()),
+        );
+        state
+    });
+    let sessions = state.update(cx, |state, cx| {
+        let opinion = state
+            .second_opinion(
+                1,
+                Provider::Claude,
+                String::new(),
+                2,
+                WindowId::FIRST,
+                None,
+                cx,
+            )
+            .unwrap()
+            .value;
+        let continued = state
+            .hand_off(
+                opinion,
+                Provider::Claude,
+                String::new(),
+                3,
+                WindowId::FIRST,
+                None,
+                cx,
+            )
+            .unwrap()
+            .value;
+        let forked = state
+            .fork(
+                opinion,
+                None,
+                String::new(),
+                Vec::new(),
+                4,
+                WindowId::FIRST,
+                None,
+                cx,
+            )
+            .unwrap()
+            .value;
+        [opinion, continued, forked]
+    });
+    for session in sessions {
+        state.update(cx, |state, cx| {
+            state.ensure_history(session);
+            assert!(state.send_message(
+                ComposerDraft {
+                    session,
+                    text: "orchestrator test: launch in new worktree sibling".into(),
+                    attachments: Vec::new(),
+                },
+                cx
+            ))
+        });
+        wait_until(&state, cx, |state| {
+            state
+                .conversations
+                .get(&session)
+                .is_some_and(|c| !c.running)
+                && transcript(state, session).contains("Scripted orchestrator")
+        });
+        let reply = state.read_with(cx, |state, _| transcript(state, session));
+        assert!(
+            reply.contains("Scripted orchestrator failure"),
+            "{session}: {reply}"
+        );
+    }
+    assert!(
+        !own.repository
+            .path()
+            .join(".keystone/worktrees/sibling")
+            .exists()
+    );
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.store.workspace().sessions().len(), 4);
+        assert!(state.store.workspace().deliveries().is_empty());
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
 }
 
 /// A Claude child an agent launched is evicted when proven idle like any session.
