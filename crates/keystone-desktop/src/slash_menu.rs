@@ -291,13 +291,20 @@ impl Keystone {
     pub(crate) fn slash_keys(
         &self,
         field: gpui::Stateful<gpui::Div>,
-        open: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        if !open {
-            return field;
-        }
-        let list = self.slash.list.clone();
+        self.menu_keys(field, self.slash.list.clone(), Self::choose_slash, cx)
+    }
+
+    /// Lets Up and Down move `list`'s highlight and Enter (without Shift) and Tab call
+    /// `choose` with no row, for a menu above the composer that leaves it focus.
+    pub(crate) fn menu_keys(
+        &self,
+        field: gpui::Stateful<gpui::Div>,
+        list: Entity<VirtualListState>,
+        choose: fn(&mut Self, Option<usize>, &mut Window, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let host = cx.entity_id();
         let step = move |delta: isize| {
             let list = list.clone();
@@ -318,18 +325,20 @@ impl Keystone {
             })
             .capture_action(self.scoped_listener(
                 cx,
-                |this, _: &text_input::Newline, window, cx| {
+                move |this, _: &text_input::Newline, window, cx| {
                     if window.modifiers().shift {
                         return;
                     }
                     cx.stop_propagation();
-                    this.choose_slash(None, window, cx);
+                    choose(this, None, window, cx);
                 },
             ))
-            .capture_action(self.scoped_listener(cx, |this, _: &NextFocus, window, cx| {
-                cx.stop_propagation();
-                this.choose_slash(None, window, cx);
-            }))
+            .capture_action(
+                self.scoped_listener(cx, move |this, _: &NextFocus, window, cx| {
+                    cx.stop_propagation();
+                    choose(this, None, window, cx);
+                }),
+            )
     }
 
     /// The menu, or the Terminal only notice, above the composer.
@@ -338,7 +347,6 @@ impl Keystone {
         window_width: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let width = px(CONTENT_WIDTH).min(window_width - px(32.));
         let card = if let Some(notice) = self.slash_notice(cx) {
             self.terminal_notice(notice, cx)
         } else {
@@ -364,16 +372,7 @@ impl Keystone {
             });
             self.command_list(entries, status, retry, cx)
         };
-        let pin = div().absolute().size_0().top_0().left_0().child(
-            deferred(
-                anchored()
-                    .anchor(Anchor::BottomLeft)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(div().pb(px(6.)).child(card.w(width))),
-            )
-            .priority(1),
-        );
-        Some(pin.into_any_element())
+        Some(composer_overlay(card, window_width))
     }
 
     fn command_list(
@@ -384,35 +383,63 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let count = entries.len();
-        self.slash.list.update(cx, |list, _| {
+        let row_height = cx.theme().density.control(px(32.));
+        let entries = std::rc::Rc::new(entries);
+        let rows = move |row: usize, highlighted: bool, _: &mut Window, cx: &mut App| {
+            entries.get(row).map_or_else(
+                || div().h(row_height).into_any_element(),
+                |entry| command_row(entry, highlighted, row_height, cx),
+            )
+        };
+        let choose = self.scoped_listener(cx, |this, row: &usize, window, cx| {
+            this.choose_slash(Some(*row), window, cx)
+        });
+        let list = self.slash.list.clone();
+        self.menu_card(
+            "slash-menu",
+            &list,
+            count,
+            rows,
+            choose,
+            status,
+            retry,
+            Some("No matching commands"),
+            cx,
+        )
+    }
+
+    /// A menu above the composer: a status line with an optional Retry, then `count`
+    /// rows from `rows` in `list`, or any `empty` label when there are none. Its parts are named
+    /// `{id}`, `{id}-status`, `{id}-retry` and `{id}-list-row-{n}`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn menu_card(
+        &self,
+        id: &'static str,
+        list: &Entity<VirtualListState>,
+        count: usize,
+        rows: impl Fn(usize, bool, &mut Window, &mut App) -> AnyElement + 'static,
+        choose: impl Fn(&usize, &mut Window, &mut App) + 'static,
+        status: Option<String>,
+        retry: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
+        empty: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        list.update(cx, |list, _| {
             if list.count() != count {
                 list.set_count(count);
             }
         });
         let row_height = cx.theme().density.control(px(32.));
-        let entries = std::rc::Rc::new(entries);
-        let rows = {
-            let entries = entries.clone();
-            move |row: usize, highlighted: bool, _: &mut Window, cx: &mut App| {
-                entries.get(row).map_or_else(
-                    || div().h(row_height).into_any_element(),
-                    |entry| command_row(entry, highlighted, row_height, cx),
-                )
-            }
-        };
-        let choose = self.scoped_listener(cx, |this, row: &usize, window, cx| {
-            this.choose_slash(Some(*row), window, cx)
-        });
         v_flex()
-            .id("slash-menu")
-            .automation_id("slash-menu")
+            .id(id)
+            .automation_id(id)
             .occlude()
             .p(px(4.))
             .surface(Elevation::Overlay, cx)
             .children(status.map(|status| {
                 h_flex()
-                    .id("slash-menu-status")
-                    .automation_id("slash-menu-status")
+                    .id(format!("{id}-status"))
+                    .automation_id(format!("{id}-status"))
                     .gap(spacing::SM)
                     .px(spacing::SM)
                     .py(px(6.))
@@ -425,26 +452,26 @@ impl Keystone {
                         ),
                     )
                     .children(retry.map(|retry| {
-                        Button::new("slash-menu-retry", "Retry")
+                        Button::new(format!("{id}-retry"), "Retry")
                             .style(ButtonStyle::Subtle)
                             .size(ButtonSize::Compact)
-                            .debug_selector(|| "slash-menu-retry".into())
+                            .debug_selector(move || format!("{id}-retry"))
                             .on_click(retry)
                     }))
             }))
-            .when(count == 0, |d| {
+            .when_some(empty.filter(|_| count == 0), |d, empty| {
                 d.child(
                     div()
                         .px(spacing::SM)
                         .py(px(6.))
-                        .child(Label::new("No matching commands").color(Color::Muted)),
+                        .child(Label::new(empty).color(Color::Muted)),
                 )
             })
             .when(count > 0, |d| {
                 d.child(
-                    VirtualList::new("slash-menu-list", &self.slash.list, rows)
+                    VirtualList::new(format!("{id}-list"), list, rows)
                         .focusable(false)
-                        .on_confirm(move |row, window, cx| choose(row, window, cx))
+                        .on_confirm(choose)
                         .h(row_height * count.min(VISIBLE_ROWS) as f32),
                 )
             })
@@ -505,6 +532,29 @@ impl Keystone {
                     ),
             )
     }
+}
+
+/// Pins `card` above the composer, as wide as the conversation column allows.
+pub(crate) fn composer_overlay(
+    card: gpui::Stateful<gpui::Div>,
+    window_width: Pixels,
+) -> AnyElement {
+    let width = px(CONTENT_WIDTH).min(window_width - px(32.));
+    div()
+        .absolute()
+        .size_0()
+        .top_0()
+        .left_0()
+        .child(
+            deferred(
+                anchored()
+                    .anchor(Anchor::BottomLeft)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(div().pb(px(6.)).child(card.w(width))),
+            )
+            .priority(1),
+        )
+        .into_any_element()
 }
 
 fn command_row(entry: &Entry, highlighted: bool, height: Pixels, cx: &mut App) -> AnyElement {

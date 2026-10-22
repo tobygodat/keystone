@@ -9,6 +9,7 @@ mod customization_agent;
 mod files;
 mod handoff;
 mod integrations;
+mod mentions;
 mod model_selector;
 mod notifications;
 mod presentation;
@@ -427,6 +428,7 @@ struct Keystone {
     projects: Option<projects::ProjectList>,
     files: files::Files,
     slash: slash_menu::SlashMenu,
+    mentions: mentions::Mentions,
     usage_focus: FocusHandle,
 }
 
@@ -741,6 +743,7 @@ impl Keystone {
             }),
         );
         let slash = slash_menu::SlashMenu::new(&composer, cx);
+        let mentions = mentions::Mentions::new(&composer, cx);
         let mut result = Self {
             state,
             window_id,
@@ -790,6 +793,7 @@ impl Keystone {
             projects: None,
             files: files::Files::default(),
             slash,
+            mentions,
             usage_focus: cx.focus_handle().tab_stop(true),
         };
         result.save_opened_project(cx);
@@ -856,9 +860,13 @@ impl Keystone {
             .into_iter()
             .filter(|other| other != &this)
             .find(|other| selected.is_some() && other.read(cx).selected(cx) == selected)
-            .map(|other| other.read(cx).composer.read(cx).value().to_owned());
-        let value = typed.unwrap_or_else(|| {
-            self.state
+            .map(|other| {
+                let input = other.read(cx).composer.read(cx);
+                (input.value().to_owned(), Some(input.tokens().to_vec()))
+            });
+        let (value, tokens) = typed.unwrap_or_else(|| {
+            let draft = self
+                .state
                 .read(cx)
                 .store()
                 .workspace()
@@ -866,10 +874,18 @@ impl Keystone {
                 .iter()
                 .find(|s| Some(s.id()) == selected)
                 .map(|s| s.draft().to_owned())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (draft, None)
         });
+        self.mentions.edited = None;
         self.composer
             .update(cx, |input, cx| input.set_value(value, cx));
+        match tokens {
+            Some(tokens) => self
+                .composer
+                .update(cx, |input, cx| input.set_tokens(tokens, cx)),
+            None => self.restore_mention_tokens(cx),
+        }
     }
 
     /// Shows the draft just saved for `session` in every other window that shows it,
@@ -877,16 +893,24 @@ impl Keystone {
     fn share_draft(&self, session: u64, cx: &mut Context<Self>) {
         let this = cx.entity();
         let text = self.composer.read(cx).value().to_owned();
+        let tokens = self.composer.read(cx).tokens().to_vec();
         for other in open_windows(cx) {
             if other == this {
                 continue;
             }
             other.update(cx, |other, cx| {
-                if other.selected(cx) == Some(session) && other.composer.read(cx).value() != text {
+                let input = other.composer.read(cx);
+                if other.selected(cx) == Some(session)
+                    && (input.value() != text || input.tokens() != tokens)
+                {
                     other.draft_save_task = None;
-                    other
-                        .composer
-                        .update(cx, |input, cx| input.set_value(text.clone(), cx));
+                    other.mentions.edited = None;
+                    other.composer.update(cx, |input, cx| {
+                        if input.value() != text {
+                            input.set_value(text.clone(), cx);
+                        }
+                        input.set_tokens(tokens.clone(), cx);
+                    });
                 }
             });
         }
@@ -1776,11 +1800,19 @@ impl Keystone {
                             })
                             .when(!can_send, |d| d.cursor_not_allowed()),
                     );
-                let menu_open = self
+                let field = if self
                     .slash_entries(cx)
-                    .is_some_and(|(.., entries)| !entries.is_empty());
+                    .is_some_and(|(.., entries)| !entries.is_empty())
+                {
+                    self.slash_keys(field, cx)
+                } else if self.mention_open(cx) {
+                    let list = self.mentions.list.clone();
+                    self.menu_keys(field, list, Self::choose_highlighted_mention, cx)
+                } else {
+                    field
+                };
                 (
-                    self.slash_keys(field, menu_open, cx)
+                    field
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.composer.focus_handle(cx).focus(window, cx)
                         }))
@@ -1813,6 +1845,7 @@ impl Keystone {
             .gap(px(14.))
             .relative()
             .children(current.and_then(|_| self.slash_menu(viewport.width, cx)))
+            .children(current.and_then(|_| self.mention_menu(viewport.width, cx)))
             .child(field)
             .child(toolbar)
     }
@@ -3426,7 +3459,7 @@ impl Render for Keystone {
                         this.presentation.current.arrangement.surface_menu = None;
                         this.refresh(cx);
                         cx.stop_propagation();
-                    } else if this.dismiss_slash(cx) {
+                    } else if this.dismiss_slash(cx) || this.dismiss_mention(cx) {
                         cx.stop_propagation();
                     } else if this.presentation.current.customization.is_open() {
                         this.customize(arrangement_editor::Action::Close, window, cx);

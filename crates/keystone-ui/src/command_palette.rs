@@ -16,7 +16,6 @@ use gpui::{
     Subscription, Window, anchored, deferred, div, point, prelude::*, px,
 };
 use std::cmp::Reverse;
-use std::ops::Range;
 use std::rc::Rc;
 
 gpui::actions!(command_palette, [Dismiss, PageUp, PageDown, Remove]);
@@ -306,18 +305,6 @@ impl CommandPalette {
     }
 }
 
-fn highlight_ranges(label: &str, positions: &[usize]) -> Vec<Range<usize>> {
-    let mut ranges: Vec<Range<usize>> = Vec::new();
-    for &start in positions {
-        let end = start + label[start..].chars().next().map_or(0, char::len_utf8);
-        match ranges.last_mut() {
-            Some(last) if last.end == start => last.end = end,
-            _ => ranges.push(start..end),
-        }
-    }
-    ranges
-}
-
 fn render_row(
     id: &SharedString,
     state: &Entity<CommandPaletteState>,
@@ -338,7 +325,7 @@ fn render_row(
         ..Default::default()
     };
     let label = StyledText::new(item.label.clone()).with_highlights(
-        highlight_ranges(&item.label, &shown.positions)
+        crate::fuzzy::ranges(&item.label, &shown.positions)
             .into_iter()
             .map(|range| (range, marked)),
     );

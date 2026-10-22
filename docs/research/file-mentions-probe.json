@@ -1,0 +1,262 @@
+{
+ "time_utc": "2026-10-21T18:11:41Z",
+ "message": "Summarise @notes.txt, @src/deep/file.rs and @\"my notes/a b.txt\"",
+ "claude_version": "2.1.301 (Claude Code)",
+ "codex_version": "codex-cli 0.163.0",
+ "claude": {
+  "frames": [
+   {
+    "type": "control_response",
+    "subtype": null
+   },
+   {
+    "type": "command_lifecycle",
+    "subtype": null
+   },
+   {
+    "type": "command_lifecycle",
+    "subtype": null
+   },
+   {
+    "type": "system",
+    "subtype": "init"
+   },
+   {
+    "type": "system",
+    "subtype": "status"
+   },
+   {
+    "type": "user",
+    "subtype": null
+   },
+   {
+    "type": "assistant",
+    "subtype": null
+   },
+   {
+    "type": "result",
+    "subtype": "success"
+   }
+  ],
+  "replayed_user_content": "Summarise @notes.txt, @src/deep/file.rs and @\"my notes/a b.txt\"",
+  "result": {
+   "subtype": "success",
+   "is_error": true,
+   "result": "API Error: 400 keystone probe: no model here"
+  },
+  "exit": 1,
+  "stderr_tail": "",
+  "all_requests": [
+   {
+    "method": "POST",
+    "path": "/v1/messages?beta=true"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/messages?beta=true"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/messages?beta=true"
+   }
+  ],
+  "typed_text_present": true,
+  "sentinels_present": {
+   "notes.txt": true,
+   "src/deep/file.rs": true,
+   "my notes/a b.txt": true
+  },
+  "model_requests": [
+   {
+    "path": "/v1/messages?beta=true",
+    "model": "claude-opus-5-5",
+    "blocks_with_hits": [
+     {
+      "role": "user",
+      "type": "text",
+      "sentinels": [],
+      "typed_text": true,
+      "text": "Summarise @notes.txt, @src/deep/file.rs and @\"my notes/a b.txt\""
+     },
+     {
+      "role": "system",
+      "type": "text",
+      "sentinels": [
+       "notes.txt",
+       "src/deep/file.rs",
+       "my notes/a b.txt"
+      ],
+      "typed_text": false,
+      "text": "Called the Read tool with the following input: {\"file_path\":\"<root>/project/my notes/a b.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-SPACED-c04e\n2\t\n\nCalled the Read tool with the following input: {\"file_path\":\"<root>/project/notes.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-NOTES-7f3a\n2\t\n\nCalled the Read tool with the following input: {\"file_path\":\"<root>/project/src/deep/file.rs\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-DEEP-91c2\n2\t"
+     }
+    ],
+    "sentinel_locations": [
+     {
+      "at": "$.messages[1].content[0].text",
+      "sentinels": [
+       "notes.txt",
+       "src/deep/file.rs",
+       "my notes/a b.txt"
+      ],
+      "excerpt": "Called the Read tool with the following input: {\"file_path\":\"<root>/project/my notes/a b.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-SPACED-c04e\n2\t\n\nCalled"
+     }
+    ]
+   },
+   {
+    "path": "/v1/messages?beta=true",
+    "model": "claude-opus-5-5",
+    "blocks_with_hits": [
+     {
+      "role": "user",
+      "type": "text",
+      "sentinels": [],
+      "typed_text": true,
+      "text": "Summarise @notes.txt, @src/deep/file.rs and @\"my notes/a b.txt\""
+     },
+     {
+      "role": "system",
+      "type": "text",
+      "sentinels": [
+       "notes.txt",
+       "src/deep/file.rs",
+       "my notes/a b.txt"
+      ],
+      "typed_text": false,
+      "text": "Called the Read tool with the following input: {\"file_path\":\"<root>/project/my notes/a b.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-SPACED-c04e\n2\t\n\nCalled the Read tool with the following input: {\"file_path\":\"<root>/project/notes.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-NOTES-7f3a\n2\t\n\nCalled the Read tool with the following input: {\"file_path\":\"<root>/project/src/deep/file.rs\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-DEEP-91c2\n2\t"
+     }
+    ],
+    "sentinel_locations": [
+     {
+      "at": "$.messages[1].content[0].text",
+      "sentinels": [
+       "notes.txt",
+       "src/deep/file.rs",
+       "my notes/a b.txt"
+      ],
+      "excerpt": "Called the Read tool with the following input: {\"file_path\":\"<root>/project/my notes/a b.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-SPACED-c04e\n2\t\n\nCalled"
+     }
+    ]
+   },
+   {
+    "path": "/v1/messages?beta=true",
+    "model": "claude-opus-5-5",
+    "blocks_with_hits": [
+     {
+      "role": "user",
+      "type": "text",
+      "sentinels": [],
+      "typed_text": true,
+      "text": "Summarise @notes.txt, @src/deep/file.rs and @\"my notes/a b.txt\""
+     },
+     {
+      "role": "system",
+      "type": "text",
+      "sentinels": [
+       "notes.txt",
+       "src/deep/file.rs",
+       "my notes/a b.txt"
+      ],
+      "typed_text": false,
+      "text": "Called the Read tool with the following input: {\"file_path\":\"<root>/project/my notes/a b.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-SPACED-c04e\n2\t\n\nCalled the Read tool with the following input: {\"file_path\":\"<root>/project/notes.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-NOTES-7f3a\n2\t\n\nCalled the Read tool with the following input: {\"file_path\":\"<root>/project/src/deep/file.rs\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-DEEP-91c2\n2\t"
+     }
+    ],
+    "sentinel_locations": [
+     {
+      "at": "$.messages[1].content[0].text",
+      "sentinels": [
+       "notes.txt",
+       "src/deep/file.rs",
+       "my notes/a b.txt"
+      ],
+      "excerpt": "Called the Read tool with the following input: {\"file_path\":\"<root>/project/my notes/a b.txt\"}\nResult of calling the Read tool:\n1\tKEYSTONE-SENTINEL-SPACED-c04e\n2\t\n\nCalled"
+     }
+    ]
+   }
+  ]
+ },
+ "codex": {
+  "answers": {
+   "initialize_error": null,
+   "thread_start_error": null,
+   "turn_start_error": null,
+   "turn_completed": true
+  },
+  "exit": 0,
+  "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))\n",
+  "all_requests": [
+   {
+    "method": "POST",
+    "path": "/v1/responses"
+   }
+  ],
+  "typed_text_present": true,
+  "sentinels_present": {
+   "notes.txt": false,
+   "src/deep/file.rs": false,
+   "my notes/a b.txt": false
+  },
+  "model_requests": [
+   {
+    "path": "/v1/responses",
+    "model": "probe-model",
+    "blocks_with_hits": [
+     {
+      "role": "user",
+      "type": "input_text",
+      "sentinels": [],
+      "typed_text": true,
+      "text": "Summarise @notes.txt, @src/deep/file.rs and @\"my notes/a b.txt\""
+     }
+    ],
+    "sentinel_locations": []
+   }
+  ],
+  "turn_start_input_types": [
+   "audio",
+   "image",
+   "localAudio",
+   "localImage",
+   "mention",
+   "skill",
+   "text"
+  ]
+ },
+ "codex_mention_items": {
+  "answers": {
+   "initialize_error": null,
+   "thread_start_error": null,
+   "turn_start_error": null,
+   "turn_completed": true
+  },
+  "exit": 0,
+  "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))\n",
+  "all_requests": [
+   {
+    "method": "POST",
+    "path": "/v1/responses"
+   }
+  ],
+  "typed_text_present": true,
+  "sentinels_present": {
+   "notes.txt": false,
+   "src/deep/file.rs": false,
+   "my notes/a b.txt": false
+  },
+  "model_requests": [
+   {
+    "path": "/v1/responses",
+    "model": "probe-model",
+    "blocks_with_hits": [
+     {
+      "role": "user",
+      "type": "input_text",
+      "sentinels": [],
+      "typed_text": true,
+      "text": "Summarise @notes.txt, @src/deep/file.rs and @\"my notes/a b.txt\""
+     }
+    ],
+    "sentinel_locations": []
+   }
+  ]
+ }
+}

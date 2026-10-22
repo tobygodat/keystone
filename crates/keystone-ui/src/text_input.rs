@@ -169,6 +169,8 @@ pub struct TextInput {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    /// Ranges of the content that read and delete as one unit, in order.
+    tokens: Vec<Range<usize>>,
     mode: InputMode,
     affinity: CaretAffinity,
     desired_x: Option<Pixels>,
@@ -193,6 +195,7 @@ impl TextInput {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            tokens: Vec::new(),
             mode,
             affinity: CaretAffinity::AfterWrap,
             desired_x: None,
@@ -222,12 +225,124 @@ impl TextInput {
         self.selected_range = end..end;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.tokens.clear();
         self.last_layout = None;
         self.scroll_offset = px(0.);
         self.reveal_cursor = true;
         self.desired_x = None;
         self.affinity = CaretAffinity::AfterWrap;
         cx.notify();
+    }
+
+    /// The caret's byte offset in the content.
+    pub fn cursor(&self) -> usize {
+        self.cursor_offset()
+    }
+
+    /// The tokens in the content, in order. Backspace at a token's end and Delete at
+    /// its start remove it whole, and an edit inside it or against its edges makes it
+    /// plain text again.
+    pub fn tokens(&self) -> &[Range<usize>] {
+        &self.tokens
+    }
+
+    /// Makes `tokens` the content's tokens. A range that is empty, overlaps an earlier
+    /// one, or does not fall on character boundaries with whitespace or an end on each
+    /// side is left out.
+    pub fn set_tokens(
+        &mut self,
+        tokens: impl IntoIterator<Item = Range<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.tokens.clear();
+        for token in tokens {
+            if self
+                .tokens
+                .last()
+                .is_none_or(|last| last.end <= token.start)
+                && self.stands_alone(&token)
+            {
+                self.tokens.push(token);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Replaces `range` with `token` as one token, with a space before it when other
+    /// text would touch it and a space after it unless one follows already, and puts
+    /// the caret after that space. An empty `range` inside a token moves to its end,
+    /// so the token stays whole. Like [`Self::set_value`], it emits no [`Changed`].
+    pub fn insert_token(&mut self, range: Range<usize>, token: &str, cx: &mut Context<Self>) {
+        let range = match self
+            .tokens
+            .iter()
+            .find(|t| range.is_empty() && t.start < range.start && range.start < t.end)
+        {
+            Some(inside) => inside.end..inside.end,
+            None => range,
+        };
+        let before = self.content[..range.start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace());
+        let after = self.content[range.end..].starts_with(' ');
+        let start = range.start + usize::from(before);
+        let inserted = format!(
+            "{}{token}{}",
+            if before { " " } else { "" },
+            if after { "" } else { " " }
+        );
+        let caret = range.start + inserted.len() + usize::from(after);
+        self.content = format!(
+            "{}{inserted}{}",
+            &self.content[..range.start],
+            &self.content[range.end..]
+        )
+        .into();
+        self.shift_tokens(range, inserted.len());
+        if self.stands_alone(&(start..start + token.len())) {
+            let at = self.tokens.partition_point(|t| t.end <= start);
+            self.tokens.insert(at, start..start + token.len());
+        }
+        self.marked_range = None;
+        self.last_layout = None;
+        self.move_to(caret, cx);
+    }
+
+    /// Whether `range` is non-empty, on character boundaries, and has whitespace or an
+    /// end of the content on each side.
+    fn stands_alone(&self, range: &Range<usize>) -> bool {
+        let text = self.content.as_ref();
+        range.start < range.end
+            && range.end <= text.len()
+            && text.is_char_boundary(range.start)
+            && text.is_char_boundary(range.end)
+            && text[..range.start]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+            && text[range.end..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace)
+    }
+
+    /// Updates the tokens for `edited`, a range of the old content now replaced by
+    /// `inserted` bytes: later tokens move, and any it touched or glued to other text
+    /// stop being tokens.
+    fn shift_tokens(&mut self, edited: Range<usize>, inserted: usize) {
+        let mut tokens = std::mem::take(&mut self.tokens);
+        tokens.retain_mut(|token| {
+            if edited.end <= token.start {
+                token.start = token.start - edited.end + edited.start + inserted;
+                token.end = token.end - edited.end + edited.start + inserted;
+                true
+            } else {
+                edited.start >= token.end
+            }
+        });
+        tokens.retain(|token| self.stands_alone(token));
+        self.tokens = tokens;
     }
 
     pub fn bind_keys(cx: &mut App) {
@@ -506,15 +621,25 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+        let cursor = self.cursor_offset();
+        if let Some(token) = self.tokens.iter().find(|t| t.end == cursor)
+            && self.selected_range.is_empty()
+        {
+            self.selected_range = token.clone();
+        } else if self.selected_range.is_empty() {
+            self.select_to(self.previous_boundary(cursor), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.select_to(self.next_boundary(self.cursor_offset()), cx);
+        let cursor = self.cursor_offset();
+        if let Some(token) = self.tokens.iter().find(|t| t.start == cursor)
+            && self.selected_range.is_empty()
+        {
+            self.selected_range = token.clone();
+        } else if self.selected_range.is_empty() {
+            self.select_to(self.next_boundary(cursor), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -586,6 +711,7 @@ impl TextInput {
         );
         let changed = next != self.content;
         self.content = next.into();
+        self.shift_tokens(range.clone(), new_text.len());
         self.last_layout = None;
         self.move_to(range.start + new_text.len(), cx);
         if changed {
@@ -814,9 +940,13 @@ fn wrapped_rows(
     rows.min(limit)
 }
 
+/// Shapes `text`, drawing the byte ranges in `tokens` in `token_color`.
+#[allow(clippy::too_many_arguments)]
 fn shape_layout(
     input: &TextInput,
     text: &str,
+    tokens: &[Range<usize>],
+    token_color: Hsla,
     width: Pixels,
     style: &TextStyle,
     line_height: Pixels,
@@ -834,45 +964,50 @@ fn shape_layout(
     let mut start = 0;
     for text in text.split('\n') {
         let end = start + text.len();
-        let marked = input
-            .marked_range
-            .as_ref()
-            .map(|range| range.start.max(start)..range.end.min(end))
-            .filter(|range| range.start < range.end);
+        let marked = input.marked_range.as_ref();
+        let mut cuts = vec![start, end];
+        for range in marked.into_iter().chain(tokens) {
+            cuts.extend(
+                [range.start, range.end]
+                    .into_iter()
+                    .filter(|&b| b > start && b < end),
+            );
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
         let run = TextRun {
-            len: text.len(),
+            len: 0,
             font: style.font(),
             color,
             background_color: None,
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked) = marked {
-            vec![
+        let mut runs: Vec<TextRun> = cuts
+            .windows(2)
+            .map(|pair| {
+                let inside = |range: &Range<usize>| range.start <= pair[0] && pair[1] <= range.end;
                 TextRun {
-                    len: marked.start - start,
+                    len: pair[1] - pair[0],
+                    color: if tokens.iter().any(inside) {
+                        token_color
+                    } else {
+                        color
+                    },
+                    underline: marked
+                        .filter(|range| inside(range))
+                        .map(|_| UnderlineStyle {
+                            color: Some(color),
+                            thickness: px(1.),
+                            wavy: false,
+                        }),
                     ..run.clone()
-                },
-                TextRun {
-                    len: marked.end - marked.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(color),
-                        thickness: px(1.),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: end - marked.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect::<Vec<_>>()
-        } else {
-            vec![run]
-        };
+                }
+            })
+            .collect();
+        if runs.is_empty() {
+            runs.push(run);
+        }
         let wrap = (input.mode == InputMode::Multiline).then_some(width.max(px(1.)));
         let line = window
             .text_system()
@@ -965,12 +1100,18 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> PrepaintState {
         let colors = &cx.theme().colors;
-        let (placeholder, selection_color, caret) =
-            (colors.text_placeholder, colors.selection, colors.caret);
+        let (placeholder, selection_color, caret, accent) = (
+            colors.text_placeholder,
+            colors.selection,
+            colors.caret,
+            colors.accent,
+        );
         let input = self.input.read(cx);
         let layout = shape_layout(
             input,
             &input.content,
+            &input.tokens,
+            accent,
             bounds.size.width,
             &state.0,
             state.1,
@@ -981,6 +1122,8 @@ impl Element for TextElement {
             shape_layout(
                 input,
                 &input.placeholder,
+                &[],
+                accent,
                 bounds.size.width,
                 &state.0,
                 state.1,
@@ -1278,6 +1421,8 @@ mod tests {
                     let shaped = shape_layout(
                         input.read(cx),
                         text,
+                        &[],
+                        style.color,
                         width,
                         &style,
                         line_height,
@@ -1317,5 +1462,94 @@ mod tests {
         });
         cx.simulate_input("next");
         input.read_with(cx, |input, _| assert_eq!(input.value(), "next"));
+    }
+
+    #[gpui::test]
+    fn tokens_delete_whole_and_become_text_when_edited(cx: &mut gpui::TestAppContext) {
+        cx.update(TextInput::bind_keys);
+        cx.update(crate::init);
+        let (input, cx) = cx.add_window_view(|window, cx| {
+            let input = TextInput::new("Draft", InputMode::Multiline, cx);
+            window.focus(&input.focus_handle, cx);
+            input
+        });
+        cx.simulate_input("read @mod");
+        input.update(cx, |input, cx| input.insert_token(5..9, "@src/a b.rs", cx));
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.value(), "read @src/a b.rs ");
+            assert_eq!(input.tokens(), [5..16]);
+            assert_eq!(input.cursor(), 17);
+        });
+        cx.simulate_input("now");
+        cx.simulate_keystrokes("home");
+        cx.simulate_input("> ");
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.value(), "> read @src/a b.rs now");
+            assert_eq!(input.tokens(), [7..18], "an edit before a token moves it");
+        });
+        cx.simulate_keystrokes("end backspace backspace backspace backspace");
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.value(), "> read @src/a b.rs")
+        });
+        cx.simulate_keystrokes("backspace");
+        input.read_with(cx, |input, _| {
+            assert_eq!(
+                input.value(),
+                "> read ",
+                "Backspace at its end removes it whole"
+            );
+            assert!(input.tokens().is_empty());
+        });
+
+        // Inserted against other text, a token gets a space before it and takes the
+        // space that follows instead of adding one.
+        input.update(cx, |input, cx| {
+            input.set_value("see it".into(), cx);
+            input.insert_token(3..3, "@a.rs", cx);
+        });
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.value(), "see @a.rs it");
+            assert_eq!(input.tokens(), [4..9]);
+            assert_eq!(input.cursor(), 10);
+        });
+        cx.simulate_keystrokes("home right right right right delete");
+        input.read_with(cx, |input, _| {
+            assert_eq!(
+                input.value(),
+                "see  it",
+                "Delete at its start removes it whole"
+            );
+        });
+
+        // Typing inside a token, or against its end, makes it plain text.
+        input.update(cx, |input, cx| {
+            input.set_value("@a.rs @b.rs".into(), cx);
+            input.set_tokens([0..5, 6..11, 3..4], cx);
+        });
+        input.read_with(cx, |input, _| assert_eq!(input.tokens(), [0..5, 6..11]));
+        cx.simulate_keystrokes("end");
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("home right");
+        cx.simulate_input("y");
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.value(), "@ya.rs @b.rsx");
+            assert!(input.tokens().is_empty());
+        });
+        cx.simulate_keystrokes("end backspace");
+        input.read_with(cx, |input, _| assert_eq!(input.value(), "@ya.rs @b.rs"));
+        // A token inserted with the caret inside another goes after it.
+        input.update(cx, |input, cx| {
+            input.set_value("see @a.rs now".into(), cx);
+            input.set_tokens([4..9], cx);
+            input.insert_token(6..6, "@b.rs", cx);
+        });
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.value(), "see @a.rs @b.rs now");
+            assert_eq!(input.tokens(), [4..9, 10..15]);
+        });
+        input.update(cx, |input, cx| input.set_tokens([0..2], cx));
+        input.read_with(cx, |input, _| {
+            assert!(input.tokens().is_empty(), "a token must stand alone");
+        });
     }
 }

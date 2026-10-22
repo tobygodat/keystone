@@ -3,7 +3,7 @@ use crate::arrangement_editor::FILES_WIDTH;
 use crate::presentation::ConversationFolder;
 use gpui::{
     AnyElement, App, AppContext, ClipboardItem, Context, Entity, Focusable, IntoElement,
-    KeyBinding, Render, Window, div, prelude::*, px,
+    KeyBinding, Render, WeakEntity, Window, div, prelude::*, px,
 };
 use keystone_core::{Axis, Component, Edit, Place};
 use keystone_ui::prelude::*;
@@ -15,12 +15,15 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-gpui::actions!(files, [CopyPath, ToggleFiles]);
+gpui::actions!(files, [CopyPath, MentionInComposer, ToggleFiles]);
 
 const CONTEXT: &str = "FileTree";
 
 pub(crate) fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-shift-c", CopyPath, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("ctrl-shift-c", CopyPath, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-m", MentionInComposer, Some(CONTEXT)),
+    ]);
 }
 
 /// One file browser per project folder, so switching sessions or closing and reopening
@@ -31,11 +34,12 @@ pub(crate) struct Files {
 }
 
 impl Files {
-    pub(crate) fn browser(&self, root: &Path, cx: &mut App) -> Entity<FileBrowser> {
+    pub(crate) fn browser(&self, root: &Path, cx: &mut Context<Keystone>) -> Entity<FileBrowser> {
+        let keystone = cx.weak_entity();
         self.browsers
             .borrow_mut()
             .entry(root.to_owned())
-            .or_insert_with(|| cx.new(|cx| FileBrowser::new(root.to_owned(), cx)))
+            .or_insert_with(|| cx.new(|cx| FileBrowser::new(root.to_owned(), keystone, cx)))
             .clone()
     }
 }
@@ -64,12 +68,18 @@ struct Entry {
     kind: NodeKind,
 }
 
-/// The entries directly inside `dir`, folders first and then by name ignoring case.
-/// Hidden files and anything a `.gitignore` of the enclosing repository excludes are left out.
+/// A walk of `dir` that leaves out hidden files and anything a `.gitignore` of the
+/// enclosing repository excludes, as the Files view and the composer's `@` picker show.
+pub(crate) fn walker(dir: &Path) -> ignore::WalkBuilder {
+    ignore::WalkBuilder::new(dir)
+}
+
+/// The entries directly inside `dir` that [`walker`] keeps, folders first and then by
+/// name ignoring case.
 fn list_dir(dir: &Path) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut failure = None;
-    for result in ignore::WalkBuilder::new(dir).max_depth(Some(1)).build() {
+    for result in walker(dir).max_depth(Some(1)).build() {
         match result {
             Ok(entry) if entry.depth() == 0 => {}
             Ok(entry) => {
@@ -227,10 +237,12 @@ pub(crate) struct FileBrowser {
     /// Folders with a listing in flight, and whether they expanded again since it began.
     loading: HashMap<NodeId, bool>,
     notice: Option<Notice>,
+    /// The window whose composer "Mention in composer" writes to.
+    keystone: WeakEntity<Keystone>,
 }
 
 impl FileBrowser {
-    fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
+    fn new(root: PathBuf, keystone: WeakEntity<Keystone>, cx: &mut Context<Self>) -> Self {
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
@@ -242,6 +254,7 @@ impl FileBrowser {
             paths: vec![root],
             loading: HashMap::new(),
             notice: None,
+            keystone,
         };
         if let Some(root) = browser.tree.update(cx, |tree, cx| tree.expand(0, cx)) {
             browser.load(root, cx);
@@ -307,6 +320,25 @@ impl FileBrowser {
         cx.notify();
     }
 
+    /// How the composer would mention `node`: only a file of the selected session's
+    /// recorded folder whose path has a token.
+    fn mention_token(&self, node: NodeId, cx: &App) -> Option<String> {
+        let root = self.keystone.upgrade()?.read(cx).mention_root(cx)?;
+        let relative = self.paths[node as usize]
+            .strip_prefix(root)
+            .ok()?
+            .to_str()?;
+        crate::mentions::token(relative)
+    }
+
+    /// Puts an `@` mention of the file `node` in the composer.
+    fn mention(&self, node: NodeId, window: &mut Window, cx: &mut App) {
+        let path = self.paths[node as usize].clone();
+        let _ = self
+            .keystone
+            .update(cx, |keystone, cx| keystone.mention_file(&path, window, cx));
+    }
+
     fn copy_path(&self, node: NodeId, cx: &mut App) {
         let path = self.paths[node as usize].to_string_lossy().into_owned();
         cx.write_to_clipboard(ClipboardItem::new_string(path));
@@ -330,6 +362,14 @@ impl Render for FileBrowser {
                     this.copy_path(node, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &MentionInComposer, window, cx| {
+                let tree = this.tree.read(cx);
+                if let Some(node) = tree.highlighted_node(cx)
+                    && tree.model().node(node).kind() == NodeKind::File
+                {
+                    this.mention(node, window, cx);
+                }
+            }))
             .children(self.notice.as_ref().map(|notice| {
                 div()
                     .flex_shrink_0()
@@ -343,41 +383,78 @@ impl Render for FileBrowser {
                     )
             }))
             .child(
-                Tree::new("files-tree", &self.tree, move |entry, highlighted, _, _| {
-                    let (id, browser) = (entry.id, browser.clone());
-                    let icon = match entry.kind {
-                        NodeKind::Folder => IconName::Folder,
-                        NodeKind::File => IconName::File,
-                    };
-                    h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .child(Icon::new(icon).size(px(14.)).color(Color::Muted))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Label::new(entry.name.clone()).truncate()),
-                        )
-                        .when(highlighted, |d| {
-                            d.child(
-                                IconButton::new(("copy-path", id as usize), IconName::Copy)
-                                    .size(ButtonSize::Compact)
-                                    .debug_selector(|| "copy-path".into())
-                                    .tooltip(Tooltip::text("Copy path"))
-                                    .on_click(move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(browser) = browser.upgrade() {
-                                            browser.update(cx, |browser, cx| {
-                                                browser.copy_path(id, cx)
-                                            });
-                                        }
-                                    }),
+                Tree::new(
+                    "files-tree",
+                    &self.tree,
+                    move |entry, highlighted, _, cx| {
+                        let (id, browser) = (entry.id, browser.clone());
+                        let icon = match entry.kind {
+                            NodeKind::Folder => IconName::Folder,
+                            NodeKind::File => IconName::File,
+                        };
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(Icon::new(icon).size(px(14.)).color(Color::Muted))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Label::new(entry.name.clone()).truncate()),
                             )
-                        })
-                        .into_any_element()
-                })
+                            .when(
+                                highlighted
+                                    && entry.kind == NodeKind::File
+                                    && browser.upgrade().is_some_and(|b| {
+                                        b.read(cx).mention_token(id, cx).is_some()
+                                    }),
+                                |d| {
+                                    let browser = browser.clone();
+                                    d.child(
+                                        IconButton::new(
+                                            ("mention-file", id as usize),
+                                            IconName::At,
+                                        )
+                                        .size(ButtonSize::Compact)
+                                        .debug_selector(|| "mention-file".into())
+                                        .aria_label("Mention in composer")
+                                        .tooltip(Tooltip::with_key(
+                                            "Mention in composer",
+                                            "Ctrl+Shift+M",
+                                        ))
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                if let Some(browser) = browser.upgrade() {
+                                                    browser.update(cx, |browser, cx| {
+                                                        browser.mention(id, window, cx)
+                                                    });
+                                                }
+                                            },
+                                        ),
+                                    )
+                                },
+                            )
+                            .when(highlighted, |d| {
+                                d.child(
+                                    IconButton::new(("copy-path", id as usize), IconName::Copy)
+                                        .size(ButtonSize::Compact)
+                                        .debug_selector(|| "copy-path".into())
+                                        .tooltip(Tooltip::text("Copy path"))
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            if let Some(browser) = browser.upgrade() {
+                                                browser.update(cx, |browser, cx| {
+                                                    browser.copy_path(id, cx)
+                                                });
+                                            }
+                                        }),
+                                )
+                            })
+                            .into_any_element()
+                    },
+                )
                 .on_open(cx.listener(|this, id: &NodeId, _, cx| this.open(*id, cx)))
                 .on_expand(cx.listener(|this, id: &NodeId, _, cx| this.load(*id, cx)))
                 .flex_1()

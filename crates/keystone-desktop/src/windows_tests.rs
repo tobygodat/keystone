@@ -174,6 +174,57 @@ fn one_session_shown_in_two_windows_keeps_one_draft(cx: &mut TestAppContext) {
     );
 }
 
+/// A mention chosen over the same text reaches the other window as a token, leaving
+/// that window's selection where it was.
+#[gpui::test]
+fn a_token_over_the_same_text_reaches_the_other_window_in_place(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    new_window(&first, Some(1), cx);
+    let second = view_in(WindowId(1), cx);
+    first.update(cx, |this, cx| {
+        this.composer
+            .update(cx, |input, cx| input.set_value("@README.md ".into(), cx));
+        assert!(this.save_draft(cx));
+    });
+    cx.run_until_parked();
+    let selection = |cx: &mut TestAppContext| {
+        handle(&second, cx)
+            .update(cx, |_, window, cx| {
+                second.update(cx, |this, cx| {
+                    this.composer.update(cx, |input, cx| {
+                        gpui::EntityInputHandler::selected_text_range(input, false, window, cx)
+                            .map(|s| s.range)
+                    })
+                })
+            })
+            .unwrap()
+    };
+    handle(&second, cx)
+        .update(cx, |_, window, cx| {
+            second.update(cx, |this, cx| {
+                this.composer.update(cx, |input, cx| {
+                    input.select_all(&keystone_ui::text_input::SelectAll, window, cx)
+                })
+            })
+        })
+        .unwrap();
+    assert_eq!(selection(cx), Some(0..11));
+    first.update(cx, |this, cx| {
+        this.composer
+            .update(cx, |input, cx| input.insert_token(0..10, "@README.md", cx));
+        assert!(this.save_draft(cx));
+    });
+    cx.run_until_parked();
+    let shown = cx.read(|cx| {
+        let input = second.read(cx).composer.read(cx);
+        (input.value().to_owned(), input.tokens().to_vec())
+    });
+    assert_eq!(shown, ("@README.md ".into(), vec![0..10]));
+    assert_eq!(selection(cx), Some(0..11), "the selection stays");
+}
+
 #[gpui::test]
 fn closing_a_window_keeps_its_sessions_running_and_reachable(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

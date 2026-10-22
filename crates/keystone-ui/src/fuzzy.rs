@@ -65,6 +65,20 @@ pub fn score(query: &str, candidate: &str) -> Option<Match> {
     SCRATCH.with_borrow_mut(|s| s.score(query, candidate))
 }
 
+/// The byte ranges of `candidate` that a match's `positions` cover, with adjacent
+/// characters joined into one range, for highlighting.
+pub fn ranges(candidate: &str, positions: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for &start in positions {
+        let end = start + candidate[start..].chars().next().map_or(0, char::len_utf8);
+        match ranges.last_mut() {
+            Some(last) if last.end == start => last.end = end,
+            _ => ranges.push(start..end),
+        }
+    }
+    ranges
+}
+
 impl Scratch {
     fn score(&mut self, query: &str, candidate: &str) -> Option<Match> {
         self.query.clear();

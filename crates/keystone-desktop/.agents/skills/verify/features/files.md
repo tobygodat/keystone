@@ -10,6 +10,7 @@ Browse the selected session's project folder in a Files view of the project layo
 - `files-expand` lists one folder level at a time, folders first, without hidden files or anything the repository's `.gitignore` excludes. Expanding a folder again re-reads it.
 - `files-open` opens a file with `$VISUAL`, then `$EDITOR`, then `xdg-open`. Terminal editors (vi, vim, nvim, nano, helix, `emacs -nw`, and others) are skipped because a detached editor has no terminal.
 - `files-copy-path` copies a row's absolute path.
+- `files-mention` puts an `@` mention of a file row's path in the composer ([File mentions](mentions.md)).
 - `files-error` shows a red row at the top of the tree when the editor cannot start or a folder cannot be read. The app stays up.
 
 ## How to get to it (user POV)
@@ -20,6 +21,7 @@ Browse the selected session's project folder in a Files view of the project layo
 - In a window too narrow for the layout, Files becomes one of the fitted tabs beside the conversations.
 - Up and Down move, Right expands or steps into a folder, Left collapses or steps out, Enter or a click opens a file or toggles a folder.
 - Hover or highlight a row and click its copy icon, or press Ctrl+Shift+C.
+- Highlight a file and click its **@** icon, or press Ctrl+Shift+M, to mention it in the composer.
 
 ## Driving it with keystone-verify
 
@@ -48,7 +50,7 @@ Preconditions:
 - Restart. Require the Files view back from the saved layout.
 - Add a file under an expanded folder on disk. Collapse and expand the folder. Require the new file.
 
-Named elements: `files-tab-0` and `files-tab-0-close` (a lone Files view), `surface-tabs-N-tab-M` and `surface-tabs-N-tab-M-close` (a tab group whose first view is N; the close shows on the selected tab or on hover), `surface-add`, `surface-add-files`, `surface-add-conversation`, `component-add-files` (Customize), `files-tree-row-N`, `files-tree-chevron-N`, `copy-path` (only on the highlighted row), `files-notice`, `files-empty`.
+Named elements: `files-tab-0` and `files-tab-0-close` (a lone Files view), `surface-tabs-N-tab-M` and `surface-tabs-N-tab-M-close` (a tab group whose first view is N; the close shows on the selected tab or on hover), `surface-add`, `surface-add-files`, `surface-add-conversation`, `component-add-files` (Customize), `files-tree-row-N`, `files-tree-chevron-N`, `copy-path` (only on the highlighted row), `mention-file` (only on a highlighted file row), `files-notice`, `files-empty`.
 
 ## Perf
 
