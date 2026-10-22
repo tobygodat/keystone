@@ -1,0 +1,253 @@
+{
+  "claude": {
+    "version": "2.1.301 (Claude Code)",
+    "turn_ends": [
+      "a0000000-0000-4000-8000-000000000001",
+      "a0000000-0000-4000-8000-000000000003",
+      "a0000000-0000-4000-8000-000000000004"
+    ],
+    "turn_prompts": [
+      "6b657973-746f-46e6-8005-000000000001",
+      "6b657973-746f-46e6-8005-000000000002",
+      "6b657973-746f-46e6-8005-000000000003"
+    ],
+    "runs": {
+      "through_turn_1": {
+        "argv_tail": [
+          "--resume",
+          "0b1c2d3e-0000-4000-8000-0000000000f1",
+          "--fork-session",
+          "--resume-session-at",
+          "a0000000-0000-4000-8000-000000000001"
+        ],
+        "initialize": "success",
+        "kept_message_tokens": {
+          "userMessageTokens": 4,
+          "assistantMessageTokens": 9,
+          "toolCallTokens": 0,
+          "toolResultTokens": 0
+        },
+        "frames": [],
+        "exit": 0,
+        "stderr_tail": ""
+      },
+      "through_turn_2": {
+        "argv_tail": [
+          "--resume",
+          "0b1c2d3e-0000-4000-8000-0000000000f1",
+          "--fork-session",
+          "--resume-session-at",
+          "a0000000-0000-4000-8000-000000000003"
+        ],
+        "initialize": "success",
+        "kept_message_tokens": {
+          "userMessageTokens": 11,
+          "assistantMessageTokens": 19,
+          "toolCallTokens": 18,
+          "toolResultTokens": 16
+        },
+        "frames": [],
+        "exit": 0,
+        "stderr_tail": ""
+      },
+      "whole": {
+        "argv_tail": [
+          "--resume",
+          "0b1c2d3e-0000-4000-8000-0000000000f1",
+          "--fork-session"
+        ],
+        "initialize": "success",
+        "kept_message_tokens": {
+          "userMessageTokens": 15,
+          "assistantMessageTokens": 28,
+          "toolCallTokens": 18,
+          "toolResultTokens": 16
+        },
+        "frames": [],
+        "exit": 0,
+        "stderr_tail": ""
+      },
+      "at_turn_3_prompt": {
+        "argv_tail": [
+          "--resume",
+          "0b1c2d3e-0000-4000-8000-0000000000f1",
+          "--fork-session",
+          "--resume-session-at",
+          "6b657973-746f-46e6-8005-000000000003"
+        ],
+        "initialize": "success",
+        "kept_message_tokens": {
+          "userMessageTokens": 15,
+          "assistantMessageTokens": 19,
+          "toolCallTokens": 18,
+          "toolResultTokens": 16
+        },
+        "frames": [],
+        "exit": 0,
+        "stderr_tail": ""
+      },
+      "unknown_entry": {
+        "argv_tail": [
+          "--resume",
+          "0b1c2d3e-0000-4000-8000-0000000000f1",
+          "--fork-session",
+          "--resume-session-at",
+          "not-an-entry"
+        ],
+        "initialize": null,
+        "kept_message_tokens": null,
+        "frames": [
+          {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true
+          }
+        ],
+        "exit": 1,
+        "stderr_tail": "No message found with message.uuid of: not-an-entry"
+      },
+      "unknown_session": {
+        "argv_tail": [
+          "--resume",
+          "0b1c2d3e-0000-4000-8000-0000000000ff",
+          "--fork-session"
+        ],
+        "initialize": null,
+        "kept_message_tokens": null,
+        "frames": [
+          {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true
+          }
+        ],
+        "exit": 1,
+        "stderr_tail": "No conversation found with session ID: 0b1c2d3e-0000-4000-8000-0000000000ff"
+      }
+    },
+    "source_unchanged": true,
+    "session_files_after": [
+      "projects/<root as a Claude folder name>-claude-project/0b1c2d3e-0000-4000-8000-0000000000f1.jsonl"
+    ]
+  },
+  "codex": {
+    "version": "codex-cli 0.163.0",
+    "fork_method_listed": true,
+    "rollback_methods_listed": [
+      "thread/revert"
+    ],
+    "fork_params": [
+      "approvalPolicy",
+      "approvalsReviewer",
+      "baseInstructions",
+      "config",
+      "cwd",
+      "developerInstructions",
+      "ephemeral",
+      "excludeTurns",
+      "lastTurnId",
+      "model",
+      "modelProvider",
+      "sandbox",
+      "serviceTier",
+      "threadId",
+      "threadSource"
+    ],
+    "last_turn_id_doc": "Optional last turn id to fork through, inclusive.\n\nWhen specified, turns after `last_turn_id` are omitted from the fork. The referenced turn cannot be in progress.",
+    "source_turns": [
+      [
+        "turn-1",
+        [
+          "turn 1\n"
+        ]
+      ],
+      [
+        "turn-2",
+        [
+          "turn 2\n"
+        ]
+      ],
+      [
+        "turn-3",
+        [
+          "turn 3\n"
+        ]
+      ]
+    ],
+    "fork_through_turn_2": {
+      "forkedFromId": "source",
+      "turns": [
+        [
+          "turn-1",
+          [
+            "turn 1\n"
+          ]
+        ],
+        [
+          "turn-2",
+          [
+            "turn 2\n"
+          ]
+        ]
+      ]
+    },
+    "fork_whole": {
+      "turns": [
+        [
+          "turn-1",
+          [
+            "turn 1\n"
+          ]
+        ],
+        [
+          "turn-2",
+          [
+            "turn 2\n"
+          ]
+        ],
+        [
+          "turn-3",
+          [
+            "turn 3\n"
+          ]
+        ]
+      ]
+    },
+    "source_turns_after": [
+      [
+        "turn-1",
+        [
+          "turn 1\n"
+        ]
+      ],
+      [
+        "turn-2",
+        [
+          "turn 2\n"
+        ]
+      ],
+      [
+        "turn-3",
+        [
+          "turn 3\n"
+        ]
+      ]
+    ],
+    "unknown_turn": {
+      "code": -32600,
+      "message": "turn not found: not-a-turn"
+    },
+    "notifications": [
+      "deprecationNotice",
+      "item/commandExecution/outputDelta",
+      "item/completed",
+      "item/started",
+      "remoteControl/status/changed",
+      "thread/started",
+      "thread/status/changed",
+      "turn/completed",
+      "turn/started"
+    ],
+    "exit": 0
+  }
+}

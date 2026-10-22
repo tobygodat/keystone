@@ -1034,6 +1034,41 @@ impl AppState {
         result
     }
 
+    /// Forks `source` in `window`, saving `show` with the new session. See
+    /// [`keystone_core::Store::fork`]. A native fork's conversation starts as `log`, the
+    /// source's rows it keeps, shown at once and saved as the fork's own log.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fork(
+        &mut self,
+        source: u64,
+        point: Option<keystone_core::ForkPoint>,
+        draft: String,
+        log: Vec<keystone_agent::log::Write>,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self.store.fork(source, point, draft, now, window, show);
+        if let Ok(applied) = &result {
+            let fork = applied.value;
+            let mut conversation = Conversation::loading();
+            conversation.restore(Ok(log.iter().map(|write| write.entry.clone()).collect()));
+            self.conversations.insert(fork, conversation);
+            if self.logs.append(fork, log).is_err() {
+                let lost = self.logs.lost_entries(fork);
+                self.record_loss(fork, lost);
+            }
+            self.commit(fork);
+        }
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
     /// Creates a session that works in `worktree`, saving `show` with it as
     /// [`AppState::create_showing`] does.
     pub(crate) fn create_worktree_showing(
@@ -2872,27 +2907,35 @@ impl AppState {
             return false;
         }
         let sent = match self.connection(provider, account.as_ref()) {
-            Ok(connection) => match caller {
-                Some(caller) => connection.send_from(
-                    id,
-                    cwd,
-                    resume.as_deref(),
-                    session.model(),
-                    approval,
-                    text.clone(),
-                    caller,
-                ),
-                None => connection.send(
-                    id,
-                    cwd,
-                    resume.as_deref(),
-                    session.model(),
-                    approval,
-                    text.clone(),
-                    images,
-                ),
+            Ok(connection) => {
+                // A native fork's first message opens the provider's fork of its source.
+                if resume.is_none()
+                    && let Some(point) = session.fork_point()
+                {
+                    connection.set_fork(id, point.clone());
+                }
+                match caller {
+                    Some(caller) => connection.send_from(
+                        id,
+                        cwd,
+                        resume.as_deref(),
+                        session.model(),
+                        approval,
+                        text.clone(),
+                        caller,
+                    ),
+                    None => connection.send(
+                        id,
+                        cwd,
+                        resume.as_deref(),
+                        session.model(),
+                        approval,
+                        text.clone(),
+                        images,
+                    ),
+                }
+                .map_err(str::to_owned)
             }
-            .map_err(str::to_owned),
             Err(error) => Err(error),
         };
         if let Err(reason) = sent {

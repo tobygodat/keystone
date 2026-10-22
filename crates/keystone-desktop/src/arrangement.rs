@@ -1383,6 +1383,12 @@ impl Keystone {
                                 this.focus_latest(key, window, cx)
                             },
                         ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::fork::ForkFromHere, window, cx| {
+                                this.fork_focused_row(key, window, cx)
+                            },
+                        ))
                         .on_mouse_down(
                             MouseButton::Left,
                             self.scoped_listener(cx, move |this, _, window, cx| {

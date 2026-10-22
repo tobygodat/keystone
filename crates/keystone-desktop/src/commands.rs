@@ -5,6 +5,7 @@ use crate::attachments::AttachFiles;
 use crate::changes::ToggleChanges;
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
+use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
 use crate::notes::ToggleNotes;
 use crate::projects::{OpenProject, SwitchProject};
@@ -326,6 +327,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-c"],
         context: Some(TRANSCRIPT),
         action: || Box::new(CopyTranscript),
+    },
+    Command {
+        id: "fork-from-here",
+        label: "Transcript: fork from the focused message",
+        keys: &["ctrl-shift-f"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(ForkFromHere),
     },
     Command {
         id: "transcript-focus-latest",

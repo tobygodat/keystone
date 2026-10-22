@@ -11,8 +11,8 @@ use keystone_agent::surface::{self, Status, Surface};
 use keystone_agent::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
 };
-use keystone_core::UsageLimit;
-use std::collections::BTreeSet;
+use keystone_core::{ForkPoint, UsageLimit};
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -39,6 +39,26 @@ pub enum Row {
     Surface(Surface),
     /// The images sent with the user message in the row before it.
     Attachments(Vec<keystone_core::Attachment>),
+}
+
+/// The rows of one turn the provider can fork the conversation through, and where.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForkMark {
+    pub rows: Range<usize>,
+    pub point: ForkPoint,
+}
+
+/// How a fork from a row can go.
+#[derive(Debug, PartialEq)]
+pub enum ForkFrom<'a> {
+    /// The provider forks its own conversation through the row's turn, whose rows end
+    /// before `end`.
+    Native { point: &'a ForkPoint, end: usize },
+    /// No native point is known for the row's turn, so the conversation up to `end` is
+    /// carried as handoff text.
+    Handoff { end: usize },
+    /// The row's turn is still running, so it has no point yet.
+    Running,
 }
 
 /// A Button press on a widget: what to send the agent, and whether the provider's
@@ -123,6 +143,8 @@ pub struct Conversation {
     unsaved_surfaces: BTreeSet<String>,
     /// The usage limit the provider said refused the turn now ending.
     limit: Option<UsageLimit>,
+    /// Each turn the provider named a fork point for, in row order.
+    pub forks: Vec<ForkMark>,
 }
 
 /// Identifies a run of the app in the log. Each conversation takes a new one, unique
@@ -260,6 +282,7 @@ impl Conversation {
         let mut review = None;
         let mut last_local = false;
         let mut exited = false;
+        let mut points: Vec<(ForkPoint, usize, usize)> = Vec::new();
         // The marker for a recovery batch the log rejected is named after the batch, and
         // a Retry that saved the batch later means nothing was lost.
         let saved: BTreeSet<String> = entries
@@ -278,7 +301,11 @@ impl Conversation {
                 continue;
             }
             let (seq, entry_run) = match &entry {
-                Entry::TurnStarted | Entry::Recovery { .. } | Entry::ProviderExited => (None, None),
+                Entry::TurnStarted
+                | Entry::Recovery { .. }
+                | Entry::ProviderExited
+                | Entry::ForkPoint { .. }
+                | Entry::ForkPointsLost => (None, None),
                 Entry::Item { seq, run, .. }
                 | Entry::Approval { seq, run, .. }
                 | Entry::TurnEnded { seq, run, .. }
@@ -288,6 +315,26 @@ impl Conversation {
             match &entry {
                 Entry::ProviderExited => {
                     exited = true;
+                    continue;
+                }
+                // The turn's rows are the ones since it started, so an ID reused in
+                // another turn never moves its point. A row is named by the log entry
+                // that added it, which the ordering below keeps.
+                Entry::ForkPoint { point, first, last } => {
+                    let turn = &self.rows[self.turn_start..];
+                    let find = |found: Option<usize>| found.map(|n| origins[self.turn_start + n]);
+                    let named =
+                        |row: &Row, id: &str| matches!(row, Row::Item(item) if item.id == id);
+                    if let (Some(first), Some(last)) = (
+                        find(turn.iter().position(|row| named(row, first))),
+                        find(turn.iter().rposition(|row| named(row, last))),
+                    ) {
+                        points.push((point.clone(), first, last));
+                    }
+                    continue;
+                }
+                Entry::ForkPointsLost => {
+                    points.clear();
                     continue;
                 }
                 Entry::Recovery { batch } => {
@@ -362,7 +409,10 @@ impl Conversation {
                         None => Some(Row::Surface(surface)),
                     }
                 }
-                Entry::Recovery { .. } | Entry::ProviderExited => None,
+                Entry::Recovery { .. }
+                | Entry::ProviderExited
+                | Entry::ForkPoint { .. }
+                | Entry::ForkPointsLost => None,
                 Entry::TurnEnded {
                     status,
                     error,
@@ -427,6 +477,27 @@ impl Conversation {
             .map(|(_, origin, row)| (origin, row))
             .unzip();
         self.rows = rows;
+        let at: HashMap<usize, usize> = origins
+            .iter()
+            .enumerate()
+            .map(|(index, origin)| (*origin, index))
+            .collect();
+        // A point whose rows are gone, or out of order, is dropped: forking there offers
+        // a handoff instead of guessing.
+        let mut forks: Vec<ForkMark> = points
+            .into_iter()
+            .filter_map(|(point, first, last)| {
+                let (first, last) = (*at.get(&first)?, *at.get(&last)?);
+                (first <= last).then(|| ForkMark {
+                    rows: first..last + 1,
+                    point,
+                })
+            })
+            .collect();
+        forks.sort_by_key(|mark| mark.rows.start);
+        forks.dedup_by(|later, kept| later.rows.start < kept.rows.end);
+        // Recovered rows inserted below move the marks with them.
+        self.forks = forks;
         // Each batch applies to the rows logged before it, as it did when it was saved.
         self.origins = Some(origins);
         for (position, batch) in &batches {
@@ -467,6 +538,128 @@ impl Conversation {
     /// Whether Keystone lost track of the last restored turn.
     pub fn open_turn(&self) -> bool {
         self.uncertain_tail
+    }
+
+    /// How a fork from the row at `index` goes. A native fork keeps the row's whole
+    /// turn, with the rows that close it; a handoff keeps rows up to the next message
+    /// the user sent.
+    pub fn fork_from(&self, index: usize) -> ForkFrom<'_> {
+        let closing = |mut end: usize| {
+            while matches!(
+                self.rows.get(end),
+                Some(Row::TurnEnded { .. } | Row::Decision { .. })
+            ) {
+                end += 1;
+            }
+            end
+        };
+        let running = self.running && index >= self.turn_start;
+        // A message the provider never echoed may not be in its history at that point.
+        let unconfirmed =
+            matches!(&self.rows[index], Row::Item(item) if item.id.starts_with(LOCAL));
+        let at = self.forks.partition_point(|mark| mark.rows.end <= index);
+        if let Some(mark) = self
+            .forks
+            .get(at)
+            .filter(|mark| mark.rows.contains(&index) && !unconfirmed)
+        {
+            return ForkFrom::Native {
+                point: &mark.point,
+                end: closing(mark.rows.end),
+            };
+        }
+        if running {
+            return ForkFrom::Running;
+        }
+        let end = self.rows[index + 1..]
+            .iter()
+            .position(|row| matches!(row, Row::Item(item) if item.kind == ItemKind::UserMessage))
+            .map_or(self.rows.len(), |n| index + 1 + n);
+        ForkFrom::Handoff { end }
+    }
+
+    /// The log a native fork starts with: the rows before `end` as one run, with the
+    /// fork points of the turns among them, so the fork can be forked again there. Turn
+    /// boundaries go between turns, so a restore never matches an ID reused in another
+    /// turn.
+    pub fn fork_log(&self, end: usize) -> Vec<Write> {
+        let run = Some(Run::default().0);
+        let boundary = |sync| Write {
+            entry: Entry::TurnEnded {
+                status: TurnStatus::Completed,
+                error: None,
+                limit: None,
+                seq: None,
+                run: None,
+            },
+            sync,
+        };
+        let id = |index: usize| match &self.rows[index] {
+            Row::Item(item) => Some(item.id.clone()),
+            _ => None,
+        };
+        let marks: Vec<&ForkMark> = self.forks.iter().filter(|m| m.rows.end <= end).collect();
+        let mut writes = Vec::new();
+        let mut skipped = false;
+        for (index, row) in self.rows[..end].iter().enumerate() {
+            let mark = marks.iter().find(|m| m.rows.contains(&index));
+            let starts_turn = match mark {
+                Some(mark) => mark.rows.start == index,
+                None => matches!(row, Row::Item(item) if item.kind == ItemKind::UserMessage),
+            };
+            if index > 0 && starts_turn {
+                writes.push(boundary(false));
+            }
+            // A message the provider never echoed is not in its history at the cut, nor
+            // are the images sent with it.
+            let unechoed =
+                mark.is_some() && matches!(row, Row::Item(item) if item.id.starts_with(LOCAL));
+            if unechoed || (skipped && matches!(row, Row::Attachments(_))) {
+                skipped = true;
+                continue;
+            }
+            skipped = false;
+            let seq = Some(index as u64);
+            let entry = match row.clone() {
+                Row::Item(item) => Entry::Item { item, seq, run },
+                Row::Decision { action, allowed } => Entry::Approval {
+                    action,
+                    allowed,
+                    seq,
+                    run,
+                },
+                // The usage limit card and its scheduled continue stay with the source.
+                Row::TurnEnded { status, error, .. } => Entry::TurnEnded {
+                    status,
+                    error,
+                    limit: None,
+                    seq,
+                    run,
+                },
+                Row::Surface(surface) => Entry::Surface { surface, seq, run },
+                Row::Attachments(attachments) => Entry::Attachments {
+                    attachments,
+                    seq,
+                    run,
+                },
+                Row::Recovery(_) => continue,
+            };
+            writes.push(Write { entry, sync: false });
+            if let Some(mark) = mark.filter(|m| m.rows.end == index + 1)
+                && let (Some(first), Some(last)) = (id(mark.rows.start), id(index))
+            {
+                writes.push(Write {
+                    entry: Entry::ForkPoint {
+                        point: mark.point.clone(),
+                        first,
+                        last,
+                    },
+                    sync: false,
+                });
+            }
+        }
+        writes.push(boundary(true));
+        writes
     }
 
     /// The items shown, in order, for recovery to match against.
@@ -579,6 +772,14 @@ impl Conversation {
     /// Inserts a row, keeping the indexes that point past it on the same rows.
     fn insert_row(&mut self, at: usize, row: Row, logged_at: usize) {
         self.rows.insert(at, row);
+        for mark in &mut self.forks {
+            if at <= mark.rows.start {
+                mark.rows.start += 1;
+            }
+            if at < mark.rows.end {
+                mark.rows.end += 1;
+            }
+        }
         if let Some(origins) = &mut self.origins {
             origins.insert(at, logged_at);
         }
@@ -742,6 +943,37 @@ impl Conversation {
                 self.log_surface(index);
             }
             Event::UsageLimit(limit) => self.limit = Some(limit),
+            Event::ForkPoint(point) => {
+                // A message shown but not echoed may be waiting for the next turn, so
+                // the provider's own items bound this one.
+                let items: Vec<(usize, &str)> = self.rows[self.turn_start..]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| match row {
+                        Row::Item(item) if !item.id.starts_with(LOCAL) => {
+                            Some((self.turn_start + index, item.id.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if let (Some(&(start, first)), Some(&(end, last))) = (items.first(), items.last()) {
+                    let entry = Entry::ForkPoint {
+                        point: point.clone(),
+                        first: first.to_owned(),
+                        last: last.to_owned(),
+                    };
+                    self.forks.retain(|mark| mark.rows.end <= start);
+                    self.forks.push(ForkMark {
+                        rows: start..end + 1,
+                        point,
+                    });
+                    self.write(entry, false);
+                }
+            }
+            Event::ForkPointsLost => {
+                self.forks.clear();
+                self.write(Entry::ForkPointsLost, false);
+            }
             Event::TurnCompleted { status, error, .. } => {
                 self.running = false;
                 self.approvals.clear();
@@ -1029,6 +1261,141 @@ mod tests {
     }
 
     use super::*;
+
+    fn point(at: &str) -> ForkPoint {
+        ForkPoint {
+            thread: "thread".into(),
+            at: at.into(),
+        }
+    }
+
+    /// Turns of a user message, a command, and a reply, each ending with its fork
+    /// point; the last one fails.
+    fn forked_turns(conversation: &mut Conversation, turns: &[&str]) {
+        for (n, turn) in turns.iter().enumerate() {
+            conversation.push_local(turn);
+            conversation.apply(Event::TurnStarted);
+            let item = |id: &str, kind: ItemKind, text: &str| {
+                Event::ItemCompleted(Item {
+                    id: format!("{turn}-{id}"),
+                    kind,
+                    text: text.into(),
+                    status: ItemStatus::Completed,
+                })
+            };
+            conversation.apply(item("user", ItemKind::UserMessage, turn));
+            conversation.apply(item(
+                "command",
+                ItemKind::Command {
+                    command: "ls".into(),
+                    exit_code: Some(0),
+                },
+                "",
+            ));
+            conversation.apply(item("reply", ItemKind::AgentMessage, &format!("re {turn}")));
+            conversation.apply(Event::ForkPoint(point(turn)));
+            let failed = n + 1 == turns.len();
+            conversation.apply(Event::TurnCompleted {
+                status: if failed {
+                    TurnStatus::Failed
+                } else {
+                    TurnStatus::Completed
+                },
+                error: failed.then(|| "rate limited".into()),
+                stopped: false,
+            });
+        }
+    }
+
+    fn restored(entries: Vec<Entry>) -> Conversation {
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(entries));
+        conversation
+    }
+
+    #[test]
+    fn each_turn_s_fork_point_covers_its_rows_and_survives_a_restore() {
+        let mut live = Conversation::default();
+        forked_turns(&mut live, &["one", "two", "three"]);
+        let marks: Vec<_> = live.forks.iter().map(|m| m.rows.clone()).collect();
+        assert_eq!(marks, [0..3, 3..6, 6..9]);
+        assert_eq!(live.rows.len(), 10, "the failed turn's end is a row");
+        let entries: Vec<Entry> = live.take_writes().into_iter().map(|w| w.entry).collect();
+        assert!(entries.contains(&Entry::ForkPoint {
+            point: point("two"),
+            first: "two-user".into(),
+            last: "two-reply".into(),
+        }));
+        let restored = restored(entries);
+        assert_eq!(restored.rows, live.rows);
+        assert_eq!(restored.forks, live.forks);
+
+        assert_eq!(
+            live.fork_from(4),
+            ForkFrom::Native {
+                point: &point("two"),
+                end: 6
+            }
+        );
+        assert_eq!(
+            live.fork_from(8),
+            ForkFrom::Native {
+                point: &point("three"),
+                end: 10
+            },
+            "a native fork keeps the row that closes its turn"
+        );
+    }
+
+    #[test]
+    fn a_turn_without_a_point_forks_as_a_handoff_and_a_running_one_not_at_all() {
+        let mut conversation = Conversation::default();
+        forked_turns(&mut conversation, &["one"]);
+        conversation.push_local("old");
+        conversation.apply(Event::TurnStarted);
+        conversation.apply(Event::ItemCompleted(Item {
+            id: "old-reply".into(),
+            kind: ItemKind::AgentMessage,
+            text: "no point".into(),
+            status: ItemStatus::Completed,
+        }));
+        conversation.apply(Event::TurnCompleted {
+            status: TurnStatus::Completed,
+            error: None,
+            stopped: false,
+        });
+        let user = conversation.rows.len();
+        conversation.push_local("now");
+        conversation.apply(Event::TurnStarted);
+        assert_eq!(conversation.fork_from(5), ForkFrom::Handoff { end: user });
+        assert_eq!(conversation.fork_from(user), ForkFrom::Running);
+        // A point whose rows the log no longer places is not trusted.
+        let mut entries: Vec<Entry> = conversation
+            .take_writes()
+            .into_iter()
+            .map(|w| w.entry)
+            .collect();
+        entries.push(Entry::ForkPoint {
+            point: point("lost"),
+            first: "gone".into(),
+            last: "old-reply".into(),
+        });
+        assert_eq!(restored(entries).forks.len(), 1);
+    }
+
+    #[test]
+    fn a_fork_s_log_shows_the_kept_rows_and_keeps_their_fork_points() {
+        let mut source = Conversation::default();
+        forked_turns(&mut source, &["one", "two", "three"]);
+        let ForkFrom::Native { end, .. } = source.fork_from(4) else {
+            panic!("a native point");
+        };
+        let fork = restored(source.fork_log(end).into_iter().map(|w| w.entry).collect());
+        assert_eq!(fork.rows, source.rows[..end]);
+        assert_eq!(fork.forks, source.forks[..2]);
+        assert!(!fork.needs_recovery());
+        assert!(!fork.running);
+    }
 
     fn gap_marker(id: &str, count: u64, seq: Option<u64>, run: Option<u64>) -> Entry {
         let mut item = Item {
@@ -1949,6 +2316,66 @@ mod tests {
     /// Rows a recovery adds after a message come after the images sent with it, and so
     /// does its report.
     #[test]
+    fn a_native_fork_keeps_the_images_sent_in_its_turns() {
+        let image = |n: &str| keystone_core::Attachment {
+            sha256: n.repeat(64),
+            media_type: "image/png".into(),
+            name: format!("{n}.png"),
+        };
+        let mut live = Conversation::default();
+        live.push_sent("What changed?", vec![image("a")]);
+        let echoed = user("u1", "What changed?");
+        for event in [
+            Event::TurnStarted,
+            Event::ItemCompleted(echoed.clone()),
+            Event::ItemCompleted(message("r", "A diagram.", ItemStatus::Completed)),
+            Event::ForkPoint(point("one")),
+            completed(),
+        ] {
+            live.apply(event);
+        }
+        let ForkFrom::Native { end, .. } = live.fork_from(0) else {
+            panic!("a native point");
+        };
+        let fork = Log(live.fork_log(end).into_iter().map(|w| w.entry).collect()).restore();
+        assert_eq!(fork.rows, live.rows);
+        assert!(matches!(&fork.rows[1], Row::Attachments(images) if *images == [image("a")]));
+    }
+
+    #[test]
+    fn a_fork_leaves_the_usage_limit_card_with_its_source() {
+        let mut live = Conversation::default();
+        for event in [
+            Event::TurnStarted,
+            Event::ItemCompleted(user("u1", "go")),
+            Event::ItemCompleted(message("r", "partial", ItemStatus::Completed)),
+            Event::UsageLimit(UsageLimit::default()),
+            Event::ForkPoint(point("one")),
+            Event::TurnCompleted {
+                status: TurnStatus::Failed,
+                error: Some("You've hit your usage limit.".into()),
+                stopped: false,
+            },
+        ] {
+            live.apply(event);
+        }
+        assert!(live.usage_limit().is_some());
+        let ForkFrom::Native { end, .. } = live.fork_from(0) else {
+            panic!("a native point");
+        };
+        let fork = Log(live.fork_log(end).into_iter().map(|w| w.entry).collect()).restore();
+        assert_eq!(fork.usage_limit(), None);
+        assert!(matches!(
+            fork.rows.last(),
+            Some(Row::TurnEnded {
+                status: TurnStatus::Failed,
+                limit: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn a_recovery_keeps_a_message_s_images_under_it() {
         use keystone_agent::recovery::{Snapshot, SnapshotTurn, reconcile};
         let images = vec![keystone_core::Attachment {
@@ -1986,6 +2413,179 @@ mod tests {
         assert!(matches!(&live.rows[1], Row::Attachments(shown) if *shown == images));
         assert!(matches!(&live.rows[2], Row::Item(item) if item.id == "m1"));
         assert_eq!(log.restore().rows, live.rows);
+    }
+
+    #[test]
+    fn fork_points_follow_rows_a_recovery_inserts_before_them() {
+        use keystone_agent::recovery::{Outcome, RecoveryReport, TurnEvidence};
+        let item = |item: Item, seq| Entry::Item {
+            item,
+            seq: Some(seq),
+            run: Some(1),
+        };
+        let batch = RecoveryBatch {
+            id: "recovery-1".into(),
+            operations: vec![Operation::Insert {
+                after: "u1".into(),
+                item: message("m1", "recovered", ItemStatus::Completed),
+            }],
+            report: RecoveryReport {
+                outcome: Outcome::Recovered,
+                messages: 1,
+                tools: 0,
+                extended: 0,
+                turn: TurnEvidence::Recorded(TurnStatus::Completed),
+                limits: Vec::new(),
+            },
+            report_after: Some("m1".into()),
+            closes_turn: true,
+        };
+        let restored = Log(vec![
+            item(user("u1", "one"), 0),
+            Entry::TurnStarted,
+            Entry::ProviderExited,
+            Entry::Recovery { batch },
+            Entry::TurnStarted,
+            item(user("u2", "two"), 1),
+            item(message("r2", "reply two", ItemStatus::Completed), 2),
+            Entry::ForkPoint {
+                point: point("two"),
+                first: "u2".into(),
+                last: "r2".into(),
+            },
+            Entry::TurnEnded {
+                status: TurnStatus::Completed,
+                error: None,
+                limit: None,
+                seq: None,
+                run: None,
+            },
+        ])
+        .restore();
+        let at = |id: &str| {
+            restored
+                .rows
+                .iter()
+                .position(|row| matches!(row, Row::Item(item) if item.id == id))
+                .unwrap()
+        };
+        assert!(at("m1") < at("u2"), "{:?}", restored.rows);
+        assert_eq!(restored.forks[0].rows, at("u2")..at("r2") + 1);
+        let ForkFrom::Native { point: chosen, end } = restored.fork_from(at("u2")) else {
+            panic!("a native point");
+        };
+        assert_eq!(*chosen, point("two"));
+        let fork = Log(restored
+            .fork_log(end)
+            .into_iter()
+            .map(|w| w.entry)
+            .collect())
+        .restore();
+        assert_eq!(fork.forks.len(), 1);
+    }
+
+    #[test]
+    fn a_message_queued_behind_a_turn_is_not_forked_through_that_turn() {
+        let mut live = Conversation::default();
+        live.push_local("a");
+        live.apply(Event::TurnStarted);
+        live.apply(Event::ItemCompleted(user("a-user", "a")));
+        // Sent while the turn runs, held by the provider for the next turn.
+        live.push_local("b");
+        let queued = live.rows.len() - 1;
+        live.apply(Event::ItemCompleted(message(
+            "a-reply",
+            "reply a",
+            ItemStatus::Completed,
+        )));
+        live.apply(Event::ForkPoint(point("a")));
+        live.apply(completed());
+        let ForkFrom::Native { end, .. } = live.fork_from(0) else {
+            panic!("a native point");
+        };
+        let fork = Log(live.fork_log(end).into_iter().map(|w| w.entry).collect()).restore();
+        assert_eq!(texts(&fork), ["a", "reply a"]);
+        assert_eq!(
+            live.fork_from(queued),
+            ForkFrom::Handoff {
+                end: live.rows.len()
+            }
+        );
+    }
+
+    #[test]
+    fn a_compaction_leaves_only_later_turns_forkable() {
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        for (text, compacts) in [("one", false), ("two", true), ("three", false)] {
+            feed(
+                &mut live,
+                &mut log,
+                [
+                    Event::TurnStarted,
+                    Event::ItemCompleted(user(&format!("{text}-user"), text)),
+                ]
+                .into_iter()
+                .chain(compacts.then_some(Event::ForkPointsLost))
+                .chain([
+                    Event::ItemCompleted(message(
+                        &format!("{text}-reply"),
+                        text,
+                        ItemStatus::Completed,
+                    )),
+                    Event::ForkPoint(point(text)),
+                    completed(),
+                ]),
+            );
+        }
+        for conversation in [&live, &log.restore()] {
+            let points: Vec<_> = conversation
+                .forks
+                .iter()
+                .map(|m| m.point.at.as_str())
+                .collect();
+            assert_eq!(points, ["two", "three"]);
+            assert!(matches!(
+                conversation.fork_from(0),
+                ForkFrom::Handoff { .. }
+            ));
+            assert!(matches!(conversation.fork_from(2), ForkFrom::Native { .. }));
+        }
+    }
+
+    #[test]
+    fn ids_reused_across_turns_keep_each_turn_s_fork_point() {
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        for text in ["first", "second"] {
+            live.push_local(text);
+            log.save(&mut live);
+            feed(
+                &mut live,
+                &mut log,
+                [
+                    Event::TurnStarted,
+                    Event::ItemCompleted(user("prompt", text)),
+                    Event::ItemCompleted(message("reused", text, ItemStatus::Completed)),
+                    Event::ForkPoint(point(text)),
+                    completed(),
+                ],
+            );
+        }
+        let ranges = |c: &Conversation| -> Vec<_> {
+            c.forks
+                .iter()
+                .map(|m| (m.rows.clone(), m.point.at.clone()))
+                .collect()
+        };
+        assert_eq!(
+            ranges(&live),
+            [(0..2, "first".to_owned()), (2..4, "second".to_owned())]
+        );
+        let restored = log.restore();
+        assert_eq!(restored.rows, live.rows);
+        assert_eq!(ranges(&restored), ranges(&live));
+        let fork = Log(live.fork_log(4).into_iter().map(|w| w.entry).collect()).restore();
+        assert_eq!(fork.rows, live.rows);
+        assert_eq!(ranges(&fork), ranges(&live));
     }
 
     #[test]

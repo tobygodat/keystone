@@ -1,0 +1,137 @@
+//! Fork from here: a new session with the same provider, account and model, holding
+//! the conversation up to a message, linked to its source, which stays unchanged.
+//!
+//! Where the provider named a fork point for the message's turn, the fork shows the
+//! source's rows through that turn and its first message opens the provider's own
+//! fork of the source there. Otherwise the fork is labelled a handoff fork: it starts
+//! a new conversation with the rows carried as handoff text in its composer.
+
+use crate::conversation::{ForkFrom, Row};
+use crate::handoff::{BUDGET_TOKENS, Source, build};
+use crate::view_state::ViewKey;
+use crate::{Keystone, now_ms};
+use gpui::{Context, Focusable, Window};
+use keystone_agent::ItemKind;
+use keystone_core::SessionContext;
+
+gpui::actions!(fork, [ForkFromHere]);
+
+/// What a row's Fork control says about the fork it makes.
+pub(crate) fn label(from: &ForkFrom) -> (&'static str, &'static str) {
+    match from {
+        ForkFrom::Native { .. } | ForkFrom::Running => (
+            "Fork from here",
+            "Fork from here: a new session with this conversation through this turn",
+        ),
+        ForkFrom::Handoff { .. } => (
+            "Fork from here (handoff)",
+            "Fork from here as a handoff: no native fork point is saved for this turn, so a new conversation starts with it as handoff text",
+        ),
+    }
+}
+
+/// Whether a row offers Fork from here: a message the user sent or a finished reply.
+pub(crate) fn forkable(row: &Row) -> bool {
+    matches!(row, Row::Item(item) if item.kind == ItemKind::UserMessage
+        || (item.kind == ItemKind::AgentMessage && item.status != keystone_agent::ItemStatus::InProgress))
+}
+
+impl Keystone {
+    /// Forks the session in `key`'s view from the row at `index`, opening the fork in a
+    /// tab beside it with the composer focused.
+    pub(crate) fn fork_from(
+        &mut self,
+        key: ViewKey,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected(cx) != Some(key.session) {
+            self.activate(key.view, cx);
+            if self.selected(cx) != Some(key.session) {
+                return;
+            }
+        }
+        let Some(session) = self.selected_session(cx) else {
+            return;
+        };
+        let (id, provider) = (session.id(), session.provider());
+        let SessionContext::Recorded { directory, .. } = session.context() else {
+            self.error = Some("Choose this session's folder before forking it.".into());
+            return self.refresh(cx);
+        };
+        let state = self.state.read(cx);
+        let Some(conversation) = state.conversations().get(&id).filter(|c| !c.is_loading()) else {
+            self.error = Some("This conversation is still loading. Fork once it shows.".into());
+            return self.refresh(cx);
+        };
+        if conversation.load_error.is_some() {
+            self.error = Some(
+                "This conversation's saved history could not be read, so a fork would leave it \
+                 out. Restart Keystone to read it again, then fork."
+                    .into(),
+            );
+            return self.refresh(cx);
+        }
+        if !conversation.rows.get(index).is_some_and(forkable) {
+            self.error = Some("Choose a message to fork from.".into());
+            return self.refresh(cx);
+        }
+        let (point, draft, log) = match conversation.fork_from(index) {
+            ForkFrom::Running => {
+                self.error =
+                    Some("This turn is still running. Fork from here once it ends.".into());
+                return self.refresh(cx);
+            }
+            ForkFrom::Native { point, end } => (
+                Some(point.clone()),
+                String::new(),
+                conversation.fork_log(end),
+            ),
+            ForkFrom::Handoff { end } => {
+                let text = build(
+                    Source {
+                        id,
+                        title: session.title(),
+                        provider,
+                        folder: directory.as_str(),
+                    },
+                    &conversation.rows[..end],
+                    BUDGET_TOKENS,
+                );
+                (None, text, Vec::new())
+            }
+        };
+        let window_id = self.window_id;
+        if self
+            .create_beside(id, true, cx, |state, show, cx| {
+                state.fork(id, point, draft, log, now_ms(), window_id, show, cx)
+            })
+            .is_none()
+        {
+            return;
+        }
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Forks from the transcript row the keyboard is on.
+    pub(crate) fn fork_focused_row(
+        &mut self,
+        key: ViewKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .presentation
+            .current
+            .views
+            .keyboard_state(key)
+            .and_then(|k| k.row)
+        else {
+            self.error = Some("Choose a message to fork from.".into());
+            return self.refresh(cx);
+        };
+        self.fork_from(key, index, window, cx);
+    }
+}

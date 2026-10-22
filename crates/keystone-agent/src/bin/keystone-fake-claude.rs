@@ -11,6 +11,11 @@
 //! `KEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE=1` acts like a Claude older than
 //! `msg_lifecycle_v1`: no `command_lifecycle` frames and no such capability.
 //! `--resume missing` fails like a conversation Claude no longer has.
+//! `--resume <session> --fork-session` continues that conversation under a new session
+//! ID, and `--resume-session-at <uuid>` keeps it only through that record. In store
+//! mode the fork's file starts with a copy of the source's records, written with the
+//! first message as Claude Code 2.1.301 does, and an unknown session or record fails
+//! as it does there. Each assistant and user frame carries the UUID its record has.
 //! In that mode only, `KEYSTONE_FAKE_CLAUDE_RELEASE_FILE` naming a path holds each
 //! reply after its first streamed word until that file exists, so a test can act
 //! mid-reply without a timing margin. A hold longer than [`RELEASE_LIMIT`] ends the
@@ -132,20 +137,20 @@ struct Store {
     cwd: String,
     last: Option<String>,
     next: u64,
+    /// A fork's copy of its source's records, written before its first record.
+    copied: Vec<String>,
 }
 
 static STORE: Mutex<Option<Store>> = Mutex::new(None);
 
-fn open_store(session: &str) {
+/// Where `session` is stored in the working directory's project, in store mode.
+fn store_path(session: &str) -> Option<(PathBuf, String)> {
     if !std::env::var("KEYSTONE_FAKE_CLAUDE_STORE").is_ok_and(|v| v == "1") {
-        return;
+        return None;
     }
-    let Some(root) = std::env::var_os("CLAUDE_CONFIG_DIR")
+    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
-    else {
-        return;
-    };
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?;
     let cwd = std::env::current_dir()
         .map(|dir| dir.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -157,36 +162,81 @@ fn open_store(session: &str) {
         .join("projects")
         .join(folder)
         .join(format!("{session}.jsonl"));
+    Some((path, cwd))
+}
+
+/// The records a fork of `source` starts with, through `at` when given, or why Claude
+/// Code would refuse the fork. Nothing to check outside store mode.
+fn fork_records(source: &str, at: Option<&str>, session: &str) -> Result<Vec<String>, String> {
+    let Some((path, _)) = store_path(source) else {
+        return Ok(Vec::new());
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Err(format!("No conversation found with session ID: {source}"));
+    };
+    let mut records = Vec::new();
+    for line in text.lines() {
+        let Ok(mut record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let last = at.is_some() && record["uuid"].as_str() == at;
+        record["sessionId"] = json!(session);
+        records.push(record.to_string());
+        if last {
+            return Ok(records);
+        }
+    }
+    match at {
+        Some(at) => Err(format!("No message found with message.uuid of: {at}")),
+        None => Ok(records),
+    }
+}
+
+fn open_store(session: &str, copied: Vec<String>) {
+    let Some((path, cwd)) = store_path(session) else {
+        return;
+    };
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    // A resumed session continues the chain where its file ends.
-    let last = std::fs::read_to_string(&path).ok().and_then(|text| {
-        text.lines().rev().find_map(|line| {
-            serde_json::from_str::<Value>(line).ok()?["uuid"]
-                .as_str()
-                .map(str::to_owned)
-        })
-    });
+    // A resumed session continues the chain where its file ends, and a fork where its
+    // copy does.
+    let last = std::fs::read_to_string(&path)
+        .ok()
+        .into_iter()
+        .chain(copied.last().cloned())
+        .last()
+        .and_then(|text| {
+            text.lines().rev().find_map(|line| {
+                serde_json::from_str::<Value>(line).ok()?["uuid"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        });
     *STORE.lock().unwrap() = Some(Store {
         path,
         session: session.to_owned(),
         cwd,
         last,
         next: 0,
+        copied,
     });
 }
 
+static RECORDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Appends a record of `kind` ("user" or "assistant") with `message`, under `uuid`
-/// when given.
-fn store(kind: &str, message: Value, uuid: Option<&str>) {
-    let mut guard = STORE.lock().unwrap();
-    let Some(store) = guard.as_mut() else {
-        return;
-    };
-    store.next += 1;
+/// when given, and returns the record's UUID, which its frame carries. Outside store
+/// mode nothing is written.
+fn store(kind: &str, message: Value, uuid: Option<&str>) -> String {
+    let next = RECORDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let uuid = uuid.filter(|uuid| !uuid.is_empty()).map_or_else(
-        || format!("fake-record-{}-{}", std::process::id(), store.next),
+        || format!("fake-record-{}-{next}", std::process::id()),
         str::to_owned,
     );
+    let mut guard = STORE.lock().unwrap();
+    let Some(store) = guard.as_mut() else {
+        return uuid;
+    };
+    store.next += 1;
     let record = json!({"type": kind, "uuid": uuid, "parentUuid": store.last, "isSidechain": false,
         "sessionId": store.session, "cwd": store.cwd, "version": VERSION, "message": message});
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -194,9 +244,13 @@ fn store(kind: &str, message: Value, uuid: Option<&str>) {
         .append(true)
         .open(&store.path)
     {
+        for copied in std::mem::take(&mut store.copied) {
+            let _ = writeln!(file, "{copied}");
+        }
         let _ = writeln!(file, "{record}");
     }
-    store.last = Some(uuid);
+    store.last = Some(uuid.clone());
+    uuid
 }
 
 /// The longest a reply waits for its release file.
@@ -430,8 +484,30 @@ fn main() {
         eprintln!("No conversation found with session ID: missing");
         std::process::exit(1);
     }
-    let session = resume.unwrap_or_else(|| format!("fake-claude-session-{}", std::process::id()));
-    open_store(&session);
+    let new_session = format!("fake-claude-session-{}", std::process::id());
+    let (session, copied) = match resume {
+        Some(source) if args.iter().any(|a| a == "--fork-session") => {
+            let at = args
+                .iter()
+                .position(|a| a == "--resume-session-at")
+                .and_then(|i| args.get(i + 1));
+            match fork_records(&source, at.map(String::as_str), &new_session) {
+                Ok(copied) => (new_session, copied),
+                Err(error) => {
+                    emit(
+                        &out,
+                        json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
+                               "errors": [error]}),
+                    );
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(source) => (source, Vec::new()),
+        None => (new_session, Vec::new()),
+    };
+    open_store(&session, copied);
     let signed_out = std::env::var("KEYSTONE_FAKE_CLAUDE_SIGNED_OUT").is_ok_and(|v| v == "1");
     let frames = !std::env::var("KEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE").is_ok_and(|v| v == "1");
     let log = std::env::var_os("KEYSTONE_FAKE_CLAUDE_LOG_DIR")
@@ -1262,16 +1338,17 @@ fn answer(
             json!({"type": "content_block_start", "index": 0, "content_block":
                    {"type": "tool_use", "id": tool, "name": "Bash", "input": {}}}),
         );
-        emit(
-            out,
-            json!({"type": "assistant", "message": {"id": message, "content":
-                   [{"type": "tool_use", "id": tool, "name": "Bash", "input": input}]}, "parent_tool_use_id": null}),
-        );
-        store(
+        let uuid = store(
             "assistant",
             json!({"id": message, "role": "assistant", "content":
                    [{"type": "tool_use", "id": tool, "name": "Bash", "input": input}]}),
             None,
+        );
+        emit(
+            out,
+            json!({"type": "assistant", "message": {"id": message, "content":
+                   [{"type": "tool_use", "id": tool, "name": "Bash", "input": input}]}, "parent_tool_use_id": null,
+                   "uuid": uuid}),
         );
         let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
         let request = format!("fake-request-{turn}");
@@ -1314,17 +1391,17 @@ fn answer(
         } else {
             ("The user denied this in Keystone.", true)
         };
-        emit(
-            out,
-            json!({"type": "user", "message": {"role": "user", "content":
-                   [{"type": "tool_result", "tool_use_id": tool, "content": content, "is_error": is_error}]},
-                   "parent_tool_use_id": null}),
-        );
-        store(
+        let uuid = store(
             "user",
             json!({"role": "user", "content":
                    [{"type": "tool_result", "tool_use_id": tool, "content": content, "is_error": is_error}]}),
             None,
+        );
+        emit(
+            out,
+            json!({"type": "user", "message": {"role": "user", "content":
+                   [{"type": "tool_result", "tool_use_id": tool, "content": content, "is_error": is_error}]},
+                   "parent_tool_use_id": null, "uuid": uuid}),
         );
     }
     let calls = widgets::calls(text);
@@ -1415,11 +1492,12 @@ fn answer(
             "cache_read_input_tokens": percent * 1000, "output_tokens": 0});
         result["modelUsage"] = json!({model: {"contextWindow": 200_000}});
     }
+    let uuid = text_record(&sent);
     emit(
         out,
-        json!({"type": "assistant", "message": message_json, "parent_tool_use_id": null}),
+        json!({"type": "assistant", "message": message_json, "parent_tool_use_id": null,
+               "uuid": uuid}),
     );
-    text_record(&sent);
     stream(out, json!({"type": "content_block_stop", "index": 0}));
     if let Some(percent) = usage {
         emit_rate_limit(out, session, percent);
@@ -1587,7 +1665,7 @@ fn limit(out: &Out, session: &str, turn: u64, reset: u64) -> &'static str {
 }
 
 fn stopped(out: &Out) -> &'static str {
-    store(
+    let uuid = store(
         "user",
         json!({"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}),
         None,
@@ -1595,7 +1673,8 @@ fn stopped(out: &Out) -> &'static str {
     emit(
         out,
         json!({"type": "user", "message": {"role": "user", "content":
-               [{"type": "text", "text": "[Request interrupted by user]"}]}, "parent_tool_use_id": null}),
+               [{"type": "text", "text": "[Request interrupted by user]"}]}, "parent_tool_use_id": null,
+               "uuid": uuid}),
     );
     emit(
         out,

@@ -220,8 +220,28 @@ pub struct Session {
     /// The pull request last made or found for the session's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pull_request: Option<PullRequest>,
+    /// The session this one was forked from. The fork starts with that session's
+    /// conversation up to a point, leaving that one unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forked_from: Option<u64>,
+    /// Where the provider forks the source's conversation for this session. It stays
+    /// saved, but once the fork's own conversation is saved ([`Session::provider_thread`])
+    /// that one is resumed instead. `None` for a fork that carries the conversation as
+    /// handoff text instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_point: Option<ForkPoint>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
+}
+
+/// Where a provider can fork a conversation natively: its own conversation ID, and its
+/// own ID of the last thing kept. For Claude Code that is a transcript entry's UUID,
+/// passed as `--resume <thread> --fork-session --resume-session-at <at>`; for Codex a
+/// turn ID, passed to `thread/fork` as `lastTurnId`. Both keep `at` itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkPoint {
+    pub thread: String,
+    pub at: String,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -307,6 +327,8 @@ impl Session {
             handed_off_from: None,
             continue_at: None,
             pull_request: None,
+            forked_from: None,
+            fork_point: None,
             unknown: Map::new(),
         }
     }
@@ -380,6 +402,16 @@ impl Session {
 
     pub fn pull_request(&self) -> Option<&PullRequest> {
         self.pull_request.as_ref()
+    }
+
+    /// The session this one was forked from, if any.
+    pub fn forked_from(&self) -> Option<u64> {
+        self.forked_from
+    }
+
+    /// Where the provider forks the source's conversation, for a native fork.
+    pub fn fork_point(&self) -> Option<&ForkPoint> {
+        self.fork_point.as_ref()
     }
 
     /// Whether the session has sent anything to its provider. The provider and model
@@ -855,6 +887,54 @@ impl Store {
             },
             Opening::Window(window, show),
         )
+    }
+
+    /// Forks `source` into a new session selected in `window`, in one save, saving
+    /// `show` with it as [`Store::create_showing`] does. The fork keeps `source`'s
+    /// provider, account, model, approval mode and execution context, and its title
+    /// with "(fork)" after it, or "(handoff fork)" without `point`. Like a handoff, it
+    /// works in the same folder or worktree and keeps the branch's pull request. With
+    /// `point`, the provider forks its conversation there on the first message, and the session counts as started, since the conversation
+    /// is already the provider's. Without one, the fork has not started and `draft`
+    /// holds the conversation as handoff text instead. `source` itself is not changed.
+    pub fn fork(
+        &mut self,
+        source: u64,
+        point: Option<ForkPoint>,
+        draft: String,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
+        let from = self
+            .workspace
+            .sessions
+            .iter()
+            .find(|session| session.id == source)
+            .ok_or_else(|| invalid(format!("unknown session ID {source}")))?;
+        let SessionContext::Recorded { directory, .. } = from.context() else {
+            return Err(invalid("choose this session's folder before forking it").into());
+        };
+        let mut fork = Session::new(0, from.provider, directory, now);
+        fork.execution_context = from.execution_context.clone();
+        let kind = if point.is_some() {
+            "fork"
+        } else {
+            "handoff fork"
+        };
+        fork.title = format!("{} ({kind})", from.title);
+        fork.title_source = TitleSource::FirstMessage;
+        fork.approval_mode = from.approval_mode;
+        // A native fork carries any override the provider kept on the conversation.
+        fork.approval_overridden = point.is_some() && from.approval_overridden;
+        fork.model = from.model.clone();
+        fork.account = from.account.clone();
+        fork.model_locked = Some(point.is_some());
+        fork.pull_request = from.pull_request.clone();
+        fork.forked_from = Some(source);
+        fork.fork_point = point;
+        fork.draft = draft;
+        self.add_session(|id| Session { id, ..fork }, Opening::Window(window, show))
     }
 
     /// Adds the session `make` builds with the next ID, selecting it in `window` and
@@ -3219,5 +3299,116 @@ mod tests {
             store.workspace().sessions().last().unwrap().title(),
             "Pick this up"
         );
+    }
+
+    #[test]
+    fn a_fork_keeps_the_source_s_provider_account_model_and_folder_and_leaves_it_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        let folder = working_directory();
+        let home = directory.path().join("claude-work");
+        let work = store
+            .add_account(Provider::Claude, "Work", home, &[])
+            .unwrap()
+            .value;
+        let source = store.create(Provider::Claude, &folder, 1).unwrap().value;
+        store
+            .set_provider_account(source, Provider::Claude, Some(work.clone()))
+            .unwrap();
+        store.set_model(source, Some("opus".into())).unwrap();
+        store
+            .set_approval_mode(source, ApprovalMode::ReadOnly)
+            .unwrap();
+        store.set_approval_overridden(source).unwrap();
+        store.lock_model(source).unwrap();
+        store
+            .record_message(source, "Fix the login bug", 2)
+            .unwrap();
+        store
+            .set_provider_thread(source, "conversation-1".into())
+            .unwrap();
+        store.set_draft(source, "half a thought".into()).unwrap();
+        let before = store.workspace().sessions().last().unwrap().clone();
+        let point = ForkPoint {
+            thread: "conversation-1".into(),
+            at: "entry-7".into(),
+        };
+
+        let fork = store
+            .fork(
+                source,
+                Some(point.clone()),
+                String::new(),
+                5,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap()
+            .value;
+
+        assert_eq!(store.workspace().selected(), Some(fork));
+        let reopened = Store::open(&path).unwrap();
+        let sessions = reopened.workspace().sessions();
+        let (from, new) = (&sessions[sessions.len() - 2], &sessions[sessions.len() - 1]);
+        assert_eq!(*from, before);
+        assert_eq!(from.forked_from(), None);
+        assert_eq!(new.id(), fork);
+        assert_eq!(new.forked_from(), Some(source));
+        assert_eq!(new.fork_point(), Some(&point));
+        assert_eq!(new.provider(), Provider::Claude);
+        assert_eq!(new.account(), Some(&work));
+        assert_eq!(new.model(), Some("opus"));
+        assert_eq!(new.approval_mode(), ApprovalMode::ReadOnly);
+        assert!(new.approval_overridden());
+        assert!(new.started());
+        assert_eq!(new.provider_thread(), None);
+        assert_eq!(new.draft(), "");
+        assert_eq!(new.title(), "Fix the login bug (fork)");
+        assert_eq!(new.context(), from.context());
+        assert!(store.set_model(fork, None).is_err());
+    }
+
+    #[test]
+    fn a_fork_without_a_native_point_is_unstarted_and_holds_its_handoff_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        let source = store
+            .create(Provider::Codex, &working_directory(), 1)
+            .unwrap()
+            .value;
+        store.set_approval_overridden(source).unwrap();
+        store.lock_model(source).unwrap();
+        store.record_message(source, "Plan the release", 2).unwrap();
+        let fork = store
+            .fork(
+                source,
+                None,
+                "handoff text".into(),
+                3,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap()
+            .value;
+        let new = store.workspace().sessions().last().unwrap();
+        assert_eq!(new.id(), fork);
+        assert_eq!(new.forked_from(), Some(source));
+        assert_eq!(new.fork_point(), None);
+        assert!(!new.started());
+        assert!(!new.approval_overridden());
+        assert_eq!(new.draft(), "handoff text");
+        assert_eq!(new.provider(), Provider::Codex);
+
+        std::fs::write(
+            directory.path().join("legacy.json"),
+            r#"{"version":1,"next_id":2,"workspace":{"selected":1,"sessions":[{"id":1,"title":"Legacy","provider":"Codex","settled":false,"draft":""}]}}"#,
+        )
+        .unwrap();
+        let mut legacy = Store::open(directory.path().join("legacy.json")).unwrap();
+        let refused = legacy
+            .fork(1, None, String::new(), 1, WindowId::FIRST, None)
+            .unwrap_err();
+        assert!(refused.to_string().contains("folder"), "{refused}");
     }
 }

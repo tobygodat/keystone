@@ -31,6 +31,34 @@ pub struct RowControls {
     pub widget: Option<crate::widget::WidgetControl>,
     /// For a launched session's delivered result, that session's title.
     pub result: Option<SharedString>,
+    /// A message row's Fork from here control.
+    pub fork: Option<ForkControl>,
+}
+
+pub struct ForkControl {
+    pub label: &'static str,
+    pub tooltip: &'static str,
+    pub on_click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+}
+
+fn fork_button(
+    index: usize,
+    control: ForkControl,
+    action: &Option<(CopyTarget, FocusHandle)>,
+) -> AnyElement {
+    IconButton::new(("fork", index), IconName::Branch)
+        .size(ButtonSize::Compact)
+        .aria_label(control.label)
+        .tooltip(Tooltip::text(control.tooltip))
+        .debug_selector(move || format!("fork-{index}"))
+        .when_some(
+            action
+                .as_ref()
+                .filter(|(target, _)| *target == CopyTarget::Fork),
+            |button, (_, focus)| button.track_focus(focus).reveal_on_focus(),
+        )
+        .on_click(move |event, window, cx| (control.on_click)(event, window, cx))
+        .into_any_element()
 }
 
 pub fn activity_name(item: &Item) -> Option<String> {
@@ -122,6 +150,7 @@ pub fn row(
         selection_start,
         widget,
         result,
+        fork,
     } = controls;
     let colors = cx.theme().colors;
     match row {
@@ -138,7 +167,7 @@ pub fn row(
                 .items_start()
                 .gap_1()
                 .child(
-                    div()
+                    h_flex()
                         .when(!selected, |d| d.invisible())
                         .group_hover("user-message", |s| s.visible())
                         .child(
@@ -153,7 +182,8 @@ pub fn row(
                                     .filter(|(n, _)| *n == CopyTarget::Row)
                                     .map(|(_, f)| f),
                             ),
-                        ),
+                        )
+                        .when_some(fork, |d, fork| d.child(fork_button(index, fork, &action))),
                 )
                 .child(
                     div()
@@ -195,7 +225,7 @@ pub fn row(
                         )
                     })
                     .child(
-                        div()
+                        h_flex()
                             .when(item.status == ItemStatus::InProgress, |d| d.invisible())
                             .child(
                                 CopyButton::new(
@@ -209,7 +239,10 @@ pub fn row(
                                         .filter(|(n, _)| *n == CopyTarget::Row && row_copy)
                                         .map(|(_, f)| f),
                                 ),
-                            ),
+                            )
+                            .when_some(fork.filter(|_| row_copy), |d, fork| {
+                                d.child(fork_button(index, fork, &action))
+                            }),
                     )
                     .into_any_element()
             }

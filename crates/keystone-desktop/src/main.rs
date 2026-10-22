@@ -9,6 +9,7 @@ mod conversation;
 mod customization;
 mod customization_agent;
 mod files;
+mod fork;
 mod handoff;
 mod integrations;
 mod limit;
@@ -2582,6 +2583,16 @@ impl Keystone {
                     Row::Surface(surface) => Some(self.widget_control(key, index, &surface.call)),
                     _ => None,
                 };
+                let fork = fork::forkable(row).then(|| {
+                    let (label, tooltip) = fork::label(&conversation.fork_from(index));
+                    transcript::ForkControl {
+                        label,
+                        tooltip,
+                        on_click: Box::new(self.scoped_listener(cx, move |this, _, window, cx| {
+                            this.fork_from(key, index, window, cx)
+                        })),
+                    }
+                });
                 Some(transcript::row(
                     row,
                     index,
@@ -2593,6 +2604,7 @@ impl Keystone {
                         selection_start,
                         widget,
                         result,
+                        fork,
                     },
                     cx,
                 ))
@@ -9441,6 +9453,11 @@ mod tests {
     mod handoff {
         use super::*;
         include!("handoff_tests.rs");
+    }
+
+    mod fork {
+        use super::*;
+        include!("fork_tests.rs");
     }
 
     fn open_with_session<'a>(

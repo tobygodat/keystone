@@ -15,7 +15,7 @@ use crate::item::{
 use crate::mcp::{Caller, Issuer};
 use crate::surface;
 use keystone_core::integrations::{Health, ServerStatus};
-use keystone_core::{ApprovalMode, LimitWindow};
+use keystone_core::{ApprovalMode, ForkPoint, LimitWindow};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
@@ -95,6 +95,8 @@ enum Pending {
     Thread {
         session: u64,
         resume: bool,
+        /// Whether it forks another thread; `resume` is set too.
+        fork: bool,
         injected: bool,
         /// The same `thread/start` without `dynamicTools`, to send if Codex refuses
         /// the tool.
@@ -187,6 +189,8 @@ struct Session {
     /// user's settings sends them, so no failed or lost restore can leave an override
     /// behind.
     overridden: bool,
+    /// Where the next open forks another thread, when it has no thread to resume.
+    fork: Option<ForkPoint>,
 }
 
 pub struct CodexDriver {
@@ -362,15 +366,17 @@ impl CodexDriver {
                 state.opening = true;
                 state.cwd = cwd.clone();
                 state.model = model;
-                // A resumed thread reports its own override, not the user's settings, so
-                // read those from a fresh thread before the next turn needs them.
-                if resume.is_none() {
+                let fork = state.fork.take().filter(|_| resume.is_none());
+                // A resumed or forked thread reports its own override, not the user's
+                // settings, so read those from a fresh thread before the next turn needs
+                // them.
+                if resume.is_none() && fork.is_none() {
                     // A new thread holds no override.
                     state.overridden = false;
                 } else if state.overridden {
                     self.request_baseline(&cwd, out);
                 }
-                self.open_thread(session, cwd, resume, out);
+                self.open_thread(session, cwd, resume, fork, out);
             }
             Command::Configure {
                 session,
@@ -598,20 +604,34 @@ impl CodexDriver {
         }
     }
 
+    /// Makes the session's next open fork `point`'s thread through its turn, when the
+    /// session has no thread of its own to resume.
+    pub fn fork_on_open(&mut self, session: u64, point: ForkPoint) {
+        self.sessions.entry(session).or_default().fork = Some(point);
+    }
+
     fn open_thread(
         &mut self,
         session: u64,
         cwd: String,
         resume: Option<String>,
+        fork: Option<ForkPoint>,
         out: &mut Outputs,
     ) {
-        let (method, mut params) = match &resume {
-            Some(thread) => (
+        let (method, mut params) = match (&resume, &fork) {
+            (Some(thread), _) => (
                 "thread/resume",
                 json!({"threadId": thread, "cwd": cwd, "excludeTurns": true}),
             ),
-            None => ("thread/start", json!({"cwd": cwd})),
+            (None, Some(fork)) => (
+                "thread/fork",
+                json!({"threadId": fork.thread, "lastTurnId": fork.at, "cwd": cwd,
+                    "excludeTurns": true}),
+            ),
+            (None, None) => ("thread/start", json!({"cwd": cwd})),
         };
+        let forking = fork.is_some();
+        let resume = resume.is_some() || forking;
         // A resumed thread keeps the tools it started with.
         if let Some(model) = self.sessions.get(&session).and_then(|s| s.model.clone()) {
             params["model"] = json!(model);
@@ -624,7 +644,7 @@ impl CodexDriver {
             self.injected.remove(&session);
             false
         };
-        let without_tools = (self.widgets && resume.is_none()).then(|| {
+        let without_tools = (self.widgets && !resume).then(|| {
             let plain = params.clone();
             params["dynamicTools"] = json!([surface::codex_tool()]);
             plain
@@ -634,7 +654,8 @@ impl CodexDriver {
             params,
             Pending::Thread {
                 session,
-                resume: resume.is_some(),
+                resume,
+                fork: forking,
                 injected,
                 without_tools,
             },
@@ -878,6 +899,7 @@ impl CodexDriver {
             Pending::Thread {
                 session,
                 resume,
+                fork,
                 injected,
                 without_tools,
             } => {
@@ -900,6 +922,7 @@ impl CodexDriver {
                         Pending::Thread {
                             session,
                             resume,
+                            fork,
                             injected,
                             without_tools: None,
                         },
@@ -933,7 +956,11 @@ impl CodexDriver {
                         } else {
                             error.map_or("no thread in the reply".into(), |e| e.message)
                         };
-                        let message = if resume {
+                        let message = if fork {
+                            format!(
+                                "Could not fork this Codex conversation: {reason}. The history shown here stays; Hand off (Ctrl+Shift+H) to continue it in a new session."
+                            )
+                        } else if resume {
                             format!(
                                 "Could not resume this Codex conversation: {reason}. Start a new Codex session to continue."
                             )
@@ -1164,6 +1191,13 @@ impl CodexDriver {
                         out.event(session, Event::UsageLimit(Default::default()));
                     }
                     let error = note.turn.error.map(|e| e.message);
+                    out.event(
+                        session,
+                        Event::ForkPoint(ForkPoint {
+                            thread: note.thread_id,
+                            at: note.turn.id,
+                        }),
+                    );
                     out.event(
                         session,
                         Event::TurnCompleted {

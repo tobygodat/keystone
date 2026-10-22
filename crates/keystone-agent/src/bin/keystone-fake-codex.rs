@@ -44,7 +44,13 @@
 //! answer, and replies with what each call returned. `dynamicTools` is refused, as
 //! Codex 0.163 refuses it, unless `initialize` opted into `experimentalApi`.
 //!
-//! `thread/start` and `thread/resume` are followed by `mcpServer/startupStatus/updated`
+//! `thread/fork` starts a new thread with the source's model and override and
+//! `forkedFromId`, as Codex 0.163.0 does. With a stored source it keeps the source's
+//! turns through `lastTurnId` (all of them without one) under the same turn IDs, and
+//! an unknown turn fails with "turn not found"; in store mode a source with no stored
+//! history is an unknown thread.
+//!
+//! `thread/start`, `thread/resume` and `thread/fork` are followed by `mcpServer/startupStatus/updated`
 //! for each MCP server the thread gets (see [`start_mcp_servers`]).
 //!
 //! An account whose `CODEX_HOME` holds a `.fake-usage-limit` file is at its usage
@@ -451,6 +457,53 @@ fn main() {
                 let model = thread_model(&mut models, &thread, &params);
                 thread_server(&mut servers, &thread, &params);
                 reply(json!({"thread": {"id": thread},
+                    "approvalPolicy": approval, "sandbox": sandbox, "model": model}));
+                start_mcp_servers(&out, &thread, &params);
+            }
+            "thread/fork" => {
+                let source = params["threadId"].as_str().unwrap_or_default().to_owned();
+                let last = params["lastTurnId"].as_str();
+                let kept = match (stored_turns(&source), last) {
+                    (Some(turns), Some(last)) => turns
+                        .iter()
+                        .position(|turn| turn["id"] == last)
+                        .map(|end| Some(turns[..=end].to_vec()))
+                        .ok_or_else(|| format!("turn not found: {last}")),
+                    (Some(turns), None) => Ok(Some(turns)),
+                    (None, _)
+                        if std::env::var("KEYSTONE_FAKE_CODEX_STORE").is_ok_and(|v| v == "1") =>
+                    {
+                        Err(format!("no rollout found for thread id {source}"))
+                    }
+                    (None, _) => Ok(None),
+                };
+                let kept = match kept {
+                    Ok(kept) => kept,
+                    Err(message) => {
+                        emit(
+                            &out,
+                            json!({"id": id, "error": {"code": -32600, "message": message}}),
+                        );
+                        continue;
+                    }
+                };
+                let n = next.fetch_add(1, Ordering::Relaxed);
+                let thread = format!("fake-thread-{n}");
+                if let (Some(turns), Some(path)) = (kept, thread_file(&thread)) {
+                    let _ = std::fs::create_dir_all(path.parent().unwrap());
+                    let _ = std::fs::write(path, json!({"turns": turns}).to_string());
+                }
+                let (approval, sandbox) = policies.get(&source).cloned().unwrap_or_else(defaults);
+                policies.insert(thread.clone(), (approval.clone(), sandbox.clone()));
+                if let Some(path) = &state {
+                    let _ = std::fs::write(path, serde_json::to_vec(&policies).unwrap());
+                }
+                if let Some(model) = models.get(&source).cloned() {
+                    models.entry(thread.clone()).or_insert(model);
+                }
+                let model = thread_model(&mut models, &thread, &params);
+                thread_server(&mut servers, &thread, &params);
+                reply(json!({"thread": {"id": thread, "forkedFromId": source},
                     "approvalPolicy": approval, "sandbox": sandbox, "model": model}));
                 start_mcp_servers(&out, &thread, &params);
             }

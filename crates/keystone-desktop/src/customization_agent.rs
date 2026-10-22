@@ -599,6 +599,7 @@ mod tests {
         }
         fn request_catalog(&self, _: u64, _: &str) {}
         fn set_approval(&self, _: u64, _: ApprovalState) {}
+        fn set_fork(&self, _: u64, _: keystone_core::ForkPoint) {}
         fn command(&self, command: Command) {
             self.commands.lock().unwrap().push(command);
         }

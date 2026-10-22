@@ -96,6 +96,9 @@ fn copy_actions<'a>(row: &'a Row, document: Option<&'a Document>) -> Vec<(CopyTa
         };
         actions.push((CopyTarget::ActivityToggle, text));
     }
+    if crate::fork::forkable(row) {
+        actions.push((CopyTarget::Fork, item.text.as_str()));
+    }
     actions
 }
 

@@ -13,6 +13,7 @@ use crate::profile::LaunchProfile;
 use crate::version::{self, Provider};
 use crate::worker::Worker;
 use keystone_core::ApprovalMode;
+use keystone_core::ForkPoint;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
@@ -101,6 +102,10 @@ pub trait Connection {
     /// provider starts for the session, including one for a message already sent and
     /// still waiting, and survives a provider restart.
     fn set_approval(&self, session: u64, approval: ApprovalState);
+    /// Has the session's conversation, when first opened with no conversation of its
+    /// own, fork `point`'s instead of starting a new one. Once the provider reports
+    /// the fork's own conversation ([`Event::ThreadReady`]), that one is resumed.
+    fn set_fork(&self, session: u64, point: ForkPoint);
     /// Stops or answers within a session.
     fn command(&self, command: Command);
     /// Ends the session's process that `candidate` names, once the app has saved
@@ -203,6 +208,9 @@ struct Shared {
     /// Each session's approval state, kept across process restarts and given to every
     /// driver before it handles the session's messages.
     approvals: HashMap<u64, ApprovalState>,
+    /// Where a session with no thread yet forks another one; see
+    /// [`Connection::set_fork`].
+    forks: HashMap<u64, ForkPoint>,
     /// Incremented per process, so a late exit from an old one is ignored.
     generation: u64,
     /// Set when the connection is dropped, so queued commands start nothing.
@@ -393,6 +401,11 @@ impl CodexConnection {
                         }
                     }
                     let resume = shared.threads.get(&session).cloned().or(resume);
+                    if resume.is_none()
+                        && let Some(point) = shared.forks.get(&session)
+                    {
+                        driver.fork_on_open(session, point.clone());
+                    }
                     driver.command(
                         Command::Open {
                             session,
@@ -815,6 +828,10 @@ impl Connection for CodexConnection {
         CodexConnection::set_approval(self, session, approval);
     }
 
+    fn set_fork(&self, session: u64, point: ForkPoint) {
+        self.shared.lock().unwrap().forks.insert(session, point);
+    }
+
     fn command(&self, command: Command) {
         CodexConnection::command(self, command);
     }
@@ -922,6 +939,9 @@ struct ClaudeShared {
     live: HashMap<u64, Live>,
     /// The latest conversation per session, kept across process restarts.
     threads: HashMap<u64, String>,
+    /// Where a session with no conversation yet forks another one; see
+    /// [`Connection::set_fork`].
+    forks: HashMap<u64, ForkPoint>,
     /// Messages per session that `send` accepted and the worker has not sent yet.
     queued: HashMap<u64, usize>,
     /// Each session's approval state. A process is launched in its mode, and replaced
@@ -1793,23 +1813,31 @@ impl ClaudeStarter {
             Launch::Chat => shared.threads.get(&session).cloned().or(resume),
             Launch::LayoutHelper => None,
         };
+        let fork = match (launch, &resume) {
+            (Launch::Chat, None) => shared.forks.get(&session).cloned(),
+            _ => None,
+        };
         shared.generation += 1;
         let generation = shared.generation;
         let approval = shared.approvals.get(&session).copied().unwrap_or_default();
         let mode = approval.mode;
         // A conversation Keystone set a mode in may resume in it, such as plan mode,
         // so the user's own settings are read from a fresh process and passed.
-        let probe = mode == ApprovalMode::Provider && resume.is_some() && approval.overridden;
+        let continues = resume.is_some() || fork.is_some();
+        let probe = mode == ApprovalMode::Provider && continues && approval.overridden;
         let mut pending = Outputs::default();
         let mut driver = ClaudeDriver::launched(
             session,
-            resume.is_some(),
+            continues,
             random_seed(),
             mode,
             launch,
             &mut pending,
         );
         driver.set_sign_in(self.profile.sign_in());
+        if fork.is_some() {
+            driver.set_forking();
+        }
         let mut lease = None;
         if launch == Launch::Chat
             && let Some(issuer) = &shared.mcp
@@ -1869,7 +1897,7 @@ impl ClaudeStarter {
         let hook = shared.before_start.clone();
         drop(shared);
         let spawned = self.spawn(
-            session, generation, program, hook, cwd, resume, model, mode, probe, launch,
+            session, generation, program, hook, cwd, resume, fork, model, mode, probe, launch,
         );
 
         let mut shared = self.shared.lock().unwrap();
@@ -1937,6 +1965,7 @@ impl ClaudeStarter {
         hook: Option<StartHook>,
         cwd: &Path,
         resume: Option<String>,
+        fork: Option<ForkPoint>,
         model: Option<String>,
         mode: ApprovalMode,
         probe: bool,
@@ -1968,6 +1997,7 @@ impl ClaudeStarter {
             baseline.as_deref(),
             model.as_deref(),
             resume.as_deref(),
+            fork.as_ref(),
         );
         let on_line = {
             let starter = self.clone();
@@ -2364,6 +2394,15 @@ impl Connection for ClaudeConnection {
 
     fn set_approval(&self, session: u64, approval: ApprovalState) {
         ClaudeConnection::set_approval(self, session, approval);
+    }
+
+    fn set_fork(&self, session: u64, point: ForkPoint) {
+        self.starter
+            .shared
+            .lock()
+            .unwrap()
+            .forks
+            .insert(session, point);
     }
 
     fn command(&self, command: Command) {

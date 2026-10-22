@@ -340,39 +340,10 @@ impl Keystone {
             &conversation.rows,
             BUDGET_TOKENS,
         );
-        // Beside other views or tabs, the new session opens in a tab beside the source,
-        // as New tab does, so the source stays in view. A lone view follows the selection.
-        let shown = self.saved_composition(cx);
-        let beside = !self.session_tabs(cx).is_empty()
-            || arrangement::ordered_views(shown.root())
-                .into_iter()
-                .filter(|&v| shown.component(v) == Some(keystone_core::Component::Conversation))
-                .nth(1)
-                .is_some();
-        let tab = match self
-            .layout_for_change(cx)
-            .filter(|(_, tabs, active)| beside && tabs.get(*active).is_some())
-        {
-            Some((c, tabs, active)) => {
-                let Some((view, layout)) = self.open_view(&c, Place::TabWith(active), cx) else {
-                    return;
-                };
-                Some((layout, tabs, view))
-            }
-            None => None,
-        };
-        let opened = tab.as_ref().map(|(_, _, view)| *view);
-        let project = self.presentation.project.as_ref().ok().cloned();
-        let show = tab.and_then(|(layout, tabs, view)| {
-            project
-                .as_ref()
-                .map(|project| (project, layout, tabs, view))
-        });
         let window_id = self.window_id;
-        self.create_with(cx, |state, cx| {
+        let Some(new) = self.create_beside(id, false, cx, |state, show, cx| {
             state.hand_off(id, target, text, now_ms(), window_id, show, cx)
-        });
-        let Some(new) = self.selected(cx).filter(|selected| *selected != id) else {
+        }) else {
             return;
         };
         // The work goes on in the new session, so the source's scheduled continue must
@@ -386,11 +357,6 @@ impl Keystone {
         {
             self.state
                 .update(cx, |state, cx| state.schedule_continue(id, None, cx));
-        }
-        if let Some(view) = opened.filter(|&view| self.session_tabs(cx).get(view) == Some(new)) {
-            self.presentation.current.customization.forget_undo();
-            self.presentation.current.arrangement.seen = Some(Some(new));
-            self.show_fitted(view, cx);
         }
         match account {
             Some(account) => {
@@ -410,8 +376,64 @@ impl Keystone {
         cx.notify();
     }
 
+    /// Creates a session from `source`, the selected one, with `create`. It opens in a
+    /// tab beside the source, as New tab does, so the source stays a click away: always
+    /// when `always` is set, else only beside other views or tabs, and a lone view
+    /// follows the selection. Returns the new session once it is selected.
+    pub(crate) fn create_beside(
+        &mut self,
+        source: u64,
+        always: bool,
+        cx: &mut Context<Self>,
+        create: impl FnOnce(
+            &mut crate::app_state::AppState,
+            Option<(
+                &keystone_core::ProjectId,
+                keystone_core::Composition,
+                keystone_core::SessionTabs,
+                keystone_core::ViewId,
+            )>,
+            &mut Context<crate::app_state::AppState>,
+        ) -> Result<keystone_core::Applied<u64>, Box<dyn std::error::Error>>,
+    ) -> Option<u64> {
+        let shown = self.saved_composition(cx);
+        let beside = always
+            || !self.session_tabs(cx).is_empty()
+            || arrangement::ordered_views(shown.root())
+                .into_iter()
+                .filter(|&v| shown.component(v) == Some(keystone_core::Component::Conversation))
+                .nth(1)
+                .is_some();
+        let tab = match self
+            .layout_for_change(cx)
+            .filter(|(_, tabs, active)| beside && tabs.get(*active).is_some())
+        {
+            Some((c, tabs, active)) => {
+                let (view, layout) = self.open_view(&c, Place::TabWith(active), cx)?;
+                Some((layout, tabs, view))
+            }
+            None => None,
+        };
+        let opened = tab.as_ref().map(|(_, _, view)| *view);
+        let project = self.presentation.project.as_ref().ok().cloned();
+        let show = tab.and_then(|(layout, tabs, view)| {
+            project
+                .as_ref()
+                .map(|project| (project, layout, tabs, view))
+        });
+        self.create_with(cx, |state, cx| create(state, show, cx));
+        let new = self.selected(cx).filter(|selected| *selected != source)?;
+        if let Some(view) = opened.filter(|&view| self.session_tabs(cx).get(view) == Some(new)) {
+            self.presentation.current.customization.forget_undo();
+            self.presentation.current.arrangement.seen = Some(Some(new));
+            self.show_fitted(view, cx);
+        }
+        Some(new)
+    }
+
     /// "Continued from" and "Continued in" rows for the session in `key`'s view, each
-    /// opening the other session. `None` when it has no handoff links.
+    /// opening the other session, and "Forked from" and "Forked in" rows for forks.
+    /// `None` when it has no such links.
     pub(crate) fn handoff_links(&self, key: ViewKey, cx: &mut Context<Self>) -> Option<AnyElement> {
         let workspace = self.state.read(cx).store().workspace();
         let sessions = workspace.sessions();
@@ -423,31 +445,49 @@ impl Keystone {
                 };
             (session.id(), session.title().to_owned(), provider)
         };
-        let from = sessions
-            .iter()
-            .find(|s| s.id() == key.session)?
-            .handed_off_from()
-            .and_then(|from| sessions.iter().find(|s| s.id() == from))
-            .map(describe);
-        let to: Vec<_> = sessions
-            .iter()
-            .filter(|s| s.handed_off_from() == Some(key.session) && s.started())
-            .map(describe)
-            .collect();
-        if from.is_none() && to.is_empty() {
-            return None;
-        }
-        let rows = from
-            .map(|link| ("Continued from", "handoff-from".to_owned(), link))
+        let shown = sessions.iter().find(|s| s.id() == key.session)?;
+        let source = |from: Option<u64>| {
+            from.and_then(|from| sessions.iter().find(|s| s.id() == from))
+                .map(describe)
+        };
+        let from = source(shown.handed_off_from())
+            .map(|link| {
+                (
+                    "Continued from",
+                    "handoff-from".to_owned(),
+                    IconName::Handoff,
+                    link,
+                )
+            })
             .into_iter()
-            .chain(to.into_iter().map(|link| {
-                let selector = format!("handoff-to-{}", link.0);
-                ("Continued in", selector, link)
-            }))
-            .map(|(lead, selector, (id, title, provider))| {
-                self.link_row(key, lead, &selector, id, title, provider, cx)
+            .chain(source(shown.forked_from()).map(|link| {
+                (
+                    "Forked from",
+                    "fork-from".to_owned(),
+                    IconName::Branch,
+                    link,
+                )
+            }));
+        let to = sessions.iter().filter(|s| s.started()).filter_map(|s| {
+            if s.handed_off_from() == Some(key.session) {
+                let selector = format!("handoff-to-{}", s.id());
+                Some(("Continued in", selector, IconName::Handoff, describe(s)))
+            } else if s.forked_from() == Some(key.session) {
+                let selector = format!("fork-to-{}", s.id());
+                Some(("Forked in", selector, IconName::Branch, describe(s)))
+            } else {
+                None
+            }
+        });
+        let rows = from
+            .chain(to)
+            .map(|(lead, selector, icon, (id, title, provider))| {
+                self.link_row(key, lead, &selector, icon, id, title, provider, cx)
             })
             .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return None;
+        }
         Some(
             v_flex()
                 .flex_none()
@@ -472,6 +512,7 @@ impl Keystone {
         key: ViewKey,
         lead: &'static str,
         selector: &str,
+        icon: IconName,
         id: u64,
         title: String,
         provider: String,
@@ -488,11 +529,7 @@ impl Keystone {
             .rounded(radius::CONTROL)
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
-            .child(
-                Icon::new(IconName::Handoff)
-                    .size(px(14.))
-                    .color(Color::Muted),
-            )
+            .child(Icon::new(icon).size(px(14.)).color(Color::Muted))
             .child(Label::new(lead).size(TextSize::Ui).color(Color::Muted))
             .child(
                 div().min_w_0().flex_shrink(1.).child(

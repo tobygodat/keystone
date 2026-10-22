@@ -1466,3 +1466,108 @@ fn a_turn_failed_on_the_usage_limit_reports_an_unnamed_limit() {
         }
     }
 }
+
+#[test]
+fn a_fork_opens_codex_s_fork_of_the_source_through_its_turn_and_names_each_turn_s_point() {
+    let mut out = Outputs::default();
+    let mut driver = CodexDriver::new("0.0.0-test", &mut out);
+    driver.on_line(br#"{"id":1,"result":{"userAgent":"test"}}"#, &mut out);
+    driver.fork_on_open(
+        SESSION,
+        keystone_core::ForkPoint {
+            thread: "source".into(),
+            at: "turn-2".into(),
+        },
+    );
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Open {
+            session: SESSION,
+            cwd: "/tmp/repo".into(),
+            resume: None,
+            model: None,
+        },
+        &mut out,
+    );
+    let fork: Value = serde_json::from_str(&out.writes[0]).unwrap();
+    assert_eq!(fork["method"], "thread/fork");
+    assert_eq!(fork["params"]["threadId"], "source");
+    assert_eq!(fork["params"]["lastTurnId"], "turn-2");
+    assert_eq!(fork["params"]["cwd"], "/tmp/repo");
+    assert_eq!(fork["params"]["excludeTurns"], true);
+    assert!(fork["params"].get("dynamicTools").is_none());
+    assert_eq!(out.writes.len(), 1, "a fork reads no settings baseline");
+
+    let response = format!(
+        r#"{{"id":{},"result":{{"thread":{{"id":"{THREAD}","forkedFromId":"source"}}}}}}"#,
+        fork["id"]
+    );
+    let out = feed(&mut driver, &[response]);
+    assert_eq!(
+        out.events,
+        vec![(
+            SESSION,
+            Event::ThreadReady {
+                thread_id: THREAD.into()
+            }
+        )]
+    );
+
+    // A turn of the fork ends at a point in the fork's own thread.
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "next".into(),
+            images: Vec::new(),
+        },
+        &mut out,
+    );
+    let out = feed(&mut driver, &[started("turn-4"), completed("turn-4")]);
+    let events: Vec<_> = out.events.into_iter().map(|(_, e)| e).collect();
+    let end = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnCompleted { .. }))
+        .unwrap();
+    assert_eq!(
+        events[end - 1],
+        Event::ForkPoint(keystone_core::ForkPoint {
+            thread: THREAD.into(),
+            at: "turn-4".into(),
+        })
+    );
+}
+
+#[test]
+fn a_fork_codex_refuses_fails_with_the_handoff_way_on_and_no_new_thread() {
+    let mut out = Outputs::default();
+    let mut driver = CodexDriver::new("0.0.0-test", &mut out);
+    driver.on_line(br#"{"id":1,"result":{"userAgent":"test"}}"#, &mut out);
+    driver.fork_on_open(
+        SESSION,
+        keystone_core::ForkPoint {
+            thread: "source".into(),
+            at: "not-a-turn".into(),
+        },
+    );
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Open {
+            session: SESSION,
+            cwd: "/tmp/repo".into(),
+            resume: None,
+            model: None,
+        },
+        &mut out,
+    );
+    let fork: Value = serde_json::from_str(&out.writes[0]).unwrap();
+    let response = format!(
+        r#"{{"id":{},"error":{{"code":-32600,"message":"turn not found: not-a-turn"}}}}"#,
+        fork["id"]
+    );
+    let out = feed(&mut driver, &[response]);
+    assert!(out.writes.is_empty(), "{:?}", out.writes);
+    assert!(out.events.iter().any(|(_, e)| matches!(e,
+        Event::Failed { message } if message == "Could not fork this Codex conversation: turn not found: not-a-turn. The history shown here stays; Hand off (Ctrl+Shift+H) to continue it in a new session.")),
+        "{:?}", out.events);
+}

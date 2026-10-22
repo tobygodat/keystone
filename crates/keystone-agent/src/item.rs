@@ -122,6 +122,13 @@ pub enum Event {
     ApprovalResolved {
         request: RequestId,
     },
+    /// Where the provider could fork the conversation through the turn about to end.
+    /// Sent just before that turn's [`Event::TurnCompleted`], when the provider gave
+    /// its own IDs for both.
+    ForkPoint(keystone_core::ForkPoint),
+    /// The provider can no longer fork at the points it reported before this, as after
+    /// Claude Code compacts the conversation.
+    ForkPointsLost,
     TurnCompleted {
         status: TurnStatus,
         error: Option<String>,

@@ -38,6 +38,8 @@ pub enum CopyTarget {
     DiagramToggle(usize),
     ActivityToggle,
     TextSelection,
+    /// The message row's Fork from here control.
+    Fork,
 }
 
 #[derive(Default)]

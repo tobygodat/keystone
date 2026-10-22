@@ -107,6 +107,7 @@ impl Launch {
         baseline: Option<&'a str>,
         model: Option<&'a str>,
         resume: Option<&'a str>,
+        fork: Option<&'a keystone_core::ForkPoint>,
     ) -> Vec<&'a str> {
         match self {
             Launch::Chat => {
@@ -117,8 +118,16 @@ impl Launch {
                 if let Some(model) = model {
                     args.extend(["--model", model]);
                 }
-                if let Some(resume) = resume {
-                    args.extend(["--resume", resume]);
+                match (resume, fork) {
+                    (Some(resume), _) => args.extend(["--resume", resume]),
+                    (None, Some(fork)) => args.extend([
+                        "--resume",
+                        &fork.thread,
+                        "--fork-session",
+                        "--resume-session-at",
+                        &fork.at,
+                    ]),
+                    (None, None) => {}
                 }
                 args
             }
@@ -160,6 +169,10 @@ struct Turn {
     held: Vec<QueuedMessage>,
     /// Whether the turn's first message was written.
     written: bool,
+    /// The UUID of the turn's latest transcript entry Claude reported: an assistant
+    /// message, a tool result or a message it read. A fork through this turn keeps
+    /// everything up to and including it.
+    last_entry: Option<String>,
 }
 
 /// How long Claude lets a `show_ui` call wait for the user before failing it.
@@ -211,6 +224,8 @@ pub struct ClaudeDriver {
     cancel_queued: bool,
     session: u64,
     resume: bool,
+    /// Whether the process was started to fork another conversation.
+    forking: bool,
     seed: u64,
     next_message: u64,
     next_request: u64,
@@ -316,6 +331,11 @@ impl ClaudeDriver {
         Self::launched(session, resume, seed, mode, Launch::Chat, out)
     }
 
+    /// Says the process was started with `--fork-session`, for a failure to open.
+    pub fn set_forking(&mut self) {
+        self.forking = true;
+    }
+
     /// Names the account and how to sign it in, for a signed-out error.
     pub fn set_sign_in(&mut self, sign_in: Option<&str>) {
         self.sign_in = sign_in.map(str::to_owned);
@@ -333,6 +353,7 @@ impl ClaudeDriver {
             cancel_queued: true,
             session,
             resume,
+            forking: false,
             seed,
             next_message: 0,
             next_request: 0,
@@ -701,6 +722,14 @@ impl ClaudeDriver {
         }
         match (&*envelope.kind, envelope.subtype.as_deref()) {
             ("system", Some("init")) => self.on_init(line, out),
+            // Claude Code resumes a compacted conversation from the boundary on, so an
+            // entry before it can no longer be resumed at.
+            ("system", Some("compact_boundary")) => {
+                if let Some(turn) = &mut self.turn {
+                    turn.last_entry = None;
+                }
+                out.event(self.session, Event::ForkPointsLost)
+            }
             ("system", Some("hook_started")) if self.launch == Launch::LayoutHelper => {
                 self.refuse("ran a hook although Keystone turned hooks off", out)
             }
@@ -750,7 +779,10 @@ impl ClaudeDriver {
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
         self.mcp_request = None;
         self.ui_calls.clear();
-        if self.turn.is_some() {
+        if let Some(turn) = &mut self.turn {
+            // What the process wrote before it died is unknown, so the turn has no
+            // point to fork at.
+            turn.last_entry = None;
             out.event(self.session, Event::RecoveryNeeded);
             self.finish(TurnStatus::Failed, Some(reason.to_owned()), out);
         }
@@ -1204,9 +1236,11 @@ impl ClaudeDriver {
     fn finish(&mut self, status: TurnStatus, error: Option<String>, out: &mut Outputs) {
         self.leaving_plan = false;
         // Only Stop ends a Claude turn early: a denial lets the turn go on.
-        let (held, written, stopped) =
-            self.turn.take().map_or((Vec::new(), false, false), |turn| {
-                (turn.held, turn.written, turn.stopping)
+        let (held, written, stopped, last_entry) = self
+            .turn
+            .take()
+            .map_or((Vec::new(), false, false, None), |turn| {
+                (turn.held, turn.written, turn.stopping, turn.last_entry)
             });
         let carried = if status == TurnStatus::Completed {
             held
@@ -1239,6 +1273,14 @@ impl ClaudeDriver {
             && status == TurnStatus::Failed
         {
             out.event(self.session, Event::UsageLimit(limit));
+        }
+        if let (Launch::Chat, Some(thread), Some(at)) =
+            (self.launch, self.conversation.clone(), last_entry)
+        {
+            out.event(
+                self.session,
+                Event::ForkPoint(keystone_core::ForkPoint { thread, at }),
+            );
         }
         out.event(
             self.session,
@@ -1487,6 +1529,12 @@ impl ClaudeDriver {
             };
             return;
         }
+        if let Some(uuid) = &assistant.uuid {
+            self.ensure_turn(out);
+            if let Some(turn) = &mut self.turn {
+                turn.last_entry = Some(uuid.clone());
+            }
+        }
         if let Some(usage) = &assistant.message.usage {
             let used = usage.input_tokens
                 + usage.cache_creation_input_tokens
@@ -1559,6 +1607,9 @@ impl ClaudeDriver {
         let Ok(user) = serde_json::from_slice::<User>(line) else {
             return self.unknown += 1;
         };
+        if let (Some(turn), Some(uuid)) = (&mut self.turn, &user.uuid) {
+            turn.last_entry = Some(uuid.clone());
+        }
         let parts = match user.message.content {
             Content::Text(text) if user.is_replay => {
                 return self.echo(user.uuid, text, out);
@@ -2026,7 +2077,12 @@ impl ClaudeDriver {
         // `--resume` of a conversation Claude no longer has. Never fall back to a fresh
         // one: the user would see the old conversation while Claude had none of it.
         if self.conversation.is_none() && failed {
-            let message = if self.resume {
+            let message = if self.forking {
+                format!(
+                    "Could not fork this Claude Code conversation: {}. The history shown here stays; Hand off (Ctrl+Shift+H) to continue it in a new session.",
+                    reason()
+                )
+            } else if self.resume {
                 format!(
                     "Could not resume this Claude Code conversation: {}. Start a new Claude session to continue.",
                     reason()
@@ -2288,6 +2344,7 @@ struct Assistant {
     error: Option<String>,
     api_error: Option<String>,
     api_error_params: Option<ApiErrorParams>,
+    uuid: Option<String>,
 }
 
 /// The `api_error` kind Claude gives a request an account's usage limit refused. Its
@@ -2918,6 +2975,165 @@ mod tests {
                 window: None
             }
         )));
+    }
+
+    #[test]
+    fn a_turn_ends_with_the_fork_point_of_its_last_transcript_entry() {
+        let (mut driver, mut out) = idle_driver();
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "again".into(),
+                images: Vec::new(),
+            },
+            &mut out,
+        );
+        out.events.clear();
+        for line in [
+            r#"{"type":"command_lifecycle","command_uuid":"00000000-0000-4000-8007-000000000002","state":"started"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"again"},"uuid":"prompt-1","isReplay":true,"parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"uuid":"entry-1","parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"sub","content":[{"type":"text","text":"sub"}]},"uuid":"subagent-entry","parent_tool_use_id":"t1"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt"}]},"uuid":"result-1","parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"done"}]},"uuid":"entry-2","parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"API Error"}]},"uuid":"error-entry","error":"rate_limit","parent_tool_use_id":null}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+            r#"{"type":"command_lifecycle","command_uuid":"00000000-0000-4000-8007-000000000002","state":"completed"}"#,
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        let end = out
+            .events
+            .iter()
+            .position(|(_, e)| matches!(e, Event::TurnCompleted { .. }))
+            .expect("the turn ended");
+        assert_eq!(
+            out.events[end - 1],
+            (
+                1,
+                Event::ForkPoint(keystone_core::ForkPoint {
+                    thread: "s1".into(),
+                    at: "entry-2".into(),
+                })
+            )
+        );
+        assert_eq!(
+            out.events
+                .iter()
+                .filter(|(_, e)| matches!(e, Event::ForkPoint(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_compaction_loses_earlier_fork_points_and_a_crash_saves_none() {
+        let (mut driver, mut out) = idle_driver();
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "again".into(),
+                images: Vec::new(),
+            },
+            &mut out,
+        );
+        out.events.clear();
+        for line in [
+            r#"{"type":"command_lifecycle","command_uuid":"00000000-0000-4000-8007-000000000002","state":"started"}"#,
+            r#"{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"before"}]},"uuid":"entry-0","parent_tool_use_id":null}"#,
+            r#"{"type":"system","subtype":"compact_boundary","session_id":"s1","uuid":"boundary","compact_metadata":{"trigger":"auto","pre_tokens":1}}"#,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["overloaded"]}"#,
+            r#"{"type":"command_lifecycle","command_uuid":"00000000-0000-4000-8007-000000000002","state":"completed"}"#,
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        assert!(out.events.contains(&(1, Event::ForkPointsLost)));
+        assert!(
+            out.events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::TurnCompleted { .. })),
+            "{:?}",
+            out.events
+        );
+        assert!(
+            !out.events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ForkPoint(_))),
+            "{:?}",
+            out.events
+        );
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "more".into(),
+                images: Vec::new(),
+            },
+            &mut out,
+        );
+        out.events.clear();
+        for line in [
+            r#"{"type":"command_lifecycle","command_uuid":"00000000-0000-4000-8007-000000000003","state":"started"}"#,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"partial"}]},"uuid":"entry-1","parent_tool_use_id":null}"#,
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        driver.on_exit("killed", &mut out);
+        assert!(
+            out.events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::TurnCompleted { .. })),
+            "{:?}",
+            out.events
+        );
+        assert!(
+            !out.events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ForkPoint(_))),
+            "{:?}",
+            out.events
+        );
+    }
+
+    #[test]
+    fn a_fork_resumes_the_source_as_a_new_session_cut_at_its_point() {
+        let fork = keystone_core::ForkPoint {
+            thread: "source".into(),
+            at: "entry-2".into(),
+        };
+        let args = Launch::Chat.args(ApprovalMode::Provider, None, None, None, Some(&fork));
+        assert_eq!(
+            args[ARGS.len()..],
+            [
+                "--resume",
+                "source",
+                "--fork-session",
+                "--resume-session-at",
+                "entry-2"
+            ]
+        );
+        // The fork's own conversation, once known, is resumed instead.
+        let args = Launch::Chat.args(
+            ApprovalMode::Provider,
+            None,
+            None,
+            Some("fork"),
+            Some(&fork),
+        );
+        assert_eq!(args[ARGS.len()..], ["--resume", "fork"]);
+        let helper =
+            Launch::LayoutHelper.args(ApprovalMode::Provider, None, None, None, Some(&fork));
+        assert!(!helper.contains(&"--fork-session"));
+
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(1, true, 0, ApprovalMode::Provider, &mut out);
+        driver.set_forking();
+        driver.on_line(
+            br#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["No message found with message.uuid of: entry-2"]}"#,
+            &mut out,
+        );
+        assert!(out.events.iter().any(|(_, e)| matches!(e,
+            Event::Failed { message } if message.starts_with("Could not fork this Claude Code conversation: No message found"))),
+            "{:?}", out.events);
     }
 
     /// A driver past `initialize` and one completed turn, so nothing Keystone itself

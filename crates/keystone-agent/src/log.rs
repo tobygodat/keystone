@@ -82,6 +82,16 @@ pub enum Entry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run: Option<u64>,
     },
+    /// Where the provider can fork the conversation through a turn, saved as the turn
+    /// ends. `first` and `last` are the IDs of the turn's first and last items, which
+    /// place it among the rows.
+    ForkPoint {
+        point: keystone_core::ForkPoint,
+        first: String,
+        last: String,
+    },
+    /// The provider can no longer fork at the points saved before this one.
+    ForkPointsLost,
     /// An agent-built widget, whole, saved each time it changes. The latest entry for
     /// a `call` replaces earlier ones; `seq` and `run` place its row as for an item.
     Surface {
