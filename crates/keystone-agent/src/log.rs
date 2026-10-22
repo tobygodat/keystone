@@ -68,6 +68,16 @@ pub enum Entry {
     /// The provider exited during a turn, so what it saved must be checked. A later
     /// `Recovery` or a new turn settles it; until then every restore checks again.
     ProviderExited,
+    /// The images sent with the user message logged just before it, by reference: the
+    /// bytes stay in Keystone's attachments folder. `seq` and `run` place its row as
+    /// for an item. Builds before attachments skip it.
+    Attachments {
+        attachments: Vec<keystone_core::Attachment>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<u64>,
+    },
     /// An agent-built widget, whole, saved each time it changes. The latest entry for
     /// a `call` replaces earlier ones; `seq` and `run` place its row as for an item.
     Surface {
@@ -378,6 +388,7 @@ impl Gap {
             Entry::Item { seq, run, .. }
             | Entry::Approval { seq, run, .. }
             | Entry::TurnEnded { seq, run, .. }
+            | Entry::Attachments { seq, run, .. }
             | Entry::Surface { seq, run, .. } => (*seq, *run),
             _ => (None, None),
         };
@@ -2799,5 +2810,28 @@ mod tests {
             fs::read(sessions.join("7.jsonl")).unwrap(),
             b"{\"entry\":\"turn_started\"}\n{\"entry\":\"turn_en"
         );
+    }
+
+    /// A sent message's images are logged as references: hash, type and name, never
+    /// their bytes.
+    #[test]
+    fn attachments_are_logged_as_references() {
+        let entry = Entry::Attachments {
+            attachments: vec![keystone_core::Attachment {
+                sha256: "ab".repeat(32),
+                media_type: "image/png".into(),
+                name: "shot.png".into(),
+            }],
+            seq: Some(1),
+            run: Some(2),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"entry": "attachments", "attachments": [
+                {"sha256": "ab".repeat(32), "media_type": "image/png", "name": "shot.png"}
+            ], "seq": 1, "run": 2})
+        );
+        assert_eq!(serde_json::from_value::<Entry>(json).unwrap(), entry);
     }
 }

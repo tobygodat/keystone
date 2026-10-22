@@ -252,7 +252,12 @@ impl Keystone {
     /// session without one has no mentions: the project folder Files falls back to
     /// may not be the folder it will run in.
     pub(crate) fn mention_root(&self, cx: &App) -> Option<PathBuf> {
-        match self.conversation_folder(self.selected(cx)?, cx)? {
+        self.session_root(self.selected(cx)?, cx)
+    }
+
+    /// `session`'s recorded folder; see [`Self::mention_root`].
+    pub(crate) fn session_root(&self, session: u64, cx: &App) -> Option<PathBuf> {
+        match self.conversation_folder(session, cx)? {
             crate::presentation::ConversationFolder::Recorded(directory) => {
                 Some(directory.path().to_owned())
             }
@@ -454,12 +459,21 @@ impl Keystone {
         else {
             return;
         };
-        let Some(token) = token(&relative) else {
-            return;
-        };
+        if let Some(token) = token(&relative) {
+            self.insert_mention(&token, window, cx);
+        }
+    }
+
+    /// Inserts `token` at the composer's caret as one token, and saves the draft.
+    pub(crate) fn insert_mention(
+        &mut self,
+        token: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.composer.update(cx, |input, cx| {
             let caret = input.cursor();
-            input.insert_token(caret..caret, &token, cx)
+            input.insert_token(caret..caret, token, cx)
         });
         self.save_draft(cx);
         self.composer.focus_handle(cx).focus(window, cx);

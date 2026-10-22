@@ -605,6 +605,7 @@ impl AppState {
                     ComposerDraft {
                         session: id,
                         text: launch.message,
+                        attachments: Vec::new(),
                     },
                     Some(caller),
                     true,
@@ -624,7 +625,8 @@ impl AppState {
                 connection
                     .steer_from(send.session, send.message.clone(), caller)
                     .map_err(str::to_owned)?;
-                self.conversation(send.session).push_local(&send.message);
+                self.conversation(send.session)
+                    .push_sent(&send.message, Vec::new());
                 self.commit(send.session);
                 self.persist(PendingSave::Message(send.session, send.message, now_ms()));
                 self.refresh(cx);
@@ -678,6 +680,10 @@ impl AppState {
                         Row::Recovery(report) => {
                             json!({"position":index,"recovery":report,"truncated":false})
                         }
+                        Row::Attachments(attachments) => json!({"position":index,
+                            "attachments":attachments.iter().map(|a| json!({
+                                "name":a.name,"media_type":a.media_type,"sha256":a.sha256
+                            })).collect::<Vec<_>>(),"truncated":false}),
                         // What the user did in it, not how it is drawn.
                         Row::Surface(surface) => json!({"position":index,"surface":{
                             "call":surface.call,"surface_id":surface.surface_id,

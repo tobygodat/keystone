@@ -21,6 +21,9 @@
 //! `fake-default`, remembered per thread for the process. Each reply ends with it.
 //! `skills/list` answers the skills in `$CODEX_HOME/skills` and the folder's
 //! `.agents/skills` and `.codex/skills`, then one scripted system skill.
+//! `turn/start` takes `localImage` input items beside the text; with
+//! `KEYSTONE_FAKE_IMAGE_RECEIPT` set, each one's path and the hash of the file there is
+//! appended to it (see `support/images.rs`), and the reply names them.
 //! `KEYSTONE_FAKE_ENV_RECEIPT` names a file each process appends its environment to, and
 //! a `CODEX_HOME` that is not a directory fails the start, as the real CLI does.
 //!
@@ -56,6 +59,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[path = "support/images.rs"]
+mod images;
 #[path = "support/orchestrator.rs"]
 mod orchestrator;
 #[path = "support/widgets.rs"]
@@ -479,10 +484,15 @@ fn main() {
             }
             "turn/start" => {
                 let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
-                let text = params["input"][0]["text"]
-                    .as_str()
+                let input = params["input"].as_array().cloned().unwrap_or_default();
+                let text = input
+                    .iter()
+                    .find(|item| item["type"] == "text")
+                    .and_then(|item| item["text"].as_str())
                     .unwrap_or_default()
                     .to_owned();
+                let images =
+                    images::record(&input.iter().filter_map(image_item).collect::<Vec<_>>());
                 if !params["approvalPolicy"].is_null() {
                     policies.insert(
                         thread.clone(),
@@ -530,6 +540,7 @@ fn main() {
                         &thread,
                         &turn_id,
                         &text,
+                        &images,
                         &policy,
                         &model,
                         server.as_ref(),
@@ -568,7 +579,13 @@ fn main() {
                 }
                 match live.get(turn_id) {
                     Some(turn) => {
-                        let text = params["input"][0]["text"].as_str().unwrap_or_default();
+                        let input = params["input"].as_array().cloned().unwrap_or_default();
+                        let text = input
+                            .iter()
+                            .find(|item| item["type"] == "text")
+                            .and_then(|item| item["text"].as_str())
+                            .unwrap_or_default();
+                        images::record(&input.iter().filter_map(image_item).collect::<Vec<_>>());
                         *turn.steer.lock().unwrap() = Some(text.to_owned());
                         reply(json!({"turnId": turn_id}));
                     }
@@ -633,6 +650,7 @@ fn run_turn(
     thread: &str,
     turn_id: &str,
     text: &str,
+    images: &str,
     policy: &str,
     model: &str,
     server: Option<&orchestrator::Server>,
@@ -781,7 +799,7 @@ fn run_turn(
         format!(
             "Scripted Codex reply (test data, no model call). You wrote: {text}. \
              This reply streams one word at a time so streaming, steering, and stopping can be checked. \
-             **Approvals:** `{policy}` **Model:** `{model}`"
+             **Approvals:** `{policy}` **Model:** `{model}`{images}"
         )
     });
     let mut steer = None;
@@ -915,4 +933,17 @@ fn finish(out: &Out, thread: &str, turn_id: &str, status: &str) {
         "turn/completed",
         json!({"threadId": thread, "turn": {"id": turn_id, "status": status, "error": null}}),
     );
+}
+
+/// A Codex `localImage` input item: its path, and the hash of the file there.
+fn image_item(item: &Value) -> Option<Value> {
+    if item["type"] != "localImage" {
+        return None;
+    }
+    let path = item["path"].as_str().unwrap_or_default();
+    let data = std::fs::read(path).ok();
+    Some(
+        json!({"provider": "codex", "path": path, "exists": data.is_some(),
+        "sha256": data.as_deref().map(images::sha256), "bytes": data.map(|d| d.len())}),
+    )
 }

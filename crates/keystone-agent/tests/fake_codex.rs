@@ -58,6 +58,7 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     conn.command(Command::Send {
         session: 1,
         text: "hello".into(),
+        images: Vec::new(),
     });
     let events = until(&conn, &wake, completed);
     assert!(matches!(events[0], Event::ThreadReady { .. }));
@@ -73,11 +74,13 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     conn.command(Command::Send {
         session: 1,
         text: "long".into(),
+        images: Vec::new(),
     });
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
     conn.command(Command::Send {
         session: 1,
         text: "change course".into(),
+        images: Vec::new(),
     });
     let events = until(&conn, &wake, completed);
     assert!(events.iter().any(|e| matches!(e,
@@ -87,6 +90,7 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     conn.command(Command::Send {
         session: 1,
         text: "another".into(),
+        images: Vec::new(),
     });
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
     assert!(conn.is_running(1));
@@ -105,6 +109,7 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     conn.command(Command::Send {
         session: 1,
         text: "please run it".into(),
+        images: Vec::new(),
     });
     let events = until(&conn, &wake, |e| matches!(e, Event::ApprovalRequested(_)));
     let Some(Event::ApprovalRequested(approval)) = events.last() else {
@@ -134,6 +139,7 @@ fn two_sessions_share_one_process() {
         conn.command(Command::Send {
             session,
             text: format!("session {session}"),
+            images: Vec::new(),
         });
     }
     let deadline = Instant::now() + Duration::from_secs(10);

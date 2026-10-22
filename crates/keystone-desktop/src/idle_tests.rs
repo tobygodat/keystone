@@ -84,6 +84,7 @@ fn send(state: &Entity<AppState>, text: &str, cx: &mut gpui::TestAppContext) {
             ComposerDraft {
                 session: 1,
                 text: text.into(),
+                attachments: Vec::new(),
             },
             cx
         ))
@@ -241,6 +242,7 @@ fn a_dormant_session_still_waits_for_recovery_before_sending(cx: &mut gpui::Test
             ComposerDraft {
                 session: 1,
                 text: "held".into(),
+                attachments: Vec::new(),
             },
             cx
         ));

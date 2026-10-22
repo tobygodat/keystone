@@ -89,6 +89,14 @@ fn entry(row: &Row, position: usize, provider: Provider) -> Option<(bool, String
             ),
             None => format!("Showed widget `{}`", surface.surface_id),
         }),
+        Row::Attachments(attachments) => line(format!(
+            "The user attached {}",
+            attachments
+                .iter()
+                .map(|a| format!("`{}`", one_line(&a.name)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
         Row::Recovery(_) => None,
     }
 }

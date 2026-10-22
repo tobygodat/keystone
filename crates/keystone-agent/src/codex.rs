@@ -7,7 +7,7 @@
 //! the 0.163.0 app-server schema.
 
 use crate::commands::{self, Commands};
-use crate::driver::{ApprovalState, Command, Outputs};
+use crate::driver::{ApprovalState, Command, Image, Outputs};
 use crate::item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
     cap_output,
@@ -148,6 +148,7 @@ enum Turn {
 
 struct QueuedMessage {
     text: String,
+    images: Vec<Image>,
     authorization: Option<(Issuer, Caller)>,
 }
 
@@ -280,6 +281,7 @@ impl CodexDriver {
             session,
             QueuedMessage {
                 text,
+                images: Vec::new(),
                 authorization: Some((issuer, caller)),
             },
             out,
@@ -315,6 +317,7 @@ impl CodexDriver {
                 session,
                 message: QueuedMessage {
                     text,
+                    images: Vec::new(),
                     authorization: None,
                 },
                 turn,
@@ -382,10 +385,15 @@ impl CodexDriver {
                     state.overridden |= overridden;
                 }
             }
-            Command::Send { session, text } => self.send(
+            Command::Send {
+                session,
+                text,
+                images,
+            } => self.send(
                 session,
                 QueuedMessage {
                     text,
+                    images,
                     authorization: None,
                 },
                 out,
@@ -663,7 +671,7 @@ impl CodexDriver {
                 let epoch = state.epoch;
                 let line = self.request(
                     "turn/steer",
-                    json!({"threadId": thread, "expectedTurnId": turn, "input": text_input(&message.text)}),
+                    json!({"threadId": thread, "expectedTurnId": turn, "input": input(&message.text, &message.images)}),
                     Pending::Steer {
                         session,
                         message,
@@ -675,7 +683,8 @@ impl CodexDriver {
                 self.write(line, out);
             }
             (Some(thread), Turn::Idle) => {
-                let mut params = json!({"threadId": thread, "input": text_input(&message.text)});
+                let mut params =
+                    json!({"threadId": thread, "input": input(&message.text, &message.images)});
                 match (state.policy, state.overridden) {
                     (Some(policy), _) => {
                         let (approval, sandbox) = policy.params();
@@ -1396,6 +1405,17 @@ impl CodexDriver {
 
 fn text_input(text: &str) -> Value {
     json!([{"type": "text", "text": text}])
+}
+
+/// A message's input items: its text, left out when empty beside images, then a
+/// `localImage` per image, which Codex reads from its path.
+fn input(text: &str, images: &[Image]) -> Value {
+    let text =
+        (!text.is_empty() || images.is_empty()).then(|| json!({"type": "text", "text": text}));
+    let images = images
+        .iter()
+        .map(|image| json!({"type": "localImage", "path": image.path}));
+    Value::Array(text.into_iter().chain(images).collect())
 }
 
 fn params<'a, T: Deserialize<'a>>(line: &'a [u8]) -> Option<T> {

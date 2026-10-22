@@ -133,6 +133,7 @@ fn draft(text: &str) -> ComposerDraft {
     ComposerDraft {
         session: 1,
         text: text.into(),
+        attachments: Vec::new(),
     }
 }
 

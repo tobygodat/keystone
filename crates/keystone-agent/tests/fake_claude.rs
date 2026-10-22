@@ -1137,3 +1137,67 @@ fn dropping_ends_a_hung_settings_probe() {
     gate::gone(probe);
     assert_eq!(started_in(path).len(), 2, "nothing started after the drop");
 }
+
+/// The connection reads each attached image off the caller's thread and Claude gets
+/// its bytes in a base64 block (the scripted Claude's reply names the type and the
+/// first hex digits of the hash it decoded). A file gone by then fails a new turn with
+/// its path rather than sending the message without it; a steer is refused with a
+/// warning and the running turn goes on.
+#[test]
+fn attached_images_reach_claude_as_their_bytes() {
+    use keystone_agent::{Connection, Image};
+    let dir = project("images", &[]);
+    let image = std::path::Path::new(&dir).join("shot.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nscripted").unwrap();
+    let (conn, wake) = connect();
+    let send = |path: &std::path::Path| {
+        Connection::send(
+            &conn,
+            1,
+            &dir,
+            None,
+            None,
+            NO_MODE,
+            "look".into(),
+            vec![Image {
+                path: path.to_owned(),
+                media_type: "image/png".into(),
+                base64: None,
+            }],
+        )
+        .unwrap()
+    };
+    send(&image);
+    let events = until(&conn, &wake, completed);
+    assert!(
+        reply(&events)
+            .unwrap()
+            .ends_with("**Images:** image/png 7b08d4b4"),
+        "{:?}",
+        reply(&events)
+    );
+    send(&std::path::Path::new(&dir).join("gone.png"));
+    let events = until(&conn, &wake, |e| matches!(e, Event::Failed { .. }));
+    assert!(events.iter().any(|e| matches!(e,
+        Event::Failed { message } if message.starts_with("Not sent: the attached image ")
+            && message.contains("gone.png could not be read"))));
+
+    conn.send(1, &dir, None, None, NO_MODE, "long".into())
+        .unwrap();
+    until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
+    send(&std::path::Path::new(&dir).join("gone.png"));
+    let events = until(&conn, &wake, completed);
+    assert!(events.iter().any(|e| matches!(e,
+        Event::Warning { message } if message.contains("gone.png could not be read"))));
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Failed { .. })),
+        "{events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnCompleted {
+            status: TurnStatus::Completed,
+            ..
+        })
+    ));
+}

@@ -49,6 +49,9 @@
 //! file each user message it reads.
 //!
 //! `KEYSTONE_FAKE_ENV_RECEIPT` names a file each process appends its environment to.
+//! A user message's content may be a list of text and base64 `image` blocks; with
+//! `KEYSTONE_FAKE_IMAGE_RECEIPT` set, each image's media type and byte hash is appended
+//! there (see `support/images.rs`), and the reply names them.
 //!
 //! A prompt containing "usage NN" gives its reply's last assistant message token usage
 //! (NN/2 % of a 200,000-token context) and, before its `result`, a synthetic, labelled
@@ -108,6 +111,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/images.rs"]
+mod images;
 #[path = "support/orchestrator.rs"]
 mod orchestrator;
 #[path = "support/widgets.rs"]
@@ -247,6 +252,8 @@ enum Abort {
 struct Queued {
     uuid: String,
     text: String,
+    /// What the reply says about the images sent with the text.
+    images: String,
 }
 
 #[derive(Default)]
@@ -772,10 +779,19 @@ fn main() {
             }
             Some("user") => {
                 let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
-                let text = message["message"]["content"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned();
+                let content = &message["message"]["content"];
+                let blocks = content.as_array().cloned().unwrap_or_default();
+                let text = match content.as_str() {
+                    Some(text) => text.to_owned(),
+                    None => blocks
+                        .iter()
+                        .filter(|block| block["type"] == "text")
+                        .filter_map(|block| block["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                };
+                let images =
+                    images::record(&blocks.iter().filter_map(image_block).collect::<Vec<_>>());
                 if let Ok(mut messages) = std::fs::OpenOptions::new()
                     .append(true)
                     .open(".fake-claude-messages")
@@ -793,7 +809,7 @@ fn main() {
                 if state.busy && message["priority"] == "now" {
                     state.abort = Some(Abort::Steer);
                 }
-                state.queue.push_back(Queued { uuid, text });
+                state.queue.push_back(Queued { uuid, text, images });
                 shared.wake.notify_all();
             }
             _ => {}
@@ -1008,7 +1024,15 @@ fn work(
             "cancelled"
         } else {
             answer(
-                out, shared, session, turn, &next.uuid, &next.text, &mode, delay,
+                out,
+                shared,
+                session,
+                turn,
+                &next.uuid,
+                &next.text,
+                &next.images,
+                &mode,
+                delay,
             )
         };
         lifecycle(out, shared, session, &next.uuid, ended);
@@ -1158,6 +1182,7 @@ fn answer(
     turn: u64,
     request: &str,
     text: &str,
+    images: &str,
     mode: &str,
     delay: Duration,
 ) -> &'static str {
@@ -1205,7 +1230,7 @@ fn answer(
     let scripted = orchestrator::reply(text, server.as_ref(), &request);
     let mut reply = scripted.or_else(|| std::env::var("KEYSTONE_FAKE_CLAUDE_REPLY").ok()).unwrap_or_else(|| {
         format!(
-            "Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan} **Model:** `{model}`"
+            "Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan} **Model:** `{model}`{images}"
         )
     });
     if text.contains("long") {
@@ -1541,4 +1566,19 @@ fn stopped(out: &Out) -> &'static str {
                "errors": ["interrupted"]}),
     );
     "cancelled"
+}
+
+/// A Claude `image` block: its media type and the hash of its decoded bytes.
+fn image_block(block: &Value) -> Option<Value> {
+    if block["type"] != "image" {
+        return None;
+    }
+    let source = &block["source"];
+    let data = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        source["data"].as_str().unwrap_or_default(),
+    )
+    .unwrap_or_default();
+    Some(json!({"provider": "claude", "source": source["type"],
+        "media_type": source["media_type"], "sha256": images::sha256(&data), "bytes": data.len()}))
 }

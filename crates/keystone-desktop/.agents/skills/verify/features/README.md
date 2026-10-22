@@ -23,6 +23,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Files](files.md) covers the sidebar's Sessions and Files toggle, lazy folder listing that respects `.gitignore`, opening files in an external editor, Copy path, and the spawn error row.
 - [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, choosing the provider and model before the first Send, and restoring a conversation.
 - [File mentions](mentions.md) covers the composer's `@` picker over the session folder's files, choosing a path as one token that Backspace removes whole, Escape, sending as typed, Files' Mention in composer, and tokens after a restart.
+- [Attachments](attachments.md) covers attaching images by paste, drop, the attach button or a typed path, their chips, refusals, restoring them with the draft, sending them to each provider in its own image form, and mentioning other files by path.
 - [Handoff](handoff.md) covers handing a session off to a new linked session on another provider, account or model: the handoff text and budget, the selector, Send on the chosen account, link rows both ways, and restart.
 - [Claude idle shutdown](provider-idle.md) covers proven-idle eviction of a scripted Claude, lazy resume with the same thread, folder, flags, account and requested model, and held work that keeps its process.
 - [Keyboard transcript actions](transcript-keyboard.md) covers virtual row/action navigation, exact copy bytes, occurrence-scoped Jump and hidden-focus transitions.

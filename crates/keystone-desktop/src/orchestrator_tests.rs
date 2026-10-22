@@ -86,7 +86,8 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
         assert!(state.send_message(
             ComposerDraft {
                 session: 1,
-                text: format!("orchestrator test: launch {target}")
+                text: format!("orchestrator test: launch {target}"),
+                attachments: Vec::new(),
             },
             cx
         ))
@@ -128,7 +129,8 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
         assert!(state.send_message(
             ComposerDraft {
                 session: 1,
-                text: "long".into()
+                text: "long".into(),
+                attachments: Vec::new(),
             },
             cx
         ))
@@ -402,7 +404,8 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
         assert!(state.send_message(
             ComposerDraft {
                 session: 1,
-                text: "orchestrator test: launch claude".into()
+                text: "orchestrator test: launch claude".into(),
+                attachments: Vec::new(),
             },
             cx
         ))
@@ -431,7 +434,8 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
         assert!(state.send_message(
             ComposerDraft {
                 session: 1,
-                text: "long".into()
+                text: "long".into(),
+                attachments: Vec::new(),
             },
             cx
         ))
@@ -482,7 +486,8 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
         assert!(state.send_message(
             ComposerDraft {
                 session: 2,
-                text: "resume the child".into()
+                text: "resume the child".into(),
+                attachments: Vec::new(),
             },
             cx
         ))
@@ -578,7 +583,14 @@ fn orchestrate_turn(
 ) -> String {
     let before = state.read_with(cx, |state, _| transcript(state, 1).len());
     state.update(cx, |state, cx| {
-        assert!(state.send_message(ComposerDraft { session: 1, text }, cx))
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text,
+                attachments: Vec::new(),
+            },
+            cx
+        ))
     });
     wait_until(state, cx, |state| {
         state.conversations.get(&1).is_some_and(|c| !c.running)
@@ -684,7 +696,8 @@ fn an_agent_in_a_worktree_may_create_another(cx: &mut gpui::TestAppContext) {
         assert!(state.send_message(
             ComposerDraft {
                 session: 1,
-                text: "long".into()
+                text: "long".into(),
+                attachments: Vec::new(),
             },
             cx
         ))

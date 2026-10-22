@@ -33,6 +33,7 @@ fn send(n: usize) -> Command {
     Command::Send {
         session: SESSION,
         text: SENT[n - 1].into(),
+        images: Vec::new(),
     }
 }
 
@@ -288,6 +289,60 @@ fn a_steer_during_a_tool_call_waits_for_the_tool() {
     assert_eq!(parse(&out.writes[0])["priority"], "next");
 }
 
+/// Images go as base64 `image` blocks after the text, as the TOB-59 probe found Claude
+/// Code 2.1.301 takes them, and a message of images alone has no empty text block.
+#[test]
+fn images_are_sent_as_base64_blocks_after_the_text() {
+    let image = |media_type: &str, data: &[u8]| keystone_agent::Image {
+        path: "/data/attachments/x".into(),
+        media_type: media_type.into(),
+        base64: Some(
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data).into(),
+        ),
+    };
+    let content = |text: &str, images| {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+        ready(&mut driver, &mut out, ApprovalMode::Provider);
+        out.writes.clear();
+        let text = text.into();
+        driver.command(
+            Command::Send {
+                session: SESSION,
+                text,
+                images,
+            },
+            &mut out,
+        );
+        parse(&out.writes[0])["message"]["content"].clone()
+    };
+    assert_eq!(
+        content(
+            "What changed?",
+            vec![
+                image("image/png", b"png bytes"),
+                image("image/webp", b"webp")
+            ]
+        ),
+        serde_json::json!([
+            {"type": "text", "text": "What changed?"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "cG5nIGJ5dGVz"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "d2VicA=="}},
+        ])
+    );
+    assert_eq!(
+        content("", vec![image("image/gif", b"gif")]),
+        serde_json::json!([
+            {"type": "image", "source": {"type": "base64", "media_type": "image/gif", "data": "Z2lm"}},
+        ])
+    );
+    assert_eq!(
+        content("plain", Vec::new()),
+        "plain",
+        "text alone stays a string"
+    );
+}
+
 /// The resume recording's one message UUID was renumbered to the first a driver makes.
 #[test]
 fn a_resumed_conversation_keeps_its_id() {
@@ -298,6 +353,7 @@ fn a_resumed_conversation_keeps_its_id() {
         Command::Send {
             session: SESSION,
             text: "What exact phrase did I ask you to reply with in my first message? Answer with only that phrase.".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -1328,6 +1384,7 @@ fn messages_only_ever_run_in_the_mode_selected_when_they_were_written() {
                             Command::Send {
                                 session: SESSION,
                                 text: format!("m{text}"),
+                                images: Vec::new(),
                             },
                             &mut out,
                         );

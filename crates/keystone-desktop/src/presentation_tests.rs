@@ -453,6 +453,7 @@ fn legacy_choice_saves_without_send_and_unsupported_data_cannot_be_replaced(
             crate::ComposerDraft {
                 session: 1,
                 text: "Explicit only".into(),
+                attachments: Vec::new(),
             },
             window,
             cx,
@@ -480,6 +481,7 @@ fn legacy_choice_saves_without_send_and_unsupported_data_cannot_be_replaced(
             crate::ComposerDraft {
                 session: 2,
                 text: "Never send unsupported".into(),
+                attachments: Vec::new(),
             },
             window,
             cx,
@@ -539,6 +541,7 @@ fn unavailable_recorded_directory_never_uses_the_layout_project(cx: &mut TestApp
                 crate::ComposerDraft {
                     session: 1,
                     text: "Keep unavailable draft".into(),
+                    attachments: Vec::new(),
                 },
                 window,
                 cx,
@@ -707,6 +710,7 @@ fn send_with_unrelated_save_debt_refuses_without_blaming_a_folder(cx: &mut TestA
             crate::ComposerDraft {
                 session: 1,
                 text: "Retry later".into(),
+                attachments: Vec::new(),
             },
             window,
             cx,
@@ -735,6 +739,7 @@ fn first_send_lock_waits_for_the_send_barrier_when_its_sync_is_pending(cx: &mut 
             crate::ComposerDraft {
                 session: 1,
                 text: "First message".into(),
+                attachments: Vec::new(),
             },
             window,
             cx,
@@ -1245,6 +1250,7 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
             crate::ComposerDraft {
                 session: 2,
                 text: "hello".into(),
+                attachments: Vec::new(),
             },
             window,
             cx,

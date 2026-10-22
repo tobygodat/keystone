@@ -12,6 +12,7 @@ mod account;
 #[cfg(test)]
 #[path = "account_tests.rs"]
 mod account_tests;
+pub mod attachment;
 mod composition;
 mod database;
 pub mod integrations;
@@ -28,6 +29,7 @@ mod windows;
 pub mod worktree;
 
 pub use account::{Account, AccountId, expand_home, homes_overlap, lexical};
+pub use attachment::Attachment;
 pub use composition::{
     Axis, Child, Component, Composition, Edit, Node, NodePath, Place, Problem, SavedComposition,
     Size, ViewId,
@@ -156,6 +158,9 @@ pub struct Session {
     execution_context: SavedSessionContext,
     settled: bool,
     draft: String,
+    /// Images attached to the draft, sent with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    draft_attachments: Vec<Attachment>,
     /// The provider's own conversation ID, used to resume after a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_thread: Option<String>,
@@ -270,6 +275,7 @@ impl Session {
             execution_context: SavedSessionContext::recorded(directory, ContextOrigin::Created),
             settled: false,
             draft: String::new(),
+            draft_attachments: Vec::new(),
             provider_thread: None,
             created_at: Some(now),
             updated_at: Some(now),
@@ -311,6 +317,10 @@ impl Session {
 
     pub fn draft(&self) -> &str {
         &self.draft
+    }
+
+    pub fn draft_attachments(&self) -> &[Attachment] {
+        &self.draft_attachments
     }
 
     pub fn provider_thread(&self) -> Option<&str> {
@@ -1357,6 +1367,14 @@ impl Store {
         self.update_session(id, |session| session.draft = text)
     }
 
+    pub fn set_draft_attachments(
+        &mut self,
+        id: u64,
+        attachments: Vec<Attachment>,
+    ) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.draft_attachments = attachments)
+    }
+
     fn update_preferences(
         &mut self,
         change: impl FnOnce(&mut Preferences),
@@ -1539,6 +1557,35 @@ mod tests {
 
     fn working_directory() -> WorkingDirectory {
         WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    #[test]
+    fn draft_attachments_are_saved_with_the_session_and_cleared_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        let image = Attachment {
+            sha256: "ab".repeat(32),
+            media_type: "image/png".into(),
+            name: "shot.png".into(),
+        };
+        store.set_draft(1, "look".into()).unwrap();
+        store.set_draft_attachments(1, vec![image.clone()]).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        let session = &reopened.workspace().sessions()[0];
+        assert_eq!(session.draft(), "look");
+        assert_eq!(session.draft_attachments(), [image]);
+        store.set_draft_attachments(1, Vec::new()).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert!(
+            reopened.workspace().sessions()[0]
+                .draft_attachments()
+                .is_empty()
+        );
+        assert_eq!(reopened.workspace().sessions()[0].draft(), "look");
     }
 
     #[test]

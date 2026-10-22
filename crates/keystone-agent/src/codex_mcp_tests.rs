@@ -55,6 +55,7 @@ fn human(driver: &mut CodexDriver, out: &mut Outputs) {
         Command::Send {
             session: SESSION,
             text: "human".into(),
+            images: Vec::new(),
         },
         out,
     );

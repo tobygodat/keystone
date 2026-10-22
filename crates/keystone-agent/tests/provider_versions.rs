@@ -81,6 +81,7 @@ fn scripted_versions_warn_or_refuse_before_sending_and_gate_optional_fields() {
             None,
             ApprovalState::default(),
             "hello".into(),
+            Vec::new(),
         )
         .unwrap();
         let events = collect(conn.as_ref(), &rx, |e| {
@@ -145,6 +146,7 @@ fn scripted_versions_warn_or_refuse_before_sending_and_gate_optional_fields() {
                 None,
                 ApprovalState::default(),
                 "hello".into(),
+                Vec::new(),
             )
             .unwrap();
             let second = collect(conn.as_ref(), &rx, |e| {
@@ -189,6 +191,7 @@ fn unavailable_version_probe_is_bounded_and_does_not_prevent_a_safe_turn() {
             None,
             ApprovalState::default(),
             "hello".into(),
+            Vec::new(),
         )
         .unwrap();
         let events = collect(&conn, &rx, |e| matches!(e, Event::TurnCompleted { .. }));
@@ -282,6 +285,7 @@ fn rejected_codex_notification_capability_retries_plain_handshake_without_losing
         None,
         ApprovalState::default(),
         "hello".into(),
+        Vec::new(),
     )
     .unwrap();
     let events = collect(&conn, &rx, |e| matches!(e, Event::TurnCompleted { .. }));

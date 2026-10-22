@@ -3,6 +3,8 @@
 
 use crate::item::{Event, RequestId};
 use keystone_core::ApprovalMode;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The approval mode a session's next turns run under. Each driver maps the mode to its
 /// provider's own settings; see "Approval modes" in `docs/design/providers.md`.
@@ -29,6 +31,7 @@ pub enum Command {
     Send {
         session: u64,
         text: String,
+        images: Vec<Image>,
     },
     Interrupt {
         session: u64,
@@ -51,6 +54,16 @@ pub enum Command {
         session: u64,
         approval: ApprovalState,
     },
+}
+
+/// An image sent after a message's text. Codex reads `path` itself. Claude is sent
+/// `base64`, the file's bytes in base64, which its connection reads and encodes before
+/// the driver needs them, since drivers do no IO.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Image {
+    pub path: PathBuf,
+    pub media_type: String,
+    pub base64: Option<Arc<str>>,
 }
 
 /// Lines to write to the provider and events for each session.

@@ -10,7 +10,7 @@
 //! completes, or cancels it. A steer can fold into the running turn (one `result`) or
 //! abort it and run next (two), so counting results alone is not enough.
 
-use crate::driver::{ApprovalState, Command, Outputs};
+use crate::driver::{ApprovalState, Command, Image, Outputs};
 use crate::item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
     cap_output,
@@ -194,6 +194,7 @@ struct Quiesce {
 
 pub struct QueuedMessage {
     text: String,
+    images: Vec<Image>,
     authorization: Option<(Issuer, Caller)>,
 }
 
@@ -443,6 +444,7 @@ impl ClaudeDriver {
         self.enqueue(
             QueuedMessage {
                 text,
+                images: Vec::new(),
                 authorization: Some((issuer, caller)),
             },
             out,
@@ -466,6 +468,7 @@ impl ClaudeDriver {
         self.write(
             QueuedMessage {
                 text,
+                images: Vec::new(),
                 authorization: None,
             },
             out,
@@ -596,7 +599,7 @@ impl ClaudeDriver {
                 }
                 self.pump(out);
             }
-            Command::Send { text, .. } => self.send(text, out),
+            Command::Send { text, images, .. } => self.send(text, images, out),
             Command::Act { call, text, .. } => match self.ui_calls.remove(&call) {
                 Some((request_id, id)) => out.writes.push(mcp_response(
                     &request_id,
@@ -974,10 +977,11 @@ impl ClaudeDriver {
 
     /// Starts a turn, or steers the running one. Every message waits in the turn's
     /// `held` list and is written by [`ClaudeDriver::pump`].
-    fn send(&mut self, text: String, out: &mut Outputs) {
+    fn send(&mut self, text: String, images: Vec<Image>, out: &mut Outputs) {
         self.enqueue(
             QueuedMessage {
                 text,
+                images,
                 authorization: None,
             },
             out,
@@ -1126,7 +1130,7 @@ impl ClaudeDriver {
         let uuid = message_uuid(self.seed, self.next_message);
         let mut message = json!({
             "type": "user",
-                "message": {"role": "user", "content": message.text},
+                "message": {"role": "user", "content": content(message.text, &message.images)},
             "parent_tool_use_id": null,
             "uuid": uuid,
         });
@@ -2107,6 +2111,20 @@ pub(crate) fn exit_code_in(text: &str) -> Option<i32> {
         .ok()
 }
 
+/// A user message's content: its text alone, as Keystone always sent it, or with images
+/// a text block when there is text, then a base64 `image` block per image.
+fn content(text: String, images: &[Image]) -> Value {
+    if images.is_empty() {
+        return json!(text);
+    }
+    let text = (!text.is_empty()).then(|| json!({"type": "text", "text": text}));
+    let images = images.iter().map(|image| {
+        json!({"type": "image", "source": {"type": "base64", "media_type": image.media_type,
+            "data": image.base64.as_deref().unwrap_or_default()}})
+    });
+    Value::Array(text.into_iter().chain(images).collect())
+}
+
 /// Text from a list of `{"type": "text", "text": ..}` parts.
 pub(crate) fn join_text(parts: &[Value]) -> String {
     parts
@@ -2497,6 +2515,7 @@ mod tests {
             Command::Send {
                 session: 1,
                 text: "a layout".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -2633,6 +2652,7 @@ mod tests {
             Command::Send {
                 session: 1,
                 text: "again".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -2668,6 +2688,7 @@ mod tests {
             Command::Send {
                 session: 1,
                 text: "third".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -2700,6 +2721,7 @@ mod tests {
             Command::Send {
                 session: 1,
                 text: "hi".into(),
+                images: Vec::new(),
             },
             &mut out,
         );

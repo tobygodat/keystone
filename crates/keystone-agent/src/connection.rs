@@ -4,7 +4,7 @@
 use crate::claude::{self, ClaudeDriver, Launch};
 use crate::codex::CodexDriver;
 use crate::commands::{self, Commands};
-use crate::driver::{ApprovalState, Command, Outputs};
+use crate::driver::{ApprovalState, Command, Image, Outputs};
 use crate::host::{Exit, Process};
 use crate::idle::{IdleCandidate, IdlePolicy, QUIESCE_TIMEOUT, Timer, TimerKind, Timers};
 use crate::item::{Catalog, Event};
@@ -79,8 +79,10 @@ pub trait Connection {
     /// `model` the provider-native model the session asked for, applied when the
     /// conversation opens. `approval` is the session's approval state, which a turn
     /// this message starts runs under unless [`Connection::set_approval`] changes it
-    /// first. Returns the reason, without sending, when the provider cannot take a
-    /// steer now, so the caller can keep the text.
+    /// first. `images` follow the text, each in the provider's native form. Returns the
+    /// reason, without sending, when the provider cannot take a steer now, so the caller
+    /// can keep the text.
+    #[allow(clippy::too_many_arguments)]
     fn send(
         &self,
         session: u64,
@@ -89,6 +91,7 @@ pub trait Connection {
         model: Option<&str>,
         approval: ApprovalState,
         text: String,
+        images: Vec<Image>,
     ) -> Result<(), &'static str>;
     /// Asks the provider which models it offers, from `cwd`. The answer arrives as
     /// [`Event::Catalog`] for `session`, a failure to ask included, and the commands
@@ -299,7 +302,16 @@ impl CodexConnection {
         approval: ApprovalState,
         text: String,
     ) {
-        let _ = self.send_inner(session, cwd, resume, model, approval, text, None);
+        let _ = self.send_inner(
+            session,
+            cwd,
+            resume,
+            model,
+            approval,
+            text,
+            Vec::new(),
+            None,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -311,6 +323,7 @@ impl CodexConnection {
         model: Option<&str>,
         approval: ApprovalState,
         text: String,
+        images: Vec<Image>,
         caller: Option<Caller>,
     ) -> Result<(), &'static str> {
         {
@@ -399,7 +412,14 @@ impl CodexConnection {
                         out,
                     );
                 } else {
-                    driver.command(Command::Send { session, text }, out);
+                    driver.command(
+                        Command::Send {
+                            session,
+                            text,
+                            images,
+                        },
+                        out,
+                    );
                 }
             },
         );
@@ -698,7 +718,16 @@ impl Connection for CodexConnection {
         text: String,
         caller: Caller,
     ) -> Result<(), &'static str> {
-        self.send_inner(session, cwd, resume, model, approval, text, Some(caller))
+        self.send_inner(
+            session,
+            cwd,
+            resume,
+            model,
+            approval,
+            text,
+            Vec::new(),
+            Some(caller),
+        )
     }
 
     fn steer_from(&self, session: u64, text: String, caller: Caller) -> Result<(), &'static str> {
@@ -769,8 +798,9 @@ impl Connection for CodexConnection {
         model: Option<&str>,
         approval: ApprovalState,
         text: String,
+        images: Vec<Image>,
     ) -> Result<(), &'static str> {
-        CodexConnection::send(self, session, cwd, resume, model, approval, text);
+        let _ = self.send_inner(session, cwd, resume, model, approval, text, images, None);
         Ok(())
     }
 
@@ -1187,7 +1217,16 @@ impl ClaudeConnection {
         approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
-        self.send_inner(session, cwd, resume, model, approval, text, None)
+        self.send_inner(
+            session,
+            cwd,
+            resume,
+            model,
+            approval,
+            text,
+            Vec::new(),
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1199,6 +1238,7 @@ impl ClaudeConnection {
         model: Option<&str>,
         approval: ApprovalState,
         text: String,
+        images: Vec<Image>,
         caller: Option<Caller>,
     ) -> Result<(), &'static str> {
         let issuer;
@@ -1235,19 +1275,55 @@ impl ClaudeConnection {
             model.map(str::to_owned),
             caller,
         );
-        self.starter.queue(session, start, move |driver, out| {
-            if let Some(caller) = caller {
-                if driver.is_running() {
-                    out.event(
-                        session,
-                        start_failed("busy: The target already has a running turn".into()),
-                    );
+        // Each image is read and encoded on the session's worker before the shared state
+        // is locked, so a large one never holds up other sessions or the UI.
+        self.starter.on_worker(session, move |starter| {
+            let images = images
+                .into_iter()
+                .map(|image| match std::fs::read(&image.path) {
+                    Ok(data) => Ok(Image {
+                        base64: Some(
+                            base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                data,
+                            )
+                            .into(),
+                        ),
+                        ..image
+                    }),
+                    Err(error) => Err(format!(
+                        "Not sent: the attached image {} could not be read: {error}",
+                        image.path.display()
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>();
+            starter.run(session, start, move |driver, out| {
+                if let Some(caller) = caller {
+                    if driver.is_running() {
+                        out.event(
+                            session,
+                            start_failed("busy: The target already has a running turn".into()),
+                        );
+                        return;
+                    }
+                    driver.send_from(text, issuer.unwrap(), caller, out);
                     return;
                 }
-                driver.send_from(text, issuer.unwrap(), caller, out);
-            } else {
-                driver.command(Command::Send { session, text }, out);
-            }
+                match images {
+                    Ok(images) => driver.command(
+                        Command::Send {
+                            session,
+                            text,
+                            images,
+                        },
+                        out,
+                    ),
+                    Err(message) if driver.is_running() => {
+                        out.event(session, Event::Warning { message })
+                    }
+                    Err(message) => out.event(session, start_failed(message)),
+                }
+            })
         });
         Ok(())
     }
@@ -1518,12 +1594,17 @@ impl ClaudeStarter {
         job: Job,
         act: impl FnOnce(&mut ClaudeDriver, &mut Outputs) + Send + 'static,
     ) {
+        self.on_worker(session, move |starter| starter.run(session, job, act));
+    }
+
+    /// Runs `work` on the session's worker, after the work queued before it.
+    fn on_worker(&self, session: u64, work: impl FnOnce(&Self) + Send + 'static) {
         let starter = self.clone();
         let mut workers = self.workers.lock().unwrap();
         let worker = workers
             .entry(session)
             .or_insert_with(|| Worker::new("claude-session"));
-        worker.run(move || starter.run(session, job, act));
+        worker.run(move || work(&starter));
     }
 
     /// Delivers the driver's outputs ([`claude_deliver`]), then, without the lock,
@@ -2186,7 +2267,16 @@ impl Connection for ClaudeConnection {
         text: String,
         caller: Caller,
     ) -> Result<(), &'static str> {
-        self.send_inner(session, cwd, resume, model, approval, text, Some(caller))
+        self.send_inner(
+            session,
+            cwd,
+            resume,
+            model,
+            approval,
+            text,
+            Vec::new(),
+            Some(caller),
+        )
     }
 
     fn steer_from(&self, session: u64, text: String, caller: Caller) -> Result<(), &'static str> {
@@ -2263,8 +2353,9 @@ impl Connection for ClaudeConnection {
         model: Option<&str>,
         approval: ApprovalState,
         text: String,
+        images: Vec<Image>,
     ) -> Result<(), &'static str> {
-        ClaudeConnection::send(self, session, cwd, resume, model, approval, text)
+        self.send_inner(session, cwd, resume, model, approval, text, images, None)
     }
 
     fn request_catalog(&self, session: u64, cwd: &str) {

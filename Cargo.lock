@@ -2826,6 +2826,7 @@ dependencies = [
 name = "keystone-agent"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "getrandom 0.2.17",
  "keystone-core",
  "libc",
@@ -2845,6 +2846,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "unicode-segmentation",

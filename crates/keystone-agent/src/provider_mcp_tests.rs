@@ -70,6 +70,7 @@ fn claude_injects_after_initialize_and_holds_messages_until_server_success() {
             Command::Send {
                 session: 7,
                 text: "hello".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -113,6 +114,7 @@ fn claude_failed_mcp_configuration_never_writes_a_user_message_or_echoes_errors(
             Command::Send {
                 session: 7,
                 text: "hello".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -282,6 +284,7 @@ fn claude_strict_steer_is_immediate_or_busy_and_never_held() {
         Command::Send {
             session: 7,
             text: "first".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -324,6 +327,7 @@ fn codex_injects_start_and_resume_only_after_initialization() {
             Command::Send {
                 session: 7,
                 text: "hello".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -366,6 +370,7 @@ fn codex_strict_steer_never_falls_back_after_turn_completion() {
             Command::Send {
                 session: 7,
                 text: "first".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -384,6 +389,7 @@ fn codex_strict_steer_never_falls_back_after_turn_completion() {
                 Command::Send {
                     session: 7,
                     text: "steer".into(),
+                    images: Vec::new(),
                 },
                 &mut out,
             );
@@ -463,6 +469,7 @@ fn launch_authorization_is_rechecked_at_actual_claude_and_codex_writes() {
             Command::Send {
                 session: 7,
                 text: "human retry".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -470,6 +477,7 @@ fn launch_authorization_is_rechecked_at_actual_claude_and_codex_writes() {
             Command::Send {
                 session: 7,
                 text: "human retry".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -494,6 +502,7 @@ fn claude_refused_launch_keeps_human_input_held_behind_it() {
         Command::Send {
             session: 7,
             text: "human".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -566,6 +575,7 @@ fn replacement_keeps_running_authorization_without_duplicate_turn_start() {
         Command::Send {
             session: 7,
             text: "carried".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -881,6 +891,7 @@ fn claude_connection_revokes_failed_handshakes_and_drop_but_not_denied_launch_re
             Command::Send {
                 session: 7,
                 text: "initial".into(),
+                images: Vec::new(),
             },
             &mut out,
         );
@@ -902,6 +913,7 @@ fn claude_connection_revokes_failed_handshakes_and_drop_but_not_denied_launch_re
                 Command::Send {
                     session: 7,
                     text: "human retry".into(),
+                    images: Vec::new(),
                 },
                 &mut out,
             );
@@ -1101,6 +1113,7 @@ fn claude_with_both_servers() -> (ClaudeDriver, Value) {
         Command::Send {
             session: 7,
             text: "hello".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -1187,6 +1200,7 @@ fn claude_reports_init_mcp_servers_without_keystones_own() {
         Command::Send {
             session: 7,
             text: "hello".into(),
+            images: Vec::new(),
         },
         &mut out,
     );

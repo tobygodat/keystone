@@ -269,7 +269,8 @@ fn global_runtime_loads_sends_answers_and_logs_both_providers_without_a_view(
             assert!(state.send_message(
                 ComposerDraft {
                     session: id,
-                    text: text.into()
+                    text: text.into(),
+                    attachments: Vec::new(),
                 },
                 cx
             ));
@@ -391,7 +392,8 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
             assert!(state.send_message(
                 ComposerDraft {
                     session: id,
-                    text: "long reply without a view".into()
+                    text: "long reply without a view".into(),
+                    attachments: Vec::new(),
                 },
                 cx
             ));
@@ -488,7 +490,8 @@ fn owned_processes(
             assert!(state.send_message(
                 ComposerDraft {
                     session: id,
-                    text: "please run it".into()
+                    text: "please run it".into(),
+                    attachments: Vec::new(),
                 },
                 cx
             ));
@@ -581,7 +584,8 @@ fn explicit_teardown_ends_only_owned_providers_descendants_and_catalog_probe(
             assert!(!state.send_message(
                 ComposerDraft {
                     session: id,
-                    text: "must not start".into()
+                    text: "must not start".into(),
+                    attachments: Vec::new(),
                 },
                 cx
             ));
@@ -785,7 +789,8 @@ fn each_session_runs_on_its_own_accounts_home_and_codex_accounts_get_one_server_
             assert!(state.send_message(
                 ComposerDraft {
                     session: id,
-                    text: format!("hello {id}")
+                    text: format!("hello {id}"),
+                    attachments: Vec::new(),
                 },
                 cx
             ));
@@ -1046,7 +1051,8 @@ fn an_account_on_the_inherited_default_home_never_sends(cx: &mut gpui::TestAppCo
         assert!(!state.send_message(
             ComposerDraft {
                 session: 2,
-                text: "hello".into()
+                text: "hello".into(),
+                attachments: Vec::new(),
             },
             cx
         ));
@@ -1107,7 +1113,8 @@ fn an_account_folder_swapped_for_a_link_to_another_never_sends(cx: &mut gpui::Te
         assert!(!state.send_message(
             ComposerDraft {
                 session: 2,
-                text: "hello".into()
+                text: "hello".into(),
+                attachments: Vec::new(),
             },
             cx
         ));

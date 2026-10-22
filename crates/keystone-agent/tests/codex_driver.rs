@@ -232,6 +232,7 @@ fn a_message_during_a_turn_steers_and_starts_a_new_turn_if_that_turn_ended() {
         Command::Send {
             session: SESSION,
             text: "first".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -243,6 +244,7 @@ fn a_message_during_a_turn_steers_and_starts_a_new_turn_if_that_turn_ended() {
         Command::Send {
             session: SESSION,
             text: "second".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -263,6 +265,52 @@ fn a_message_during_a_turn_steers_and_starts_a_new_turn_if_that_turn_ended() {
     assert_eq!(next["params"]["input"][0]["text"], "second");
 }
 
+/// Images go as `localImage` items after the text, on a new turn and on a steer, as
+/// the TOB-59 probe found Codex 0.163.0 takes them.
+#[test]
+fn images_are_sent_as_local_image_items_after_the_text() {
+    let image = |path: &str| keystone_agent::Image {
+        path: path.into(),
+        media_type: "image/png".into(),
+        base64: None,
+    };
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "first".into(),
+            images: vec![image("/data/attachments/a.png")],
+        },
+        &mut out,
+    );
+    let start: Value = serde_json::from_str(&out.writes[0]).unwrap();
+    assert_eq!(
+        start["params"]["input"],
+        serde_json::json!([
+            {"type": "text", "text": "first"},
+            {"type": "localImage", "path": "/data/attachments/a.png"},
+        ])
+    );
+
+    let mut out = Outputs::default();
+    driver.on_line(started("T1").as_bytes(), &mut out);
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: String::new(),
+            images: vec![image("/data/attachments/b.png")],
+        },
+        &mut out,
+    );
+    let steer: Value = serde_json::from_str(&out.writes[0]).unwrap();
+    assert_eq!(steer["method"], "turn/steer");
+    assert_eq!(
+        steer["params"]["input"],
+        serde_json::json!([{"type": "localImage", "path": "/data/attachments/b.png"}])
+    );
+}
+
 #[test]
 fn a_steer_rejected_while_the_turn_runs_is_a_warning_and_the_turn_continues() {
     let mut driver = opened();
@@ -271,6 +319,7 @@ fn a_steer_rejected_while_the_turn_runs_is_a_warning_and_the_turn_continues() {
         Command::Send {
             session: SESSION,
             text: "first".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -280,6 +329,7 @@ fn a_steer_rejected_while_the_turn_runs_is_a_warning_and_the_turn_continues() {
         Command::Send {
             session: SESSION,
             text: "second".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -305,6 +355,7 @@ fn a_steer_rejected_after_stop_does_not_start_a_new_turn() {
         Command::Send {
             session: SESSION,
             text: "first".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -314,6 +365,7 @@ fn a_steer_rejected_after_stop_does_not_start_a_new_turn() {
         Command::Send {
             session: SESSION,
             text: "steer".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -358,6 +410,7 @@ fn messages_and_a_stop_sent_during_startup_are_kept_in_order() {
         Command::Send {
             session: SESSION,
             text: "one".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -365,6 +418,7 @@ fn messages_and_a_stop_sent_during_startup_are_kept_in_order() {
         Command::Send {
             session: SESSION,
             text: "two".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -381,6 +435,7 @@ fn messages_and_a_stop_sent_during_startup_are_kept_in_order() {
         Command::Send {
             session: SESSION,
             text: "three".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -413,6 +468,7 @@ fn a_stop_while_opening_ends_the_turn_and_drops_the_message() {
         Command::Send {
             session: SESSION,
             text: "one".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -455,6 +511,7 @@ fn unknown_server_requests_get_an_error_and_exit_fails_the_running_turn() {
         Command::Send {
             session: SESSION,
             text: "hi".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -498,6 +555,7 @@ fn a_thread_that_cannot_resume_reports_it_instead_of_starting_fresh() {
         Command::Send {
             session: SESSION,
             text: "hi".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -546,6 +604,7 @@ fn send(driver: &mut CodexDriver, text: &str) -> Value {
         Command::Send {
             session: SESSION,
             text: text.into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -585,6 +644,7 @@ fn the_default_sends_no_policy_and_a_mode_applies_from_the_next_turn() {
         Command::Send {
             session: SESSION,
             text: "steer".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -674,6 +734,7 @@ fn a_resumed_overridden_thread_waits_for_the_users_settings() {
         Command::Send {
             session: SESSION,
             text: "hi".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -718,6 +779,7 @@ fn unreadable_settings_fail_the_message_instead_of_keeping_the_override() {
         Command::Send {
             session: SESSION,
             text: "hi".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -846,6 +908,7 @@ fn a_rejected_restore_after_reading_the_settings_is_retried_with_them() {
         Command::Send {
             session: SESSION,
             text: "hi".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -913,6 +976,7 @@ fn a_stop_is_reported_by_its_own_turn_only() {
         Command::Send {
             session: SESSION,
             text: "one".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -924,6 +988,7 @@ fn a_stop_is_reported_by_its_own_turn_only() {
         Command::Send {
             session: SESSION,
             text: "two".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -949,6 +1014,7 @@ fn a_stop_after_the_turn_already_ended_leaves_that_end_alone() {
         Command::Send {
             session: SESSION,
             text: "one".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -969,6 +1035,7 @@ fn a_stop_after_the_turn_already_ended_leaves_that_end_alone() {
         Command::Send {
             session: SESSION,
             text: "two".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -987,6 +1054,7 @@ fn only_a_denial_that_cancels_the_turn_ends_it_for_the_user() {
         Command::Send {
             session: SESSION,
             text: "one".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -1016,6 +1084,7 @@ fn only_a_denial_that_cancels_the_turn_ends_it_for_the_user() {
         Command::Send {
             session: SESSION,
             text: "two".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -1032,6 +1101,7 @@ fn only_a_denial_that_cancels_the_turn_ends_it_for_the_user() {
         Command::Send {
             session: SESSION,
             text: "three".into(),
+            images: Vec::new(),
         },
         &mut out,
     );

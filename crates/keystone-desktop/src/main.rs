@@ -2,6 +2,7 @@ mod app_state;
 use app_state::{AppState, RuntimeChanged};
 mod arrangement;
 mod arrangement_editor;
+mod attachments;
 mod commands;
 mod conversation;
 mod customization;
@@ -34,9 +35,9 @@ use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
     Anchor, AnyElement, AnyView, App, AvailableSpace, BackgroundExecutor, BoxShadow, Context,
-    Entity, FocusHandle, Focusable, FontWeight, IntoElement, ListOffset, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle, StyleRefinement, Subscription,
-    WeakEntity, Window, WindowBounds, canvas, div, list, point, prelude::*, px, size,
+    Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement, ListOffset,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle, StyleRefinement,
+    Subscription, WeakEntity, Window, WindowBounds, canvas, div, list, point, prelude::*, px, size,
 };
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{
@@ -178,6 +179,7 @@ struct FullAccessConfirmation {
 struct ComposerDraft {
     session: u64,
     text: String,
+    attachments: Vec<keystone_core::Attachment>,
 }
 
 struct FolderWarning {
@@ -432,6 +434,7 @@ struct Keystone {
     files: files::Files,
     slash: slash_menu::SlashMenu,
     mentions: mentions::Mentions,
+    attach: attachments::Attach,
     usage_focus: FocusHandle,
 }
 
@@ -472,7 +475,7 @@ impl Keystone {
         }
     }
     fn send_message(&mut self, draft: ComposerDraft, window: &mut Window, cx: &mut Context<Self>) {
-        if self.slash_blocks(&draft, cx) {
+        if self.slash_blocks(&draft, cx) || self.importing(draft.session) {
             return;
         }
         let id = draft.session;
@@ -798,6 +801,7 @@ impl Keystone {
             files: files::Files::default(),
             slash,
             mentions,
+            attach: attachments::Attach::new(cx),
             usage_focus: cx.focus_handle().tab_stop(true),
         };
         result.save_opened_project(cx);
@@ -1652,7 +1656,9 @@ impl Keystone {
         let running = conversation.is_some_and(|c| c.running);
         let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
         let mode = self.selected_session(cx).map(|s| s.approval_mode());
-        let can_send = current.is_some() && !self.composer.read(cx).value().trim().is_empty();
+        let can_send = current.is_some_and(|(id, _)| !self.importing(id))
+            && (!self.composer.read(cx).value().trim().is_empty()
+                || !self.draft_attachments(cx).is_empty());
         let field = div()
             .id("composer-field")
             .automation_id("composer-field")
@@ -1751,58 +1757,76 @@ impl Keystone {
                     })
                     .children(self.usage_meter(session, narrow, cx))
                     .child(div().flex_1())
-                    .when(running, |d| {
-                        d.child(
-                            Button::new("stop", "Stop")
-                                .style(ButtonStyle::Subtle)
-                                .icon(IconName::Square)
-                                .debug_selector(|| "stop".into())
-                                .tooltip(Tooltip::text("Stop this turn"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.stop_turn(session, window, cx)
-                                })),
-                        )
-                    })
                     .child(
-                        div()
-                            .id("send")
-                            .automation_id("send")
-                            .flex_shrink_0()
-                            .size(px(32.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(if can_send {
-                                colors.element_inverse
-                            } else {
-                                colors.element_disabled
-                            })
-                            .child(Icon::new(IconName::Up).size(px(15.)).color(if can_send {
-                                Color::Custom(colors.text_inverse)
-                            } else {
-                                Color::Faint
-                            }))
-                            .tooltip(
-                                Tooltip::with_key(
-                                    if running { "Steer" } else { "Send" },
-                                    "Ctrl+Enter",
-                                )
-                                .builder(),
+                        h_flex()
+                            .flex_none()
+                            .gap(px(6.))
+                            .child(
+                                Button::new("attach", "")
+                                    .style(ButtonStyle::Ghost)
+                                    .icon(IconName::Paperclip)
+                                    .aria_label("Attach files")
+                                    .debug_selector(|| "attach".into())
+                                    .tooltip(Tooltip::with_key("Attach files", "Ctrl+Shift+U"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_attachments(window, cx)
+                                    })),
                             )
-                            .when(can_send, |d| {
-                                d.cursor_pointer()
-                                    .hover(|s| s.opacity(0.85))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if let Some(draft) = this
-                                            .composer_draft(cx)
-                                            .filter(|draft| draft.session == session)
-                                        {
-                                            this.send_message(draft, window, cx)
-                                        }
-                                    }))
+                            .when(running, |d| {
+                                d.child(
+                                    Button::new("stop", "Stop")
+                                        .style(ButtonStyle::Subtle)
+                                        .icon(IconName::Square)
+                                        .debug_selector(|| "stop".into())
+                                        .tooltip(Tooltip::text("Stop this turn"))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.stop_turn(session, window, cx)
+                                        })),
+                                )
                             })
-                            .when(!can_send, |d| d.cursor_not_allowed()),
+                            .child(
+                                div()
+                                    .id("send")
+                                    .automation_id("send")
+                                    .flex_shrink_0()
+                                    .size(px(32.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(if can_send {
+                                        colors.element_inverse
+                                    } else {
+                                        colors.element_disabled
+                                    })
+                                    .child(Icon::new(IconName::Up).size(px(15.)).color(
+                                        if can_send {
+                                            Color::Custom(colors.text_inverse)
+                                        } else {
+                                            Color::Faint
+                                        },
+                                    ))
+                                    .tooltip(
+                                        Tooltip::with_key(
+                                            if running { "Steer" } else { "Send" },
+                                            "Ctrl+Enter",
+                                        )
+                                        .builder(),
+                                    )
+                                    .when(can_send, |d| {
+                                        d.cursor_pointer().hover(|s| s.opacity(0.85)).on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                if let Some(draft) = this
+                                                    .composer_draft(cx)
+                                                    .filter(|draft| draft.session == session)
+                                                {
+                                                    this.send_message(draft, window, cx)
+                                                }
+                                            }),
+                                        )
+                                    })
+                                    .when(!can_send, |d| d.cursor_not_allowed()),
+                            ),
                     );
                 let field = if self
                     .slash_entries(cx)
@@ -1817,6 +1841,13 @@ impl Keystone {
                 };
                 (
                     field
+                        .capture_action(cx.listener(
+                            |this, _: &keystone_ui::text_input::Paste, window, cx| {
+                                if this.paste_image(window, cx) {
+                                    cx.stop_propagation();
+                                }
+                            },
+                        ))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.composer.focus_handle(cx).focus(window, cx)
                         }))
@@ -1848,9 +1879,18 @@ impl Keystone {
             .pb(px(12.))
             .gap(px(14.))
             .relative()
+            .when(current.is_some(), |d| {
+                d.drag_over::<ExternalPaths>(move |style, _, _, _| {
+                    style.border_color(colors.border_focused)
+                })
+                .on_drop(cx.listener(
+                    |this, paths: &ExternalPaths, window, cx| this.on_file_drop(paths, window, cx),
+                ))
+            })
             .children(current.and_then(|_| self.slash_menu(viewport.width, cx)))
             .children(current.and_then(|_| self.mention_menu(viewport.width, cx)))
             .child(field)
+            .children(current.and_then(|(session, _)| self.attachment_strip(session, cx)))
             .child(toolbar)
     }
 
@@ -2288,6 +2328,7 @@ impl Keystone {
         Some(ComposerDraft {
             session: self.selected(cx)?,
             text: self.composer.read(cx).value().to_owned(),
+            attachments: self.draft_attachments(cx),
         })
     }
 
@@ -3650,6 +3691,12 @@ impl Render for Keystone {
                     this.choose_project(window, cx)
                 }),
             )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &attachments::AttachFiles, window, cx| {
+                    this.choose_attachments(window, cx)
+                },
+            ))
             .on_action(
                 self.scoped_listener(cx, |this, _: &prompts::InsertPrompt, window, cx| {
                     this.open_prompt_list(window, cx)
@@ -8185,6 +8232,7 @@ mod tests {
             self.command(Command::Send {
                 session: 1,
                 text: turn.into(),
+                images: Vec::new(),
             });
             self.line(format!(
                 r#"{{"method":"turn/started","params":{{"threadId":"{}","turn":{{"id":"{turn}"}}}}}}"#,
@@ -8530,6 +8578,7 @@ mod tests {
                 Command::Send {
                     session: 1,
                     text: "hello".into(),
+                    images: Vec::new(),
                 },
                 &mut out,
             );

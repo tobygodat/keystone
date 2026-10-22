@@ -339,7 +339,8 @@ fn autosave_supersedes_the_last_failed_queued_draft_but_keeps_shutdown_feedback(
         assert!(state.send_message(
             ComposerDraft {
                 session: 1,
-                text: "Accepted before draft failure".into()
+                text: "Accepted before draft failure".into(),
+                attachments: Vec::new(),
             },
             cx
         ));

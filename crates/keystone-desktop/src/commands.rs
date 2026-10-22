@@ -1,6 +1,7 @@
 //! The commands the palette lists. Their key bindings come from the same table, so a
 //! row's shortcut hint cannot drift from the binding that runs it.
 
+use crate::attachments::AttachFiles;
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::handoff::HandOff;
@@ -78,6 +79,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-l"],
         context: Some(APP),
         action: || Box::new(FocusComposer),
+    },
+    Command {
+        id: "attach-files",
+        label: "Attach files…",
+        keys: &["ctrl-shift-u"],
+        context: Some(APP),
+        action: || Box::new(AttachFiles),
     },
     Command {
         id: "rename-session",

@@ -29,6 +29,7 @@ fn claude(accept: bool) -> (ClaudeDriver, Outputs) {
         Command::Send {
             session: SESSION,
             text: "show a checklist".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -321,6 +322,7 @@ fn a_widget_server_that_never_answers_only_leaves_the_tool_out() {
         Command::Send {
             session: SESSION,
             text: "hello".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -546,6 +548,7 @@ fn codex_refuses_calls_while_a_turn_starts_and_replays_of_answered_calls() {
         Command::Send {
             session: SESSION,
             text: "go".into(),
+            images: Vec::new(),
         },
         &mut out,
     );
@@ -691,6 +694,7 @@ mod scripted {
             None,
             ApprovalState::default(),
             prompt.into(),
+            Vec::new(),
         )
         .unwrap();
         let events = collect(conn, rx, |e| {
@@ -810,6 +814,7 @@ mod scripted {
             None,
             ApprovalState::default(),
             "show a widget checklist".into(),
+            Vec::new(),
         )
         .unwrap();
         let events = collect(&conn, &rx, |e| matches!(e, Event::TurnCompleted { .. }));

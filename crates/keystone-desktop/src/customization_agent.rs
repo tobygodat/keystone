@@ -188,8 +188,15 @@ impl Worker {
             mode: ApprovalMode::ReadOnly,
             overridden: true,
         };
-        if let Err(reason) = connection.send(SESSION, cwd, None, None, approval, instruction(&ask))
-        {
+        if let Err(reason) = connection.send(
+            SESSION,
+            cwd,
+            None,
+            None,
+            approval,
+            instruction(&ask),
+            Vec::new(),
+        ) {
             self.report(ask.request, Outcome::Failed(reason.to_owned()));
             return Next::Wait;
         }
@@ -584,6 +591,7 @@ mod tests {
             _: Option<&str>,
             _: ApprovalState,
             _: String,
+            _: Vec<keystone_agent::Image>,
         ) -> Result<(), &'static str> {
             std::thread::sleep(self.delay);
             let _ = self.inbox.lock().unwrap().send(Message::Events);

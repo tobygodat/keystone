@@ -375,6 +375,7 @@ pub fn row(
             crate::widget::SurfaceView::new(surface.clone(), widget.expect("widget controls"))
                 .into_any_element()
         }
+        Row::Attachments(attachments) => crate::attachments::sent(index, attachments, cx),
         Row::Decision { action, allowed } => Label::new(format!(
             "{} {action}",
             if *allowed { "Allowed:" } else { "Denied:" }

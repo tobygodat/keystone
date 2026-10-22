@@ -32,6 +32,7 @@ enum PendingSave {
     Thread(u64, String),
     Message(u64, String, u64),
     Draft(u64, String),
+    DraftAttachments(u64, Vec<keystone_core::Attachment>),
 }
 
 #[derive(Default)]
@@ -110,8 +111,36 @@ pub(crate) struct AppState {
     #[cfg(test)]
     pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
     pub(crate) notifier: crate::notifications::Notifier,
+    /// Where attached images are copied, beside the workspace database.
+    pub(crate) attachments: keystone_core::attachment::Attachments,
 }
 impl EventEmitter<RuntimeChanged> for AppState {}
+
+/// Deletes, off the UI thread, attached-image copies past their retention that no
+/// draft holds. See [`keystone_core::attachment::keep_for`].
+fn sweep_attachments(
+    store: &Store,
+    attachments: &keystone_core::attachment::Attachments,
+    cx: &mut Context<AppState>,
+) {
+    let Some(keep_for) = keystone_core::attachment::keep_for() else {
+        return;
+    };
+    let keep: std::collections::HashSet<String> = store
+        .workspace()
+        .sessions()
+        .iter()
+        .flat_map(|session| session.draft_attachments())
+        .map(|attachment| attachment.sha256.clone())
+        .collect();
+    let attachments = attachments.clone();
+    cx.background_spawn(async move {
+        if let Err(error) = attachments.sweep(&keep, keep_for, std::time::SystemTime::now()) {
+            eprintln!("Keystone could not clear old attached images: {error}");
+        }
+    })
+    .detach();
+}
 
 /// Most Claude store reads at once. A read stuck on a slow disk keeps its slot.
 const RECOVERY_READERS: usize = 2;
@@ -334,6 +363,10 @@ impl AppState {
                 PendingSave::Draft(id, text) => {
                     (self.store.set_draft(*id, text.clone()), "Draft not saved")
                 }
+                PendingSave::DraftAttachments(id, attachments) => (
+                    self.store.set_draft_attachments(*id, attachments.clone()),
+                    "Draft not saved",
+                ),
             };
             if let Err(error) = result {
                 self.error = Some(format!("{message}. {error}"));
@@ -371,6 +404,29 @@ impl AppState {
             self.pending.retain(
                 |update| !matches!(update, PendingSave::Draft(session, _) if *session == id),
             );
+            self.retry_updates();
+        }
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Saves the images attached to the session's draft. Every window reads them from
+    /// the store, so a session open in two windows shows the same ones.
+    pub(crate) fn set_draft_attachments(
+        &mut self,
+        id: u64,
+        attachments: Vec<keystone_core::Attachment>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self.store.set_draft_attachments(id, attachments);
+        if result.is_ok() {
+            self.pending.retain(|update| {
+                !matches!(update, PendingSave::DraftAttachments(session, _) if *session == id)
+            });
             self.retry_updates();
         }
         self.changes.sidebar = true;
@@ -1067,6 +1123,13 @@ impl AppState {
             let _ = wake_tx.unbounded_send(());
         });
         let logs = Logs::with_database(store.database(), wake.clone());
+        let attachments = keystone_core::attachment::Attachments::in_data_dir(
+            store.path().parent().unwrap_or(std::path::Path::new(".")),
+        );
+        sweep_attachments(&store, &attachments, cx);
+        cx.set_global(crate::attachments::AttachmentsDir(
+            attachments.dir().to_owned(),
+        ));
         // A small log budget for scripted native runs; release builds keep the default.
         #[cfg(debug_assertions)]
         let logs = match std::env::var("KEYSTONE_TEST_LOG_BUDGET_BYTES")
@@ -1130,6 +1193,7 @@ impl AppState {
             #[cfg(test)]
             test_programs: None,
             notifier: Default::default(),
+            attachments,
             store,
         }
     }
@@ -2354,6 +2418,7 @@ impl AppState {
         let draft = ComposerDraft {
             session,
             text: keystone_agent::surface::message_for(call, action),
+            attachments: Vec::new(),
         };
         if self.send_message_from(draft, None, false, cx) {
             return;
@@ -2389,8 +2454,36 @@ impl AppState {
             return false;
         };
         let text = draft.text.trim().to_owned();
-        if text.is_empty() {
+        if text.is_empty() && draft.attachments.is_empty() {
             return false;
+        }
+        // An image whose copy is gone or cannot be opened keeps the draft, with a reason,
+        // rather than going without it.
+        let mut images = Vec::new();
+        for attachment in &draft.attachments {
+            let path = attachment.path(self.attachments.dir());
+            let refused = match std::fs::File::open(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(format!(
+                    "Not sent: {} is no longer in Keystone's data folder. Remove it and attach it again.",
+                    attachment.name
+                )),
+                Err(error) => Some(format!(
+                    "Not sent: {} could not be opened in Keystone's data folder: {error}. Remove it and attach it again.",
+                    attachment.name
+                )),
+                Ok(_) => None,
+            };
+            if let Some(refused) = refused {
+                self.conversation(id).error = Some(refused);
+                self.commit(id);
+                self.publish(cx);
+                return false;
+            }
+            images.push(keystone_agent::Image {
+                path,
+                media_type: attachment.media_type.clone(),
+                base64: None,
+            });
         }
         // Apply anything that already arrived, such as the end of the last turn, so
         // the message is shown in the right turn.
@@ -2494,6 +2587,7 @@ impl AppState {
                     session.model(),
                     approval,
                     text.clone(),
+                    images,
                 ),
             }
             .map_err(str::to_owned),
@@ -2506,11 +2600,18 @@ impl AppState {
             self.publish(cx);
             return false;
         }
-        self.conversation(id).push_local(&text);
+        for attachment in &draft.attachments {
+            self.attachments.touch(attachment);
+        }
+        self.conversation(id)
+            .push_sent(&text, draft.attachments.clone());
         self.commit(id);
         self.persist(PendingSave::Message(id, text.clone(), now_ms()));
         if clear_draft {
             self.persist(PendingSave::Draft(id, String::new()));
+            if !draft.attachments.is_empty() {
+                self.persist(PendingSave::DraftAttachments(id, Vec::new()));
+            }
         }
         self.refresh(cx);
         true

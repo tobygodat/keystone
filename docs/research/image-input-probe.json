@@ -1,0 +1,679 @@
+{
+ "time_utc": "2026-10-21T19:43:51Z",
+ "message": "What is in this image?",
+ "fixtures": {
+  "png": {
+   "path": "<root>/fixtures/probe.png",
+   "media_type": "image/png",
+   "sha256": "b6900ab28c566dc35caeaa9a2d543d424235cc6499b4dc47efa22cbf488f1012",
+   "bytes": 512
+  },
+  "jpeg": {
+   "path": "<root>/fixtures/probe.jpeg",
+   "media_type": "image/jpeg",
+   "sha256": "d765833a532ea18056888edba4d3652b04b1586d105a36bef9b0562144eb0e5a",
+   "bytes": 520
+  },
+  "gif": {
+   "path": "<root>/fixtures/probe.gif",
+   "media_type": "image/gif",
+   "sha256": "48b567138760eecfc92aa0eff3745bb052da661547fdeaff2069e52c0dd5c4c0",
+   "bytes": 804
+  },
+  "webp": {
+   "path": "<root>/fixtures/probe.webp",
+   "media_type": "image/webp",
+   "sha256": "3a069b2663ea441f0cc4cce6d253c680ee01d0d8af10c4f3a01f9ff4223797fd",
+   "bytes": 142
+  },
+  "large-png": {
+   "path": "<root>/fixtures/large.png",
+   "media_type": "image/png",
+   "sha256": "d054b313c3d57299557a0f787d0aa1376ab4f72965facf14ddc10c3cb3e7ad57",
+   "bytes": 12977970
+  }
+ },
+ "claude_version": "2.1.301 (Claude Code)",
+ "codex_version": "codex-cli 0.163.0",
+ "claude": {
+  "png": {
+   "replayed_user_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?"
+    },
+    {
+     "type": "image",
+     "media_type": "image/png"
+    }
+   ],
+   "result": {
+    "subtype": "success",
+    "is_error": true,
+    "result": "API Error: 400 keystone probe: no model here"
+   },
+   "exit": 1,
+   "stderr_tail": "",
+   "requests": [
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/png",
+       "sha256": "b6900ab28c566dc35caeaa9a2d543d424235cc6499b4dc47efa22cbf488f1012",
+       "bytes": 512
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/png",
+       "sha256": "b6900ab28c566dc35caeaa9a2d543d424235cc6499b4dc47efa22cbf488f1012",
+       "bytes": 512
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/png",
+       "sha256": "b6900ab28c566dc35caeaa9a2d543d424235cc6499b4dc47efa22cbf488f1012",
+       "bytes": 512
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 3,
+   "image_count_in_first_request": 1,
+   "same_bytes": true,
+   "same_media_type": true
+  },
+  "jpeg": {
+   "replayed_user_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?"
+    },
+    {
+     "type": "image",
+     "media_type": "image/jpeg"
+    }
+   ],
+   "result": {
+    "subtype": "success",
+    "is_error": true,
+    "result": "API Error: 400 keystone probe: no model here"
+   },
+   "exit": 1,
+   "stderr_tail": "",
+   "requests": [
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/jpeg",
+       "sha256": "d765833a532ea18056888edba4d3652b04b1586d105a36bef9b0562144eb0e5a",
+       "bytes": 520
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/jpeg",
+       "sha256": "d765833a532ea18056888edba4d3652b04b1586d105a36bef9b0562144eb0e5a",
+       "bytes": 520
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/jpeg",
+       "sha256": "d765833a532ea18056888edba4d3652b04b1586d105a36bef9b0562144eb0e5a",
+       "bytes": 520
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 3,
+   "image_count_in_first_request": 1,
+   "same_bytes": true,
+   "same_media_type": true
+  },
+  "gif": {
+   "replayed_user_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?"
+    },
+    {
+     "type": "image",
+     "media_type": "image/gif"
+    }
+   ],
+   "result": {
+    "subtype": "success",
+    "is_error": true,
+    "result": "API Error: 400 keystone probe: no model here"
+   },
+   "exit": 1,
+   "stderr_tail": "",
+   "requests": [
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/gif",
+       "sha256": "48b567138760eecfc92aa0eff3745bb052da661547fdeaff2069e52c0dd5c4c0",
+       "bytes": 804
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/gif",
+       "sha256": "48b567138760eecfc92aa0eff3745bb052da661547fdeaff2069e52c0dd5c4c0",
+       "bytes": 804
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/gif",
+       "sha256": "48b567138760eecfc92aa0eff3745bb052da661547fdeaff2069e52c0dd5c4c0",
+       "bytes": 804
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 3,
+   "image_count_in_first_request": 1,
+   "same_bytes": true,
+   "same_media_type": true
+  },
+  "webp": {
+   "replayed_user_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?"
+    },
+    {
+     "type": "image",
+     "media_type": "image/webp"
+    }
+   ],
+   "result": {
+    "subtype": "success",
+    "is_error": true,
+    "result": "API Error: 400 keystone probe: no model here"
+   },
+   "exit": 1,
+   "stderr_tail": "",
+   "requests": [
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/webp",
+       "sha256": "3a069b2663ea441f0cc4cce6d253c680ee01d0d8af10c4f3a01f9ff4223797fd",
+       "bytes": 142
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/webp",
+       "sha256": "3a069b2663ea441f0cc4cce6d253c680ee01d0d8af10c4f3a01f9ff4223797fd",
+       "bytes": 142
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/webp",
+       "sha256": "3a069b2663ea441f0cc4cce6d253c680ee01d0d8af10c4f3a01f9ff4223797fd",
+       "bytes": 142
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 3,
+   "image_count_in_first_request": 1,
+   "same_bytes": true,
+   "same_media_type": true
+  },
+  "large-png": {
+   "replayed_user_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?"
+    },
+    {
+     "type": "image",
+     "media_type": "image/jpeg"
+    }
+   ],
+   "result": {
+    "subtype": "success",
+    "is_error": true,
+    "result": "API Error: 400 keystone probe: no model here"
+   },
+   "exit": 1,
+   "stderr_tail": "",
+   "requests": [
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/jpeg",
+       "sha256": "1e7ef418af860c8546b3514f4ae18d6d173454daaa1afc15c65d8199a9d05f3b",
+       "bytes": 477462
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/jpeg",
+       "sha256": "1e7ef418af860c8546b3514f4ae18d6d173454daaa1afc15c65d8199a9d05f3b",
+       "bytes": 477462
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    },
+    {
+     "path": "/v1/messages?beta=true",
+     "images": [
+      {
+       "block": "image",
+       "source_type": "base64",
+       "media_type": "image/jpeg",
+       "sha256": "1e7ef418af860c8546b3514f4ae18d6d173454daaa1afc15c65d8199a9d05f3b",
+       "bytes": 477462
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 3,
+   "image_count_in_first_request": 1,
+   "same_bytes": false,
+   "same_media_type": false
+  }
+ },
+ "claude_mention_beside_image": {
+  "replayed_user_content": [
+   {
+    "type": "text",
+    "text": "Summarise @notes.txt and the image"
+   },
+   {
+    "type": "image",
+    "media_type": "image/png"
+   }
+  ],
+  "result": {
+   "subtype": "success",
+   "is_error": true,
+   "result": "API Error: 400 keystone probe: no model here"
+  },
+  "exit": 1,
+  "stderr_tail": "",
+  "requests": [
+   {
+    "path": "/v1/messages?beta=true",
+    "images": [
+     {
+      "block": "image",
+      "source_type": "base64",
+      "media_type": "image/png",
+      "sha256": "b6900ab28c566dc35caeaa9a2d543d424235cc6499b4dc47efa22cbf488f1012",
+      "bytes": 512
+     }
+    ],
+    "typed_text_present": false,
+    "mentioned_file_present": false
+   },
+   {
+    "path": "/v1/messages?beta=true",
+    "images": [
+     {
+      "block": "image",
+      "source_type": "base64",
+      "media_type": "image/png",
+      "sha256": "b6900ab28c566dc35caeaa9a2d543d424235cc6499b4dc47efa22cbf488f1012",
+      "bytes": 512
+     }
+    ],
+    "typed_text_present": false,
+    "mentioned_file_present": false
+   },
+   {
+    "path": "/v1/messages?beta=true",
+    "images": [
+     {
+      "block": "image",
+      "source_type": "base64",
+      "media_type": "image/png",
+      "sha256": "b6900ab28c566dc35caeaa9a2d543d424235cc6499b4dc47efa22cbf488f1012",
+      "bytes": 512
+     }
+    ],
+    "typed_text_present": false,
+    "mentioned_file_present": false
+   }
+  ],
+  "model_requests": 3,
+  "image_count_in_first_request": 1,
+  "same_bytes": true,
+  "same_media_type": true
+ },
+ "claude_mention_alone": {
+  "replayed_user_content": "Summarise @notes.txt and the image",
+  "result": {
+   "subtype": "success",
+   "is_error": true,
+   "result": "API Error: 400 keystone probe: no model here"
+  },
+  "exit": 1,
+  "stderr_tail": "",
+  "requests": [
+   {
+    "path": "/v1/messages?beta=true",
+    "images": [],
+    "typed_text_present": false,
+    "mentioned_file_present": true
+   },
+   {
+    "path": "/v1/messages?beta=true",
+    "images": [],
+    "typed_text_present": false,
+    "mentioned_file_present": true
+   },
+   {
+    "path": "/v1/messages?beta=true",
+    "images": [],
+    "typed_text_present": false,
+    "mentioned_file_present": true
+   }
+  ]
+ },
+ "codex": {
+  "png": {
+   "answers": {
+    "initialize_error": null,
+    "thread_start_error": null,
+    "turn_start_error": null,
+    "turn_completed": true
+   },
+   "user_message_item_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?",
+     "text_elements": []
+    },
+    {
+     "type": "localImage",
+     "detail": null,
+     "path": "<root>/fixtures/probe.png"
+    }
+   ],
+   "exit": 0,
+   "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))\n",
+   "requests": [
+    {
+     "path": "/v1/responses",
+     "images": [
+      {
+       "block": "input_image",
+       "media_type": "image/png",
+       "sha256": "b6900ab28c566dc35caeaa9a2d543d424235cc6499b4dc47efa22cbf488f1012",
+       "bytes": 512
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 1,
+   "image_count_in_first_request": 1,
+   "same_bytes": true,
+   "same_media_type": true
+  },
+  "jpeg": {
+   "answers": {
+    "initialize_error": null,
+    "thread_start_error": null,
+    "turn_start_error": null,
+    "turn_completed": true
+   },
+   "user_message_item_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?",
+     "text_elements": []
+    },
+    {
+     "type": "localImage",
+     "detail": null,
+     "path": "<root>/fixtures/probe.jpeg"
+    }
+   ],
+   "exit": 0,
+   "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))\n",
+   "requests": [
+    {
+     "path": "/v1/responses",
+     "images": [
+      {
+       "block": "input_image",
+       "media_type": "image/jpeg",
+       "sha256": "d765833a532ea18056888edba4d3652b04b1586d105a36bef9b0562144eb0e5a",
+       "bytes": 520
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 1,
+   "image_count_in_first_request": 1,
+   "same_bytes": true,
+   "same_media_type": true
+  },
+  "gif": {
+   "answers": {
+    "initialize_error": null,
+    "thread_start_error": null,
+    "turn_start_error": null,
+    "turn_completed": true
+   },
+   "user_message_item_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?",
+     "text_elements": []
+    },
+    {
+     "type": "localImage",
+     "detail": null,
+     "path": "<root>/fixtures/probe.gif"
+    }
+   ],
+   "exit": 0,
+   "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))\n",
+   "requests": [
+    {
+     "path": "/v1/responses",
+     "images": [
+      {
+       "block": "input_image",
+       "media_type": "image/png",
+       "sha256": "913be060135bd2ecafe2251a52adc3aa6468b5879fe319dd280d6217644a643e",
+       "bytes": 351
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 1,
+   "image_count_in_first_request": 1,
+   "same_bytes": false,
+   "same_media_type": false
+  },
+  "webp": {
+   "answers": {
+    "initialize_error": null,
+    "thread_start_error": null,
+    "turn_start_error": null,
+    "turn_completed": true
+   },
+   "user_message_item_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?",
+     "text_elements": []
+    },
+    {
+     "type": "localImage",
+     "detail": null,
+     "path": "<root>/fixtures/probe.webp"
+    }
+   ],
+   "exit": 0,
+   "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))\n",
+   "requests": [
+    {
+     "path": "/v1/responses",
+     "images": [
+      {
+       "block": "input_image",
+       "media_type": "image/webp",
+       "sha256": "3a069b2663ea441f0cc4cce6d253c680ee01d0d8af10c4f3a01f9ff4223797fd",
+       "bytes": 142
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 1,
+   "image_count_in_first_request": 1,
+   "same_bytes": true,
+   "same_media_type": true
+  },
+  "large-png": {
+   "answers": {
+    "initialize_error": null,
+    "thread_start_error": null,
+    "turn_start_error": null,
+    "turn_completed": true
+   },
+   "user_message_item_content": [
+    {
+     "type": "text",
+     "text": "What is in this image?",
+     "text_elements": []
+    },
+    {
+     "type": "localImage",
+     "detail": null,
+     "path": "<root>/fixtures/large.png"
+    }
+   ],
+   "exit": 0,
+   "stderr_tail": "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"<root>/codex-home\"))\n",
+   "requests": [
+    {
+     "path": "/v1/responses",
+     "images": [
+      {
+       "block": "input_image",
+       "media_type": "image/png",
+       "sha256": "ee3acf872337dccc4b67f0968c4d3855d34414257dcd498fadb231817707c102",
+       "bytes": 9536025
+      }
+     ],
+     "typed_text_present": true,
+     "mentioned_file_present": false
+    }
+   ],
+   "model_requests": 1,
+   "image_count_in_first_request": 1,
+   "same_bytes": false,
+   "same_media_type": true
+  }
+ }
+}

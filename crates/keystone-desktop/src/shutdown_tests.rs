@@ -143,7 +143,8 @@ fn start(
         assert!(state.send_message(
             ComposerDraft {
                 session: id,
-                text: "long turn for shutdown".into()
+                text: "long turn for shutdown".into(),
+                attachments: Vec::new(),
             },
             cx
         ));
@@ -627,7 +628,8 @@ fn quit_during_both_provider_starts_reaps_owned_probes_and_descendants(cx: &mut 
         assert!(!s.send_message(
             ComposerDraft {
                 session: 1,
-                text: "must not start".into()
+                text: "must not start".into(),
+                attachments: Vec::new(),
             },
             cx
         ));

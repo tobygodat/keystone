@@ -35,6 +35,8 @@ pub enum Row {
     Recovery(RecoveryReport),
     /// An agent-built widget and the user's state in it.
     Surface(Surface),
+    /// The images sent with the user message in the row before it.
+    Attachments(Vec<keystone_core::Attachment>),
 }
 
 /// A Button press on a widget: what to send the agent, and whether the provider's
@@ -135,7 +137,7 @@ impl Default for Run {
 }
 
 enum Pending {
-    Local(String),
+    Local(String, Vec<keystone_core::Attachment>),
     Event(Event),
 }
 
@@ -230,7 +232,7 @@ impl Conversation {
         self.changed.extend(0..self.rows.len());
         for pending in pending {
             match pending {
-                Pending::Local(text) => self.push_local(&text),
+                Pending::Local(text, attachments) => self.push_sent(&text, attachments),
                 Pending::Event(event) => {
                     self.apply(event);
                 }
@@ -276,6 +278,7 @@ impl Conversation {
                 Entry::Item { seq, run, .. }
                 | Entry::Approval { seq, run, .. }
                 | Entry::TurnEnded { seq, run, .. }
+                | Entry::Attachments { seq, run, .. }
                 | Entry::Surface { seq, run, .. } => (*seq, *run),
             };
             match &entry {
@@ -308,7 +311,7 @@ impl Conversation {
                     last_local = item.id.starts_with(LOCAL) && item.kind == ItemKind::UserMessage;
                 }
                 Entry::TurnEnded { .. } => last_local = false,
-                Entry::Approval { .. } | Entry::Surface { .. } => {}
+                Entry::Approval { .. } | Entry::Surface { .. } | Entry::Attachments { .. } => {}
             }
             if entry_run.is_some() && entry_run != run {
                 // A new run starts after every row before it, and never replaces them.
@@ -341,6 +344,7 @@ impl Conversation {
                 Entry::Approval {
                     action, allowed, ..
                 } => Some(Row::Decision { action, allowed }),
+                Entry::Attachments { attachments, .. } => Some(Row::Attachments(attachments)),
                 Entry::Surface { mut surface, .. } => {
                     // The tool call that waited for it ended with the run that showed it.
                     if surface.status == Status::Waiting {
@@ -501,8 +505,14 @@ impl Conversation {
                         continue;
                     }
                     if let Some(index) = self.find(logged_at, |old| old.id == *after) {
-                        self.insert_row(index + 1, Row::Item(item.clone()), logged_at);
-                        touch(index + 1);
+                        let at = index
+                            + 1
+                            + usize::from(matches!(
+                                self.rows.get(index + 1),
+                                Some(Row::Attachments(_))
+                            ));
+                        self.insert_row(at, Row::Item(item.clone()), logged_at);
+                        touch(at);
                     }
                 }
             }
@@ -526,7 +536,9 @@ impl Conversation {
                         let mut at = index + 1;
                         while matches!(
                             self.rows.get(at),
-                            Some(Row::TurnEnded { .. } | Row::Decision { .. })
+                            Some(
+                                Row::TurnEnded { .. } | Row::Decision { .. } | Row::Attachments(_)
+                            )
                         ) {
                             at += 1;
                         }
@@ -569,11 +581,18 @@ impl Conversation {
         }
     }
 
-    /// Shows and logs a sent message at once. Steers are not always echoed back, so
-    /// the message is logged now; the provider's copy replaces it if one arrives.
+    #[cfg(test)]
     pub fn push_local(&mut self, text: &str) {
+        self.push_sent(text, Vec::new());
+    }
+
+    /// Shows and logs a sent message at once. Steers are not always echoed back, so
+    /// the message is logged now; the provider's copy replaces it if one arrives. The
+    /// images sent with it follow in a row of their own, which the log holds as
+    /// references, not bytes.
+    pub fn push_sent(&mut self, text: &str, attachments: Vec<keystone_core::Attachment>) {
         if let Some(pending) = &mut self.pending {
-            pending.push(Pending::Local(text.to_owned()));
+            pending.push(Pending::Local(text.to_owned(), attachments));
             // The message has already gone to the provider, so the turn is running
             // now, and Stop is offered before the history arrives.
             self.running = true;
@@ -595,6 +614,18 @@ impl Conversation {
         }
         let index = self.push(Row::Item(item.clone()));
         self.log_item(index, item);
+        if !attachments.is_empty() {
+            let index = self.push(Row::Attachments(attachments.clone()));
+            let (seq, run) = (Some(self.seq(index)), Some(self.run.0));
+            self.write(
+                Entry::Attachments {
+                    attachments,
+                    seq,
+                    run,
+                },
+                false,
+            );
+        }
         self.running = true;
         self.error = None;
     }
@@ -916,7 +947,8 @@ impl Conversation {
 pub fn visible(row: &Row) -> bool {
     match row {
         Row::Item(item) => match &item.kind {
-            ItemKind::Reasoning => !item.text.is_empty(),
+            // A message of images alone shows only its images' row.
+            ItemKind::Reasoning | ItemKind::UserMessage => !item.text.is_empty(),
             // The widget's own row stands for its tool call.
             ItemKind::Tool { name } => name != surface::TOOL,
             _ => true,
@@ -1820,6 +1852,90 @@ mod tests {
             texts(&log.restore()),
             ["Fix the build", "Never echoed", "After restart"]
         );
+    }
+
+    /// A sent message's images follow it in a row of their own, which the provider's
+    /// echo of the message leaves in place, and which a restart restores after it. The
+    /// log holds references, not bytes.
+    #[test]
+    fn images_sent_with_a_message_follow_it_and_survive_the_echo_and_a_restart() {
+        let image = |n: &str| keystone_core::Attachment {
+            sha256: n.repeat(64),
+            media_type: "image/png".into(),
+            name: format!("{n}.png"),
+        };
+        let images = vec![image("a"), image("b")];
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        live.push_sent("What changed?", images.clone());
+        assert!(live.writes.iter().any(|write| matches!(&write.entry,
+            Entry::Attachments { attachments, seq: Some(1), .. } if *attachments == images)));
+        log.save(&mut live);
+        let echoed = user("u1", "What changed?");
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::ItemStarted(echoed.clone()),
+                Event::ItemCompleted(echoed.clone()),
+                Event::ItemCompleted(message("r", "A diagram.", ItemStatus::Completed)),
+                completed(),
+            ],
+        );
+        let expected = [
+            Row::Item(echoed),
+            Row::Attachments(images.clone()),
+            Row::Item(message("r", "A diagram.", ItemStatus::Completed)),
+        ];
+        assert_eq!(live.rows, expected);
+        assert_eq!(log.restore().rows, expected);
+
+        // Images alone: the empty message is not shown, its images are.
+        let mut alone = Conversation::default();
+        alone.push_sent("", vec![image("c")]);
+        let shown: Vec<_> = alone.rows.iter().filter(|row| visible(row)).collect();
+        assert_eq!(shown, [&Row::Attachments(vec![image("c")])]);
+    }
+
+    /// Rows a recovery adds after a message come after the images sent with it, and so
+    /// does its report.
+    #[test]
+    fn a_recovery_keeps_a_message_s_images_under_it() {
+        use keystone_agent::recovery::{Snapshot, SnapshotTurn, reconcile};
+        let images = vec![keystone_core::Attachment {
+            sha256: "a".repeat(64),
+            media_type: "image/png".into(),
+            name: "a.png".into(),
+        }];
+        let mut log = Log(vec![
+            Entry::Item {
+                item: user("u1", "hi"),
+                seq: Some(0),
+                run: Some(1),
+            },
+            Entry::Attachments {
+                attachments: images.clone(),
+                seq: Some(1),
+                run: Some(1),
+            },
+            Entry::TurnStarted,
+        ]);
+        let mut live = log.restore();
+        let snapshot = Snapshot {
+            turns: vec![SnapshotTurn {
+                items: vec![
+                    user("u1", "hi"),
+                    message("m1", "one", ItemStatus::Completed),
+                ],
+                end: Some(TurnStatus::Completed),
+            }],
+            limits: Vec::new(),
+        };
+        let batch = reconcile(&live.neutral_items(), live.open_turn(), &snapshot).unwrap();
+        live.apply_recovery(batch);
+        log.save(&mut live);
+        assert!(matches!(&live.rows[1], Row::Attachments(shown) if *shown == images));
+        assert!(matches!(&live.rows[2], Row::Item(item) if item.id == "m1"));
+        assert_eq!(log.restore().rows, live.rows);
     }
 
     #[test]
