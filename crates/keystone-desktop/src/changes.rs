@@ -13,7 +13,7 @@ use gpui::{
 use keystone_agent::git::{self, Entry, PushError, Status};
 use keystone_agent::github;
 use keystone_agent::worker::Worker;
-use keystone_core::{Axis, Component, Edit, Place, PullRequest};
+use keystone_core::{Axis, Component, Edit, Place};
 use keystone_ui::prelude::*;
 use keystone_ui::text_input::Changed;
 use std::cell::RefCell;
@@ -23,7 +23,15 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-gpui::actions!(changes, [ToggleChanges, ToggleStaged, CopyChangePath]);
+gpui::actions!(
+    changes,
+    [
+        ToggleChanges,
+        ToggleStaged,
+        CopyChangePath,
+        CopyPullRequestLink
+    ]
+);
 
 const LIST_CONTEXT: &str = "ChangesList";
 const ROW_HEIGHT: f32 = 26.;
@@ -249,14 +257,6 @@ fn rows(status: &Status) -> Vec<Row> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Notice {
-    Committed(String),
-    /// git's output from a push that worked.
-    Pushed(String),
-    /// A pull request made, or found already open, and saved on the session.
-    PullRequest {
-        lead: &'static str,
-        pull_request: PullRequest,
-    },
     /// A command failed; the output is git's and its hooks', or gh's, as they wrote it.
     Failed {
         title: &'static str,
@@ -271,6 +271,8 @@ enum Notice {
         output: Option<String>,
     },
     Info(&'static str),
+    /// The branch already had this pull request, which is saved on the session.
+    AlreadyOpen(u64),
 }
 
 impl Notice {
@@ -279,22 +281,19 @@ impl Notice {
         match error {
             github::Error::Missing => Notice::Hint {
                 id: "changes-hint-gh-missing",
-                title: "GitHub CLI (gh) is not installed. Install it from cli.github.com, then sign in from a terminal:".into(),
+                title: "Install gh (cli.github.com), then run:".into(),
                 command: github::SIGN_IN,
                 output: None,
             },
             github::Error::SignedOut { output } => Notice::Hint {
                 id: "changes-hint-gh-signed-out",
-                title: "GitHub CLI is not signed in, or its login could not be checked. Sign in from a terminal, then try again:".into(),
+                title: "Sign in to gh:".into(),
                 command: github::SIGN_IN,
                 output: Some(output),
             },
-            github::Error::Exists(pull_request) => Notice::PullRequest {
-                lead: "This branch already has pull request",
-                pull_request,
-            },
+            github::Error::Exists(pull_request) => Notice::AlreadyOpen(pull_request.number),
             github::Error::Failed { output } => Notice::Failed {
-                title: "Couldn't create the pull request. Your text is kept.",
+                title: "Could not create the pull request.",
                 output,
             },
         }
@@ -496,10 +495,7 @@ impl ChangesPanel {
                 if group == Group::Conflicted
                     && let Some(path) = paths.iter().find(|path| has_markers(&root.join(path)))
                 {
-                    return Err(format!(
-                        "{} still has conflict markers. Resolve them, then stage it.",
-                        path.display()
-                    ));
+                    return Err(format!("{} still has conflict markers.", path.display()));
                 }
                 git::stage(&root, &paths).map_err(|error| error.to_string())
             },
@@ -592,39 +588,32 @@ impl ChangesPanel {
             return;
         };
         let message = self.message.read(cx).value().to_owned();
-        self.notice = if self.files(Group::Staged).next().is_none() {
-            Some(Notice::Info("Stage a file to commit it."))
-        } else if message.trim().is_empty() {
-            Some(Notice::Info("Write a commit message first."))
-        } else {
-            None
-        };
-        cx.notify();
-        if self.notice.is_some() {
+        if self.files(Group::Staged).next().is_none() || message.trim().is_empty() {
             return;
         }
+        self.notice = None;
+        cx.notify();
         self.committing = Some(message.clone());
         self.run(
             move || git::commit(&root, &message),
             |this, result, cx| {
                 let message = this.committing.take().unwrap_or_default();
                 match result {
-                    Ok(committed) => {
+                    Ok(()) => {
                         // Text typed while the hooks ran was not committed, so it stays.
-                        this.notice = Some(Notice::Committed(committed.summary));
                         if this.message.read(cx).value() == message {
                             this.message
                                 .update(cx, |input, cx| input.set_value(String::new(), cx));
                             this.draft_task = None;
                             // Unsaved until the store has it, so a failure is retried
-                            // at close and quit, and its notice replaces the summary.
+                            // at close and quit.
                             this.unsaved = true;
                             let _ = this.save_draft(cx);
                         }
                     }
                     Err(error) => {
                         this.notice = Some(Notice::Failed {
-                            title: "Commit failed. Your message is kept.",
+                            title: "Commit failed.",
                             output: error.to_string(),
                         })
                     }
@@ -654,38 +643,34 @@ impl ChangesPanel {
             move || git::push(&root, &branch),
             |this, result, cx| {
                 this.pushing = false;
-                this.notice = Some(match result {
-                    Ok(output) => Notice::Pushed(output),
-                    Err(PushError::NoRemote) => Notice::Hint {
+                this.notice = match result {
+                    Ok(_) => None,
+                    Err(PushError::NoRemote) => Some(Notice::Hint {
                         id: "changes-hint-no-remote",
-                        title: "This repository has no remote. Add one from a terminal, then push:"
-                            .into(),
+                        title: "No remote. Add one:".into(),
                         command: "git remote add origin <url>",
                         output: None,
-                    },
-                    Err(PushError::UnclearRemote(remotes)) => Notice::Hint {
+                    }),
+                    Err(PushError::UnclearRemote(remotes)) => Some(Notice::Hint {
                         id: "changes-hint-unclear-remote",
-                        title: format!(
-                            "This repository has several remotes ({}) and none is set to push to. Choose one from a terminal:",
-                            remotes.join(", ")
-                        ),
+                        title: format!("Several remotes ({}). Pick one:", remotes.join(", ")),
                         command: "git config remote.pushDefault <remote>",
                         output: None,
-                    },
+                    }),
                     Err(PushError::Failed(error)) => {
                         let output = error.to_string();
-                        let rejected = output.contains("[rejected]")
-                            || output.contains("[remote rejected]");
-                        Notice::Failed {
+                        let rejected =
+                            output.contains("[rejected]") || output.contains("[remote rejected]");
+                        Some(Notice::Failed {
                             title: if rejected {
-                                "Push rejected. Nothing was forced."
+                                "Push rejected."
                             } else {
                                 "Push failed."
                             },
                             output,
-                        }
+                        })
                     }
-                });
+                };
                 cx.notify();
             },
             cx,
@@ -706,15 +691,10 @@ impl ChangesPanel {
             return;
         };
         if !status.branch.published {
-            self.notice = Some(Notice::Info(
-                "Push the branch before creating a pull request.",
-            ));
-            return cx.notify();
+            return;
         }
         if status.branch.unpushed > 0 {
-            self.notice = Some(Notice::Info(
-                "Push your latest commits before creating a pull request.",
-            ));
+            self.notice = Some(Notice::Info("Push your commits first."));
             return cx.notify();
         }
         if let Err(error) = github::locate() {
@@ -740,7 +720,7 @@ impl ChangesPanel {
             branch,
             title: input("Title", InputMode::SingleLine, title, cx),
             body: input("Description", InputMode::Multiline, String::new(), cx),
-            base: input("Default branch", InputMode::SingleLine, String::new(), cx),
+            base: input("Base branch", InputMode::SingleLine, String::new(), cx),
             draft: false,
             busy: None,
         };
@@ -782,7 +762,7 @@ impl ChangesPanel {
             draft: form.draft,
         };
         if request.title.is_empty() {
-            self.notice = Some(Notice::Info("Give the pull request a title."));
+            self.notice = Some(Notice::Info("Add a title."));
             return cx.notify();
         }
         form.busy = Some("Creating…");
@@ -798,8 +778,8 @@ impl ChangesPanel {
                 Ok(Some(current)) if current == branch => github::create(&root, &request),
                 Ok(current) => Err(github::Error::Failed {
                     output: format!(
-                        "The form is for {branch}, but {} is checked out now. Check out {branch}, or close the form and open it again.",
-                        current.as_deref().unwrap_or("no branch")
+                        "{} is checked out. Check out {branch} to create this pull request.",
+                        current.as_deref().unwrap_or("No branch")
                     ),
                 }),
                 Err(error) => Err(github::Error::Failed {
@@ -813,15 +793,14 @@ impl ChangesPanel {
             let Ok(result) = receiver.await else {
                 return;
             };
-            let notice = match result {
-                Ok(pull_request) => Notice::PullRequest {
-                    lead: "Created pull request",
-                    pull_request,
-                },
-                Err(error) => Notice::github(error),
+            let pull_request = match &result {
+                Ok(pull_request) | Err(github::Error::Exists(pull_request)) => {
+                    Some(pull_request.clone())
+                }
+                Err(_) => None,
             };
-            let saved = match (&notice, session) {
-                (Notice::PullRequest { pull_request, .. }, Some(id)) => state
+            let saved = match (&pull_request, session) {
+                (Some(pull_request), Some(id)) => state
                     .update(cx, |state, cx| {
                         state.set_pull_request(id, pull_request.clone(), cx)
                     })
@@ -832,17 +811,23 @@ impl ChangesPanel {
                 if let Some(form) = &mut this.form {
                     form.busy = None;
                 }
-                if let Notice::PullRequest { pull_request, .. } = &notice {
+                if pull_request.is_some() {
                     this.form = None;
-                    if let Err(output) = saved {
-                        this.notice = Some(Notice::Failed {
-                            title: "The pull request was made, but not saved on the session.",
-                            output: format!("{}\n{output}", pull_request.url),
-                        });
-                        return cx.notify();
-                    }
                 }
-                this.notice = Some(notice);
+                this.notice = match (result, saved) {
+                    (Ok(_), Ok(())) => None,
+                    (Ok(pull_request), Err(output)) => Some(Notice::Failed {
+                        title: "Created, but not saved on the session.",
+                        output: format!("{}\n{output}", pull_request.url),
+                    }),
+                    (Err(github::Error::Exists(pull_request)), Err(output)) => {
+                        Some(Notice::Failed {
+                            title: "Already open, but not saved on the session.",
+                            output: format!("{}\n{output}", pull_request.url),
+                        })
+                    }
+                    (Err(error), _) => Some(Notice::github(error)),
+                };
                 cx.notify();
             });
         })
@@ -861,24 +846,12 @@ impl ChangesPanel {
     fn sync_row(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let branch = &self.status()?.branch;
         let published = branch.published;
-        let (state, tip) = match (&branch.head, &branch.upstream) {
-            (None, _) => ("Not on a branch".to_owned(), None),
-            (Some(_), Some(upstream)) if published => (upstream.clone(), None),
-            (Some(_), Some(upstream)) => (
-                "Not pushed yet".to_owned(),
-                Some(format!("Started from {upstream}")),
-            ),
-            (Some(_), None) if published => ("Published".to_owned(), None),
-            (Some(_), None) => ("Not pushed yet".to_owned(), None),
+        let state = match (&branch.head, &branch.upstream) {
+            (Some(_), Some(upstream)) if published => upstream.clone(),
+            (Some(_), _) if !published => "Not pushed".to_owned(),
+            _ => String::new(),
         };
         let can_push = branch.head.is_some() && !self.pushing && self.committing.is_none();
-        let push_tip = if branch.head.is_none() {
-            "Check out a branch to push it"
-        } else if published {
-            "Push"
-        } else {
-            "Push and publish the branch"
-        };
         Some(
             h_flex()
                 .flex_shrink_0()
@@ -897,22 +870,17 @@ impl ChangesPanel {
                                 .size(TextSize::Sm)
                                 .color(Color::Muted)
                                 .truncate(),
-                        )
-                        .when_some(tip, |d, tip| d.tooltip(Tooltip::text(tip).builder())),
+                        ),
                 )
                 .children(
                     branch
                         .upstream
                         .as_ref()
                         .filter(|_| (branch.ahead, branch.behind) != (0, 0))
-                        .map(|upstream| {
+                        .map(|_| {
                             div()
                                 .id("changes-sync")
                                 .automation_id("changes-sync")
-                                .tooltip(
-                                    Tooltip::text(format!("Ahead of and behind {upstream}"))
-                                        .builder(),
-                                )
                                 .child(
                                     Label::new(format!("↑{} ↓{}", branch.ahead, branch.behind))
                                         .size(TextSize::Sm)
@@ -925,11 +893,9 @@ impl ChangesPanel {
                         "changes-push",
                         if self.pushing { "Pushing…" } else { "Push" },
                     )
-                    .icon(IconName::Up)
                     .size(ButtonSize::Compact)
                     .disabled(!can_push)
                     .debug_selector(|| "changes-push".into())
-                    .tooltip(Tooltip::text(push_tip))
                     .on_click(cx.listener(|this, _, _, cx| this.push(cx))),
                 )
                 .child(
@@ -937,10 +903,15 @@ impl ChangesPanel {
                         .size(ButtonSize::Compact)
                         .disabled(!published || self.session.is_none() || self.form.is_some())
                         .debug_selector(|| "changes-create-pr".into())
-                        .tooltip(Tooltip::text(match (published, self.session) {
-                            (false, _) => "Push the branch before creating a pull request",
-                            (true, None) => "Select a session to create a pull request for",
-                            (true, Some(_)) => "Create pull request",
+                        .aria_label("Create pull request")
+                        .tooltip(Tooltip::text(if self.session.is_none() {
+                            "Select a session"
+                        } else if published {
+                            "Create pull request"
+                        } else if branch.head.is_none() {
+                            "No branch"
+                        } else {
+                            "Push first"
                         }))
                         .on_click(cx.listener(|this, _, window, cx| this.open_form(window, cx))),
                 ),
@@ -981,11 +952,6 @@ impl ChangesPanel {
                 .pb_2()
                 .gap_2()
                 .automation_id("changes-pr-form")
-                .child(
-                    Label::new("New pull request")
-                        .size(TextSize::Ui)
-                        .weight(FontWeight::MEDIUM),
-                )
                 .child(Self::field("changes-pr-title", &form.title, false, cx))
                 .child(Self::field("changes-pr-body", &form.body, true, cx))
                 .child(
@@ -1017,15 +983,14 @@ impl ChangesPanel {
                     h_flex()
                         .gap_2()
                         .child(
-                            Button::new(
-                                "changes-pr-create",
-                                form.busy.unwrap_or("Create pull request"),
-                            )
-                            .style(ButtonStyle::Filled)
-                            .disabled(form.busy.is_some())
-                            .debug_selector(|| "changes-pr-create".into())
-                            .tooltip(Tooltip::text("Create with gh · Ctrl+Enter"))
-                            .on_click(cx.listener(|this, _, _, cx| this.create_pull_request(cx))),
+                            Button::new("changes-pr-create", form.busy.unwrap_or("Create"))
+                                .style(ButtonStyle::Filled)
+                                .disabled(form.busy.is_some())
+                                .debug_selector(|| "changes-pr-create".into())
+                                .tooltip(Tooltip::text("Ctrl+Enter"))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.create_pull_request(cx)),
+                                ),
                         )
                         .child(
                             Button::new("changes-pr-cancel", "Cancel")
@@ -1086,11 +1051,10 @@ impl ChangesPanel {
         let colors = cx.theme().colors;
         let staged = self.files(Group::Staged).count();
         let ready = staged > 0 && !self.message.read(cx).value().trim().is_empty();
-        let label = match (self.committing.is_some(), staged) {
-            (true, _) => "Committing…".to_owned(),
-            (false, 0) => "Commit".to_owned(),
-            (false, 1) => "Commit 1 file".to_owned(),
-            (false, n) => format!("Commit {n} files"),
+        let label = if self.committing.is_some() {
+            "Committing…"
+        } else {
+            "Commit"
         };
         let message = self.message.clone();
         v_flex()
@@ -1119,7 +1083,7 @@ impl ChangesPanel {
                     .style(ButtonStyle::Filled)
                     .disabled(!ready || self.committing.is_some())
                     .debug_selector(|| "changes-commit".into())
-                    .tooltip(Tooltip::text("Commit staged files · Ctrl+Enter"))
+                    .tooltip(Tooltip::text("Ctrl+Enter"))
                     .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
             )
     }
@@ -1128,14 +1092,10 @@ impl ChangesPanel {
         let colors = cx.theme().colors;
         let notice = self.notice.as_ref()?;
         let (title, color, output) = match notice {
-            Notice::Committed(summary) => (summary.clone(), Color::Success, None),
-            Notice::Pushed(output) => ("Pushed.".into(), Color::Success, Some(output.clone())),
-            Notice::PullRequest { lead, pull_request } => (
-                format!("{lead} #{}.", pull_request.number),
-                Color::Success,
-                None,
-            ),
             Notice::Info(text) => ((*text).into(), Color::Muted, None),
+            Notice::AlreadyOpen(number) => {
+                (format!("Already open: #{number}."), Color::Muted, None)
+            }
             Notice::Failed { title, output } => {
                 ((*title).into(), Color::Danger, Some(output.clone()))
             }
@@ -1144,10 +1104,6 @@ impl ChangesPanel {
         let (command, id) = match notice {
             Notice::Hint { command, id, .. } => (Some(*command), *id),
             _ => (None, "changes-notice-title"),
-        };
-        let link = match notice {
-            Notice::PullRequest { pull_request, .. } => Some(pull_request.url.clone()),
-            _ => None,
         };
         Some(
             v_flex()
@@ -1177,36 +1133,6 @@ impl ChangesPanel {
                                 })),
                         ),
                 )
-                .children(link.map(|url| {
-                    let (open, copy) = (url.clone(), url.clone());
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            div()
-                                .id("changes-pr-link")
-                                .automation_id("changes-pr-link")
-                                .min_w_0()
-                                .flex_shrink(1.)
-                                .cursor_pointer()
-                                .child(
-                                    Label::new(url)
-                                        .size(TextSize::Sm)
-                                        .color(Color::Accent)
-                                        .truncate(),
-                                )
-                                .tooltip(Tooltip::text("Open in the browser").builder())
-                                .on_click(move |_, _, cx| cx.open_url(&open)),
-                        )
-                        .child(
-                            IconButton::new("changes-pr-copy", IconName::Copy)
-                                .size(ButtonSize::Compact)
-                                .debug_selector(|| "changes-pr-copy".into())
-                                .tooltip(Tooltip::text("Copy link"))
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
-                                }),
-                        )
-                }))
                 .children(command.map(|command| {
                     h_flex()
                         .gap_1()
@@ -1267,16 +1193,16 @@ impl ChangesPanel {
                 .into_any_element()
         };
         match &self.status {
-            None => return empty("Reading changes…".into(), "changes-loading"),
+            None => return div().flex_1().into_any_element(),
             Some(Err(error)) => {
                 return empty(
-                    format!("Couldn't read this folder's changes. {error}"),
+                    format!("Could not read changes. {error}"),
                     "changes-unavailable",
                 );
             }
             Some(Ok(status)) if self.rows.is_empty() => {
                 let text = if status.untracked_hidden {
-                    "No changes. New files are hidden by this repository's status.showUntrackedFiles setting."
+                    "No changes. Untracked files are hidden by git config."
                 } else {
                     "No changes."
                 };
@@ -1417,7 +1343,7 @@ fn row(
             };
             let (icon, tip) = match file.group {
                 Group::Staged => (IconName::Minus, "Unstage"),
-                Group::Conflicted => (IconName::Plus, "Stage, marking it resolved"),
+                Group::Conflicted => (IconName::Plus, "Mark resolved"),
                 Group::Unstaged | Group::Untracked => (IconName::Plus, "Stage"),
             };
             let (copy, stage) = (file.clone(), file.clone());
@@ -1513,6 +1439,17 @@ impl Render for ChangesPanel {
 }
 
 impl Keystone {
+    /// Copies the selected session's pull request link, if it has one.
+    pub(crate) fn copy_pull_request_link(&self, cx: &mut Context<Self>) {
+        let url = self
+            .selected(cx)
+            .and_then(|session| self.state.read(cx).session(session)?.pull_request())
+            .map(|pull_request| pull_request.url.clone());
+        if let Some(url) = url {
+            cx.write_to_clipboard(ClipboardItem::new_string(url));
+        }
+    }
+
     /// The selected session's pull request as `#N` in the top bar, opening it in the
     /// browser.
     pub(crate) fn pull_request_link(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1670,7 +1607,7 @@ impl Keystone {
                 .py_2()
                 .automation_id("changes-unavailable")
                 .child(
-                    Label::new(format!("No project folder to show changes for. {error}"))
+                    Label::new(format!("No project folder. {error}"))
                         .size(TextSize::Ui)
                         .color(Color::Muted),
                 )
@@ -1805,7 +1742,7 @@ mod tests {
 mod ui_tests {
     use super::*;
     use keystone_agent::{Event, Item, ItemKind, ItemStatus};
-    use keystone_core::{Provider, Store, WorkingDirectory};
+    use keystone_core::{Provider, PullRequest, Store, WorkingDirectory};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
@@ -2003,8 +1940,10 @@ mod ui_tests {
             "edited.txt\n",
             "only the staged file is committed"
         );
-        assert!(
-            matches!(notice(&view, cx), Some(Notice::Committed(summary)) if summary.contains("verify commit"))
+        assert_eq!(
+            notice(&view, cx),
+            None,
+            "the cleared box and list show the commit"
         );
         assert_eq!(
             shown(&view, cx),
@@ -2073,15 +2012,18 @@ mod ui_tests {
         cx.simulate_keystrokes("ctrl-enter");
         assert_eq!(
             notice(&view, cx),
-            Some(Notice::Info("Stage a file to commit it."))
+            None,
+            "nothing staged: Ctrl+Enter does nothing"
         );
         click(cx, "changes-stage-unstaged-edited.txt");
         until(cx, "staged", |cx| settled(&view, cx));
         cx.simulate_keystrokes("ctrl-enter");
         assert_eq!(
             notice(&view, cx),
-            Some(Notice::Info("Write a commit message first."))
+            None,
+            "no message: Ctrl+Enter does nothing"
         );
+        assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "first\n");
         click(cx, "changes-message");
         cx.simulate_input("verify commit");
         cx.simulate_keystrokes("ctrl-enter");
@@ -2089,7 +2031,7 @@ mod ui_tests {
         assert_eq!(
             notice(&view, cx),
             Some(Notice::Failed {
-                title: "Commit failed. Your message is kept.",
+                title: "Commit failed.",
                 output: "pre-commit: lint failed in edited.txt".into(),
             })
         );
@@ -2419,7 +2361,7 @@ mod ui_tests {
             notice(&view, cx),
             Some(Notice::Failed {
                 title: "Couldn't stage",
-                output: "kept.txt still has conflict markers. Resolve them, then stage it.".into(),
+                output: "kept.txt still has conflict markers.".into(),
             })
         );
         assert_eq!(shown(&view, cx), ["Conflicts · 1", "! kept.txt"]);
@@ -2546,9 +2488,7 @@ mod ui_tests {
             git(repo, &["rev-parse", "HEAD"])
         );
         assert_eq!(upstream(&view, cx).as_deref(), Some("origin/feature"));
-        assert!(
-            matches!(notice(&view, cx), Some(Notice::Pushed(output)) if output.contains("[new branch]"))
-        );
+        assert_eq!(notice(&view, cx), None, "the upstream shows the push");
 
         script_gh(
             repo,
@@ -2557,7 +2497,10 @@ mod ui_tests {
              echo https://github.com/owner/repo/pull/12\n",
         );
         click(cx, "changes-create-pr");
-        until(cx, "gh checked", |cx| settled_all(&view, cx));
+        until(cx, "gh checked and the base filled", |cx| {
+            settled_all(&view, cx)
+                && form_value(&view, cx, |form| &form.base).is_some_and(|base| !base.is_empty())
+        });
         assert_eq!(
             form_value(&view, cx, |form| &form.title).as_deref(),
             Some("New Claude session"),
@@ -2586,18 +2529,18 @@ mod ui_tests {
             number: 12,
             url: "https://github.com/owner/repo/pull/12".into(),
         };
-        assert_eq!(
-            notice(&view, cx),
-            Some(Notice::PullRequest {
-                lead: "Created pull request",
-                pull_request: created.clone()
-            })
-        );
-        assert!(cx.debug_bounds("changes-pr-link").is_some());
-        assert_eq!(saved_pull_request(&view, cx), Some(created));
+        assert_eq!(notice(&view, cx), None, "the top bar shows it");
+        assert_eq!(saved_pull_request(&view, cx), Some(created.clone()));
         assert!(
             cx.debug_bounds("session-pull-request").is_some(),
             "the top bar shows the session's pull request"
+        );
+        view.update_in(cx, |this, window, cx| this.focus.focus(window, cx));
+        cx.simulate_keystrokes("ctrl-alt-c");
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text())),
+            Some(created.url),
+            "Copy pull request link copies the session's pull request"
         );
         assert_eq!(
             git(repo, &["log", "-1", "--format=%s"]),
@@ -2623,13 +2566,7 @@ mod ui_tests {
             number: 7,
             url: "https://github.com/owner/repo/pull/7".into(),
         };
-        assert_eq!(
-            notice(&view, cx),
-            Some(Notice::PullRequest {
-                lead: "This branch already has pull request",
-                pull_request: existing.clone()
-            })
-        );
+        assert_eq!(notice(&view, cx), Some(Notice::AlreadyOpen(7)));
         assert_eq!(saved_pull_request(&view, cx), Some(existing));
     }
 
@@ -2692,7 +2629,7 @@ mod ui_tests {
         assert!(
             matches!(
                 notice(&view, cx),
-                Some(Notice::Failed { title: "Push rejected. Nothing was forced.", output })
+                Some(Notice::Failed { title: "Push rejected.", output })
                     if output.contains("[rejected]")
             ),
             "{:?}",
@@ -2704,9 +2641,7 @@ mod ui_tests {
         click(cx, "changes-create-pr");
         assert_eq!(
             notice(&view, cx),
-            Some(Notice::Info(
-                "Push your latest commits before creating a pull request."
-            )),
+            Some(Notice::Info("Push your commits first.")),
             "gh would refuse a branch with unpushed commits"
         );
         git(repo, &["pull", "-q", "--rebase"]);
@@ -2745,7 +2680,7 @@ mod ui_tests {
             matches!(
                 notice(&view, cx),
                 Some(Notice::Failed { output, .. })
-                    if output.contains("The form is for main, but other is checked out now")
+                    if output.contains("other is checked out. Check out main")
             ),
             "{:?}",
             notice(&view, cx)

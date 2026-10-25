@@ -1,6 +1,6 @@
 use super::*;
 use crate::FOLDER_UNCONFIRMED;
-use crate::arrangement_editor::{Action, Commit};
+use crate::arrangement_editor::Action;
 use crate::customization_agent::{Outcome, Proposal};
 use crate::model_selector::{CatalogKey, Choices};
 use crate::view_state::ViewKey;
@@ -147,12 +147,10 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
                 )
             })
             .unwrap();
-        this.presentation.current.customization.saved(
-            Commit::Apply,
-            None,
-            candidate.clone(),
-            Ok(false),
-        );
+        this.presentation
+            .current
+            .customization
+            .saved(None, candidate.clone(), Ok(false));
         this.presentation
             .current
             .customize_prompt
@@ -273,10 +271,7 @@ fn newest_project_picker_and_same_canonical_alias_preserve_current_work(cx: &mut
             .customization
             .dispatch(Action::Open, None, &saved);
         this.presentation.current.customization.dispatch(
-            Action::Ask {
-                provider: Provider::Claude,
-                prompt: "Retain".into(),
-            },
+            Action::Ask("Retain".into()),
             None,
             &saved,
         );
@@ -322,10 +317,7 @@ fn failed_draft_barrier_keeps_project_preview_and_helper_acceptance(cx: &mut Tes
             .customization
             .dispatch(Action::Open, None, &saved);
         this.presentation.current.customization.dispatch(
-            Action::Ask {
-                provider: Provider::Claude,
-                prompt: "Keep running".into(),
-            },
+            Action::Ask("Keep running".into()),
             None,
             &saved,
         );
@@ -359,10 +351,7 @@ fn suspended_helpers_and_old_frame_mutations_stay_stale_after_return(cx: &mut Te
             .customization
             .dispatch(Action::Open, None, &saved);
         this.presentation.current.customization.dispatch(
-            Action::Ask {
-                provider: Provider::Claude,
-                prompt: "A request".into(),
-            },
+            Action::Ask("A request".into()),
             None,
             &saved,
         );
@@ -381,10 +370,7 @@ fn suspended_helpers_and_old_frame_mutations_stay_stale_after_return(cx: &mut Te
             .customization
             .dispatch(Action::Open, None, &saved);
         this.presentation.current.customization.dispatch(
-            Action::Ask {
-                provider: Provider::Claude,
-                prompt: "B request".into(),
-            },
+            Action::Ask("B request".into()),
             None,
             &saved,
         );
@@ -679,7 +665,7 @@ fn applied_folder_warning_ends_with_confirmation_and_never_returns(cx: &mut Test
         this.set_approval_mode(1, ApprovalMode::ReadOnly, window, cx);
         let (later, color) = this.status_line(cx).unwrap();
         assert!(
-            later.starts_with("Change saved, but crash durability"),
+            later.starts_with("Saved, but not confirmed on disk"),
             "{later}"
         );
         assert_eq!(color, Color::Danger);
@@ -720,9 +706,7 @@ fn send_with_unrelated_save_debt_refuses_without_blaming_a_folder(cx: &mut TestA
         assert!(this.state.read(cx).conversations()[&1].rows.is_empty());
         assert_eq!(
             this.state.read(cx).conversations()[&1].error.as_deref(),
-            Some(
-                "Not sent. Could not finish saving changes. Your draft is kept. Send will retry saving. directory sync unavailable"
-            )
+            Some("Not sent. Could not finish saving changes. directory sync unavailable")
         );
     });
 }
@@ -1156,7 +1140,6 @@ fn the_model_menu_fits_a_400px_window_and_keeps_its_columns_when_wide(cx: &mut T
         "model-default",
         "model-failed",
         "model-retry",
-        "model-footer",
     ] {
         let bounds = cx
             .debug_bounds(id)
@@ -1406,16 +1389,11 @@ fn the_model_choices_keep_one_height_and_retry_stays_in_view(cx: &mut TestAppCon
             gpui::size(px(width), px(height)),
         );
         let loading = show(None, cx);
-        let footer = cx.debug_bounds("model-footer").unwrap();
         assert!(inside(loading, window), "{at}: {loading:?}");
         let failed = show(Some(keystone_agent::Catalog::Failed(long.clone())), cx);
         assert_eq!(failed, loading, "{at}: a long failure");
-        assert_eq!(cx.debug_bounds("model-footer"), Some(footer), "{at}");
         let retry = cx.debug_bounds("model-retry").unwrap();
-        assert!(
-            inside(retry, loading) && retry.bottom() <= footer.top(),
-            "{at}: Retry at {retry:?}, footer {footer:?}"
-        );
+        assert!(inside(retry, loading), "{at}: Retry at {retry:?}");
         let ready = show(
             Some(keystone_agent::Catalog::Ready {
                 models: models.clone(),

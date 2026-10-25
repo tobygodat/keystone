@@ -198,7 +198,7 @@ pub(crate) fn move_tab(
                     {
                         source.update(cx, |source, cx| {
                             source.error = Some(format!(
-                                "Window not opened. The tab is saved in it, and it opens at the next launch. {error}"
+                                "Window not opened; it opens at the next launch. {error}"
                             ));
                             source.refresh(cx);
                         });

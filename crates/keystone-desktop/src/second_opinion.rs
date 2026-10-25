@@ -6,7 +6,7 @@
 //! composer for the user to send. A second opinion never starts a turn in its source.
 
 use crate::conversation::{Conversation, Recovery, Row};
-use crate::handoff::{self, BUDGET_TOKENS, Refusals, Source, provider_label};
+use crate::handoff::{self, BUDGET_TOKENS, Source, provider_label};
 use crate::model_selector::provider_name;
 use crate::view_state::ViewKey;
 use crate::{Keystone, arrangement, now_ms};
@@ -26,14 +26,6 @@ gpui::actions!(
         AskAboutConversation
     ]
 );
-
-const REFUSALS: Refusals = Refusals {
-    unsent: "Nothing to ask about yet: this session has not sent anything.",
-    no_folder: "Choose this session's folder before asking for a second opinion.",
-    loading: "This conversation is still loading. Ask once it shows.",
-    unreadable: "This conversation's saved history could not be read, so a second opinion \
-                 would miss it. Restart Keystone to read it again, then ask.",
-};
 
 /// Whether `row` is a reply that has finished streaming.
 fn finished_reply(row: &Row) -> bool {
@@ -131,14 +123,12 @@ impl Progress {
         }
     }
 
-    fn word(self) -> &'static str {
+    fn word(self) -> Option<&'static str> {
         match self {
-            Self::Running => "running",
-            Self::Waiting => "waiting for you",
-            Self::Loading => "reading…",
-            Self::Done => "done",
-            Self::Failed => "failed",
-            Self::Stopped => "stopped",
+            Self::Running | Self::Loading | Self::Done => None,
+            Self::Waiting => Some("waiting for you"),
+            Self::Failed => Some("failed"),
+            Self::Stopped => Some("stopped"),
         }
     }
 }
@@ -147,9 +137,7 @@ impl Progress {
 pub(crate) fn button() -> impl IntoElement {
     IconButton::new("second-opinion", IconName::Chat)
         .debug_selector(|| "second-opinion".into())
-        .tooltip(Tooltip::text(
-            "Ask for a second opinion on this conversation…",
-        ))
+        .tooltip(Tooltip::with_key("Second opinion…", "Ctrl+Alt+O"))
         .on_click(|_, window, cx| window.dispatch_action(Box::new(AskAboutConversation), cx))
 }
 
@@ -167,8 +155,7 @@ impl Keystone {
         let Some(id) = self.selected(cx) else {
             return;
         };
-        let Some((provider, text)) =
-            self.carry(id, &REFUSALS, cx, |source, rows| text(source, rows, reply))
+        let Some((provider, text)) = self.carry(id, cx, |source, rows| text(source, rows, reply))
         else {
             return;
         };
@@ -245,10 +232,9 @@ impl Keystone {
                 key,
                 "Second opinion on",
                 "opinion-of",
-                IconName::Chat,
                 on.id(),
                 on.title().to_owned(),
-                provider_label(on, workspace.accounts()),
+                None,
                 cx,
             ));
         }
@@ -279,10 +265,9 @@ impl Keystone {
                 key,
                 "Second opinion from",
                 &format!("opinion-{id}"),
-                IconName::Chat,
                 id,
                 provider,
-                format!("· {}", progress.word()),
+                progress.word(),
                 cx,
             );
             let use_it = arrangement::selector(&format!("opinion-use-{id}"), key.view);
@@ -296,9 +281,6 @@ impl Keystone {
                             Button::new(use_it.clone(), "Use in conversation")
                                 .size(ButtonSize::Compact)
                                 .style(ButtonStyle::Subtle)
-                                .tooltip(Tooltip::text(
-                                    "Put this second opinion's reply in the composer",
-                                ))
                                 .debug_selector(move || use_it.to_string())
                                 .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                                     this.use_second_opinion(key, id, window, cx)
@@ -335,11 +317,7 @@ impl Keystone {
             .filter(|_| Progress::of(session, live) == Progress::Done)
             .and_then(answer)
         else {
-            self.error = Some(
-                "This second opinion has no finished reply to use yet. Open it to see where it \
-                 is."
-                .into(),
-            );
+            self.error = Some("No finished reply yet.".into());
             return self.refresh(cx);
         };
         let quote =

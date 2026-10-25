@@ -1007,13 +1007,11 @@ fn code_block(
                 .py_0p5()
                 .gap_2()
                 .hairline_b(cx)
-                .child(
-                    div().flex_1().child(
-                        Label::new(language.unwrap_or_else(|| "text".into()))
-                            .size(TextSize::Ui)
-                            .color(Color::Muted),
-                    ),
-                )
+                .child(div().flex_1().children(
+                    language.map(|language| {
+                        Label::new(language).size(TextSize::Ui).color(Color::Muted)
+                    }),
+                ))
                 .child(copy),
         )
         .child(

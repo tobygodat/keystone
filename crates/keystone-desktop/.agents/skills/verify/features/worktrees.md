@@ -13,7 +13,7 @@ A session can work in its own git worktree inside the project's repository. Keys
 ## How to get to it (user POV)
 
 - Welcome composer: the **In worktree** pill (`welcome-worktree`).
-- Sidebar: the new-session button (`new-session`), then **New session in worktree…** (`new-worktree`).
+- Sidebar: the new-session button (`new-session`), then **In worktree…** (`new-worktree`).
 - Ctrl+Alt+G, or **New session in worktree…** in the palette.
 - Remove: right-click a worktree session's row and choose **Remove worktree…** (`menu-remove-worktree`), or Ctrl+Alt+Shift+G / the palette's **Remove worktree…** for the shown session.
 

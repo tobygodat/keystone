@@ -37,7 +37,7 @@ Send scrolls the most recently focused visible conversation, with the first visi
 
 Entry and commit controls are `customize-toggle`, `customize-panel`, `customize-close`, `customize-borrow`, `customize-reset`, `customize-undo`, `customize-discard`, `customize-apply`, and `customize-status`.
 
-Helper controls are `customize-provider-claude`, `customize-provider-codex`, `customize-prompt`, `customize-ask`, `customize-cancel`, and `customize-retry`. Only the applicable pending/error controls appear.
+Helper controls are `customize-prompt`, `customize-ask`, `customize-cancel`, and `customize-retry`. Only the applicable pending/error controls appear.
 
 Components use `component-grip-{ViewId}`, `select-component-{ViewId}`, `component-duplicate`, `component-remove`, `component-add-sidebar`, `component-add-files`, `component-left/right/up/down`, and `component-size-auto/px/fill`. Drop targets are `drop-{ViewId}-left/right/above/below/tabs`. Split dividers are `split-grip-{NodePath:?}-{boundary_index}`, such as `split-grip-[]-0` or `split-grip-[1]-0`.
 
@@ -59,7 +59,7 @@ An unsupported answer is `{"kind":"unsupported","version":1,"reason":"Short expl
 
 ## Restricted helper checks
 
-Choose **Codex** and press Preview. Require an Unsupported explanation directing you to Claude Code or manual arrangement. Codex helper requests return before executable lookup, temporary-directory creation, or process launch. Ordinary Codex conversations remain supported.
+The helper always asks Claude Code; there is no provider choice. Ordinary Codex conversations remain supported.
 
 Log the Claude wrapper's argv and initialize exchange. Require the complete current Composition in the written prompt and a changed nondefault complete proposal in Preview. Prose, fences, unknown semantics, and malformed documents must leave the current candidate and temporary navigation intact. A missing Claude executable shows the launch error and Retry while retaining the prompt.
 

@@ -135,13 +135,6 @@ pub struct Status {
     pub untracked_hidden: bool,
 }
 
-/// The commit a successful `git commit` made.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Committed {
-    /// The abbreviated commit ID and the subject, such as `1a2b3c4 Fix the build`.
-    pub summary: String,
-}
-
 /// `git` in `folder`, in a session of its own with no controlling terminal, so a hook,
 /// a signing program or a credential helper that asks on the terminal fails at once
 /// instead of waiting for an answer nobody can type.
@@ -543,17 +536,11 @@ pub fn unstage(root: &Path, paths: &[PathBuf]) -> Result<()> {
 
 /// `git commit` of what is staged, with `message` as given. The user's hooks and
 /// signing settings apply; a failure carries their output.
-pub fn commit(root: &Path, message: &str) -> Result<Committed> {
+pub fn commit(root: &Path, message: &str) -> Result<()> {
     let mut command = git(root);
     command.args(["commit", "--file=-"]);
     run(command, Some(message.as_bytes().to_vec()), Output::Merged)?;
-    // The commit is made; a summary that cannot be read must not look like a failure.
-    let mut command = git(root);
-    command.args(["log", "-1", "--no-show-signature", "--format=%h %s"]);
-    let summary = run(command, None, Output::Separate)
-        .map(|summary| text(&summary).trim_end().to_owned())
-        .unwrap_or_else(|_| "Committed.".into());
-    Ok(Committed { summary })
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -803,9 +790,7 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
             "edited after staging\n"
         );
         stage(&top, &["gone.txt".into(), "keep.txt".into()]).unwrap();
-        let committed = commit(&top, "first\n\nbody").unwrap();
-        let head = sh(&top, &["rev-parse", "--short", "HEAD"]);
-        assert_eq!(committed.summary, format!("{} first", head.trim()));
+        commit(&top, "first\n\nbody").unwrap();
         assert_eq!(sh(&top, &["log", "-1", "--format=%B"]), "first\n\nbody\n\n");
 
         fs::remove_file(top.join("gone.txt")).unwrap();
@@ -861,16 +846,13 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
         fs::write(root.join("x.rs"), "x").unwrap();
         stage(root, &["x.rs".into()]).unwrap();
         let started = Instant::now();
-        let committed = commit(root, "background hook").unwrap();
+        commit(root, "background hook").unwrap();
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "{:?}",
             started.elapsed()
         );
-        assert!(
-            committed.summary.ends_with(" background hook"),
-            "{committed:?}"
-        );
+        assert_eq!(sh(root, &["log", "-1", "--format=%s"]), "background hook\n");
     }
 
     #[test]

@@ -1020,27 +1020,6 @@ fn fitted_tabs_with_long_titles_keep_the_shown_tab_in_the_window(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn the_fitted_hint_lines_up_with_the_tab_labels(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = seeded(dir.path(), split_layout);
-    let (_view, cx) = open(&path, cx);
-    cx.simulate_resize(gpui::size(px(720.), px(800.)));
-    cx.run_until_parked();
-    let hint = cx.debug_bounds("fitted-hint").unwrap();
-    let tabs = cx.debug_bounds("fitted-tabs").unwrap();
-    let tab = cx.debug_bounds("fitted-tab-0").unwrap();
-    let label = f32::from(tab.left()) + 9.;
-    assert!(
-        (f32::from(hint.left()) - label).abs() <= 1.,
-        "the hint starts where the tab label does: {hint:?} {tab:?}"
-    );
-    assert!(
-        f32::from(tabs.top()) >= f32::from(hint.bottom()),
-        "{hint:?} {tabs:?}"
-    );
-}
-
-#[gpui::test]
 fn new_tab_still_starts_a_session_when_saved_tabs_cannot_be_changed(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");

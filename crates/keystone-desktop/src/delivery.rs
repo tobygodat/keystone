@@ -137,15 +137,12 @@ pub(crate) enum Hold {
 impl Hold {
     /// What the parent's transcript says while a result from `title` waits.
     pub(crate) fn notice(self, title: &str) -> String {
-        let from = format!("The result from \u{201c}{title}\u{201d}");
+        let from = format!("Result from \u{201c}{title}\u{201d}");
         match self {
-            Self::Settled => format!(
-                "{from} is waiting. This session is settled, so it is not started; un-settle it to receive the result."
-            ),
-            Self::Loading => format!("{from} is waiting for this conversation to load."),
-            Self::Recovery => format!("{from} is waiting for the recovery check to finish."),
+            Self::Settled => format!("{from} waits until you un-settle this session."),
+            Self::Loading | Self::Recovery => format!("{from} is waiting."),
             Self::Turn => format!("{from} arrives when this turn ends."),
-            Self::Answer => format!("{from} is waiting for your answer."),
+            Self::Answer => format!("{from} arrives after your answer."),
         }
     }
 }
@@ -355,7 +352,7 @@ impl AppState {
             };
             if let Err(error) = self.store.set_delivery(child, delivered) {
                 self.conversation(parent).error = Some(format!(
-                    "The result from session {child} was not delivered: it could not be saved first. {error}"
+                    "Result from session {child} not delivered. {error}"
                 ));
                 self.commit(parent);
                 unsaved = true;

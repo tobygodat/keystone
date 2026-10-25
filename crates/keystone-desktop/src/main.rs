@@ -155,15 +155,14 @@ fn turn_failed(event: &Event) -> Option<bool> {
 /// How long closing waits for saved histories to finish loading.
 const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-const FOLDER_UNCONFIRMED: &str =
-    "Folder selected. Could not confirm it will survive a system crash. Send will retry saving.";
+const FOLDER_UNCONFIRMED: &str = "Folder selected, but not confirmed on disk.";
 
 fn durability_warning(durability: Durability) -> Option<String> {
     match durability {
         Durability::Synced => None,
-        Durability::DirectorySyncPending(error) => Some(format!(
-            "Change saved, but crash durability is unconfirmed. Retry saving before leaving. {error}"
-        )),
+        Durability::DirectorySyncPending(error) => {
+            Some(format!("Saved, but not confirmed on disk. {error}"))
+        }
     }
 }
 
@@ -279,7 +278,7 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
         let composer = view.save_draft(cx);
         if let Err(error) = view.changes.save_drafts(cx) {
             return Err(Some(format!(
-                "Window not closed. Its commit message is not saved. {error}"
+                "Window not closed. Commit message not saved. {error}"
             )));
         }
         if !composer || !view.save_notes(cx) {
@@ -291,11 +290,9 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
         });
         if others == 0 {
             // Quit cannot save a window that is already closed, so it stays open.
-            return placed.map(|_| None).map_err(|error| {
-                Some(format!(
-                    "Window not closed. Its place is not saved; Quit to stop the turn. {error}"
-                ))
-            });
+            return placed
+                .map(|_| None)
+                .map_err(|error| Some(format!("Window not closed. {error}")));
         }
         view.state
             .update(cx, |state, cx| state.close_window(id, cx))
@@ -385,7 +382,7 @@ fn request_quit(cx: &mut App) {
         }
         if let Some(error) = unsaved {
             state.update(cx, |state, cx| {
-                state.quit_failed(format!("A commit message is not saved. {error}"), cx)
+                state.quit_failed(format!("Commit message not saved. {error}"), cx)
             });
             return;
         }
@@ -415,8 +412,8 @@ struct Keystone {
     _subscriptions: Vec<Subscription>,
     draft_save_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
-    /// The recovery card's Continue and Retry buttons, in the view the composer sends
-    /// to, so Tab reaches them.
+    /// The recovery card's Use recovered history and Retry buttons, in the view the composer
+    /// sends to, so Tab reaches them.
     recovery_focus: (FocusHandle, FocusHandle),
     /// Usage-limit resets a redraw is already waiting for, in unix milliseconds.
     limit_wakes: std::cell::RefCell<std::collections::HashSet<u64>>,
@@ -1002,9 +999,7 @@ impl Keystone {
                 self.error.is_none()
             }
             Err(error) => {
-                self.error = Some(format!(
-                    "Draft not saved. Stay in this session and retry after fixing storage. {error}"
-                ));
+                self.error = Some(format!("Draft not saved. {error}"));
                 cx.notify();
                 false
             }
@@ -1470,18 +1465,13 @@ impl Keystone {
                     .child(Label::new(error).size(TextSize::Sm).color(Color::Danger))
             }));
         Some(
-            ConfirmDialog::new(
-                "rename-dialog",
-                &renaming.focus,
-                "Rename session",
-                "Shown in the sidebar and above the conversation.",
-            )
-            .icon(IconName::Pencil)
-            .tone(Color::Accent)
-            .confirm_label("Rename")
-            .body(body)
-            .on_cancel(move |window, cx| cancel(&(), window, cx))
-            .on_confirm(move |window, cx| confirm(&(), window, cx)),
+            ConfirmDialog::new("rename-dialog", &renaming.focus, "Rename session", "")
+                .icon(IconName::Pencil)
+                .tone(Color::Accent)
+                .confirm_label("Rename")
+                .body(body)
+                .on_cancel(move |window, cx| cancel(&(), window, cx))
+                .on_confirm(move |window, cx| confirm(&(), window, cx)),
         )
     }
 
@@ -1515,16 +1505,6 @@ impl Keystone {
                             Label::new("keystone")
                                 .size(TextSize::Body)
                                 .weight(FontWeight::SEMIBOLD),
-                        )
-                        .child(
-                            h_flex()
-                                .h(px(18.))
-                                .px(px(6.))
-                                .rounded(px(5.))
-                                .bg(colors.element_hover)
-                                .child(
-                                    Label::new("preview").size(TextSize::Xs).color(Color::Muted),
-                                ),
                         )
                         .child(div().flex_1()),
                     cx,
@@ -1592,11 +1572,6 @@ impl Keystone {
                         this.toggle_settings(window, cx)
                     })),
             )
-            .child(
-                Label::new("Local workspace")
-                    .size(TextSize::Ui)
-                    .color(Color::Muted),
-            )
     }
 
     fn filter_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1648,8 +1623,7 @@ impl Keystone {
             cx.notify();
         }))
         .child(
-            MenuItem::new("new-claude", "New Claude session")
-                .icon(IconName::Chat)
+            MenuItem::new("new-claude", "Claude Code")
                 .kbd("Ctrl+N")
                 .debug_selector(|| "new-claude".into())
                 .on_click(self.scoped_listener(cx, |this, _, window, cx| {
@@ -1657,8 +1631,7 @@ impl Keystone {
                 })),
         )
         .child(
-            MenuItem::new("new-codex", "New Codex session")
-                .icon(IconName::Chat)
+            MenuItem::new("new-codex", "Codex")
                 .kbd("Ctrl+Shift+N")
                 .debug_selector(|| "new-codex".into())
                 .on_click(self.scoped_listener(cx, |this, _, window, cx| {
@@ -1666,8 +1639,7 @@ impl Keystone {
                 })),
         )
         .child(
-            MenuItem::new("new-worktree", "New session in worktree…")
-                .icon(IconName::Branch)
+            MenuItem::new("new-worktree", "In worktree…")
                 .kbd("Ctrl+Alt+G")
                 .debug_selector(|| "new-worktree".into())
                 .on_click(
@@ -1702,40 +1674,19 @@ impl Keystone {
         let can_send = current.is_some_and(|(id, _)| !self.importing(id))
             && (!self.composer.read(cx).value().trim().is_empty()
                 || !self.draft_attachments(cx).is_empty());
-        let field = div()
-            .id("composer-field")
-            .automation_id("composer-field")
-            .min_h(px(44.))
-            .pr(px(6.));
         let (field, toolbar) = match current {
             None => (
-                field
-                    .text_size(TextSize::Body.px())
-                    .line_height(px(20.))
-                    .text_color(colors.text_placeholder)
-                    .child("Choose a provider below to start a session…"),
+                None,
                 h_flex()
                     .gap_2()
                     .child(self.welcome_pill(Provider::Claude, cx))
                     .child(self.welcome_pill(Provider::Codex, cx))
-                    .child(self.worktree_pill(cx))
-                    .child(div().flex_1())
-                    .child(
-                        Label::new("Ctrl N · Ctrl Shift N")
-                            .size(TextSize::Sm)
-                            .color(Color::Muted),
-                    ),
+                    .child(self.worktree_pill(cx)),
             ),
             Some((session, provider)) => {
-                let status = if waiting {
-                    "Waiting for your approval".to_owned()
-                } else if running {
-                    "Ctrl+Enter steers this turn".to_owned()
-                } else if let Some(hint) = self.slash_hint(session, provider, cx) {
-                    format!("{hint} · Ctrl+Enter to send")
-                } else {
-                    "Ctrl+Enter to send · Enter for a new line".to_owned()
-                };
+                let hint = (!waiting && !running)
+                    .then(|| self.slash_hint(session, provider, cx))
+                    .flatten();
                 let id = session;
                 let folder = self.conversation_folder(id, cx).unwrap();
                 let action = folder.clone();
@@ -1777,7 +1728,7 @@ impl Keystone {
                             .min_w(model_selector::MIN_WIDTH)
                             .gap(px(7.))
                             .child(self.model_selector(session, provider, viewport, cx))
-                            .when(!narrow, |d| {
+                            .when_some(hint.filter(|_| !narrow), |d, hint| {
                                 d.child(
                                     div()
                                         .id("composer-hint")
@@ -1785,7 +1736,7 @@ impl Keystone {
                                         .flex_shrink(1000.)
                                         .min_w_0()
                                         .child(
-                                            Label::new(status)
+                                            Label::new(hint)
                                                 .size(TextSize::Ui)
                                                 .color(Color::Muted)
                                                 .truncate(),
@@ -1821,7 +1772,6 @@ impl Keystone {
                                         .style(ButtonStyle::Subtle)
                                         .icon(IconName::Square)
                                         .debug_selector(|| "stop".into())
-                                        .tooltip(Tooltip::text("Stop this turn"))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.stop_turn(session, window, cx)
                                         })),
@@ -1871,6 +1821,11 @@ impl Keystone {
                                     .when(!can_send, |d| d.cursor_not_allowed()),
                             ),
                     );
+                let field = div()
+                    .id("composer-field")
+                    .automation_id("composer-field")
+                    .min_h(px(44.))
+                    .pr(px(6.));
                 let field = if self
                     .slash_entries(cx)
                     .is_some_and(|(.., entries)| !entries.is_empty())
@@ -1883,18 +1838,20 @@ impl Keystone {
                     field
                 };
                 (
-                    field
-                        .capture_action(cx.listener(
-                            |this, _: &keystone_ui::text_input::Paste, window, cx| {
-                                if this.paste_image(window, cx) {
-                                    cx.stop_propagation();
-                                }
-                            },
-                        ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.composer.focus_handle(cx).focus(window, cx)
-                        }))
-                        .child(self.composer.clone()),
+                    Some(
+                        field
+                            .capture_action(cx.listener(
+                                |this, _: &keystone_ui::text_input::Paste, window, cx| {
+                                    if this.paste_image(window, cx) {
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.composer.focus_handle(cx).focus(window, cx)
+                            }))
+                            .child(self.composer.clone()),
+                    ),
                     toolbar,
                 )
             }
@@ -1932,16 +1889,16 @@ impl Keystone {
             })
             .children(current.and_then(|_| self.slash_menu(viewport.width, cx)))
             .children(current.and_then(|_| self.mention_menu(viewport.width, cx)))
-            .child(field)
+            .children(field)
             .children(current.and_then(|(session, _)| self.attachment_strip(session, cx)))
             .child(toolbar)
     }
 
     fn welcome_pill(&self, provider: Provider, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
-        let (id, tooltip, key) = match provider {
-            Provider::Claude => ("welcome-claude", "New Claude session", "Ctrl+N"),
-            Provider::Codex => ("welcome-codex", "New Codex session", "Ctrl+Shift+N"),
+        let (id, key) = match provider {
+            Provider::Claude => ("welcome-claude", "Ctrl+N"),
+            Provider::Codex => ("welcome-codex", "Ctrl+Shift+N"),
         };
         h_flex()
             .id(id)
@@ -1963,7 +1920,7 @@ impl Keystone {
                     .size(TextSize::Ui)
                     .weight(FontWeight::MEDIUM),
             )
-            .tooltip(Tooltip::with_key(tooltip, key).builder())
+            .tooltip(Tooltip::text(key).builder())
             .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                 this.start(provider, window, cx)
             }))
@@ -2111,12 +2068,8 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let session = self.selected(cx);
-        let applies = if running {
-            "a change applies from the next turn"
-        } else {
-            "applies from the next turn"
-        };
         let color = (mode == ApprovalMode::FullAccess).then_some(Color::Warning);
+        let tooltip = Tooltip::text(approval_tooltip(mode, running, narrow));
         let trigger = if narrow {
             IconButton::new("approval-mode", IconName::Shield)
                 .size(ButtonSize::Compact)
@@ -2124,10 +2077,7 @@ impl Keystone {
                 .when_some(color, IconButton::color)
                 .aria_label(format!("Approval mode · {}", mode.label()))
                 .debug_selector(|| "approval-mode".into())
-                .tooltip(Tooltip::text(format!(
-                    "Approval mode · {} · {applies}",
-                    mode.label()
-                )))
+                .tooltip(tooltip)
                 .into_any_element()
         } else {
             Button::new("approval-mode", mode.label())
@@ -2136,7 +2086,7 @@ impl Keystone {
                 .selected(self.approval_menu)
                 .when_some(color, Button::color)
                 .debug_selector(|| "approval-mode".into())
-                .tooltip(Tooltip::text(format!("Approval mode · {applies}")))
+                .tooltip(tooltip)
                 .into_any_element()
         };
         PopoverMenu::new("approval-menu", trigger)
@@ -2146,7 +2096,6 @@ impl Keystone {
                 this.approval_menu = *open;
                 cx.notify();
             }))
-            .child(MenuHeader::new("Approvals"))
             .children(ApprovalMode::ALL.map(|choice| {
                 MenuItem::new(("approval", choice as usize), choice.label())
                     .detail(choice.description())
@@ -2216,10 +2165,7 @@ impl Keystone {
                 "full-access-dialog",
                 focus,
                 "Turn on Full access?",
-                format!(
-                    "{provider} will run commands and edit files without asking, \
-                     until you choose another approval mode."
-                ),
+                format!("{provider} will run commands and edit files without asking."),
             )
             .tone(Color::Warning)
             .on_cancel(move |window, cx| cancel(&(), window, cx))
@@ -2585,15 +2531,11 @@ impl Keystone {
                     Row::Surface(surface) => Some(self.widget_control(key, index, &surface.call)),
                     _ => None,
                 };
-                let fork = fork::forkable(row).then(|| {
-                    let (label, tooltip) = fork::label(&conversation.fork_from(index));
-                    transcript::ForkControl {
-                        label,
-                        tooltip,
-                        on_click: Box::new(self.scoped_listener(cx, move |this, _, window, cx| {
-                            this.fork_from(key, index, window, cx)
-                        })),
-                    }
+                let fork = fork::forkable(row).then(|| transcript::ForkControl {
+                    label: fork::label(&conversation.fork_from(index)),
+                    on_click: Box::new(self.scoped_listener(cx, move |this, _, window, cx| {
+                        this.fork_from(key, index, window, cx)
+                    })),
                 });
                 let second_opinion = reply.is_some().then(|| {
                     let selector =
@@ -2773,7 +2715,7 @@ impl Keystone {
         } else if let Some(limit) = conversation.usage_limit() {
             empty = false;
             view = view.child(self.limit_card(key, limit, cx));
-        } else if conversation.running {
+        } else if conversation.running && !conversation.awaiting_widget() {
             empty = false;
             view = view.child(
                 h_flex()
@@ -2822,8 +2764,8 @@ impl Keystone {
         (!empty).then(|| view.into_any_element())
     }
 
-    /// Why the next message waits for recovery, with Continue and Retry where they
-    /// apply. Only the view the composer sends to gives its buttons keyboard focus.
+    /// Why the next message waits for recovery, with Use recovered history and Retry where
+    /// they apply. Only the view the composer sends to gives its buttons keyboard focus.
     fn recovery_card(
         &self,
         key: ViewKey,
@@ -2834,49 +2776,28 @@ impl Keystone {
         let session = key.session;
         let colors = cx.theme().colors;
         let (message, color, offer_continue, offer_retry) = match recovery {
-            Recovery::Loading => (
-                "Loading this conversation before sending\u{2026}".to_owned(),
-                Color::Muted,
-                false,
-                false,
-            ),
-            Recovery::Checking => (
-                "Checking what the provider saved before sending\u{2026}".to_owned(),
-                Color::Muted,
-                false,
-                false,
-            ),
-            Recovery::Saving { error: None, .. } => (
-                "Saving the recovered history before sending\u{2026}".to_owned(),
-                Color::Muted,
-                false,
-                false,
-            ),
+            Recovery::Loading => ("Loading\u{2026}".to_owned(), Color::Muted, false, false),
+            Recovery::Checking => ("Checking\u{2026}".to_owned(), Color::Muted, false, false),
+            Recovery::Saving { error: None, .. } => {
+                ("Saving\u{2026}".to_owned(), Color::Muted, false, false)
+            }
             Recovery::Saving {
                 error: Some(error), ..
             } => (
-                format!("The recovered history is not saved yet, so sending waits. {error}"),
+                format!("Recovered history not saved. {error}"),
                 Color::Danger,
                 false,
                 true,
             ),
-            Recovery::Review(_) => (
-                "Sending is paused until you continue. Your draft is kept and nothing was resent."
-                    .to_owned(),
-                Color::Muted,
-                true,
-                true,
-            ),
+            Recovery::Review(_) => ("Sending paused.".to_owned(), Color::Muted, true, true),
             Recovery::Unavailable(reason) => (
-                format!(
-                    "Could not check what the provider saved: {reason}. This turn's outcome is unknown. Your draft is kept and nothing was resent."
-                ),
+                format!("Could not check the provider's record: {reason}."),
                 Color::Muted,
                 true,
                 true,
             ),
             Recovery::Unsaved(_) => (
-                "The recovered history is shown, but the log had no room to save it. Retry saves it once there is room; if you continue without it, a restart may not show it. Your draft is kept and nothing was resent."
+                "Recovered history not saved: log full. Continuing may lose it after a restart."
                     .to_owned(),
                 Color::Warning,
                 true,
@@ -2908,9 +2829,10 @@ impl Keystone {
                             d.child(
                                 Button::new(
                                     arrangement::selector("recovery-continue", key.view),
-                                    "Continue with available history",
+                                    "Use recovered history",
                                 )
                                 .style(ButtonStyle::Primary)
+                                .tooltip(Tooltip::text("Ctrl+Shift+Enter"))
                                 .when(keyboard, |b| b.track_focus(&continue_focus))
                                 .debug_selector(move || {
                                     arrangement::selector("recovery-continue", key.view).to_string()
@@ -2929,6 +2851,7 @@ impl Keystone {
                                     "Retry",
                                 )
                                 .style(ButtonStyle::Subtle)
+                                .tooltip(Tooltip::text("Ctrl+Shift+R"))
                                 .when(keyboard, |b| b.track_focus(&retry_focus))
                                 .debug_selector(move || {
                                     arrangement::selector("recovery-retry", key.view).to_string()
@@ -2941,18 +2864,7 @@ impl Keystone {
                                     },
                                 )),
                             )
-                        })
-                        .child(
-                            Label::new(match (offer_continue, offer_retry) {
-                                (true, true) => {
-                                    "Ctrl+Shift+Enter continues \u{b7} Ctrl+Shift+R retries"
-                                }
-                                (true, false) => "Ctrl+Shift+Enter continues",
-                                _ => "Ctrl+Shift+R retries",
-                            })
-                            .size(TextSize::Sm)
-                            .color(Color::Faint),
-                        ),
+                        }),
                 )
             })
             .into_any_element()
@@ -3080,13 +2992,26 @@ fn attention_reason(attention: Attention) -> (&'static str, Color) {
     }
 }
 
-/// The first non-blank line of a saved draft, or the provider's name when there is none.
-fn excerpt(draft: &str, provider: Provider) -> String {
+/// The approval trigger's tooltip. A `narrow` trigger shows only an icon, so it names
+/// the mode; while a turn runs, a change waits for the next one.
+fn approval_tooltip(mode: ApprovalMode, running: bool, narrow: bool) -> String {
+    let mut tooltip = String::from("Approval mode");
+    if narrow {
+        tooltip += &format!(" · {}", mode.label());
+    }
+    if running {
+        tooltip += " · applies next turn";
+    }
+    tooltip
+}
+
+/// The first non-blank line of a saved draft.
+fn excerpt(draft: &str) -> String {
     draft
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or(provider_name(provider))
+        .unwrap_or_default()
         .to_owned()
 }
 
@@ -3330,15 +3255,17 @@ impl SessionSidebar {
                     .color(Color::Faint),
             )
             .child(div().flex_1().h_px().bg(colors.border))
-            .child(
-                Icon::new(if open {
-                    IconName::Chevron
-                } else {
-                    IconName::Right
-                })
-                .size(px(12.))
-                .color(Color::Faint),
-            )
+            .when(section != Section::Working, |d| {
+                d.child(
+                    Icon::new(if open {
+                        IconName::Chevron
+                    } else {
+                        IconName::Right
+                    })
+                    .size(px(12.))
+                    .color(Color::Faint),
+                )
+            })
             .when(section.collapsible(), |d| {
                 d.cursor_pointer()
                     .hover(move |s| s.bg(colors.element_hover))
@@ -3400,7 +3327,7 @@ impl SessionSidebar {
             let row = SessionRow {
                 id: session.id(),
                 title: session.title().to_owned(),
-                excerpt: excerpt(session.draft(), session.provider()),
+                excerpt: excerpt(session.draft()),
                 provider: session.provider(),
                 account,
                 settled: session.settled(),
@@ -3417,20 +3344,7 @@ impl SessionSidebar {
             };
             sections[Section::of(&row) as usize].push(row);
         }
-        let empty = match (
-            sections.iter().all(Vec::is_empty),
-            workspace.sessions().is_empty(),
-            project_empty,
-        ) {
-            (false, _, _) => None,
-            (true, true, _) => {
-                Some("No sessions yet. Start one from the composer or press Ctrl N.")
-            }
-            (true, false, true) => Some(
-                "No sessions in this project yet. Start one from the composer or press Ctrl N.",
-            ),
-            (true, false, false) => Some("No sessions match this search."),
-        };
+        let empty = (sections.iter().all(Vec::is_empty) && !project_empty).then_some("No matches");
         let settled_open = this.settled_open;
         self.shows_time = false;
         let mut list = v_flex()
@@ -3639,6 +3553,11 @@ impl Render for Keystone {
                     this.toggle_changes(window, cx)
                 }),
             )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &changes::CopyPullRequestLink, _, cx| {
+                    this.copy_pull_request_link(cx)
+                }),
+            )
             .on_action(self.scoped_listener(
                 cx,
                 |this, _: &worktrees::NewWorktreeSession, window, cx| {
@@ -3650,7 +3569,7 @@ impl Render for Keystone {
                 |this, _: &worktrees::RemoveWorktree, window, cx| match this.selected(cx) {
                     Some(session) => this.open_remove_worktree(session, window, cx),
                     None => {
-                        this.error = Some("No session is open here.".into());
+                        this.error = Some("No session open.".into());
                         this.refresh(cx);
                     }
                 },
@@ -7059,6 +6978,24 @@ mod tests {
         assert!(thread.is_some_and(|t| t.starts_with("fake-claude-session-")));
     }
 
+    #[test]
+    fn the_approval_tooltip_says_a_change_during_a_turn_applies_next_turn() {
+        let mode = ApprovalMode::ReadOnly;
+        assert_eq!(approval_tooltip(mode, false, false), "Approval mode");
+        assert_eq!(
+            approval_tooltip(mode, true, false),
+            "Approval mode · applies next turn"
+        );
+        assert_eq!(
+            approval_tooltip(mode, false, true),
+            format!("Approval mode · {}", mode.label())
+        );
+        assert_eq!(
+            approval_tooltip(mode, true, true),
+            format!("Approval mode · {} · applies next turn", mode.label())
+        );
+    }
+
     /// A scripted provider built by `keystone-agent`. Test binaries live in
     /// target/<profile>/deps; the scripts are one level up. `scripts/check.sh ui` builds
     /// them first.
@@ -7378,16 +7315,15 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
-        let (_view, cx) = open_window(&path, cx);
+        let (view, cx) = open_window(&path, cx);
         cx.simulate_resize(size(px(1280.), px(900.)));
         click(cx, "welcome-codex");
         let laid_out = |cx: &mut gpui::VisualTestContext| {
             let button = cx.debug_bounds("model-selector").unwrap();
-            let hint = cx.debug_bounds("composer-hint").unwrap();
             let project = cx.debug_bounds("project").unwrap();
             assert!(
-                button.right() <= hint.origin.x && hint.right() <= project.origin.x,
-                "button {button:?}, hint {hint:?}, project {project:?}"
+                button.right() <= project.origin.x,
+                "button {button:?}, project {project:?}"
             );
         };
         laid_out(cx);
@@ -7397,6 +7333,23 @@ mod tests {
         wait_for(cx, "model-fake-opus");
         click(cx, "model-fake-opus");
         laid_out(cx);
+
+        cx.simulate_input("/");
+        wait_until(cx, &view, |view, cx| {
+            view.state.read(cx).commands(1, Provider::Claude).is_some()
+        });
+        cx.simulate_input("compact ");
+        wait_until(cx, &view, |view, cx| {
+            view.slash_hint(1, Provider::Claude, cx).is_some()
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("model-selector").unwrap();
+        let hint = cx.debug_bounds("composer-hint").unwrap();
+        let project = cx.debug_bounds("project").unwrap();
+        assert!(
+            button.right() <= hint.origin.x && hint.right() <= project.origin.x,
+            "button {button:?}, hint {hint:?}, project {project:?}"
+        );
     }
 
     #[gpui::test]
@@ -7796,7 +7749,7 @@ mod tests {
             let conversation = &view.state.read(cx).conversations()[&1];
             let error = conversation.error.clone().unwrap_or_default();
             assert!(
-                error.starts_with("This Claude Code version does not report message progress"),
+                error.starts_with("This Claude Code version cannot steer a running turn"),
                 "{error}"
             );
             assert!(conversation.running, "the turn goes on");
@@ -7885,6 +7838,42 @@ mod tests {
             y(cx, "session-1"),
         );
         assert!(active < header && header < settled);
+    }
+
+    /// Working keeps its header when it is the only section, so its rows do not move
+    /// when another section appears.
+    #[gpui::test]
+    fn working_keeps_its_header_when_alone(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store
+            .create(Provider::Codex, &working_directory(), 2)
+            .unwrap();
+        cx.update(keystone_ui::init);
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        assert!(y(cx, "working-section") < y(cx, "session-1"));
+        assert!(y(cx, "session-1") < y(cx, "session-2"));
+        let row = y(cx, "session-1");
+
+        view.update(cx, |this, cx| this.settle(2, true, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            y(cx, "session-1"),
+            row,
+            "settling another row moves nothing"
+        );
+        assert!(y(cx, "session-1") < y(cx, "settled-section"));
     }
 
     fn y(cx: &mut gpui::VisualTestContext, selector: &'static str) -> Pixels {
@@ -8874,6 +8863,13 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(in_section(cx, "session-1", Section::Attention));
+        view.read_with(cx, |view, cx| {
+            assert!(view.state.read(cx).conversations()[&1].running)
+        });
+        assert!(
+            cx.debug_bounds("turn-status").is_none(),
+            "the widget, not Working…, is what waits"
+        );
         view.update(cx, |this, cx| this.settle(1, true, cx));
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
@@ -9229,16 +9225,13 @@ mod tests {
     }
 
     #[test]
-    fn excerpt_is_the_first_written_line_or_the_provider() {
+    fn excerpt_is_the_first_written_line() {
         assert_eq!(
-            excerpt(
-                "\n  Fix persistence durability first \nthen the rest",
-                Provider::Claude
-            ),
+            excerpt("\n  Fix persistence durability first \nthen the rest"),
             "Fix persistence durability first"
         );
-        assert_eq!(excerpt(" \n\n", Provider::Codex), "Codex");
-        assert_eq!(excerpt("", Provider::Claude), "Claude Code");
+        assert_eq!(excerpt(" \n\n"), "");
+        assert_eq!(excerpt(""), "");
     }
 
     #[gpui::test]
@@ -9952,7 +9945,7 @@ mod tests {
     }
 
     /// A partial recovery shows its card with keyboard routes: Send waits and keeps the
-    /// draft, Shift+Tab from the composer reaches Retry and then Continue, and Continue
+    /// draft, Shift+Tab from the composer reaches Retry and then Use recovered history, which
     /// returns to the composer without sending.
     #[gpui::test]
     fn a_partial_recovery_holds_send_and_continues_from_the_keyboard(
@@ -10025,6 +10018,9 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("recovery-continue").is_some());
         assert!(cx.debug_bounds("recovery-retry").is_some());
+        let original = cx.update(|window, _| window.viewport_size());
+        cx.simulate_resize(size(px(360.), px(900.)));
+        cx.run_until_parked();
         let shown = view.read_with(cx, |view, cx| {
             let rows = &view.state.read(cx).conversations()[&1].rows;
             rows.iter()
@@ -10038,9 +10034,11 @@ mod tests {
             .debug_bounds(format!("transcript-row-{shown}").leak())
             .unwrap();
         assert!(
-            report.right() <= row.right() && report.size.height > TextSize::Ui.line_height() * 3.,
+            report.right() <= row.right() && report.size.height > TextSize::Ui.line_height(),
             "the report wraps inside its row: {report:?} in {row:?}"
         );
+        cx.simulate_resize(original);
+        cx.run_until_parked();
         view.read_with(cx, |view, cx| {
             let rows = &view.state.read(cx).conversations()[&1].rows;
             assert!(rows.iter().any(|row| matches!(row, Row::Recovery(_))));
@@ -10067,7 +10065,7 @@ mod tests {
         cx.update(|window, cx| {
             assert!(
                 view.read(cx).recovery_focus.0.is_focused(window),
-                "then Continue"
+                "then Use recovered history"
             )
         });
         view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));

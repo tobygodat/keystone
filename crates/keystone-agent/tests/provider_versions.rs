@@ -94,7 +94,7 @@ fn scripted_versions_warn_or_refuse_before_sending_and_gate_optional_fields() {
                     .any(|(_, e)| matches!(e, Event::TurnStarted | Event::ThreadReady { .. }))
             );
             assert!(!log.exists());
-            assert!(events.iter().any(|(_, e)| matches!(e, Event::Failed { message } if message.contains("incompatible") && message.contains(&fixture.version) && message.contains(&fixture.range) && message.contains("Install") && message.contains("No message was sent"))));
+            assert!(events.iter().any(|(_, e)| matches!(e, Event::Failed { message } if message.contains("incompatible") && message.contains(&fixture.version) && message.contains(&fixture.range) && message.contains("Install"))));
             conn.request_catalog(1, dir.path().to_str().unwrap());
             let catalog = collect(conn.as_ref(), &rx, |e| matches!(e, Event::Catalog(_)));
             assert!(catalog.iter().any(|(_, e)| matches!(e, Event::Catalog(keystone_agent::Catalog::Failed(message)) if message.contains("incompatible") && message.contains(&fixture.version))));

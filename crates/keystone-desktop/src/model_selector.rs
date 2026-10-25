@@ -234,8 +234,6 @@ pub fn provider_icon_color(provider: Provider, cx: &App) -> Color {
     }
 }
 
-const FIXED: &str = "Provider, account and model are fixed once a session has sent. Start a new session to choose others.";
-
 /// How a session on `provider` names its account: `None` while the user has added no
 /// account for that provider, so a single account is never mentioned.
 pub fn account_label(
@@ -335,25 +333,17 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
         |model| choices.label(model),
     );
     // A requested model is shown as running only once the provider says so: until
-    // then the label is muted and the tooltip says what was asked for.
-    let (shown, color, tooltip) = match (started, reported_model) {
-        (true, Some(reported)) => {
-            let shown = choices.label(reported);
-            let tooltip = format!("{name} · {shown}. {FIXED}");
-            (shown, Color::Default, tooltip)
-        }
-        (true, None) => {
-            let tooltip = format!(
-                "Requested {name} · {requested}. {name} has not reported its model yet. {FIXED}"
-            );
-            (requested, Color::Muted, tooltip)
-        }
-        (false, _) => {
-            let tooltip = format!(
-                "{name} · {requested}. Choose the provider, account and model for this session"
-            );
-            (requested, Color::Default, tooltip)
-        }
+    // then the label is muted.
+    let (shown, color) = match (started, reported_model) {
+        (true, Some(reported)) => (choices.label(reported), Color::Default),
+        (true, None) => (requested, Color::Muted),
+        (false, _) => (requested, Color::Default),
+    };
+    let label = format!("{name} · {shown}");
+    let tooltip = if started {
+        format!("{label} · fixed after the first message")
+    } else {
+        label.clone()
     };
     let trigger = h_flex()
         .id("model-selector")
@@ -369,7 +359,7 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
                 .color(provider_icon_color(provider, cx)),
         )
         .child(
-            Label::new(format!("{name} · {shown}"))
+            Label::new(label)
                 .size(TextSize::Ui)
                 .weight(FontWeight::MEDIUM)
                 .color(color)
@@ -400,63 +390,59 @@ fn provider_column(
     viewport: Size<Pixels>,
     cx: &App,
 ) -> impl IntoElement {
-    v_flex()
-        .flex_none()
-        .w(px(152.))
-        .child(MenuHeader::new("Provider"))
-        .child(
-            v_flex()
-                .id("provider-list")
-                .debug_selector(|| "provider-list".into())
-                .max_h(px(360.).min(viewport.height / 3.))
-                .overflow_y_scroll()
-                .children([Provider::Claude, Provider::Codex].map(|provider| {
-                    let choose = on.choose_provider.clone();
-                    let row = choice_row(
-                        ("provider", provider as usize),
-                        format!("provider-{}", slug(provider)),
-                        Some(
-                            Icon::new(provider_icon(provider))
-                                .size(px(16.))
-                                .color(provider_icon_color(provider, cx)),
-                        ),
-                        provider_name(provider),
-                        provider == current,
-                        true,
-                        cx,
-                    )
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        choose(&provider, window, cx)
-                    });
-                    let rows = accounts_of(provider, accounts).into_iter().enumerate().map(
-                        |(at, (id, label))| {
-                            let choose = on.choose_account.clone();
-                            let chosen = (provider, id.cloned());
-                            let selector = match id {
-                                Some(id) => format!("account-{id}"),
-                                None => format!("account-{}-default", slug(provider)),
-                            };
-                            div().pl(px(24.)).child(
-                                choice_row(
-                                    ("account", provider as usize * 1000 + at),
-                                    selector,
-                                    None,
-                                    label.to_owned(),
-                                    provider == current && id == account,
-                                    false,
-                                    cx,
-                                )
-                                .on_click(move |_, window, cx| {
-                                    cx.stop_propagation();
-                                    choose(&chosen, window, cx)
-                                }),
+    v_flex().flex_none().w(px(152.)).child(
+        v_flex()
+            .id("provider-list")
+            .debug_selector(|| "provider-list".into())
+            .max_h(px(360.).min(viewport.height / 3.))
+            .overflow_y_scroll()
+            .children([Provider::Claude, Provider::Codex].map(|provider| {
+                let choose = on.choose_provider.clone();
+                let row = choice_row(
+                    ("provider", provider as usize),
+                    format!("provider-{}", slug(provider)),
+                    Some(
+                        Icon::new(provider_icon(provider))
+                            .size(px(16.))
+                            .color(provider_icon_color(provider, cx)),
+                    ),
+                    provider_name(provider),
+                    provider == current,
+                    true,
+                    cx,
+                )
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    choose(&provider, window, cx)
+                });
+                let rows = accounts_of(provider, accounts).into_iter().enumerate().map(
+                    |(at, (id, label))| {
+                        let choose = on.choose_account.clone();
+                        let chosen = (provider, id.cloned());
+                        let selector = match id {
+                            Some(id) => format!("account-{id}"),
+                            None => format!("account-{}-default", slug(provider)),
+                        };
+                        div().pl(px(24.)).child(
+                            choice_row(
+                                ("account", provider as usize * 1000 + at),
+                                selector,
+                                None,
+                                label.to_owned(),
+                                provider == current && id == account,
+                                false,
+                                cx,
                             )
-                        },
-                    );
-                    v_flex().child(row).children(rows)
-                })),
-        )
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                choose(&chosen, window, cx)
+                            }),
+                        )
+                    },
+                );
+                v_flex().child(row).children(rows)
+            })),
+    )
 }
 
 fn model_column(
@@ -481,7 +467,6 @@ fn model_column(
         .w(px(282.))
         .min_w_0()
         .pl(px(8.))
-        .child(MenuHeader::new("Model"))
         .child(row(
             "model-default".into(),
             "model-default".into(),
@@ -535,29 +520,13 @@ fn model_column(
             )
         }
     };
-    column
-        .child(
-            v_flex()
-                .flex_none()
-                .h((cx.theme().density.control(px(36.)) * CHOICE_ROWS).min(viewport.height / 3.))
-                .child(list)
-                .children(retry),
-        )
-        .child(
-            div()
-                .id("model-footer")
-                .automation_id("model-footer")
-                .px(px(8.))
-                .pt(px(6.))
-                .pb(px(4.))
-                .child(
-                    Label::new(
-                        "Choices reported by the provider, which may reject an unavailable model when you send.",
-                    )
-                    .size(TextSize::Sm)
-                    .color(Color::Muted),
-                ),
-        )
+    column.child(
+        v_flex()
+            .flex_none()
+            .h((cx.theme().density.control(px(36.)) * CHOICE_ROWS).min(viewport.height / 3.))
+            .child(list)
+            .children(retry),
+    )
 }
 
 fn choice_row(

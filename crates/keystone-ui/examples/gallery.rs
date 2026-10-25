@@ -363,18 +363,9 @@ impl Render for Gallery {
             this.menu_open = *open;
             cx.notify();
         }))
-        .child(
-            MenuItem::new("claude", "New Claude session")
-                .icon(IconName::Chat)
-                .kbd("Ctrl+N"),
-        )
-        .child(
-            MenuItem::new("codex", "New Codex session")
-                .icon(IconName::Chat)
-                .kbd("Ctrl+Shift+N"),
-        )
+        .child(MenuItem::new("claude", "Claude Code").kbd("Ctrl+N"))
+        .child(MenuItem::new("codex", "Codex").kbd("Ctrl+Shift+N"))
         .child(MenuSeparator)
-        .child(MenuHeader::new("Approvals"))
         .child(
             MenuItem::new("ask", "Ask first")
                 .detail("Asks before commands not known to be safe")
@@ -558,7 +549,7 @@ impl Render for Gallery {
                         "gallery-dialog",
                         focus,
                         "Turn on Full access?",
-                        "Codex will run commands and edit files without asking, until you choose another approval mode.",
+                        "Codex will run commands and edit files without asking.",
                     )
                     .tone(Color::Warning)
                     .on_cancel(move |window, cx| cancel(&(), window, cx))

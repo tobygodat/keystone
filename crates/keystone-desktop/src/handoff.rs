@@ -298,12 +298,10 @@ pub(crate) fn provider_label(
 
 /// What the user is told when the selected session cannot be carried into a new one:
 /// it has sent nothing, has no folder, or its history is still loading or unreadable.
-pub(crate) struct Refusals {
-    pub unsent: &'static str,
-    pub no_folder: &'static str,
-    pub loading: &'static str,
-    pub unreadable: &'static str,
-}
+pub(crate) const UNSENT: &str = "Nothing sent yet.";
+pub(crate) const NO_FOLDER: &str = "Choose a conversation folder.";
+pub(crate) const LOADING: &str = "Still loading.";
+pub(crate) const UNREADABLE: &str = "Could not read the history. Restart Keystone.";
 
 /// The provider a handoff or second opinion goes to unless the user picks another.
 pub(crate) fn other(provider: Provider) -> Provider {
@@ -338,16 +336,8 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let refusals = Refusals {
-            unsent: "Nothing to hand off yet: this session has not sent anything.",
-            no_folder: "Choose this session's folder before handing it off.",
-            loading: "This conversation is still loading. Hand off once it shows.",
-            unreadable: "This conversation's saved history could not be read, so a handoff \
-                         would leave it out. Restart Keystone to read it again, then hand off.",
-        };
-        let Some((_, text)) = self.carry(id, &refusals, cx, |source, rows| {
-            build(source, rows, BUDGET_TOKENS)
-        }) else {
+        let Some((_, text)) = self.carry(id, cx, |source, rows| build(source, rows, BUDGET_TOKENS))
+        else {
             return;
         };
         let window_id = self.window_id;
@@ -407,7 +397,6 @@ impl Keystone {
     pub(crate) fn carry(
         &mut self,
         id: u64,
-        refusals: &Refusals,
         cx: &mut Context<Self>,
         text: impl FnOnce(Source, &[Row]) -> String,
     ) -> Option<(Provider, String)> {
@@ -415,11 +404,11 @@ impl Keystone {
         let provider = session.provider();
         let state = self.state.read(cx);
         let refusal = if !session.started() {
-            refusals.unsent
+            UNSENT
         } else if let SessionContext::Recorded { directory, .. } = session.context() {
             match state.conversations().get(&id).filter(|c| !c.is_loading()) {
-                None => refusals.loading,
-                Some(conversation) if conversation.load_error.is_some() => refusals.unreadable,
+                None => LOADING,
+                Some(conversation) if conversation.load_error.is_some() => UNREADABLE,
                 Some(conversation) => {
                     let source = Source {
                         id,
@@ -431,7 +420,7 @@ impl Keystone {
                 }
             }
         } else {
-            refusals.no_folder
+            NO_FOLDER
         };
         self.error = Some(refusal.into());
         self.refresh(cx);
@@ -513,38 +502,27 @@ impl Keystone {
                 .map(describe)
         };
         let from = source(shown.handed_off_from().filter(|_| !shown.second_opinion()))
-            .map(|link| {
-                (
-                    "Continued from",
-                    "handoff-from".to_owned(),
-                    IconName::Handoff,
-                    link,
-                )
-            })
+            .map(|link| ("Continued from", "handoff-from".to_owned(), link))
             .into_iter()
-            .chain(source(shown.forked_from()).map(|link| {
-                (
-                    "Forked from",
-                    "fork-from".to_owned(),
-                    IconName::Branch,
-                    link,
-                )
-            }));
+            .chain(
+                source(shown.forked_from())
+                    .map(|link| ("Forked from", "fork-from".to_owned(), link)),
+            );
         let to = sessions.iter().filter(|s| s.started()).filter_map(|s| {
             if s.handed_off_from() == Some(key.session) && !s.second_opinion() {
                 let selector = format!("handoff-to-{}", s.id());
-                Some(("Continued in", selector, IconName::Handoff, describe(s)))
+                Some(("Continued in", selector, describe(s)))
             } else if s.forked_from() == Some(key.session) {
                 let selector = format!("fork-to-{}", s.id());
-                Some(("Forked in", selector, IconName::Branch, describe(s)))
+                Some(("Forked in", selector, describe(s)))
             } else {
                 None
             }
         });
         let rows = from
             .chain(to)
-            .map(|(lead, selector, icon, (id, title, provider))| {
-                self.link_row(key, lead, &selector, icon, id, title, provider, cx)
+            .map(|(lead, selector, (id, title, provider))| {
+                self.link_row(key, lead, &selector, id, title, Some(&provider), cx)
             })
             .chain(opinions)
             .collect::<Vec<_>>();
@@ -575,10 +553,9 @@ impl Keystone {
         key: ViewKey,
         lead: &'static str,
         selector: &str,
-        icon: IconName,
         id: u64,
         title: String,
-        provider: String,
+        status: Option<&str>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let hover = cx.theme().colors.element_hover;
@@ -592,7 +569,6 @@ impl Keystone {
             .rounded(radius::CONTROL)
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
-            .child(Icon::new(icon).size(px(14.)).color(Color::Muted))
             .child(Label::new(lead).size(TextSize::Ui).color(Color::Muted))
             .child(
                 div().min_w_0().flex_shrink(1.).child(
@@ -602,13 +578,14 @@ impl Keystone {
                         .truncate(),
                 ),
             )
-            .child(
-                Label::new(provider)
-                    .size(TextSize::Ui)
-                    .color(Color::Muted)
-                    .truncate(),
-            )
-            .tooltip(Tooltip::text("Open this session").builder())
+            .when_some(status, |row, status| {
+                row.child(
+                    Label::new(format!("· {status}"))
+                        .size(TextSize::Ui)
+                        .color(Color::Muted)
+                        .truncate(),
+                )
+            })
             .on_click(self.scoped_listener(cx, move |this, _, _, cx| this.select(id, cx)))
             .into_any_element()
     }

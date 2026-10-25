@@ -249,8 +249,7 @@ impl Conversation {
             Ok(entries) => self.rebuild(entries),
             Err(error) => {
                 self.load_error = Some(format!(
-                    "Could not read this conversation's history: {error}. \
-                     New messages are still saved after it."
+                    "Could not read this conversation's history: {error}."
                 ))
             }
         }
@@ -872,14 +871,6 @@ impl Conversation {
         })
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-            && !self.running
-            && self.error.is_none()
-            && self.load_error.is_none()
-            && self.provider_notice.is_none()
-    }
-
     /// Applies one provider event. Returns the thread ID when the provider opened one.
     pub fn apply(&mut self, event: Event) -> Option<String> {
         if let Some(pending) = &mut self.pending {
@@ -1234,6 +1225,7 @@ pub fn visible(row: &Row) -> bool {
             ItemKind::Tool { name } => name != surface::TOOL,
             _ => true,
         },
+        Row::Decision { allowed, .. } => !allowed,
         _ => true,
     }
 }
@@ -2224,7 +2216,6 @@ mod tests {
         log.save(&mut live);
         let warning = live.load_error.as_deref().expect("the warning stays");
         assert!(warning.contains("permission denied"));
-        assert!(!live.is_empty());
 
         // Once it can be read, the history comes first and what was sent follows it.
         assert_eq!(

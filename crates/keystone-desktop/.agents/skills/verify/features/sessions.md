@@ -17,7 +17,7 @@ Create a local Claude or Codex session and select it from the sidebar. These rec
 ## How to get to it (user POV)
 
 - In an empty workspace, click the **Claude Code** or **Codex** pill in the welcome composer.
-- Click the pencil at the right of the sidebar app bar, then **New Claude session** or **New Codex session**.
+- Click the pencil at the right of the sidebar app bar, then **Claude Code** or **Codex**.
 - Press Ctrl+N for Claude or Ctrl+Shift+N for Codex.
 - Click a session row in the sidebar to select it.
 - Click the session title in the top bar, or press F2, to rename it. Enter saves, Escape cancels.
@@ -51,6 +51,6 @@ Needs action, with the scripted Codex from [conversations](conversations.md) and
 
 - Duplicate titles are allowed. Use state IDs and the screenshot row position to distinguish sessions.
 - The welcome chooser appears only when no session is selected. It is absent after creation.
-- Named ids are `welcome-claude`, `welcome-codex`, `welcome-heading`, `new-session`, `new-claude`, `new-codex`, `composer-field`, `sidebar-toggle`, `rename-session`, `rename-dialog`, `rename-field`, `rename-dialog-cancel`, `rename-dialog-confirm`, `minimize`, `maximize`, `close`, `session-<id>`, `settle-<id>`, `attention-section`, `working-section`, and `settled-section`. The same ids serve GPUI simulated tests.
+- Named ids are `welcome-claude`, `welcome-codex`, `welcome-heading`, `new-session`, `new-claude`, `new-codex`, `composer-field`, `sidebar-toggle`, `rename-session`, `rename-dialog`, `rename-field`, `rename-dialog-cancel`, `rename-dialog-confirm`, `minimize`, `maximize`, `close`, `session-<id>`, `settle-<id>`, `attention-section`, `working-section` (shown only beside another section), and `settled-section`. The same ids serve GPUI simulated tests.
 - Every creation path focuses the composer: the welcome buttons, the sidebar menu, Ctrl+N, and Ctrl+Shift+N.
 - Use `wait_for` on a menu item before clicking it. With `headless:false`, the nested window must stay visible. A hidden window draws no frames, so a click on a newly opened menu lands on the previous frame and misses.

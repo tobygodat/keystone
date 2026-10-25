@@ -1568,6 +1568,6 @@ fn a_fork_codex_refuses_fails_with_the_handoff_way_on_and_no_new_thread() {
     let out = feed(&mut driver, &[response]);
     assert!(out.writes.is_empty(), "{:?}", out.writes);
     assert!(out.events.iter().any(|(_, e)| matches!(e,
-        Event::Failed { message } if message == "Could not fork this Codex conversation: turn not found: not-a-turn. The history shown here stays; Hand off (Ctrl+Shift+H) to continue it in a new session.")),
+        Event::Failed { message } if message == "Could not fork this Codex conversation: turn not found: not-a-turn. Hand off (Ctrl+Shift+H) to continue it.")),
         "{:?}", out.events);
 }

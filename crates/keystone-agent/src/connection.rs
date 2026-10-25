@@ -2229,7 +2229,7 @@ impl ClaudeStarter {
         };
         let failed = |reason: &str| {
             format!(
-                "Could not read your Claude Code approval settings to restore them ({reason}). Choose an approval mode to continue."
+                "Could not read your Claude Code approval settings ({reason}). Choose an approval mode."
             )
         };
         if launch == Launch::LayoutHelper {

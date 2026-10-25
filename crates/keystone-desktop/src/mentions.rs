@@ -523,7 +523,7 @@ impl Keystone {
             Some(Index { built: None, .. }) | None => Some("Listing files…".to_owned()),
             Some(Index {
                 truncated: true, ..
-            }) => Some("Searching the first 200,000 files in this folder.".to_owned()),
+            }) => Some("First 200,000 files only.".to_owned()),
             _ => None,
         };
         let row_height = cx.theme().density.control(px(32.));
@@ -572,7 +572,6 @@ fn file_row(found: &Found, highlighted: bool, height: Pixels, cx: &mut App) -> A
         .gap(spacing::SM)
         .rounded(radius::MENU_ROW)
         .when(highlighted, |d| d.bg(cx.theme().colors.selection_fill))
-        .child(Icon::new(IconName::File).size(px(16.)).color(Color::Muted))
         .child(
             div()
                 .flex_1()

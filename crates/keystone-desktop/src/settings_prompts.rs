@@ -43,8 +43,8 @@ impl PromptsPage {
     pub(crate) fn new(cx: &mut App) -> Self {
         Self {
             title: field("Title", InputMode::SingleLine, cx),
-            shortcut: field("/shortcut (optional)", InputMode::SingleLine, cx),
-            body: field("The text to insert", InputMode::Multiline, cx),
+            shortcut: field("/shortcut", InputMode::SingleLine, cx),
+            body: field("Text", InputMode::Multiline, cx),
             project: None,
             scope_focus: cx.focus_handle().tab_stop(true),
             save: cx.focus_handle().tab_stop(true),
@@ -61,10 +61,6 @@ impl PromptsPage {
             .or_insert_with(|| cx.focus_handle().tab_stop(true))
             .clone()
     }
-}
-
-fn project_label(project: &ProjectId) -> String {
-    format!("Project · {}", project.name())
 }
 
 impl Keystone {
@@ -90,29 +86,25 @@ impl Keystone {
         scopes
     }
 
-    /// What a prompt's shortcut shares a name with, in any case: each provider's
-    /// command the selected session's account listed, else its Terminal only built-in,
-    /// with whether it is Terminal only.
-    fn shortcut_conflicts(&self, shortcut: &str, cx: &App) -> Vec<(Provider, bool)> {
+    /// The providers with a command that shares a prompt's shortcut, in any case: one
+    /// the selected session's account listed, else a Terminal only built-in.
+    fn shortcut_conflicts(&self, shortcut: &str, cx: &App) -> Vec<Provider> {
         let invocation = format!("/{shortcut}");
         let state = self.state.read(cx);
         let session = self.selected(cx);
         [Provider::Claude, Provider::Codex]
             .into_iter()
-            .filter_map(|provider| {
+            .filter(|&provider| {
                 let listed = session
                     .and_then(|id| state.commands(id, provider))
                     .is_some_and(|listed| {
                         matches!(listed, Commands::Ready(commands)
                             if commands.iter().any(|c| c.invocation.eq_ignore_ascii_case(&invocation)))
                     });
-                if listed {
-                    return Some((provider, false));
-                }
-                terminal_only(provider)
-                    .iter()
-                    .any(|c| c.invocation.eq_ignore_ascii_case(&invocation))
-                    .then_some((provider, true))
+                listed
+                    || terminal_only(provider)
+                        .iter()
+                        .any(|c| c.invocation.eq_ignore_ascii_case(&invocation))
             })
             .collect()
     }
@@ -146,22 +138,6 @@ impl Keystone {
             .collect();
         v_flex()
             .automation_id("settings-prompts")
-            .child(
-                Label::new(
-                    "Saved prompts fill the composer from the / menu or the palette's Insert prompt…; they never send. A prompt for one project is offered only in windows with that project open. When a provider has a command with the same name as a shortcut, the command wins: sending /name runs it, and the / menu still inserts the prompt from its own row.",
-                )
-                .size(TextSize::Ui)
-                .color(Color::Muted),
-            )
-            .when(rows.is_empty(), |d| {
-                d.child(
-                    div().pt(spacing::LG).automation_id("prompts-empty").child(
-                        Label::new("No saved prompts yet.")
-                            .size(TextSize::Ui)
-                            .color(Color::Faint),
-                    ),
-                )
-            })
             .child(v_flex().pt(spacing::MD).children(rows))
             .child(self.prompt_form(&page.prompts, cx))
             .into_any_element()
@@ -219,28 +195,14 @@ impl Keystone {
             .map(|(shortcut, providers)| {
                 providers
                     .iter()
-                    .map(|&(provider, terminal)| {
+                    .map(|&provider| {
                         let name = crate::model_selector::provider_name(provider);
-                        if terminal {
-                            format!("{name} also has /{shortcut}, which runs only in its own terminal; sending it shows how to open that.")
-                        } else {
-                            format!("{name} also has /{shortcut}; sending it runs that command.")
-                        }
+                        format!("{name} also has /{shortcut}.")
                     })
-                    .chain(["Choose this prompt's row in the / menu to insert it.".to_owned()])
                     .collect::<Vec<_>>()
                     .join(" ")
             });
-        let uses = match prompt.uses() {
-            0 => "Not used yet".to_owned(),
-            1 => "Used once".to_owned(),
-            n => format!("Used {n} times"),
-        };
-        let detail = [prompt_detail(prompt), uses]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" · ");
+        let detail = prompt_detail(prompt);
         let editing = page.editing.as_ref().is_some_and(|p| p.id() == id);
         h_flex()
             .automation_id(format!("prompt-row-{id}"))
@@ -261,18 +223,14 @@ impl Keystone {
                             })
                             .truncate(),
                     )
-                    .child(
-                        Label::new(prompt.body().lines().next().unwrap_or_default().to_owned())
-                            .size(TextSize::Sm)
-                            .color(Color::Muted)
-                            .truncate(),
-                    )
-                    .child(
-                        Label::new(detail)
-                            .size(TextSize::Sm)
-                            .color(Color::Faint)
-                            .truncate(),
-                    )
+                    .when(!detail.is_empty(), |d| {
+                        d.child(
+                            Label::new(detail)
+                                .size(TextSize::Sm)
+                                .color(Color::Faint)
+                                .truncate(),
+                        )
+                    })
                     .children(conflicts.map(|text| {
                         div()
                             .automation_id(format!("prompt-conflict-{id}"))
@@ -308,7 +266,7 @@ impl Keystone {
             .map(|scope| {
                 scope
                     .as_ref()
-                    .map_or_else(|| "All projects".to_owned(), project_label)
+                    .map_or_else(|| "All projects".to_owned(), |p| p.name().to_owned())
             })
             .collect();
         let selected = scopes.iter().position(|scope| *scope == page.project);
@@ -317,16 +275,6 @@ impl Keystone {
             .pt(spacing::LG)
             .gap(spacing::SM)
             .automation_id("prompt-form")
-            .child(
-                Label::new(if editing {
-                    "Edit prompt"
-                } else {
-                    "Add a prompt"
-                })
-                .size(TextSize::Ui)
-                .weight(FontWeight::MEDIUM)
-                .color(Color::Muted),
-            )
             .child(
                 h_flex()
                     .flex_wrap()
@@ -410,14 +358,11 @@ impl Keystone {
             match self.state.read(cx).store().workspace().prompt(loaded.id()) {
                 None => {
                     self.reset_prompt_form(window, cx);
-                    self.error = Some("Prompt not saved. It was deleted in another window.".into());
+                    self.error = Some("Prompt deleted in another window.".into());
                     return self.refresh(cx);
                 }
                 Some(stored) if !stored.same_content(loaded) => {
-                    self.error = Some(
-                        "Prompt not saved. It changed in another window; choose Edit again to load that version."
-                            .into(),
-                    );
+                    self.error = Some("Prompt changed in another window. Edit it again.".into());
                     return self.refresh(cx);
                 }
                 Some(_) => {}

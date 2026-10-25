@@ -1,7 +1,7 @@
 use crate::arrangement_editor::Action;
 use crate::customization::label;
 use crate::windows::Landing;
-use crate::{Keystone, ViewKey, arch_mark, model_selector, now_ms};
+use crate::{Keystone, ViewKey, model_selector, now_ms};
 use gpui::{
     Anchor, AnyElement, App, AvailableSpace, Bounds, Context, Empty, Focusable, FontWeight,
     IntoElement, MouseButton, Pixels, Point, SharedString, Window, canvas, div, prelude::*, px,
@@ -614,11 +614,6 @@ impl Keystone {
         let c = self.shown_composition(cx);
         let fitted = self.presentation.current.arrangement.fitted;
         let viewport = window.viewport_size();
-        let toolbar = if self.presentation.current.customization.is_open() {
-            f32::from(self.presentation.current.arrangement.toolbar_height)
-        } else {
-            0.
-        };
         self.presentation.current.arrangement.visible.clear();
         self.presentation.current.arrangement.bars.clear();
         if self
@@ -652,26 +647,65 @@ impl Keystone {
                 .find(|(_, k)| *k == Component::Composer)
                 .unwrap()
                 .0;
-            let mut body = v_flex().relative().flex_1().min_h_0().w_full()
-                .when(f32::from(viewport.height)-44.-toolbar > 230., |d| d.child(div().flex_none().px_2().py_1().child(div().debug_selector(|| "fitted-hint".into()).child(Label::new("Views use tabs and the composer stays below until this window has more room.").size(TextSize::Sm).color(Color::Muted)))))
-                .child(h_flex().id("fitted-tabs").debug_selector(|| "fitted-tabs".into()).flex_none().w_full().min_w_0().gap_1().overflow_x_scroll().track_scroll(&self.presentation.current.arrangement.fitted_scroll).children(surfaces.iter().map(|&id| {
-                    self.conversation_tab(format!("fitted-tab-{}", id.0), self.tab_label(id, &c, cx), selected == id, cx)
-                        .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                            this.reveal_view(id, window, cx);
-                            if this.shown_composition(cx).component(id) == Some(Component::Conversation) {
-                                this.activate(id, cx);
-                            }
-                        }))
-                        .on_mouse_down(gpui::MouseButton::Right, self.scoped_listener(cx, move |this, event: &gpui::MouseDownEvent, _, cx| {
-                            if this.shown_composition(cx).component(id) == Some(Component::Conversation)
-                                && let Some(session) = this.view_session(id, cx)
-                            {
-                                this.open_context_menu(session, event.position, cx);
-                            }
-                        }))
-                })))
-                .child(div().flex_1().min_h_0().overflow_hidden().child(self.arrangement_view(selected, &c, false, viewport, cx)))
-                .child(div().flex_none().w_full().child(self.arrangement_view(composer, &c, true, viewport, cx)));
+            let mut body = v_flex()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(
+                    h_flex()
+                        .id("fitted-tabs")
+                        .debug_selector(|| "fitted-tabs".into())
+                        .flex_none()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .overflow_x_scroll()
+                        .track_scroll(&self.presentation.current.arrangement.fitted_scroll)
+                        .children(surfaces.iter().map(|&id| {
+                            self.conversation_tab(
+                                format!("fitted-tab-{}", id.0),
+                                self.tab_label(id, &c, cx),
+                                selected == id,
+                                cx,
+                            )
+                            .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                                this.reveal_view(id, window, cx);
+                                if this.shown_composition(cx).component(id)
+                                    == Some(Component::Conversation)
+                                {
+                                    this.activate(id, cx);
+                                }
+                            }))
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                self.scoped_listener(
+                                    cx,
+                                    move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                        if this.shown_composition(cx).component(id)
+                                            == Some(Component::Conversation)
+                                            && let Some(session) = this.view_session(id, cx)
+                                        {
+                                            this.open_context_menu(session, event.position, cx);
+                                        }
+                                    },
+                                ),
+                            )
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(self.arrangement_view(selected, &c, false, viewport, cx)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w_full()
+                        .child(self.arrangement_view(composer, &c, true, viewport, cx)),
+                );
             if self.presentation.current.arrangement.sidebar_overlay {
                 if let Some((id, _)) = c.views().find(|(_, k)| *k == Component::SessionList) {
                     body = body.child(
@@ -1073,8 +1107,7 @@ impl Keystone {
         .on_open_change(self.scoped_listener(cx, move |this, open: &bool, _, cx| {
             this.presentation.current.arrangement.surface_menu = open.then_some(anchor);
             cx.notify();
-        }))
-        .child(MenuHeader::new("Open a surface"));
+        }));
         for (component, icon, id) in [
             (Component::Files, IconName::Folder, "surface-add-files"),
             (Component::Notes, IconName::Note, "surface-add-notes"),
@@ -1408,12 +1441,6 @@ impl Keystone {
                     let revision = self.presentation.current.views.revision(key);
                     let activation = self.presentation.activation();
                     let app = cx.weak_entity();
-                    let empty = self
-                        .state
-                        .read(cx)
-                        .conversations()
-                        .get(&session)
-                        .is_some_and(|c| !c.is_loading() && c.is_empty());
                     pane = pane.children(self.handoff_links(key, cx)).child(
                         div()
                             .id(selector("conversation", id))
@@ -1465,24 +1492,7 @@ impl Keystone {
                                 .absolute()
                                 .inset_0(),
                             )
-                            .children(self.jump_to_latest(key, cx))
-                            .when(empty, |d| {
-                                d.child(
-                                    div()
-                                        .id(selector("empty-conversation", id))
-                                        .absolute()
-                                        .inset_0()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(
-                                            Label::new(
-                                                "No messages yet. Your draft is saved here.",
-                                            )
-                                            .color(Color::Muted),
-                                        ),
-                                )
-                            }),
+                            .children(self.jump_to_latest(key, cx)),
                     );
                 } else if self.fixture {
                     pane = pane.child(
@@ -1496,21 +1506,16 @@ impl Keystone {
                             .child(self.transcript()),
                     );
                 } else {
-                    pane = pane
-                        .items_center()
-                        .justify_center()
-                        .gap_3()
-                        .child(arch_mark(px(40.)))
-                        .child(
-                            div()
-                                .id(selector("welcome-heading", id))
-                                .automation_id(selector("welcome-heading", id))
-                                .child(
-                                    Label::new("What should we work on?")
-                                        .size(TextSize::Title)
-                                        .weight(FontWeight::SEMIBOLD),
-                                ),
-                        );
+                    pane = pane.items_center().justify_center().gap_3().child(
+                        div()
+                            .id(selector("welcome-heading", id))
+                            .automation_id(selector("welcome-heading", id))
+                            .child(
+                                Label::new("What should we work on?")
+                                    .size(TextSize::Title)
+                                    .weight(FontWeight::SEMIBOLD),
+                            ),
+                    );
                 }
             }
         }
@@ -1644,6 +1649,7 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors;
+        let dragging = cx.has_active_drag();
         div()
             .id(SharedString::from(format!("drop-{}-{side}", target.0)))
             .automation_id(format!("drop-{}-{side}", target.0))
@@ -1658,7 +1664,9 @@ impl Keystone {
                     .right_0()
                     .w(px(48.))
                     .h(px(26.))
-                    .child(Label::new("Tabs").size(TextSize::Xs).color(Color::Faint)),
+                    .when(dragging, |d| {
+                        d.child(Label::new("Tabs").size(TextSize::Xs).color(Color::Faint))
+                    }),
             })
             .drag_over::<ComponentDrag>(move |d, drag, _, _| {
                 if drag.0 != target {

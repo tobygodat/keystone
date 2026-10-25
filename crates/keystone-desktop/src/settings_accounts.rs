@@ -64,13 +64,6 @@ impl AccountsPage {
     }
 }
 
-fn example_folder(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "~/.claude-work",
-        Provider::Codex => "~/.codex-work",
-    }
-}
-
 fn provider_slug(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude",
@@ -139,13 +132,6 @@ impl Keystone {
             .collect();
         v_flex()
             .automation_id("settings-accounts")
-            .child(
-                Label::new(
-                    "Each account runs its CLI with a folder of its own, so sign-in, settings, skills and history stay apart. Sign an account in by running its command in a terminal; Keystone never sees your credentials. A session keeps the account it first sent with. Usage is what each provider last reported.",
-                )
-                .size(TextSize::Ui)
-                .color(Color::Muted),
-            )
             .children(groups)
             .child(self.add_account_form(&page.accounts, cx))
             .into_any_element()
@@ -170,12 +156,9 @@ impl Keystone {
             || default_sign_in_command(provider),
             |account| sign_in_command(provider, Some(account.home())),
         );
-        let detail = match account {
-            Some(_) => command.clone(),
-            None => match default_home(provider) {
-                Some(home) => format!("Your own setup in {} · {command}", home.display()),
-                None => format!("Your own setup · {command}"),
-            },
+        let detail = match (account, default_home(provider)) {
+            (None, Some(home)) => home.display().to_string(),
+            _ => command.clone(),
         };
         let copied = page.copied.as_deref() == Some(key.as_str());
         let copy = {
@@ -267,9 +250,9 @@ impl Keystone {
                         .debug_selector(|| format!("account-remove-{key}"))
                         .aria_label("Remove account")
                         .tooltip(Tooltip::text(if sessions > 0 {
-                            "Sessions use this account, so it stays"
+                            "In use"
                         } else {
-                            "Remove from Keystone. Its folder stays on disk."
+                            "Remove (folder stays on disk)"
                         }))
                         .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
                             this.remove_account(&remove_id, cx)
@@ -380,14 +363,6 @@ impl Keystone {
                                 ),
                             ),
                     ),
-            )
-            .child(
-                Label::new(format!(
-                    "A folder no other account uses, such as {}. Keystone creates it if needed.",
-                    example_folder(page.provider)
-                ))
-                .size(TextSize::Sm)
-                .color(Color::Faint),
             )
     }
 

@@ -224,7 +224,7 @@ fn source_label(item: &Item) -> &'static str {
         return "Terminal only";
     }
     match command.source {
-        CommandSource::BuiltIn => "Built-in",
+        CommandSource::BuiltIn => "",
         CommandSource::User => "User",
         CommandSource::Project => "Project",
         CommandSource::Plugin => "Plugin",
@@ -283,7 +283,7 @@ impl Keystone {
                     Some(presentation::ConversationFolder::LegacyMissing) => {
                         "Choose a conversation folder to list commands."
                     }
-                    _ => "Commands need this conversation's saved folder, which this version cannot use.",
+                    _ => "Commands unavailable for this folder.",
                 }
                 .to_owned(),
             );
@@ -622,10 +622,6 @@ impl Keystone {
         notice: &Notice,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let program = match notice.provider {
-            Provider::Claude => "Claude Code",
-            Provider::Codex => "Codex",
-        };
         let command = self.notice_command(notice, cx);
         let copied = notice.copied;
         v_flex()
@@ -637,7 +633,7 @@ impl Keystone {
             .surface(Elevation::Overlay, cx)
             .child(
                 Label::new(format!(
-                    "{} runs only in {program}'s own terminal, so Keystone doesn't send it. Open it in a terminal, then type {}:",
+                    "{} runs only in a terminal. Run this, then type {}:",
                     notice.invocation, notice.invocation
                 ))
                 .size(TextSize::Ui),
@@ -653,22 +649,41 @@ impl Keystone {
                             .py(px(6.))
                             .rounded(radius::CONTROL)
                             .bg(cx.theme().colors.element_filled)
-                            .child(Label::new(command.clone()).size(TextSize::Sm).mono().truncate()),
+                            .child(
+                                Label::new(command.clone())
+                                    .size(TextSize::Sm)
+                                    .mono()
+                                    .truncate(),
+                            ),
                     )
                     .child(
-                        IconButton::new("slash-terminal-copy", if copied { IconName::Check } else { IconName::Copy })
-                            .style(ButtonStyle::Subtle)
-                            .size(ButtonSize::Compact)
-                            .debug_selector(|| "slash-terminal-copy".into())
-                            .aria_label("Copy terminal command")
-                            .tooltip(Tooltip::text(if copied { "Copied" } else { "Copy terminal command" }))
-                            .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
+                        IconButton::new(
+                            "slash-terminal-copy",
+                            if copied {
+                                IconName::Check
+                            } else {
+                                IconName::Copy
+                            },
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .debug_selector(|| "slash-terminal-copy".into())
+                        .aria_label("Copy terminal command")
+                        .tooltip(Tooltip::text(if copied {
+                            "Copied"
+                        } else {
+                            "Copy terminal command"
+                        }))
+                        .on_click(self.scoped_listener(
+                            cx,
+                            move |this, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
                                 if let Some(notice) = &mut this.slash.notice {
                                     notice.copied = true;
                                 }
                                 cx.notify();
-                            })),
+                            },
+                        )),
                     ),
             )
     }

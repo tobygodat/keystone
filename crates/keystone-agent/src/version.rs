@@ -107,7 +107,7 @@ fn assess(provider: Provider, output: &str, success: bool) -> Result<Compatibili
         && version <= policy.incompatible_through
     {
         return Err(format!(
-            "{} version \"{output}\" is incompatible: it lacks {}. Install a tested CLI version ({tested_range}), then send again. No message was sent.",
+            "{} version \"{output}\" is incompatible: it lacks {}. Install a tested CLI version ({tested_range}).",
             policy.name, policy.missing
         ));
     }
@@ -117,10 +117,11 @@ fn assess(provider: Provider, output: &str, success: bool) -> Result<Compatibili
     Ok(Compatibility {
         notice: (!tested).then(|| {
             format!(
-                "{} \"{output}\" {}. Supported baseline: {minimum}; tested range: {tested_range}. Features use capability checks.",
+                "{} \"{output}\" {}. Supported baseline: {minimum}; tested range: {tested_range}.",
                 policy.name,
                 match parsed {
-                    Some((version, true)) if version > policy.highest_tested => "is newer than tested",
+                    Some((version, true)) if version > policy.highest_tested =>
+                        "is newer than tested",
                     Some(_) => "is untested",
                     None => "could not be verified",
                 }

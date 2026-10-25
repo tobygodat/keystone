@@ -731,7 +731,7 @@ impl CodexDriver {
                             return out.event(
                                 session,
                                 Event::Failed {
-                                    message: "Could not read your Codex approval settings to restore them. Choose an approval mode to continue.".into(),
+                                    message: "Could not read your Codex approval settings. Choose an approval mode.".into(),
                                 },
                             );
                         }
@@ -860,7 +860,7 @@ impl CodexDriver {
                         out.writes.push(line);
                     } else {
                         let message = format!(
-                            "Codex could not initialize: {}. Check the CLI version and restart Keystone to reconnect. No message was sent.",
+                            "Codex could not initialize: {}. Check the CLI version, then restart Keystone.",
                             error.message
                         );
                         self.before_ready.clear();
@@ -958,7 +958,7 @@ impl CodexDriver {
                         };
                         let message = if fork {
                             format!(
-                                "Could not fork this Codex conversation: {reason}. The history shown here stays; Hand off (Ctrl+Shift+H) to continue it in a new session."
+                                "Could not fork this Codex conversation: {reason}. Hand off (Ctrl+Shift+H) to continue it."
                             )
                         } else if resume {
                             format!(

@@ -362,9 +362,7 @@ fn log_budget_gap_is_marked_before_quit_so_a_crash_keeps_it_in_its_conversation(
     });
     assert_eq!(
         notice,
-        [
-            "Session 2: 2 log entries were lost (log budget exceeded). Later entries are still saved, and after a restart the conversation marks the gap."
-        ]
+        ["Session 2: 2 log entries were lost (log budget exceeded)."]
     );
     drop(writer);
     state.update(cx, |state, cx| {

@@ -61,7 +61,6 @@ impl RenderOnce for SurfaceView {
         };
         let root = draw.component("root", None, 0, window, cx);
         let (note, color) = match self.surface.status {
-            Status::Waiting => ("Waiting for your answer".to_owned(), Color::Warning),
             Status::Answered => (
                 format!(
                     "Sent {}",
@@ -70,10 +69,10 @@ impl RenderOnce for SurfaceView {
                 Color::Muted,
             ),
             Status::Stopped => (
-                "The turn that asked has ended, so a button sends a new message.".to_owned(),
+                "Pressing a button sends a new message.".to_owned(),
                 Color::Muted,
             ),
-            Status::Shown => (String::new(), Color::Muted),
+            Status::Waiting | Status::Shown => (String::new(), Color::Muted),
         };
         v_flex()
             .automation_id(self.control.selector.clone())

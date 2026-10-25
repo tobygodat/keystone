@@ -154,7 +154,7 @@ fn a_busy_parent_gets_the_result_once_its_turn_ends(cx: &mut gpui::TestAppContex
     });
     assert_eq!(
         Hold::Turn.notice("New Codex session"),
-        "The result from \u{201c}New Codex session\u{201d} arrives when this turn ends."
+        "Result from \u{201c}New Codex session\u{201d} arrives when this turn ends."
     );
     state.update(cx, |state, cx| {
         state.receive(Vec::new(), vec![(1, finished())], cx);

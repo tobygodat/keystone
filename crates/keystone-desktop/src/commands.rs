@@ -2,7 +2,7 @@
 //! row's shortcut hint cannot drift from the binding that runs it.
 
 use crate::attachments::AttachFiles;
-use crate::changes::ToggleChanges;
+use crate::changes::{CopyPullRequestLink, ToggleChanges};
 use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::fork::ForkFromHere;
@@ -85,6 +85,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         action: || Box::new(ToggleChanges),
     },
     Command {
+        id: "copy-pull-request-link",
+        label: "Copy pull request link",
+        keys: &["ctrl-alt-c"],
+        context: Some(APP),
+        action: || Box::new(CopyPullRequestLink),
+    },
+    Command {
         id: "focus-search",
         label: "Focus search",
         keys: &["ctrl-f"],
@@ -121,7 +128,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         id: "second-opinion",
-        label: "Ask for a second opinion…",
+        label: "Second opinion…",
         keys: &["ctrl-alt-o"],
         context: Some(APP),
         action: || Box::new(AskSecondOpinion),
@@ -135,14 +142,14 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         id: "continue-recovery",
-        label: "Continue with available history",
+        label: "Use recovered history",
         keys: &["ctrl-shift-enter"],
         context: Some(APP),
         action: || Box::new(ContinueRecovery),
     },
     Command {
         id: "retry-recovery",
-        label: "Retry recovery check",
+        label: "Retry recovery",
         keys: &["ctrl-shift-r"],
         context: Some(APP),
         action: || Box::new(RetryRecovery),
@@ -198,7 +205,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         id: "new-tab",
-        label: "New session in a new tab",
+        label: "New tab",
         keys: &["ctrl-t"],
         context: Some(APP),
         action: || Box::new(NewTab),
@@ -338,14 +345,14 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         id: "fork-from-here",
-        label: "Transcript: fork from the focused message",
+        label: "Transcript: fork from row",
         keys: &["ctrl-shift-f"],
         context: Some(TRANSCRIPT),
         action: || Box::new(ForkFromHere),
     },
     Command {
         id: "transcript-focus-latest",
-        label: "Transcript: focus Jump to latest",
+        label: "Transcript: jump to latest",
         keys: &["alt-end"],
         context: Some(TRANSCRIPT),
         action: || Box::new(FocusLatest),
@@ -475,7 +482,7 @@ impl Keystone {
             .active_view(cx)
             .filter(|&view| self.view_session(view, cx).is_some())
         else {
-            self.error = Some("Tab not moved. No session is open here.".into());
+            self.error = Some("No session open.".into());
             return self.refresh(cx);
         };
         let this = cx.entity();

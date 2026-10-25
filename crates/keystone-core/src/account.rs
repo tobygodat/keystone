@@ -84,15 +84,14 @@ impl Account {
 pub fn expand_home(home: &str, user_home: Option<&Path>) -> Result<PathBuf, String> {
     let home = home.trim();
     if home.is_empty() {
-        return Err("Choose a folder for the account.".into());
+        return Err("Choose a folder.".into());
     }
     let path = match home.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            let user_home =
-                user_home.ok_or("Your home folder is unknown, so `~` cannot be used.")?;
+            let user_home = user_home.ok_or("Home folder unknown; write the full path.")?;
             user_home.join(rest.trim_start_matches('/'))
         }
-        Some(_) => return Err("Only your own `~` can be used; write the full path.".into()),
+        Some(_) => return Err("Write the full path.".into()),
         None => PathBuf::from(home),
     };
     if !path.is_absolute() {

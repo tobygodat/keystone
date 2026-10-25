@@ -1,12 +1,12 @@
 use crate::arrangement_editor::{Action, Chooser, Effect, Interpretation};
 use crate::customization_agent::{Agent, Outcome, Programs, REQUEST_TIMEOUT};
-use crate::{Keystone, SendMessage, provider_name};
+use crate::{Keystone, SendMessage};
 use gpui::{
     App, Context, Focusable, FontWeight, IntoElement, MouseButton, SharedString, Window, div,
     prelude::*, px,
 };
 use keystone_core::{
-    Axis, Component, Composition, Edit, Node, NodePath, Place, Provider, SavedComposition, Size,
+    Axis, Component, Composition, Edit, Node, NodePath, Place, SavedComposition, Size,
 };
 use keystone_ui::prelude::*;
 use std::num::NonZeroU16;
@@ -178,7 +178,7 @@ impl Keystone {
                         agent.cancel(request);
                     }
                 }
-                Effect::Save(layout, commit) => {
+                Effect::Save(layout) => {
                     let previous = self.saved_layout(cx).cloned();
                     let window_id = self.window_id;
                     let result = match &self.presentation.project {
@@ -199,7 +199,7 @@ impl Keystone {
                     self.presentation
                         .current
                         .customization
-                        .saved(commit, previous, shown, result);
+                        .saved(previous, shown, result);
                 }
                 Effect::Borrow(source) => {
                     let raw = self
@@ -261,7 +261,7 @@ impl Keystone {
             .size(ButtonSize::Compact)
             .selected(open)
             .debug_selector(|| "customize-toggle".into())
-            .tooltip(Tooltip::with_key("Arrange components", "Ctrl+Shift+L"))
+            .tooltip(Tooltip::text("Ctrl+Shift+L"))
             .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                 this.customize(if open { Action::Close } else { Action::Open }, window, cx)
             }))
@@ -395,26 +395,15 @@ impl Keystone {
                 }))
         };
         let status = match self.presentation.current.customization.interpretation() {
-            Some(Interpretation::Running { .. }) => format!(
-                "Asking {}…",
-                provider_name(self.presentation.current.customization.asking().unwrap())
-            ),
-            Some(Interpretation::Failed(error)) => error.clone(),
-            Some(Interpretation::Unsupported(reason)) => format!("Not supported. {reason}"),
+            Some(Interpretation::Running { .. }) => Some("Asking Claude Code…".into()),
+            Some(Interpretation::Failed(error)) => Some(error.clone()),
+            Some(Interpretation::Unsupported(reason)) => Some(format!("Not supported. {reason}")),
             _ => self
                 .presentation
                 .current
                 .customization
                 .note()
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    if dirty {
-                        "Unapplied changes"
-                    } else {
-                        "No unapplied changes"
-                    }
-                    .into()
-                }),
+                .map(str::to_owned),
         };
         v_flex()
             .id("customize-panel")
@@ -432,7 +421,6 @@ impl Keystone {
                 h_flex()
                     .gap_1()
                     .flex_wrap()
-                    .child(Label::new("Editing layout").weight(FontWeight::MEDIUM))
                     .child(div().flex_1())
                     .child(act(
                         "customize-borrow",
@@ -471,24 +459,6 @@ impl Keystone {
                         h_flex()
                             .gap_1()
                             .flex_wrap()
-                            .children([Provider::Claude, Provider::Codex].map(|provider| {
-                                let id = if provider == Provider::Claude {
-                                    "customize-provider-claude"
-                                } else {
-                                    "customize-provider-codex"
-                                };
-                                Button::new(id, provider_name(provider))
-                                    .size(ButtonSize::Compact)
-                                    .selected(
-                                        self.presentation.current.customize_provider == provider,
-                                    )
-                                    .disabled(running)
-                                    .debug_selector(|| id.into())
-                                    .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
-                                        this.presentation.current.customize_provider = provider;
-                                        cx.notify();
-                                    }))
-                            }))
                             .child(
                                 div()
                                     .id("customize-prompt")
@@ -517,13 +487,7 @@ impl Keystone {
                                                 .read(cx)
                                                 .value()
                                                 .to_owned();
-                                            let provider =
-                                                this.presentation.current.customize_provider;
-                                            this.customize(
-                                                Action::Ask { provider, prompt },
-                                                window,
-                                                cx,
-                                            );
+                                            this.customize(Action::Ask(prompt), window, cx);
                                             cx.stop_propagation();
                                         },
                                     ))
@@ -532,16 +496,14 @@ impl Keystone {
                             .child(act(
                                 "customize-ask",
                                 "Preview",
-                                Action::Ask {
-                                    provider: self.presentation.current.customize_provider,
-                                    prompt: self
-                                        .presentation
+                                Action::Ask(
+                                    self.presentation
                                         .current
                                         .customize_prompt
                                         .read(cx)
                                         .value()
                                         .to_owned(),
-                                },
+                                ),
                                 running,
                             ))
                             .when(running, |d| {
@@ -558,15 +520,6 @@ impl Keystone {
                             .h(px(28.))
                             .flex_none()
                             .overflow_x_scroll()
-                            .child(
-                                Label::new(selected.map_or_else(
-                                    || "Select a component grip".into(),
-                                    |id| {
-                                        format!("{} {}", component.map_or("Component", label), id.0)
-                                    },
-                                ))
-                                .size(TextSize::Sm),
-                            )
                             .children(current.views().map(|(id, c)| {
                                 Button::new(
                                     SharedString::from(format!("select-component-{}", id.0)),
@@ -596,14 +549,7 @@ impl Keystone {
                                         || (component == Some(Component::Conversation)
                                             && conversations == 1),
                                 )
-                            }))
-                            .child(
-                                Label::new(
-                                    "Alt+arrows move · Alt+[/] size · drag grips to edges or Tabs",
-                                )
-                                .size(TextSize::Xs)
-                                .color(Color::Faint),
-                            ),
+                            })),
                     )
                     .child(
                         h_flex()
@@ -611,23 +557,26 @@ impl Keystone {
                             .gap_1()
                             .children(
                                 [
-                                    ("component-left", "←", Axis::Row, false),
-                                    ("component-right", "→", Axis::Row, true),
-                                    ("component-up", "↑", Axis::Column, false),
-                                    ("component-down", "↓", Axis::Column, true),
+                                    ("component-left", "←", "Move left", Axis::Row, false),
+                                    ("component-right", "→", "Move right", Axis::Row, true),
+                                    ("component-up", "↑", "Move up", Axis::Column, false),
+                                    ("component-down", "↓", "Move down", Axis::Column, true),
                                 ]
-                                .map(|(id, text, axis, after)| {
-                                    Button::new(id, text)
-                                        .size(ButtonSize::Compact)
-                                        .disabled(selected.is_none())
-                                        .debug_selector(|| id.into())
-                                        .on_click(self.scoped_listener(
-                                            cx,
-                                            move |this, _, window, cx| {
-                                                this.move_component(axis, after, window, cx)
-                                            },
-                                        ))
-                                }),
+                                .map(
+                                    |(id, text, name, axis, after)| {
+                                        Button::new(id, text)
+                                            .size(ButtonSize::Compact)
+                                            .disabled(selected.is_none())
+                                            .debug_selector(|| id.into())
+                                            .tooltip(Tooltip::with_key(name, format!("Alt+{text}")))
+                                            .on_click(self.scoped_listener(
+                                                cx,
+                                                move |this, _, window, cx| {
+                                                    this.move_component(axis, after, window, cx)
+                                                },
+                                            ))
+                                    },
+                                ),
                             )
                             .children(
                                 [
@@ -644,6 +593,9 @@ impl Keystone {
                                         .size(ButtonSize::Compact)
                                         .disabled(selected.is_none())
                                         .debug_selector(|| id.into())
+                                        .when(!matches!(mode, Size::Auto), |button| {
+                                            button.tooltip(Tooltip::text("Alt+[ / Alt+]"))
+                                        })
                                         .on_click(self.scoped_listener(
                                             cx,
                                             move |this, _, window, cx| {
@@ -684,11 +636,11 @@ impl Keystone {
                             ),
                     ),
             )
-            .child(
+            .children(status.map(|status| {
                 div()
                     .automation_id("customize-status")
-                    .child(Label::new(status).size(TextSize::Sm).color(Color::Muted)),
-            )
+                    .child(Label::new(status).size(TextSize::Sm).color(Color::Muted))
+            }))
             .children(self.presentation.project.as_ref().err().map(|error| {
                 Label::new(format!("Layout cannot be saved. {error}"))
                     .size(TextSize::Sm)
@@ -722,23 +674,11 @@ impl Keystone {
             .layouts_in(self.window_id)
             .filter(|(id, _)| self.presentation.project.as_ref().ok() != Some(id))
             .collect();
-        let (title, description) = match chooser {
-            Chooser::Replace(_) => (
-                "Replace this preview?",
-                "Borrowing replaces only this preview. Your saved layout, draft and running work stay as they are.",
-            ),
-            Chooser::Unavailable => (
-                "This layout cannot be used",
-                "The saved layout is unavailable or unsupported. Nothing has changed here. Choose another saved layout.",
-            ),
-            Chooser::Layouts { .. } if sources.is_empty() => (
-                "No other saved layouts",
-                "Layouts saved in other project folders appear here. Close this chooser to keep arranging.",
-            ),
-            _ => (
-                "Borrow a layout",
-                "Choose a saved layout to preview in this project. Sessions, drafts, runs, permissions and model choices stay here.",
-            ),
+        let title = match chooser {
+            Chooser::Replace(_) => "Replace this preview?",
+            Chooser::Unavailable => "This layout cannot be used",
+            Chooser::Layouts { .. } if sources.is_empty() => "No other saved layouts",
+            _ => "Borrow a layout",
         };
         let mut card = v_flex()
             .id("borrow-card")
@@ -761,8 +701,7 @@ impl Keystone {
                     )
                     .child(div().flex_1())
                     .child(close("borrow-close", "×", Action::CloseChooser)),
-            )
-            .child(Label::new(description).color(Color::Muted));
+            );
         match chooser {
             Chooser::Replace(_) => {
                 card = card.child(
@@ -821,22 +760,11 @@ impl Keystone {
                                     colors.border
                                 })
                                 .cursor_pointer()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(Label::new(if chosen { "●" } else { "○" }).color(
-                                            if chosen {
-                                                Color::Custom(colors.selection_edge)
-                                            } else {
-                                                Color::Muted
-                                            },
-                                        ))
-                                        .child(Label::new(path).color(if chosen {
-                                            Color::Strong
-                                        } else {
-                                            Color::Muted
-                                        })),
-                                )
+                                .child(Label::new(path).color(if chosen {
+                                    Color::Strong
+                                } else {
+                                    Color::Muted
+                                }))
                                 .child(
                                     Label::new(count.map_or_else(
                                         || "Unsupported saved layout".into(),
@@ -1118,9 +1046,9 @@ mod tests {
         cx.simulate_resize(gpui::size(px(640.), px(360.)));
         cx.run_until_parked();
         click(cx, "customize-toggle");
-        let status = cx.debug_bounds("customize-status").unwrap();
+        let panel = cx.debug_bounds("customize-panel").unwrap();
         let send = cx.debug_bounds("send").unwrap();
-        assert!(status.bottom() < send.top());
+        assert!(panel.bottom() <= send.top());
         assert!(send.bottom() <= px(360.));
         for id in [
             "customize-apply",
@@ -1129,7 +1057,7 @@ mod tests {
             "customize-borrow",
         ] {
             let button = cx.debug_bounds(id).unwrap();
-            assert!(button.bottom() < status.top());
+            assert!(button.bottom() < send.top());
         }
     }
 

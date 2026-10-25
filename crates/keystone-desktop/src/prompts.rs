@@ -1,5 +1,5 @@
 //! Inserting saved prompts: the palette's "Insert prompt…" list, and the insert the
-//! `/` menu shares. Inserting fills the composer and counts a use; it never sends.
+//! `/` menu shares. Inserting fills the composer; it never sends.
 //! The prompts themselves are edited in Settings → Prompts.
 
 use crate::Keystone;
@@ -12,7 +12,6 @@ use keystone_ui::{CommandPalette, CommandPaletteState, PaletteItem};
 gpui::actions!(keystone, [InsertPrompt]);
 
 const ITEM: &str = "prompt-";
-const MANAGE: &str = "manage-prompts";
 
 /// The open prompt list and the focus it returns to when it closes.
 pub(crate) struct PromptList {
@@ -55,7 +54,7 @@ impl Keystone {
     }
 
     /// Puts prompt `id`'s text in the composer, in place of the whole draft when
-    /// `replace`, else at the cursor, and counts the use. A prompt no longer offered
+    /// `replace`, else at the cursor. A prompt no longer offered
     /// to the selected session, as another window may have just changed, is not
     /// inserted, and the window says so.
     pub(crate) fn insert_prompt(
@@ -72,9 +71,7 @@ impl Keystone {
             .map(|prompt| prompt.body().to_owned())
         else {
             if self.selected(cx).is_some() {
-                self.error = Some(
-                    "Prompt not inserted. Another window deleted it or moved it to another project.".into(),
-                );
+                self.error = Some("Prompt no longer available.".into());
                 self.refresh(cx);
             }
             return;
@@ -88,19 +85,6 @@ impl Keystone {
         });
         self.composer.focus_handle(cx).focus(window, cx);
         self.save_draft(cx);
-        let draft = self.composer.read(cx).value();
-        let saved = self
-            .selected_session(cx)
-            .is_some_and(|s| s.draft() == draft);
-        if saved
-            && let Err(error) = self.state.update(cx, |state, cx| {
-                state.change_prompts(|store| store.count_prompt_use(id), cx)
-            })
-        {
-            self.error = Some(format!(
-                "Prompt inserted, but its use was not counted. {error}"
-            ));
-        }
         self.refresh(cx);
     }
 
@@ -125,10 +109,8 @@ impl Keystone {
                 PaletteItem::new(format!("{ITEM}{}", prompt.id()), prompt.title().to_owned())
                     .detail(prompt_detail(prompt))
             })
-            .chain([PaletteItem::new(MANAGE, "Manage saved prompts…")])
             .collect();
-        let state =
-            cx.new(|cx| CommandPaletteState::with_placeholder(items, "Insert a saved prompt", cx));
+        let state = cx.new(|cx| CommandPaletteState::with_placeholder(items, "Search prompts", cx));
         state.focus_handle(cx).focus(window, cx);
         self.prompt_list = Some(PromptList { state, restore });
         self.refresh(cx);
@@ -146,9 +128,6 @@ impl Keystone {
 
     fn confirm_prompt(&mut self, item: &PaletteItem, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt_list(window, cx);
-        if item.id == MANAGE {
-            return self.open_prompts(window, cx);
-        }
         if let Some(id) = item.id.strip_prefix(ITEM).and_then(|id| id.parse().ok()) {
             self.insert_prompt(id, false, window, cx);
         }

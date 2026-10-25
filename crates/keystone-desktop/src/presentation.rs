@@ -3,7 +3,7 @@ use crate::arrangement::Arrangement;
 use crate::arrangement_editor::{Customization, RequestIds};
 use crate::view_state::ViewStates;
 use gpui::{App, AppContext, Context, Entity, FocusHandle, Focusable, Window};
-use keystone_core::{Composition, Preferences, ProjectId, Provider, WorkingDirectory};
+use keystone_core::{Composition, Preferences, ProjectId, WorkingDirectory};
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -28,7 +28,6 @@ pub(crate) struct ProjectPresentation {
     pub arrangement: Arrangement,
     pub views: ViewStates,
     pub customize_prompt: Entity<TextInput>,
-    pub customize_provider: Provider,
     pub sidebar: bool,
     pub sidebar_before_customize: Option<bool>,
     pub borrow_focus: Option<FocusHandle>,
@@ -44,7 +43,6 @@ impl ProjectPresentation {
             views: ViewStates::default(),
             customize_prompt: cx
                 .new(|cx| TextInput::new("Describe a layout change…", InputMode::SingleLine, cx)),
-            customize_provider: Provider::Claude,
             sidebar: true,
             sidebar_before_customize: None,
             borrow_focus: None,
@@ -179,15 +177,9 @@ pub(crate) enum ConversationFolder {
 impl ConversationFolder {
     pub fn tooltip(&self) -> String {
         match self {
-            Self::Recorded(directory) => format!(
-                "Open conversation folder · {} · {}",
-                directory
-                    .path()
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy(),
-                directory.as_str()
-            ),
+            Self::Recorded(directory) => {
+                format!("Open conversation folder · {}", directory.as_str())
+            }
             Self::LegacyMissing => "Choose conversation folder".into(),
             Self::Unsupported => {
                 "Saved conversation folder is not supported by this version".into()
@@ -438,7 +430,11 @@ impl Keystone {
         let directory = match WorkingDirectory::new(&path) {
             Ok(directory) => directory,
             Err(_) => {
-                self.folder_error(ticket.session, "Not sent. That folder is unavailable. Choose an existing folder with the folder button. Your draft is kept.".into(), cx);
+                self.folder_error(
+                    ticket.session,
+                    "Not sent. That folder is unavailable; choose another.".into(),
+                    cx,
+                );
                 return;
             }
         };
@@ -458,9 +454,7 @@ impl Keystone {
             }
             Err(error) => self.folder_error(
                 ticket.session,
-                format!(
-                    "Not sent. The folder choice could not be saved. {error}. Your draft is kept."
-                ),
+                format!("Not sent. Folder not saved. {error}."),
                 cx,
             ),
         }

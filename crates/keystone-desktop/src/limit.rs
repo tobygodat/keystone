@@ -60,15 +60,12 @@ fn headline(
     now: u64,
     at: impl Fn(u64) -> String,
 ) -> String {
-    let mut headline = if inferred {
-        "Usage limit likely reached"
-    } else {
-        "Usage limit reached"
-    }
-    .to_owned();
-    if let Some(label) = label {
-        headline.push_str(&format!(" · {label}"));
-    }
+    let mut headline = match (label, inferred) {
+        (Some(label), false) => format!("{label} limit"),
+        (Some(label), true) => format!("{label} limit likely reached"),
+        (None, false) => "Usage limit reached".to_owned(),
+        (None, true) => "Usage limit likely reached".to_owned(),
+    };
     headline.push_str(&match (scheduled, reset) {
         (Some(ms), _) => format!(" · continues at {}", at(ms)),
         (None, Some(ms)) if ms <= now => format!(" · reset {}", at(ms)),
@@ -252,11 +249,15 @@ mod tests {
             |inferred, label, scheduled, reset| headline(inferred, label, scheduled, reset, 10, at);
         assert_eq!(
             line(false, Some("5-hour"), None, Some(20)),
-            "Usage limit reached · 5-hour · resets t20"
+            "5-hour limit · resets t20"
         );
         assert_eq!(
             line(false, Some("5-hour"), Some(35), Some(20)),
-            "Usage limit reached · 5-hour · continues at t35"
+            "5-hour limit · continues at t35"
+        );
+        assert_eq!(
+            line(true, Some("5-hour"), None, Some(20)),
+            "5-hour limit likely reached · resets t20"
         );
         assert_eq!(
             line(true, None, None, Some(5)),

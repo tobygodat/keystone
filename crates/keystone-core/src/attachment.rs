@@ -120,7 +120,7 @@ impl Attachments {
         let unreadable = |error: io::Error| format!("{name} could not be read: {error}.");
         let metadata = fs::metadata(path).map_err(unreadable)?;
         if metadata.is_dir() {
-            return Err(format!("{name} is a folder. Attach files, not folders."));
+            return Err(format!("{name} is a folder."));
         }
         let mut file = fs::File::open(path).map_err(unreadable)?;
         let mut head = [0; 12];
@@ -140,9 +140,7 @@ impl Attachments {
     /// Copies an image held in memory, such as one pasted from the clipboard.
     pub fn import_bytes(&self, bytes: &[u8], name: String) -> Result<Attachment, String> {
         let Some(media_type) = image_type(bytes) else {
-            return Err(format!(
-                "{name} is not a png, jpeg, gif or webp image, the types Keystone attaches."
-            ));
+            return Err(format!("{name} isn't a png, jpeg, gif or webp image."));
         };
         self.check_size(&name, bytes.len() as u64)?;
         let attachment = Attachment {
@@ -150,12 +148,8 @@ impl Attachments {
             media_type: media_type.into(),
             name,
         };
-        let copied = |error: io::Error| {
-            format!(
-                "{} could not be copied into Keystone's data folder: {error}.",
-                attachment.name
-            )
-        };
+        let copied =
+            |error: io::Error| format!("{} could not be attached: {error}.", attachment.name);
         let target = attachment.path(&self.dir);
         let _held = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         if target.exists() {
@@ -189,7 +183,7 @@ impl Attachments {
             return Ok(());
         }
         Err(format!(
-            "{name} is {}, over the {} limit for an attached image.",
+            "{name} is {}, over the {} limit.",
             megabytes(size),
             megabytes(self.max_bytes)
         ))
@@ -363,7 +357,7 @@ mod tests {
             attachments
                 .import_file(dir.path())
                 .unwrap_err()
-                .ends_with("is a folder. Attach files, not folders.")
+                .ends_with("is a folder.")
         );
         assert!(
             attachments
@@ -375,7 +369,7 @@ mod tests {
             .import_bytes(b"BM\x36\0", "Pasted image.bmp".into())
             .unwrap_err();
         assert!(
-            refused.contains("not a png, jpeg, gif or webp image"),
+            refused.contains("isn't a png, jpeg, gif or webp image"),
             "{refused}"
         );
     }

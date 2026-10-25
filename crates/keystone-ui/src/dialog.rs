@@ -195,7 +195,9 @@ impl RenderOnce for ConfirmDialog {
                             .weight(FontWeight::MEDIUM),
                     ),
             )
-            .child(Label::new(self.message).color(Color::Muted))
+            .when(!self.message.is_empty(), |d| {
+                d.child(Label::new(self.message).color(Color::Muted))
+            })
             .children(self.body)
             .child(
                 h_flex()

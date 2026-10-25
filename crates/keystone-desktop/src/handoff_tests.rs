@@ -13,7 +13,7 @@ fn hand_off_opens_a_linked_session_with_the_context_in_its_composer(
         v.hand_off(window, cx);
         assert_eq!(
             v.error.as_deref(),
-            Some("Nothing to hand off yet: this session has not sent anything.")
+            Some("Nothing sent yet.")
         );
         v.error = None;
         v.state.update(cx, |state, cx| {
@@ -123,8 +123,8 @@ fn hand_off_waits_for_the_whole_history(cx: &mut gpui::TestAppContext) {
         conversation
     };
     for (conversation, error) in [
-        (Conversation::loading(), "still loading"),
-        (unreadable(), "could not be read"),
+        (Conversation::loading(), "Still loading"),
+        (unreadable(), "Could not read the history"),
     ] {
         view.update_in(cx, |v, window, cx| {
             v.state.update(cx, |state, _| {

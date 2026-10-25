@@ -182,7 +182,7 @@ fn a_worktree_session_is_created_shown_refused_while_dirty_and_removed_when_clea
     cx.simulate_click(confirm.center(), gpui::Modifiers::none());
     settle(&view, cx);
     let refused = dialog_error(&view, cx).expect("a dirty worktree is refused");
-    assert!(refused.contains("uncommitted changes"), "{refused}");
+    assert!(refused.contains("Uncommitted"), "{refused}");
     assert!(worktree.directory.path().join("notes").is_file());
 
     std::fs::remove_file(worktree.directory.path().join("notes")).unwrap();

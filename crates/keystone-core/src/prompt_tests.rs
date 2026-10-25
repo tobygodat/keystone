@@ -35,7 +35,7 @@ fn titles(store: &Store) -> Vec<String> {
 }
 
 #[test]
-fn prompts_are_added_edited_reordered_counted_and_removed_through_the_event_log() {
+fn prompts_are_added_edited_reordered_and_removed_through_the_event_log() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.json");
     let project = ProjectId::new(directory.path()).unwrap();
@@ -71,8 +71,6 @@ fn prompts_are_added_edited_reordered_counted_and_removed_through_the_event_log(
         )
         .unwrap();
     store.move_prompt(plan, 0).unwrap();
-    store.count_prompt_use(review).unwrap();
-    store.count_prompt_use(review).unwrap();
 
     let reopened = Store::open(&path).unwrap();
     assert_eq!(titles(&reopened), ["Plan", "Review closely"]);
@@ -80,7 +78,6 @@ fn prompts_are_added_edited_reordered_counted_and_removed_through_the_event_log(
     assert_eq!(saved.body(), "Review this diff.");
     assert_eq!(saved.shortcut(), Some("review"));
     assert_eq!(saved.project(), None);
-    assert_eq!(saved.uses(), 2);
     assert_eq!(
         reopened.workspace().prompt(plan).unwrap().project(),
         Some(project)
@@ -110,6 +107,14 @@ fn prompts_are_added_edited_reordered_counted_and_removed_through_the_event_log(
 }
 
 #[test]
+fn a_prompt_saved_with_a_use_count_still_loads_and_keeps_it() {
+    let prompt: Prompt =
+        serde_json::from_str(r#"{"id":3,"title":"T","body":"b","uses":4}"#).unwrap();
+    assert_eq!((prompt.title(), prompt.body()), ("T", "b"));
+    assert_eq!(serde_json::to_value(&prompt).unwrap()["uses"], 4);
+}
+
+#[test]
 fn a_prompt_needs_a_title_and_text_and_a_one_word_shortcut_no_overlapping_prompt_uses() {
     let directory = tempfile::tempdir().unwrap();
     let a = tempfile::tempdir().unwrap();
@@ -124,8 +129,8 @@ fn a_prompt_needs_a_title_and_text_and_a_one_word_shortcut_no_overlapping_prompt
 
     assert!(refused(&mut store, fields(" \n", "x", "", None)).contains("title"));
     assert!(refused(&mut store, fields("T", " \n ", "", None)).contains("text"));
-    assert!(refused(&mut store, fields("T", "x", "/two words", None)).contains("one word"));
-    assert!(refused(&mut store, fields("T", "x", "/über", None)).contains("one word"));
+    assert!(refused(&mut store, fields("T", "x", "/two words", None)).contains("Shortcut:"));
+    assert!(refused(&mut store, fields("T", "x", "/über", None)).contains("Shortcut:"));
 
     let first = store
         .add_prompt(fields("  Multi\n line  ", "body", " /fix ", Some(&a)))

@@ -6,7 +6,7 @@ A second opinion puts a session's conversation, or the part of it up to one repl
 
 - The top bar's Second opinion button (`second-opinion`), beside Hand off. It asks about the conversation.
 - Ctrl+Alt+O. With a finished reply focused in the transcript (row navigation), it asks about that reply; anywhere else, about the conversation.
-- The command palette: "Ask for a second opinion…". Like the shortcut, it should ask about a reply when the palette returns focus to a focused reply; only the conversation case is tested.
+- The command palette: "Second opinion…". Like the shortcut, it should ask about a reply when the palette returns focus to a focused reply; only the conversation case is tested.
 - A finished reply's Second opinion button (`second-opinion-<row>`, view-scoped like other selectors), beside Copy reply. It asks about that reply.
 
 ## Expected behaviour

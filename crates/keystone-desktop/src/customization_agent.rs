@@ -2,7 +2,7 @@ use keystone_agent::{
     ApprovalState, ClaudeConnection, Command, Connection, Event, ItemKind, ItemStatus, TurnStatus,
     Wake,
 };
-use keystone_core::{ApprovalMode, Composition, Provider};
+use keystone_core::{ApprovalMode, Composition};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,8 +15,6 @@ pub const REASON_LIMIT: usize = 256;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 const SESSION: u64 = 1;
-
-const CODEX_UNSUPPORTED: &str = "Codex prompt customization is unavailable because Keystone cannot disable all of its tools. Choose Claude Code or arrange the layout manually.";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Proposal {
@@ -33,7 +31,6 @@ pub enum Outcome {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
     pub request: u64,
-    pub provider: Provider,
     pub prompt: String,
     pub current: Composition,
 }
@@ -145,14 +142,6 @@ impl Worker {
     }
 
     fn serve(&self, ask: Ask) -> Next {
-        match ask.provider {
-            Provider::Claude => {}
-            Provider::Codex => {
-                let unsupported = Proposal::Unsupported(CODEX_UNSUPPORTED.into());
-                self.report(ask.request, Outcome::Proposal(unsupported));
-                return Next::Wait;
-            }
-        }
         let deadline = Instant::now() + self.timeout;
         let directory = match tempfile::Builder::new()
             .prefix("keystone-customize-")
@@ -634,7 +623,6 @@ mod tests {
         };
         let ask = Ask {
             request: 7,
-            provider: Provider::Claude,
             prompt: "right".into(),
             current: Composition::default(),
         };
@@ -692,10 +680,9 @@ mod provider_tests {
         (Agent::new(programs, timeout, wake), rx)
     }
 
-    fn ask(request: u64, provider: Provider) -> Ask {
+    fn ask(request: u64) -> Ask {
         Ask {
             request,
-            provider,
             prompt: "Put it on the right".into(),
             current: Composition::default(),
         }
@@ -711,7 +698,7 @@ mod provider_tests {
     const CHANGE: &str = r#"{"kind":"change","version":1,"composition":{"version":1,"views":[{"id":0,"component":"conversation"},{"id":1,"component":"session_list"},{"id":2,"component":"composer"}],"root":{"kind":"split","axis":"row","children":[{"node":{"kind":"view","id":1},"size":{"px":264}},{"node":{"kind":"split","axis":"column","children":[{"node":{"kind":"view","id":0},"size":{"fill":1}},{"node":{"kind":"view","id":2},"size":"auto"}]},"size":{"fill":1}}]}}}"#;
 
     #[test]
-    fn claude_answers_with_a_validated_proposal_and_codex_is_refused_unstarted() {
+    fn claude_answers_with_a_validated_proposal() {
         let dir = tempfile::tempdir().unwrap();
         let argv = dir.path().join("argv");
         std::fs::write(&argv, "").unwrap();
@@ -727,7 +714,7 @@ mod provider_tests {
             REQUEST_TIMEOUT,
         );
         let expected = Outcome::Proposal(Proposal::Change(Composition::default()));
-        agent.ask(ask(1, Provider::Claude));
+        agent.ask(ask(1));
         assert_eq!(next(&agent, &woken), vec![(1, expected)]);
         let launched = std::fs::read_to_string(&argv).unwrap();
         let tools = r#""--tools","","#;
@@ -736,16 +723,6 @@ mod provider_tests {
             launched.contains(r#""--include-hook-events""#),
             "{launched}"
         );
-
-        agent.ask(ask(2, Provider::Codex));
-        assert_eq!(
-            next(&agent, &woken),
-            vec![(
-                2,
-                Outcome::Proposal(Proposal::Unsupported(CODEX_UNSUPPORTED.into()))
-            )]
-        );
-        assert_eq!(std::fs::read_to_string(&argv).unwrap(), launched);
     }
 
     #[test]
@@ -767,7 +744,7 @@ mod provider_tests {
                 claude: Some(claude),
             };
             let (agent, woken) = agent(programs, REQUEST_TIMEOUT);
-            agent.ask(ask(1, Provider::Claude));
+            agent.ask(ask(1));
             let results = next(&agent, &woken);
             assert!(
                 matches!(results.as_slice(), [(1, Outcome::Failed(problem))] if problem.contains(expected)),
@@ -786,11 +763,11 @@ mod provider_tests {
             claude: Some(claude),
         };
         let (agent, woken) = agent(programs.clone(), REQUEST_TIMEOUT);
-        agent.ask(ask(1, Provider::Claude));
-        agent.ask(ask(2, Provider::Claude));
-        agent.ask(ask(3, Provider::Claude));
+        agent.ask(ask(1));
+        agent.ask(ask(2));
+        agent.ask(ask(3));
         agent.cancel(3);
-        agent.ask(ask(4, Provider::Claude));
+        agent.ask(ask(4));
         let results = next(&agent, &woken);
         assert!(
             matches!(results.as_slice(), [(4, Outcome::Proposal(_))]),
@@ -798,7 +775,7 @@ mod provider_tests {
         );
 
         let (agent, woken) = agent_with_timeout(programs);
-        agent.ask(ask(5, Provider::Claude));
+        agent.ask(ask(5));
         let results = next(&agent, &woken);
         assert!(
             matches!(results.as_slice(), [(5, Outcome::Failed(problem))] if problem.contains("No answer")),

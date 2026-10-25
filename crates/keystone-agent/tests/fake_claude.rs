@@ -1017,7 +1017,7 @@ fn read_only_refuses_to_leave_plan_mode() {
             .any(|e| matches!(e, Event::ApprovalRequested(_)))
     );
     assert!(events.iter().any(
-        |e| matches!(e, Event::Warning { message } if message.contains("Read only keeps it"))
+        |e| matches!(e, Event::Warning { message } if message.contains("asked to leave plan mode"))
     ));
     assert!(reply(&events).unwrap().contains("Stayed in plan mode"));
     assert_eq!(mode_of(&events), "plan");

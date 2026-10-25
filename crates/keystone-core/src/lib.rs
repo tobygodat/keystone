@@ -1470,15 +1470,10 @@ impl Store {
     }
 
     /// Replaces a prompt's title, text, shortcut and project. Its place in the list
-    /// and its use count stay.
+    /// stays.
     pub fn edit_prompt(&mut self, id: u64, fields: PromptFields) -> StoreResult<Applied<()>> {
         let checked = fields.check(&self.workspace.prompts, Some(id))?;
         self.update_prompt(id, |prompt| prompt.apply(checked))
-    }
-
-    /// Counts one more insert of the prompt.
-    pub fn count_prompt_use(&mut self, id: u64) -> StoreResult<Applied<()>> {
-        self.update_prompt(id, Prompt::count_use)
     }
 
     /// Moves a prompt to `to` in the list, clamped to its end.

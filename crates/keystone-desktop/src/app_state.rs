@@ -192,9 +192,9 @@ const WIDGET_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(
 /// How long a recovery check may take before the app stops waiting for it.
 pub(crate) const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
-const UNREAD: &str = "Keystone could not read this conversation's saved history, so it cannot tell whether a turn was left open";
+const UNREAD: &str = "Keystone could not read this conversation's history";
 
-const NO_THREAD: &str = "Keystone never saved this conversation's provider ID, so it cannot check what the provider recorded. Sending starts a new provider conversation";
+const NO_THREAD: &str = "this conversation's provider ID was never saved, so sending starts a new provider conversation";
 
 /// An MCP server's status and when Keystone received it, in unix milliseconds.
 #[derive(Clone, Debug, PartialEq)]
@@ -236,7 +236,10 @@ impl AppState {
             } else {
                 format!("{lost} log entries were")
             };
-            self.log_losses.insert(session, format!("Session {session}: {entries} lost (log budget exceeded). Later entries are still saved, and after a restart the conversation marks the gap."));
+            self.log_losses.insert(
+                session,
+                format!("Session {session}: {entries} lost (log budget exceeded)."),
+            );
         }
     }
     pub(crate) fn conversations(&self) -> &HashMap<u64, Conversation> {
@@ -417,7 +420,7 @@ impl AppState {
                 ),
                 PendingSave::Delivery(child, state) => (
                     self.store.set_delivery(*child, state.clone()),
-                    "Could not save a launched session's result",
+                    "Result not saved",
                 ),
             };
             if let Err(error) = result {
@@ -2012,7 +2015,7 @@ impl AppState {
                     .find(|other| keystone_core::homes_overlap(&real_path(other.home()), &home))
                 {
                     return Err(format!(
-                        "The account \u{201c}{}\u{201d} now resolves to {}, which overlaps the account \u{201c}{}\u{201d}, so nothing was sent. Give each account a folder of its own.",
+                        "Not sent. The account \u{201c}{}\u{201d} now resolves to {}, which overlaps the account \u{201c}{}\u{201d}. Give each account a folder of its own.",
                         account.label(),
                         home.display(),
                         other.label()
@@ -2024,7 +2027,7 @@ impl AppState {
                     .find(|default| keystone_core::homes_overlap(&real_path(default), &home))
                 {
                     return Err(format!(
-                        "The account \u{201c}{}\u{201d} uses {}, which overlaps a default home Keystone was started with ({}), so nothing was sent. Start Keystone without that setting, or start a new session.",
+                        "Not sent. The account \u{201c}{}\u{201d} uses {}, which overlaps a default home Keystone was started with ({}). Start Keystone without that setting, or start a new session.",
                         account.label(),
                         account.home().display(),
                         default.display()
@@ -2037,7 +2040,7 @@ impl AppState {
                 ))
             }
             _ => Err(format!(
-                "This session's {provider} account \u{201c}{id}\u{201d} is not set up in Keystone, so nothing was sent. Add it again in Settings \u{2192} Accounts, or start a new session."
+                "Not sent. This session's {provider} account \u{201c}{id}\u{201d} is not set up. Add it again in Settings \u{2192} Accounts, or start a new session."
             )),
         }
     }
@@ -2576,8 +2579,7 @@ impl AppState {
         }
         let conversation = self.conversation(session);
         if conversation.error.is_none() {
-            conversation.error =
-                Some("Continue was not sent. Press Continue on the card to try again.".into());
+            conversation.error = Some("Continue was not sent.".into());
         }
         self.commit(session);
         self.publish(cx);
@@ -2600,7 +2602,7 @@ impl AppState {
         if let Err(error) = self.store.set_continue_at(session, at) {
             self.conversation(session).error = Some(match at {
                 Some(_) => format!("Continue was not scheduled. {error}"),
-                None => format!("The scheduled continue could not be cancelled. {error}"),
+                None => format!("Continue was not cancelled. {error}"),
             });
             self.commit(session);
         } else if let Some(at) = at {
@@ -2644,7 +2646,7 @@ impl AppState {
         }
         if let Err(error) = self.store.set_continue_at(session, None) {
             self.conversation(session).error = Some(format!(
-                "The scheduled continue is waiting: Keystone could not save that it is going, so it tries again shortly. {error}"
+                "The scheduled continue will retry shortly. {error}"
             ));
             self.commit(session);
             self.refresh(cx);
@@ -2765,8 +2767,7 @@ impl AppState {
         }
         let conversation = self.conversation(session);
         if conversation.error.is_none() {
-            conversation.error =
-                Some("The widget's answer was not sent. Press its button again to retry.".into());
+            conversation.error = Some("The widget's answer was not sent.".into());
         }
         self.commit(session);
         self.publish(cx);
@@ -2910,7 +2911,7 @@ impl AppState {
         // conversation. A refusal comes now, and the text stays in the composer.
         if let Err(error) = self.store.sync_pending() {
             self.conversation(id).error = Some(format!(
-                "Not sent. Could not finish saving changes. Your draft is kept. Send will retry saving. {error}"
+                "Not sent. Could not finish saving changes. {error}"
             ));
             self.commit(id);
             self.refresh(cx);
@@ -3082,7 +3083,7 @@ impl AppState {
         {
             self.folder_error(
                 session,
-                "Not sent. This folder's worktree is being removed. Your draft is kept.".into(),
+                "Not sent. This folder's worktree is being removed.".into(),
                 cx,
             );
             return None;
@@ -3090,7 +3091,7 @@ impl AppState {
         if let Some(worktree) = self.session(session).and_then(|s| s.worktree()) {
             let error = if !keystone_core::worktree::is_intact(worktree) {
                 Some(format!(
-                    "Not sent. This session's worktree folder is missing or is no longer its worktree: {}. Its branch {} may still exist. Your draft is kept.",
+                    "Not sent. This session's worktree folder is missing or is no longer its worktree: {}. Its branch {} may still exist.",
                     worktree.directory.as_str(),
                     worktree.branch
                 ))
@@ -3112,15 +3113,13 @@ impl AppState {
                 {
                     Ok(directory)
                 }
-                _ => Err(
-                    "Not sent. This conversation's saved folder is unavailable. Your draft is kept.",
-                ),
+                _ => Err("Not sent. This conversation's saved folder is unavailable."),
             },
             ConversationFolder::LegacyMissing => Err(
-                "Not sent. Choose a conversation folder using the folder button beside the model. Your draft is kept.",
+                "Not sent. Choose a conversation folder using the folder button beside the model.",
             ),
             ConversationFolder::Unsupported => Err(
-                "Not sent. This conversation has saved folder data that this version cannot use. Your draft is kept.",
+                "Not sent. This conversation has saved folder data that this version cannot use.",
             ),
         };
         match result {

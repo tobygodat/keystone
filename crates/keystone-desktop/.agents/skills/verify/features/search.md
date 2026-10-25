@@ -25,7 +25,7 @@ Preconditions:
 - Open the Settled section if a settled session should match.
 
 - Call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","f"]},{"action":"type","text":"Codex"}]}`. Capture and require only Codex rows. Read `workspace` and require both providers still exist.
-- Send Ctrl+A while search has focus, then type `no-such-session`. Require **No sessions match this search.** under **Working**.
+- Send Ctrl+A while search has focus, then type `no-such-session`. Require **No matches** under **Working**.
 - Send Ctrl+A then BackSpace through `keypress`. Capture and require the full list to return.
 - `click` `{"id":"sidebar-toggle"}`. Call `wait_for` with `{"id":"search-field","present":false}`. Capture and require the whole left column to disappear, the main column to fill the window, and the composer to remain usable. Press Ctrl+F and require the sidebar and focused search to return.
 - `click` `{"id":"search-field"}`. Type `Claude` and require the Claude result. Clear it afterward. A click on the search icon focuses the field too.

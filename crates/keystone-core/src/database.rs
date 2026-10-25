@@ -518,12 +518,24 @@ impl Database {
         revision: i64,
     ) -> io::Result<i64> {
         self.connection(false, |connection| {
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql_error)?;
-            let actual: i64 = tx.query_one("SELECT revision FROM workspace WHERE singleton=1", [], |row| row.get(0)).map_err(sql_error)?;
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_error)?;
+            let actual: i64 = tx
+                .query_one(
+                    "SELECT revision FROM workspace WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sql_error)?;
             if actual != revision {
-                return Err(io::Error::other("The workspace changed in another writer. Reload Keystone before saving; no changes were overwritten."));
+                return Err(io::Error::other(
+                    "The workspace changed in another writer. Reload Keystone before saving.",
+                ));
             }
-            let next = revision.checked_add(1).ok_or_else(|| invalid("workspace revision exhausted"))?;
+            let next = revision
+                .checked_add(1)
+                .ok_or_else(|| invalid("workspace revision exhausted"))?;
             write_projection(&tx, snapshot, next, Some(previous))?;
             tx.commit().map_err(sql_error)?;
             Ok(next)

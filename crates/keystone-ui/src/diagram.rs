@@ -330,7 +330,7 @@ fn source_preview(source: &str, mono: SharedString, color: gpui::Hsla) -> gpui::
     }
     let mut preview = source[..end].to_owned();
     if end < source.len() {
-        preview.push_str("\n… Preview limited to 16 KiB. Copy preserves the complete source.");
+        preview.push_str("\n… Truncated at 16 KiB.");
     }
     div()
         .p_3()

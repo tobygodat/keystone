@@ -46,7 +46,7 @@ pub const ARGS: [&str; 12] = [
 
 /// Why a message cannot steer a turn before Claude says whether it reports lifecycle
 /// frames.
-pub const STEER_NOT_YET: &str = "Claude Code has not reported this turn's progress yet, so the message cannot steer it. Wait a moment and send again.";
+pub const STEER_NOT_YET: &str = "Claude Code cannot steer this turn yet. Send again in a moment.";
 
 /// Claude's `--permission-mode` for an approval mode, or `None` to pass none.
 /// `default` is the mode Claude 2.1.300 also calls `manual`.
@@ -578,14 +578,12 @@ impl ClaudeDriver {
             return self.drop_widgets(out);
         }
         let reason = match self.requests.get(id) {
-            Some(Request::Initialize) => {
-                "Claude Code did not start in time, so nothing was sent. Send again to restart it."
-            }
+            Some(Request::Initialize) => "Claude Code did not start in time. Send again.",
             Some(Request::SetMode { .. }) => {
-                "Claude Code did not confirm the approval mode in time, so nothing was sent. Send again to restart it."
+                "Claude Code did not confirm the approval mode in time. Send again."
             }
             Some(Request::Mcp { .. }) => {
-                "Claude Code did not configure Keystone tools in time, so nothing was sent. Send again to restart it."
+                "Claude Code did not configure Keystone tools in time. Send again."
             }
             _ => return,
         };
@@ -604,11 +602,11 @@ impl ClaudeDriver {
         match self.lifecycle {
             Some(true) if self.cancel_queued => None,
             Some(true) => Some(
-                "This Claude Code version does not report queued-message cancellation (interrupt_cancel_queued_v1), so Keystone cannot safely steer a running turn. Wait for the turn to end or stop it, then send again.",
+                "This Claude Code version cannot steer a running turn (it lacks interrupt_cancel_queued_v1). Send after the turn ends.",
             ),
             None => Some(STEER_NOT_YET),
             Some(false) => Some(
-                "This Claude Code version does not report message progress (msg_lifecycle_v1), so Keystone cannot steer a running turn. Wait for the turn to end or stop it, then send again.",
+                "This Claude Code version cannot steer a running turn (it lacks msg_lifecycle_v1). Send after the turn ends.",
             ),
         }
     }
@@ -1740,7 +1738,7 @@ impl ClaudeDriver {
             return out.event(
                 self.session,
                 Event::Warning {
-                    message: "Claude Code asked to leave plan mode. Read only keeps it there, so it was refused; choose another approval mode to let it make changes.".into(),
+                    message: "Claude Code asked to leave plan mode. Choose another approval mode to let it make changes.".into(),
                 },
             );
         }
@@ -1931,15 +1929,11 @@ impl ClaudeDriver {
                     return self.drop_widgets(out);
                 }
                 self.untrusted = true;
-                self.fail_held(
-                    "Claude Code could not configure Keystone tools; nothing was sent",
-                    out,
-                );
+                self.fail_held("Claude Code could not configure Keystone tools", out);
                 return out.event(
                     self.session,
                     Event::Failed {
-                        message: "Claude Code could not configure Keystone tools; nothing was sent"
-                            .into(),
+                        message: "Claude Code could not configure Keystone tools".into(),
                     },
                 );
             }
@@ -2016,9 +2010,7 @@ impl ClaudeDriver {
             if version == self.version {
                 let error = response.error.unwrap_or_else(|| "no reason given".into());
                 return self.fail_held(
-                    &format!(
-                        "Claude Code did not accept the approval mode, so nothing was sent: {error}"
-                    ),
+                    &format!("Claude Code did not accept the approval mode: {error}"),
                     out,
                 );
             }
@@ -2079,7 +2071,7 @@ impl ClaudeDriver {
         if self.conversation.is_none() && failed {
             let message = if self.forking {
                 format!(
-                    "Could not fork this Claude Code conversation: {}. The history shown here stays; Hand off (Ctrl+Shift+H) to continue it in a new session.",
+                    "Could not fork this Claude Code conversation: {}. Hand off (Ctrl+Shift+H) to continue it.",
                     reason()
                 )
             } else if self.resume {

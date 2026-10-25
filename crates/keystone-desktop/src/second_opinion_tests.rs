@@ -265,7 +265,7 @@ fn a_second_opinion_is_refused_until_there_is_something_to_ask_about(
         v.ask_second_opinion(None, window, cx);
         assert_eq!(
             v.error.as_deref(),
-            Some("Nothing to ask about yet: this session has not sent anything.")
+            Some("Nothing sent yet.")
         );
         v.state.update(cx, |state, cx| {
             state.lock_model(1, cx).unwrap();
@@ -276,7 +276,7 @@ fn a_second_opinion_is_refused_until_there_is_something_to_ask_about(
         v.ask_second_opinion(None, window, cx);
         assert_eq!(
             v.error.as_deref(),
-            Some("This conversation is still loading. Ask once it shows.")
+            Some("Still loading.")
         );
         assert_eq!(v.state.read(cx).store().workspace().sessions().len(), 1);
     });
@@ -393,7 +393,7 @@ fn use_in_conversation_reads_the_answer_when_pressed(cx: &mut gpui::TestAppConte
         assert!(
             v.error
                 .as_deref()
-                .is_some_and(|e| e.contains("no finished reply")),
+                .is_some_and(|e| e.contains("No finished reply")),
             "{:?}",
             v.error
         );

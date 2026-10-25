@@ -68,7 +68,7 @@ fn keys(cx: &mut VisualTestContext, keys: &str) {
 }
 
 /// Each saved prompt's title, shortcut, project folder name and use count, in order.
-fn saved(path: &Path) -> Vec<(String, Option<String>, Option<String>, u64)> {
+fn saved(path: &Path) -> Vec<(String, Option<String>, Option<String>)> {
     Store::open(path)
         .unwrap()
         .workspace()
@@ -86,7 +86,6 @@ fn saved(path: &Path) -> Vec<(String, Option<String>, Option<String>, u64)> {
                         .to_string_lossy()
                         .into_owned()
                 }),
-                p.uses(),
             )
         })
         .collect()
@@ -106,7 +105,6 @@ fn the_library_adds_edits_reorders_and_deletes_prompts(cx: &mut TestAppContext) 
     keys(cx, "ctrl-,");
     click(cx, "settings-section-prompts");
     assert!(shown(cx, "settings-prompts"));
-    assert!(shown(cx, "prompts-empty"));
 
     click(cx, "prompt-title");
     cx.simulate_input("Review");
@@ -117,16 +115,12 @@ fn the_library_adds_edits_reorders_and_deletes_prompts(cx: &mut TestAppContext) 
     keys(cx, "shift-enter");
     cx.simulate_input("Be terse.");
     click(cx, "prompt-save");
-    assert_eq!(
-        saved(&path),
-        [("Review".into(), Some("rev".into()), None, 0)]
-    );
+    assert_eq!(saved(&path), [("Review".into(), Some("rev".into()), None)]);
     let review = Store::open(&path).unwrap().workspace().prompts()[0].id();
     assert_eq!(
         Store::open(&path).unwrap().workspace().prompts()[0].body(),
         "Review this diff.\nBe terse."
     );
-    assert!(!shown(cx, "prompts-empty"));
     assert_eq!(
         view.read_with(cx, |view, cx| view
             .settings
@@ -161,10 +155,7 @@ fn the_library_adds_edits_reorders_and_deletes_prompts(cx: &mut TestAppContext) 
             .to_string_lossy()
             .into_owned()
     });
-    assert_eq!(
-        saved(&path)[1],
-        ("Plan".into(), None, Some(window_project), 0)
-    );
+    assert_eq!(saved(&path)[1], ("Plan".into(), None, Some(window_project)));
     let plan = Store::open(&path).unwrap().workspace().prompts()[1].id();
 
     click(cx, &format!("prompt-up-{plan}"));
@@ -178,7 +169,7 @@ fn the_library_adds_edits_reorders_and_deletes_prompts(cx: &mut TestAppContext) 
     keys(cx, "enter");
     assert_eq!(
         saved(&path)[0],
-        ("Review closely".into(), Some("rev".into()), None, 0)
+        ("Review closely".into(), Some("rev".into()), None)
     );
 
     click(cx, "prompt-title");
@@ -344,7 +335,6 @@ fn insert_prompt_opens_the_library_on_the_welcome_screen(cx: &mut TestAppContext
         view.insert_prompt(1, false, window, cx)
     });
     assert_eq!(draft(&view, cx), "");
-    assert_eq!(saved(&path)[0].3, 0);
 }
 
 /// Escape closes the prompt list first, even over an open `/` menu, and a row whose
@@ -401,12 +391,8 @@ fn the_prompt_list_takes_escape_and_skips_a_prompt_no_longer_offered(cx: &mut Te
     );
     view.read_with(cx, |view, _| {
         let error = view.error.as_deref().unwrap();
-        assert!(
-            error.contains("Another window deleted it or moved it to another project"),
-            "{error}"
-        );
+        assert!(error.contains("Prompt no longer available"), "{error}");
     });
-    assert_eq!(saved(&path)[0].3, 0);
 }
 
 /// Insert prompt… lists the prompts offered here and inserts at the caret without
@@ -466,7 +452,7 @@ fn the_palette_inserts_a_prompt_at_the_caret(cx: &mut TestAppContext) {
     });
     assert_eq!(
         rows,
-        ["Greeting", "Manage saved prompts…"],
+        ["Greeting"],
         "another project's prompt is not offered"
     );
     cx.simulate_input("greet");
@@ -482,7 +468,6 @@ fn the_palette_inserts_a_prompt_at_the_caret(cx: &mut TestAppContext) {
         !store.workspace().sessions()[0].started(),
         "inserting never sends"
     );
-    assert_eq!(saved(&path)[0].3, 1, "the use is counted");
 
     // Again, from the palette's own row.
     keys(cx, "ctrl-k");
@@ -491,5 +476,4 @@ fn the_palette_inserts_a_prompt_at_the_caret(cx: &mut TestAppContext) {
     assert!(shown(cx, "prompts"));
     keys(cx, "enter");
     assert_eq!(draft(&view, cx), "Draft: Hello there.Hello there.");
-    assert_eq!(saved(&path)[0].3, 2);
 }

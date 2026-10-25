@@ -37,7 +37,7 @@ OPTIONAL = [
     ('insert-prompt', 'Insert prompt…', 'insert-prompt', 'settings-section-prompts', False),
     ('attach-files', 'Attach files…', 'attach-files', 'attach-path', False),
     ('new-worktree-session', 'New session in worktree…', 'worktree-dialog', 'worktree-dialog', False),
-    ('second-opinion', 'Ask for a second opinion…', 'second-opinion', 'opinion-of', False),
+    ('second-opinion', 'Second opinion…', 'second-opinion', 'opinion-of', False),
 ]
 
 

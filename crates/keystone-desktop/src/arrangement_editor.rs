@@ -1,7 +1,5 @@
 use crate::customization_agent::{Ask, Outcome, Proposal};
-use keystone_core::{
-    Component, Composition, Edit, Node, ProjectId, Provider, SavedComposition, ViewId,
-};
+use keystone_core::{Component, Composition, Edit, Node, ProjectId, SavedComposition, ViewId};
 use std::collections::BTreeMap;
 
 /// The width a Files view opens at beside a conversation.
@@ -33,7 +31,7 @@ pub enum Action {
     AddFiles,
     AddChanges,
     Reset,
-    Ask { provider: Provider, prompt: String },
+    Ask(String),
     Retry,
     Cancel,
     Apply,
@@ -48,17 +46,11 @@ pub enum Action {
     BackToLayouts,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Commit {
-    Apply,
-    Undo,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Ask(Ask),
     Cancel(u64),
-    Save(Option<SavedComposition>, Commit),
+    Save(Option<SavedComposition>),
     Borrow(ProjectId),
 }
 
@@ -84,7 +76,7 @@ impl RequestIds {
 pub struct Customization {
     editing: Option<Editing>,
     replaced: Option<Option<SavedComposition>>,
-    last_ask: Option<(Provider, String)>,
+    last_ask: Option<String>,
     requests: RequestIds,
     next_view: u64,
 }
@@ -109,8 +101,7 @@ impl Customization {
         if let Some(e) = &mut self.editing {
             e.chooser = None;
             if running.is_some() {
-                e.interpretation =
-                    Interpretation::Failed("Request cancelled when leaving this project.".into());
+                e.interpretation = Interpretation::Failed("Request cancelled.".into());
             }
         }
         running
@@ -139,10 +130,6 @@ impl Customization {
             Interpretation::Running { request, .. } => Some(*request),
             _ => None,
         }
-    }
-    pub fn asking(&self) -> Option<Provider> {
-        self.running()?;
-        Some(self.last_ask.as_ref()?.0)
     }
     pub fn can_retry(&self) -> bool {
         self.last_ask.is_some()
@@ -245,9 +232,17 @@ impl Customization {
         let mut effects = Vec::new();
         if action == Action::Open {
             self.editing.get_or_insert_with(|| Editing {
-                candidate: saved.clone(), revision: 0, interpretation: Interpretation::Idle,
-                selected: saved.views().find(|(_, c)| *c == Component::Conversation).map(|(id, _)| id), chooser: None,
-                note: raw.filter(|r| r.supported().is_none()).map(|_| "The saved layout can't be read. Apply deliberately replaces it with the shown default.".into()),
+                candidate: saved.clone(),
+                revision: 0,
+                interpretation: Interpretation::Idle,
+                selected: saved
+                    .views()
+                    .find(|(_, c)| *c == Component::Conversation)
+                    .map(|(id, _)| id),
+                chooser: None,
+                note: raw
+                    .filter(|r| r.supported().is_none())
+                    .map(|_| "Saved layout unreadable. Apply replaces it.".into()),
             });
             return effects;
         }
@@ -360,22 +355,22 @@ impl Customization {
             }
             Action::Apply => {
                 if self.can_apply(raw, saved) {
-                    effects.push(Effect::Save(Some(current.into()), Commit::Apply));
+                    effects.push(Effect::Save(Some(current.into())));
                 }
                 return effects;
             }
             Action::Undo => {
                 if let Some(previous) = &self.replaced {
-                    effects.push(Effect::Save(previous.clone(), Commit::Undo));
+                    effects.push(Effect::Save(previous.clone()));
                 }
                 return effects;
             }
-            Action::Ask { provider, prompt } => {
+            Action::Ask(prompt) => {
                 let prompt = prompt.trim().to_owned();
                 if prompt.is_empty() {
                     self.editing.as_mut().unwrap().note = Some("Describe the change first.".into());
                 } else {
-                    self.last_ask = Some((provider, prompt));
+                    self.last_ask = Some(prompt);
                     self.start_request(&mut effects);
                 }
                 return effects;
@@ -398,7 +393,7 @@ impl Customization {
     }
 
     fn start_request(&mut self, effects: &mut Vec<Effect>) {
-        let Some((provider, prompt)) = self.last_ask.clone() else {
+        let Some(prompt) = self.last_ask.clone() else {
             return;
         };
         let Some(request) = self.requests.allocate() else {
@@ -414,7 +409,6 @@ impl Customization {
         e.note = None;
         effects.push(Effect::Ask(Ask {
             request,
-            provider,
             prompt,
             current: e.candidate.clone(),
         }));
@@ -439,10 +433,7 @@ impl Customization {
                 .remap(&candidate, Some(&current))
             {
                 Ok(candidate) => {
-                    self.stage(
-                        candidate,
-                        Some("Layout preview ready. Apply to save it.".into()),
-                    );
+                    self.stage(candidate, None);
                     return true;
                 }
                 Err(error) => {
@@ -479,10 +470,7 @@ impl Customization {
         self.cancel(&mut effects);
         self.stage(
             candidate,
-            Some(format!(
-                "Borrowed from {}. Preview here, not saved.",
-                source.path().display()
-            )),
+            Some(format!("Borrowed from {}", source.path().display())),
         );
         self.editing.as_mut().unwrap().chooser = None;
         effects
@@ -490,7 +478,6 @@ impl Customization {
 
     pub fn saved(
         &mut self,
-        commit: Commit,
         previous: Option<SavedComposition>,
         shown: Composition,
         result: Result<bool, String>,
@@ -500,15 +487,7 @@ impl Customization {
                 self.replaced = Some(previous);
                 self.stage(
                     shown,
-                    Some(if warning {
-                        "Layout applied. Could not confirm it will survive a system crash.".into()
-                    } else {
-                        match commit {
-                            Commit::Apply => "Applied.",
-                            Commit::Undo => "Undone.",
-                        }
-                        .into()
-                    }),
+                    warning.then(|| "Layout applied, but not confirmed on disk.".into()),
                 );
             }
             Err(error) => self.editing.as_mut().unwrap().note = Some(format!("Not saved. {error}")),
@@ -539,14 +518,7 @@ mod tests {
         let saved = Composition::default();
         let mut e = Customization::new(&saved, RequestIds::default());
         e.dispatch(Action::Open, None, &saved);
-        e.dispatch(
-            Action::Ask {
-                provider: Provider::Codex,
-                prompt: "right".into(),
-            },
-            None,
-            &saved,
-        );
+        e.dispatch(Action::Ask("right".into()), None, &saved);
         let request = e.running().unwrap();
         assert_eq!(
             e.dispatch(Action::Edit(moved(&saved)), None, &saved),
@@ -555,20 +527,15 @@ mod tests {
         let candidate = e.shown(&saved).clone();
         e.receive(request, Outcome::Proposal(Proposal::Change(saved.clone())));
         assert_eq!(e.shown(&saved), &candidate);
-        e.saved(
-            Commit::Apply,
-            None,
-            candidate.clone(),
-            Err("disk full".into()),
-        );
+        e.saved(None, candidate.clone(), Err("disk full".into()));
         assert!(e.can_apply(None, &saved));
         assert!(!e.can_undo(&saved));
-        e.saved(Commit::Apply, None, candidate.clone(), Ok(true));
+        e.saved(None, candidate.clone(), Ok(true));
         assert!(!e.can_apply(Some(&candidate.clone().into()), &candidate));
         assert!(!e.can_discard(&candidate));
         assert_eq!(
             e.dispatch(Action::Undo, Some(&candidate.clone().into()), &candidate),
-            vec![Effect::Save(None, Commit::Undo)]
+            vec![Effect::Save(None)]
         );
     }
     #[test]
@@ -610,14 +577,7 @@ mod tests {
         e.dispatch(Action::CloseChooser, None, &saved);
         assert_eq!(e.shown(&saved), &candidate);
         assert!(e.dispatch(Action::Undo, None, &saved).is_empty());
-        e.dispatch(
-            Action::Ask {
-                provider: Provider::Codex,
-                prompt: "right".into(),
-            },
-            None,
-            &saved,
-        );
+        e.dispatch(Action::Ask("right".into()), None, &saved);
         let request = e.running().unwrap();
         e.dispatch(Action::Close, None, &saved);
         e.dispatch(Action::Open, None, &saved);

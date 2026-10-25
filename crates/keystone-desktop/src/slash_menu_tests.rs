@@ -158,8 +158,8 @@ fn a_claude_command_is_listed_before_the_first_send_inserted_and_sent_as_typed(
             ("/fixture-skill".into(), "Skill"),
             ("/fixture-review".into(), "User"),
             ("/fixture-project".into(), "Project"),
-            ("/compact".into(), "Built-in"),
-            ("/context".into(), "Built-in"),
+            ("/compact".into(), ""),
+            ("/context".into(), ""),
         ]
     );
     assert!(all.contains(&("/login".into(), "Terminal only")));
@@ -440,7 +440,7 @@ fn a_session_without_a_usable_folder_says_why_it_lists_nothing(cx: &mut TestAppC
     );
     assert_eq!(
         status(&view, 2, cx).as_deref(),
-        Some("Commands need this conversation's saved folder, which this version cannot use.")
+        Some("Commands unavailable for this folder.")
     );
 }
 
@@ -546,7 +546,6 @@ fn saved_prompts_join_the_menu_and_a_command_of_the_same_name_wins(cx: &mut Test
     let saved = Store::open(dir.path().join("workspace.json")).unwrap();
     assert_eq!(saved.workspace().sessions()[0].draft(), body);
     assert!(!saved.workspace().sessions()[0].started());
-    assert_eq!(saved.workspace().prompts()[0].uses(), 1);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("project/.fake-claude-messages")).unwrap(),
         "",

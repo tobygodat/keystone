@@ -78,7 +78,7 @@ pub(crate) fn branch_chip(branch: String, missing: bool) -> impl IntoElement {
                     .flex_shrink_0()
                     .automation_id("worktree-missing")
                     .child(
-                        Label::new("Worktree folder missing")
+                        Label::new("Folder missing")
                             .size(TextSize::Sm)
                             .color(Color::Warning),
                     ),
@@ -109,7 +109,7 @@ impl Keystone {
                     .size(TextSize::Ui)
                     .weight(gpui::FontWeight::MEDIUM),
             )
-            .tooltip(Tooltip::with_key("New session in worktree", "Ctrl+Alt+G").builder())
+            .tooltip(Tooltip::text("Ctrl+Alt+G").builder())
             .on_click(
                 self.scoped_listener(cx, |this, _, window, cx| this.open_new_worktree(window, cx)),
             )
@@ -169,15 +169,11 @@ impl Keystone {
             .session(session, cx)
             .and_then(|s| s.worktree().cloned())
         else {
-            self.error = Some("This session does not work in a worktree.".into());
+            self.error = Some("This session has no worktree.".into());
             return self.refresh(cx);
         };
         if !worktree.directory.path().exists() {
-            self.error = Some(format!(
-                "Nothing to remove. The worktree folder {} is already gone; its branch {} stays. `git worktree prune` in the repository forgets it.",
-                worktree.directory.as_str(),
-                worktree.branch
-            ));
+            self.error = Some("Worktree folder already gone.".into());
             return self.refresh(cx);
         }
         self.worktree_dialog = Some(WorktreeDialog::Remove {
@@ -219,7 +215,7 @@ impl Keystone {
                 let project = match self.presentation.creation_directory() {
                     Ok(project) => project,
                     Err(e) => {
-                        *error = Some(format!("No worktree created. {e}"));
+                        *error = Some(e.to_string());
                         return self.refresh(cx);
                     }
                 };
@@ -246,15 +242,12 @@ impl Keystone {
                         && state.conversations().get(&s.id()).is_some_and(|c| c.running)
                 });
                 if running {
-                    *error = Some(
-                        "Not removed. A session's turn is still running in this worktree. Stop it first."
-                            .into(),
-                    );
+                    *error = Some("A turn is running here. Stop it first.".into());
                     return self.refresh(cx);
                 }
                 let worktree = worktree.clone();
                 let Some(hold) = self.state.read(cx).hold_worktree(&worktree) else {
-                    *error = Some("Not removed. Another window is removing this worktree.".into());
+                    *error = Some("Another window is removing it.".into());
                     return self.refresh(cx);
                 };
                 *error = None;
@@ -274,7 +267,7 @@ impl Keystone {
                         }
                         Err(error) => {
                             if let Some(dialog) = &mut this.worktree_dialog {
-                                dialog.set_error(format!("Not removed. {error}"));
+                                dialog.set_error(error.to_string());
                             }
                             this.refresh(cx);
                         }
@@ -296,7 +289,7 @@ impl Keystone {
             Ok(worktree) => worktree,
             Err(error) => {
                 if let Some(dialog) = &mut self.worktree_dialog {
-                    dialog.set_error(format!("No worktree created. {error}"));
+                    dialog.set_error(error.to_string());
                 }
                 return self.refresh(cx);
             }
@@ -317,9 +310,8 @@ impl Keystone {
         if !created {
             let error = self.error.take().unwrap_or_default();
             self.error = Some(format!(
-                "{error} The worktree at {} and branch {} were created and are kept.",
-                worktree.directory.as_str(),
-                worktree.branch
+                "{error} Worktree kept at {}.",
+                worktree.directory.as_str()
             ));
         } else if self
             .presentation
@@ -409,17 +401,12 @@ impl Keystone {
                     .gap(spacing::SM)
                     .child(field)
                     .child(providers)
-                    .children(status(error, "Creating the worktree…"));
-                ConfirmDialog::new(
-                    "worktree-dialog",
-                    focus,
-                    "New session in worktree",
-                    "Adds .keystone/worktrees/<name> on a new branch keystone/<name> from the project's current HEAD. The session works there.",
-                )
-                .icon(IconName::Branch)
-                .tone(Color::Accent)
-                .confirm_label("Create")
-                .body(body)
+                    .children(status(error, "Creating…"));
+                ConfirmDialog::new("worktree-dialog", focus, "New session in worktree", "")
+                    .icon(IconName::Branch)
+                    .tone(Color::Accent)
+                    .confirm_label("Create")
+                    .body(body)
             }
             WorktreeDialog::Remove {
                 worktree,
@@ -434,15 +421,12 @@ impl Keystone {
                             .size(TextSize::Sm)
                             .color(Color::Muted),
                     )
-                    .children(status(error, "Checking the worktree…"));
+                    .children(status(error, "Checking…"));
                 ConfirmDialog::new(
                     "remove-worktree-dialog",
                     focus,
                     "Remove worktree",
-                    format!(
-                        "Removes the folder only when it has no uncommitted changes and every commit on its branch is pushed or on another local branch. The branch {} stays, and so does this conversation.",
-                        worktree.branch
-                    ),
+                    format!("Branch {} is kept.", worktree.branch),
                 )
                 .icon(IconName::Branch)
                 .tone(Color::Warning)

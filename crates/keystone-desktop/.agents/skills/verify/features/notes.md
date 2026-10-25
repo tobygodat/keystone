@@ -8,7 +8,7 @@ One note per project, written in a Notes surface of the layout. Notes are Keysto
 - `notes-surface` is a layout component like Files: at most one per project, beside a conversation or as a tab with one. Its strip is `notes-tab-0` when alone. The editor is `notes-editor`, the composer's multiline text input filling the pane; the footer shows the project's name and `notes-send`.
 - `notes-autosave` saves 250 ms after typing stops, the composer's draft timer. Quit and closing a window save whatever the timer has not.
 - `notes-project` shows the window's project's note. Switching project (Ctrl+O) shows the other project's note; typing not yet saved still saves to the project it was typed for. Two windows on one project show the same text.
-- `notes-send` ("Send to agent", or Ctrl+Enter in the editor) puts the selection, or the whole note when nothing is selected, into the composer at its cursor, saves the draft and focuses the composer. It never sends. Without a selected session the button is disabled and Ctrl+Enter does nothing.
+- `notes-send` ("Add to draft", or Ctrl+Enter in the editor) puts the selection, or the whole note when nothing is selected, into the composer at its cursor, saves the draft and focuses the composer. It never sends. Without a selected session the button is disabled and Ctrl+Enter does nothing.
 
 ## How to get to it (user POV)
 

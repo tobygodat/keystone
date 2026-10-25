@@ -214,7 +214,7 @@ impl Keystone {
                 Attached::Mention(path) => match mention(&path, root.as_deref()) {
                     Some(mention) => mentions.push(mention),
                     None => refused.push(format!(
-                        "{} has a quote or a line break in its path, so it cannot be mentioned.",
+                        "{} can't be mentioned: quote or line break in its path.",
                         path.display()
                     )),
                 },
@@ -279,7 +279,7 @@ impl Keystone {
         };
         let attachments = self.state.read(cx).attachments.clone();
         let name = format!(
-            "Pasted image.{}",
+            "Image.{}",
             image.format.mime_type().trim_start_matches("image/")
         );
         self.start_import(session, cx);
@@ -322,36 +322,24 @@ impl Keystone {
                     Ok(Ok(None)) => {}
                     Ok(Err(error)) => {
                         eprintln!("No file picker: {error}");
-                        this.open_attach_path(true, window, cx);
+                        this.open_attach_path(window, cx);
                     }
-                    Err(_) => this.open_attach_path(true, window, cx),
+                    Err(_) => this.open_attach_path(window, cx),
                 }
             });
         })
         .detach();
     }
 
-    /// Shows the typed-path field, saying why when no picker was available.
-    pub(crate) fn open_attach_path(
-        &mut self,
-        no_picker: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.selected(cx) else {
+    /// Shows the typed-path field.
+    pub(crate) fn open_attach_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected(cx).is_none() {
             return;
-        };
+        }
         self.attach.path_open = true;
         self.attach
             .path
             .update(cx, |input, cx| input.set_value(String::new(), cx));
-        if no_picker {
-            self.show_attach_notice(
-                session,
-                Some("No file picker is available here. Type the file's path instead.".into()),
-                cx,
-            );
-        }
         self.attach.path.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -411,7 +399,7 @@ impl Keystone {
                     .style(ButtonStyle::Ghost)
                     .icon(IconName::Close)
                     .aria_label(format!("Remove {}", attachment.name))
-                    .tooltip(Tooltip::text(format!("Remove {}", attachment.name)))
+                    .tooltip(Tooltip::text("Remove"))
                     .debug_selector(move || format!("attachment-remove-{index}"))
                     .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                         this.remove_attachment(session, &sha256, window, cx)
@@ -528,9 +516,7 @@ pub(crate) fn chip(
                     .truncate(),
             ),
         )
-        .tooltip(
-            Tooltip::text(format!("{} · {}", attachment.name, attachment.media_type)).builder(),
-        )
+        .tooltip(Tooltip::text(attachment.name.clone()).builder())
 }
 
 /// Where the app's attached images are copied, for rows drawn without the app state.

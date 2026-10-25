@@ -964,10 +964,7 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
         let saved = this.saved_composition(cx);
         let raw = this.saved_layout(cx).cloned();
         this.presentation.current.customization.dispatch(
-            Action::Ask {
-                provider: Provider::Codex,
-                prompt: "Select conversation 3".into(),
-            },
+            Action::Ask("Select conversation 3".into()),
             raw.as_ref(),
             &saved,
         );
@@ -1000,10 +997,7 @@ fn fitted_checked_selection_survives_apply_and_replaces_temporary_navigation(
         let saved = this.saved_composition(cx);
         let raw = this.saved_layout(cx).cloned();
         this.presentation.current.customization.dispatch(
-            Action::Ask {
-                provider: Provider::Codex,
-                prompt: "Select conversation 0".into(),
-            },
+            Action::Ask("Select conversation 0".into()),
             raw.as_ref(),
             &saved,
         );

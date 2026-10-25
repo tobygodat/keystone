@@ -17,16 +17,10 @@ use keystone_core::SessionContext;
 gpui::actions!(fork, [ForkFromHere]);
 
 /// What a row's Fork control says about the fork it makes.
-pub(crate) fn label(from: &ForkFrom) -> (&'static str, &'static str) {
+pub(crate) fn label(from: &ForkFrom) -> &'static str {
     match from {
-        ForkFrom::Native { .. } | ForkFrom::Running => (
-            "Fork from here",
-            "Fork from here: a new session with this conversation through this turn",
-        ),
-        ForkFrom::Handoff { .. } => (
-            "Fork from here (handoff)",
-            "Fork from here as a handoff: no native fork point is saved for this turn, so a new conversation starts with it as handoff text",
-        ),
+        ForkFrom::Native { .. } | ForkFrom::Running => "Fork from here",
+        ForkFrom::Handoff { .. } => "Fork from here (handoff)",
     }
 }
 
@@ -57,20 +51,16 @@ impl Keystone {
         };
         let (id, provider) = (session.id(), session.provider());
         let SessionContext::Recorded { directory, .. } = session.context() else {
-            self.error = Some("Choose this session's folder before forking it.".into());
+            self.error = Some(crate::handoff::NO_FOLDER.into());
             return self.refresh(cx);
         };
         let state = self.state.read(cx);
         let Some(conversation) = state.conversations().get(&id).filter(|c| !c.is_loading()) else {
-            self.error = Some("This conversation is still loading. Fork once it shows.".into());
+            self.error = Some(crate::handoff::LOADING.into());
             return self.refresh(cx);
         };
         if conversation.load_error.is_some() {
-            self.error = Some(
-                "This conversation's saved history could not be read, so a fork would leave it \
-                 out. Restart Keystone to read it again, then fork."
-                    .into(),
-            );
+            self.error = Some(crate::handoff::UNREADABLE.into());
             return self.refresh(cx);
         }
         if !conversation.rows.get(index).is_some_and(forkable) {
@@ -79,8 +69,7 @@ impl Keystone {
         }
         let (point, draft, log) = match conversation.fork_from(index) {
             ForkFrom::Running => {
-                self.error =
-                    Some("This turn is still running. Fork from here once it ends.".into());
+                self.error = Some("This turn is still running.".into());
                 return self.refresh(cx);
             }
             ForkFrom::Native { point, end } => (

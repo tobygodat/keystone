@@ -169,7 +169,7 @@ fn a_pasted_image_is_saved_with_the_draft_and_reaches_claude_as_an_image_block(
     cx.simulate_keystrokes("ctrl-v");
     wait(cx, &view, |view, cx| view.draft_attachments(cx).len() == 1);
     let image = attached(&view, cx).remove(0);
-    assert_eq!(image.name, "Pasted image.png");
+    assert_eq!(image.name, "Image.png");
     assert_eq!(image.media_type, "image/png");
     assert_eq!(image.sha256, sha256(PNG));
     let copy = dir
@@ -290,13 +290,10 @@ fn a_typed_path_attaches_and_an_oversized_image_is_refused_with_a_reason(cx: &mu
                 PNG.len() as u64 + 8,
             )
         });
-        view.open_attach_path(true, window, cx)
+        view.open_attach_path(window, cx)
     });
     cx.run_until_parked();
-    assert_eq!(
-        notice(&view, cx).as_deref(),
-        Some("No file picker is available here. Type the file's path instead.")
-    );
+    assert_eq!(notice(&view, cx), None);
     assert!(cx.debug_bounds("attach-path").is_some());
     cx.simulate_input("img/a.png");
     cx.simulate_keystrokes("enter");
@@ -305,9 +302,7 @@ fn a_typed_path_attaches_and_an_oversized_image_is_refused_with_a_reason(cx: &mu
     assert!(cx.debug_bounds("attach-path").is_none());
     assert_eq!(draft(&view, cx), "", "Enter did not reach the draft");
 
-    view.update_in(cx, |view, window, cx| {
-        view.open_attach_path(false, window, cx)
-    });
+    view.update_in(cx, |view, window, cx| view.open_attach_path(window, cx));
     cx.run_until_parked();
     cx.simulate_input(dir.path().join("big.png").to_str().unwrap());
     cx.simulate_keystrokes("enter");
@@ -320,9 +315,7 @@ fn a_typed_path_attaches_and_an_oversized_image_is_refused_with_a_reason(cx: &mu
     assert!(cx.debug_bounds("attachment-notice").is_some());
     assert_eq!(attached(&view, cx).len(), 1, "nothing added");
 
-    view.update_in(cx, |view, window, cx| {
-        view.open_attach_path(false, window, cx)
-    });
+    view.update_in(cx, |view, window, cx| view.open_attach_path(window, cx));
     cx.run_until_parked();
     cx.simulate_keystrokes("escape");
     assert!(cx.debug_bounds("attach-path").is_none());

@@ -425,7 +425,7 @@ fn folders_of_sessions_from_before_projects_are_offered_too(cx: &mut TestAppCont
     let items = listed(&view, cx);
     let names: Vec<&str> = items.iter().map(|i| i.0.as_str()).collect();
     assert_eq!(names, vec!["alpha", "gamma", "beta", "Open folder…"]);
-    assert!(items[1].1.starts_with("Has sessions · "), "{items:?}");
+    assert!(items[1].1.ends_with("gamma"), "{items:?}");
     assert!(
         !items[1].2,
         "a folder not on the list has nothing to remove"

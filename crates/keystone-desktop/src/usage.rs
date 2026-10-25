@@ -171,7 +171,6 @@ impl Keystone {
                 percent(share)
             ));
         }
-        details.push("Details in Settings → Accounts".into());
         let colors = cx.theme().colors;
         let text = if narrow {
             percent(used)
@@ -235,10 +234,7 @@ impl Keystone {
         let usage = self.state.read(cx).usage(provider, account);
         let readings = usage.map_or(&[][..], |usage| &usage.readings[..]);
         let (texts, Some(newest_age)) = describe_all(now, readings) else {
-            return Label::new("No usage reported yet")
-                .size(TextSize::Sm)
-                .color(Color::Faint)
-                .into_any_element();
+            return div().into_any_element();
         };
         h_flex()
             .automation_id(format!("account-usage-{key}"))

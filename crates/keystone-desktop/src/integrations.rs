@@ -231,34 +231,19 @@ impl Keystone {
         let home = state.config_env.home.clone();
         let project = self.presentation.project.as_ref().ok().map(|p| p.path());
         let now = crate::now_ms();
-        let refresh = Button::new(
-            "integrations-refresh",
-            if integrations.reading {
-                "Reading…"
-            } else {
-                "Read again"
-            },
-        )
-        .style(ButtonStyle::Subtle)
-        .size(ButtonSize::Compact)
-        .disabled(integrations.reading)
-        .track_focus(&integrations.refresh)
-        .debug_selector(|| "integrations-refresh".into())
-        .on_click(self.scoped_listener(cx, |this, _, _, cx| this.read_integrations(cx)));
-        let intro = v_flex()
-            .gap(spacing::SM)
-            .child(
-                Label::new(
-                    "What each account's provider loads for this project, read from its own files. Keystone only reads them here. Secret values are never shown: a server's arguments are only counted, its variables and headers only named, and its URL cut to the host. A server's status is what a running session in this project last reported.",
-                )
-                .size(TextSize::Ui)
-                .color(Color::Muted),
-            )
-            .child(h_flex().child(refresh));
+        let refresh = h_flex().child(
+            Button::new("integrations-refresh", "Refresh")
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(integrations.reading)
+                .track_focus(&integrations.refresh)
+                .debug_selector(|| "integrations-refresh".into())
+                .on_click(self.scoped_listener(cx, |this, _, _, cx| this.read_integrations(cx))),
+        );
         let Some(read) = &integrations.read else {
             return v_flex()
                 .automation_id("settings-integrations")
-                .child(intro)
+                .child(refresh)
                 .child(
                     div().pt(spacing::LG).child(
                         Label::new("Reading…")
@@ -273,7 +258,7 @@ impl Keystone {
         for account in read {
             let who = format!("{} · {}", provider_name(account.provider), account.label);
             let Some(inventory) = &account.inventory else {
-                problems.push(format!("{who}: its folder is unknown, so nothing was read"));
+                problems.push(format!("{who}: folder unknown"));
                 continue;
             };
             let reported = project
@@ -348,12 +333,8 @@ impl Keystone {
                         &id,
                         name,
                         None,
-                        (
-                            "Not in a file Keystone reads, such as a plugin's or a connector"
-                                .into(),
-                            false,
-                        ),
-                        format!("{who} · Reported by a running session"),
+                        (String::new(), false),
+                        who.clone(),
                         Some(status_element),
                         cx,
                     ));
@@ -388,20 +369,11 @@ impl Keystone {
                                 .color(Color::Faint),
                         ),
                 )
-                .when(count == 0, |d| {
-                    d.child(
-                        div().py(spacing::SM).hairline_t(cx).child(
-                            Label::new("None found")
-                                .size(TextSize::Sm)
-                                .color(Color::Faint),
-                        ),
-                    )
-                })
                 .children(rows)
         });
         v_flex()
             .automation_id("settings-integrations")
-            .child(intro)
+            .child(refresh)
             .children(groups)
             .when(!problems.is_empty(), |d| {
                 d.child(

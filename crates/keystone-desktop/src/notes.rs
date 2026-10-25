@@ -1,5 +1,5 @@
 //! Notes: one note per project in a Notes surface of the layout, kept in Keystone's
-//! database rather than in the project's folder. Send to agent puts the selection, or
+//! database rather than in the project's folder. Add to draft puts the selection, or
 //! else the whole note, in the composer; it never sends.
 
 use crate::Keystone;
@@ -57,7 +57,7 @@ impl Keystone {
                 .to_owned()
         });
         let input = cx.new(|cx| {
-            let mut input = TextInput::new("Notes for this project…", InputMode::Multiline, cx)
+            let mut input = TextInput::new("", InputMode::Multiline, cx)
                 .text_style(TextSize::Body, Color::Strong)
                 .fill_height();
             input.set_value(text, cx);
@@ -230,11 +230,7 @@ impl Keystone {
                     .px(px(14.))
                     .py_2()
                     .automation_id("notes-empty")
-                    .child(
-                        Label::new(format!("No project to keep notes for. {error}"))
-                            .size(TextSize::Ui)
-                            .color(Color::Muted),
-                    )
+                    .child(Label::new(error).size(TextSize::Ui).color(Color::Muted))
                     .into_any_element();
             }
         };
@@ -263,33 +259,22 @@ impl Keystone {
             .child(
                 h_flex()
                     .flex_none()
-                    .gap_2()
+                    .justify_end()
                     .px(px(10.))
                     .py(px(6.))
                     .border_t_1()
                     .border_color(colors.border)
                     .child(
-                        div().flex_1().min_w_0().overflow_hidden().child(
-                            Label::new(project.name().to_owned())
-                                .size(TextSize::Sm)
-                                .color(Color::Muted)
-                                .truncate(),
-                        ),
-                    )
-                    .child(
-                        Button::new("notes-send", "Send to agent")
+                        Button::new("notes-send", "Add to draft")
                             .style(ButtonStyle::Subtle)
                             .size(ButtonSize::Compact)
                             .disabled(!sendable)
                             .debug_selector(|| "notes-send".into())
-                            .tooltip(if sendable {
-                                Tooltip::with_key(
-                                    "Put the selection, or the whole note, in the composer",
-                                    "Ctrl+Enter",
-                                )
+                            .tooltip(Tooltip::text(if sendable {
+                                "Ctrl+Enter"
                             } else {
-                                Tooltip::text("Select a session to send the note to")
-                            })
+                                "Select a session"
+                            }))
                             .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                                 this.send_note(window, cx)
                             })),

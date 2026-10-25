@@ -463,9 +463,7 @@ impl Keystone {
             return;
         }
         if self.session_tabs(cx).get(view) != selected {
-            self.error = Some(
-                "Layout not changed. This project's saved layout cannot be changed, so the new session is not in a tab.".into(),
-            );
+            self.error = Some("Layout not changed. It is read-only.".into());
             return self.refresh(cx);
         }
         self.presentation.current.customization.forget_undo();
@@ -624,7 +622,7 @@ impl Keystone {
             })
             .map(|s| s.id());
         let Some(session) = next else {
-            self.error = Some("Open another session to show it beside this one.".into());
+            self.error = Some("Open another session first.".into());
             return self.refresh(cx);
         };
         let Some((view, layout)) = self.open_view(&c, beside(active), cx) else {

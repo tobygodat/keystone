@@ -8,7 +8,7 @@ List the MCP servers, skills and plugins each provider account loads for the win
 - `integrations-overrides` marks a server or plugin declared again at a stronger scope (local over project over user, and the nearest file at one scope) "Overridden by <scope> scope"; it shows no status.
 - `integrations-secrets` keeps a stdio server's command (its first word only, if a whole command line was pasted there) and only the number of its arguments, the names of its env variables and headers, and only a URL's scheme, host and port (`/…` when it goes on; a URL that does not parse shows `•••`). Provider error text is never kept. A file that cannot be parsed is listed under the groups with the parser's message, never its contents.
 - `integrations-status` shows each server's status from the newest report of a session whose process is still running, in the window's project folder itself: Claude's `system/init` `mcp_servers` and Codex's `mcpServer/startupStatus/updated`, without Keystone's own `keystone` and `keystone_ui` servers. A session's report replaces its last one, and a session that stops takes its report with it. An untrusted or overridden declaration gets no status. A server no file declares, such as a plugin's, is listed as reported by a running session. Before any running session reports, a server shows "Not running".
-- `integrations-refresh` reads the files again with Read again. Opening the section reads them each time, and only the newest read fills the page.
+- `integrations-refresh` reads the files again with Refresh. Opening the section reads them each time, and only the newest read fills the page.
 
 ## How to get to it (user POV)
 

@@ -65,12 +65,12 @@ fn typed_path(query: &str) -> Option<PathBuf> {
 
 fn typed_item(query: &str) -> Option<PaletteItem> {
     let path = typed_path(query)?;
-    let detail = if path.is_dir() {
-        "Open this folder as a project"
+    let item = PaletteItem::new(format!("{TYPED}{query}"), query.trim());
+    Some(if path.is_dir() {
+        item
     } else {
-        "No folder here yet"
-    };
-    Some(PaletteItem::new(format!("{TYPED}{query}"), query.trim()).detail(detail))
+        item.detail("No folder here yet")
+    })
 }
 
 impl Keystone {
@@ -154,9 +154,7 @@ impl Keystone {
             state.open_project(window_id, &project, None, selected, crate::now_ms())
         });
         if let Err(error) = saved {
-            self.error = Some(format!(
-                "This window's project is not saved, so a relaunch may open another. {error}"
-            ));
+            self.error = Some(format!("Window's project not saved. {error}"));
         }
     }
 
@@ -246,9 +244,6 @@ impl Keystone {
                 if Some(&id) == current {
                     detail.push("Current".to_owned());
                 }
-                if unlisted.contains(&id) {
-                    detail.push("Has sessions".to_owned());
-                }
                 if !id.path().is_dir() {
                     detail.push("Folder missing".to_owned());
                 }
@@ -265,11 +260,7 @@ impl Keystone {
                 }
             })
             .collect();
-        items.push(
-            PaletteItem::new(OPEN_FOLDER, "Open folder…")
-                .detail("Choose a folder to open as a project")
-                .kbd("Ctrl+Shift+O"),
-        );
+        items.push(PaletteItem::new(OPEN_FOLDER, "Open folder…").kbd("Ctrl+Shift+O"));
         items
     }
 
@@ -296,11 +287,8 @@ impl Keystone {
             .or_else(|| window.focused(cx));
         let items = self.project_items(cx);
         let state = cx.new(|cx| {
-            let mut state = CommandPaletteState::with_placeholder(
-                items,
-                "Switch project, or type a folder path",
-                cx,
-            );
+            let mut state =
+                CommandPaletteState::with_placeholder(items, "Project or folder path", cx);
             state.set_query_item(typed_item, cx);
             if let Some(query) = query {
                 state.set_query(query, cx);
@@ -395,7 +383,7 @@ impl Keystone {
         });
         Some(
             CommandPalette::new("projects", &list.state)
-                .empty_label("No matching projects. Type a path starting with / or ~.")
+                .empty_label("No matches. Type a path.")
                 .on_confirm(
                     self.scoped_listener(cx, |this, item: &PaletteItem, window, cx| {
                         this.confirm_project(item, window, cx)

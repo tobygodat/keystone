@@ -42,7 +42,6 @@ pub struct RowControls {
 
 pub struct ForkControl {
     pub label: &'static str,
-    pub tooltip: &'static str,
     pub on_click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
 }
 
@@ -54,7 +53,7 @@ fn fork_button(
     IconButton::new(("fork", index), IconName::Branch)
         .size(ButtonSize::Compact)
         .aria_label(control.label)
-        .tooltip(Tooltip::text(control.tooltip))
+        .tooltip(Tooltip::text(control.label))
         .debug_selector(move || format!("fork-{index}"))
         .when_some(
             action
@@ -256,7 +255,10 @@ pub fn row(
                                         IconButton::new(("second-opinion", index), IconName::Chat)
                                             .size(ButtonSize::Compact)
                                             .aria_label("Ask for a second opinion on this reply")
-                                            .tooltip(Tooltip::text("Second opinion on this reply…"))
+                                            .tooltip(Tooltip::with_key(
+                                                "Second opinion…",
+                                                "Ctrl+Alt+O",
+                                            ))
                                             .debug_selector(move || selector)
                                             .on_click(move |event, window, cx| {
                                                 ask(event, window, cx)
@@ -297,9 +299,8 @@ pub fn row(
                     (ItemStatus::Declined, _) => ("Not run".to_owned(), Color::Muted),
                     (ItemStatus::Interrupted, _) => ("Interrupted".to_owned(), Color::Muted),
                     (ItemStatus::Failed, None) => ("Stopped".to_owned(), Color::Muted),
-                    (_, Some(0)) => ("Exit 0".to_owned(), Color::Success),
+                    (_, Some(0) | None) => (String::new(), Color::Muted),
                     (_, Some(code)) => (format!("Exit {code}"), Color::Danger),
-                    (_, None) => (String::new(), Color::Muted),
                 };
                 let output = item.text.trim_end();
                 let control = activity.expect("command disclosure");
@@ -385,20 +386,25 @@ pub fn row(
                                 control,
                                 false,
                             ))
-                            .child(
-                                div()
-                                    .automation_id(format!("activity-status-{index}"))
-                                    .child(
-                                        Label::new(match item.status {
-                                            ItemStatus::InProgress => "Running",
-                                            ItemStatus::Completed => "Completed",
-                                            ItemStatus::Failed => "Failed",
-                                            ItemStatus::Declined => "Declined",
-                                            ItemStatus::Interrupted => "Interrupted",
-                                        })
-                                        .size(TextSize::Sm)
-                                        .color(Color::Muted),
-                                    ),
+                            .when_some(
+                                match item.status {
+                                    ItemStatus::InProgress => Some("Running"),
+                                    ItemStatus::Completed => None,
+                                    ItemStatus::Failed => Some("Failed"),
+                                    ItemStatus::Declined => Some("Declined"),
+                                    ItemStatus::Interrupted => Some("Interrupted"),
+                                },
+                                |d, status| {
+                                    d.child(
+                                        div()
+                                            .automation_id(format!("activity-status-{index}"))
+                                            .child(
+                                                Label::new(status)
+                                                    .size(TextSize::Sm)
+                                                    .color(Color::Muted),
+                                            ),
+                                    )
+                                },
                             ),
                     )
                     .when(expanded, |d| {
@@ -447,13 +453,10 @@ pub fn row(
                 .into_any_element()
         }
         Row::Attachments(attachments) => crate::attachments::sent(index, attachments, cx),
-        Row::Decision { action, allowed } => Label::new(format!(
-            "{} {action}",
-            if *allowed { "Allowed:" } else { "Denied:" }
-        ))
-        .size(TextSize::Ui)
-        .color(Color::Muted)
-        .into_any_element(),
+        Row::Decision { action, .. } => Label::new(format!("Denied: {action}"))
+            .size(TextSize::Ui)
+            .color(Color::Muted)
+            .into_any_element(),
     }
 }
 
@@ -470,12 +473,11 @@ fn result_row(
     cx: &App,
 ) -> AnyElement {
     let colors = cx.theme().colors;
-    let (status, color, detail) = match read.outcome {
-        "It finished." => ("Finished", Color::Muted, None),
-        "It was stopped." => ("Stopped", Color::Muted, None),
+    let (status, detail) = match read.outcome {
+        "It finished." => (None, None),
+        "It was stopped." => (Some(("Stopped", Color::Muted)), None),
         outcome => (
-            "Failed",
-            Color::Danger,
+            Some(("Failed", Color::Danger)),
             Some(
                 outcome
                     .strip_prefix("It failed: ")
@@ -512,10 +514,12 @@ fn result_row(
                                 .min_w_0()
                                 .truncate()
                                 .text_color(colors.text_strong)
-                                .child(format!("\u{201c}{title}\u{201d}")),
+                                .child(title.to_owned()),
                         ),
                 )
-                .child(badge(status, color, cx))
+                .when_some(status, |d, (status, color)| {
+                    d.child(badge(status, color, cx))
+                })
                 .child(
                     CopyButton::new(("copy-result", index), "Copy result", text.to_owned())
                         .keyboard(
@@ -624,18 +628,12 @@ pub fn loss_summary(marker: &Item) -> RecoverySummary {
     RecoverySummary {
         badges: vec![("Partial", Color::Warning)],
         headline: marker.text.clone(),
-        details: vec![
-            "Keystone showed them while it ran, but its log was full, so they were not saved."
-                .into(),
-        ],
+        details: Vec::new(),
     }
 }
 
 pub fn recovery_summary(report: &RecoveryReport) -> RecoverySummary {
     let mut badges = Vec::new();
-    if report.turn != TurnEvidence::Unaffected {
-        badges.push(("Interrupted", Color::Muted));
-    }
     match report.outcome {
         Outcome::Recovered => {}
         Outcome::Partial => badges.push(("Partial", Color::Warning)),
@@ -659,10 +657,10 @@ pub fn recovery_summary(report: &RecoveryReport) -> RecoverySummary {
         ));
     }
     let found = if parts.is_empty() {
-        "Nothing more was recovered from the provider's saved conversation.".to_owned()
+        "Nothing more was recovered.".to_owned()
     } else {
         let mut text = parts.join("; ");
-        text.push_str(" from the provider's saved conversation.");
+        text.push('.');
         let mut chars = text.chars();
         chars
             .next()
@@ -671,36 +669,34 @@ pub fn recovery_summary(report: &RecoveryReport) -> RecoverySummary {
     };
     let headline = match report.turn {
         TurnEvidence::Recorded(TurnStatus::Completed) => {
-            format!("Connection interrupted; the provider recorded this turn as complete. {found}")
+            format!("Connection interrupted; the turn completed. {found}")
         }
-        TurnEvidence::Recorded(TurnStatus::Interrupted) => format!(
-            "Connection interrupted; the provider recorded this turn as interrupted. {found}"
-        ),
+        TurnEvidence::Recorded(TurnStatus::Interrupted) => {
+            format!("Connection interrupted; the turn was interrupted. {found}")
+        }
         TurnEvidence::Recorded(TurnStatus::Failed) => {
-            format!("Connection interrupted; the provider recorded this turn as failed. {found}")
+            format!("Connection interrupted; the turn failed. {found}")
         }
-        TurnEvidence::Unknown => {
-            format!("Interrupted; this turn's final outcome is unknown. {found}")
-        }
+        TurnEvidence::Unknown => format!("Interrupted; the turn's outcome is unknown. {found}"),
         TurnEvidence::Unaffected => found,
     };
-    let mut details: Vec<String> = report
+    let details = report
         .limits
         .iter()
         .map(|limit| match limit {
-            Limit::TornTail => "The last saved record was cut off and was left out.".into(),
+            Limit::TornTail => "The last saved record was cut off and left out.".into(),
             Limit::Malformed { count } => format!(
                 "{} could not be read.",
                 plural(*count, "saved record", "saved records")
             ),
             Limit::Unsupported { count } => format!(
-                "{} of kinds Keystone does not show were skipped.",
+                "{} of unsupported kinds were skipped.",
                 plural(*count, "record", "records")
             ),
             Limit::Unstable => "The provider's saved conversation changed while it was read.".into(),
             Limit::Truncated => "Only part of a long history was checked.".into(),
             Limit::OlderNotRead => {
-                "Only the newest part of the provider's history was read, and it does not reach back to what is shown here.".into()
+                "Only the newest part of the provider's history was read; it does not reach what is shown here.".into()
             }
             Limit::Compacted => {
                 "The provider compacted this conversation, so older parts are summaries.".into()
@@ -750,9 +746,6 @@ pub fn recovery_summary(report: &RecoveryReport) -> RecoverySummary {
             ),
         })
         .collect();
-    if report.turn == TurnEvidence::Unknown {
-        details.push("Text that was streaming may not have been saved by the provider.".into());
-    }
     RecoverySummary {
         badges,
         headline,

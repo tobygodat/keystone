@@ -96,7 +96,7 @@ pub fn create(project: &Path, slug: &str, base: Option<&str>) -> io::Result<Work
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         return Err(invalid(
-            "worktree slug must contain only letters, digits, hyphens or underscores and start with a letter or digit",
+            "Use letters, digits, - or _, starting with a letter or digit.",
         ));
     }
     let base = base.unwrap_or("HEAD");
@@ -127,7 +127,7 @@ pub fn create(project: &Path, slug: &str, base: Option<&str>) -> io::Result<Work
     {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "worktree branch already exists",
+            "That branch already exists.",
         ));
     }
     let mut parent = repository.path().to_owned();
@@ -152,7 +152,7 @@ pub fn create(project: &Path, slug: &str, base: Option<&str>) -> io::Result<Work
     {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "worktree directory already exists or is registered",
+            "That name is already in use.",
         ));
     }
     let exclude = common(repository.path())?.join("info/exclude");
@@ -309,7 +309,7 @@ pub fn remove(context: &WorktreeContext) -> io::Result<()> {
         ));
     }
     if inspect(context.repository.path(), context.directory.path())? != current {
-        return Err(invalid("The worktree changed while it was being checked."));
+        return Err(invalid("Worktree changed. Try again."));
     }
     let status = git(
         context.directory.path(),
@@ -345,7 +345,7 @@ pub fn remove(context: &WorktreeContext) -> io::Result<()> {
             n => format!(" and {n} more"),
         };
         return Err(invalid(format!(
-            "The worktree has uncommitted changes, untracked files or ignored files: {shown}{more}."
+            "Uncommitted, untracked or ignored files: {shown}{more}."
         )));
     }
     git(

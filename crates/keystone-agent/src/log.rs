@@ -381,7 +381,7 @@ fn limit_error(session: u64, entries: u64) -> String {
         format!("{entries} entries were")
     };
     format!(
-        "Session {session}: the log retry buffer limit was exceeded. {entries} rejected and not saved; a marker in the conversation shows where, and later entries are still saved."
+        "Session {session}: the log retry buffer limit was exceeded. {entries} rejected and not saved; a marker in the conversation shows where."
     )
 }
 

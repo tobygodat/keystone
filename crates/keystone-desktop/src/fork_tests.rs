@@ -295,7 +295,7 @@ fn a_turn_with_no_native_point_forks_as_a_labelled_handoff(cx: &mut gpui::TestAp
         assert_eq!(conversation.fork_from(4), ForkFrom::Running);
         crate::fork::label(&conversation.fork_from(1))
     });
-    assert_eq!(tooltip.0, "Fork from here (handoff)");
+    assert_eq!(tooltip, "Fork from here (handoff)");
 
     view.update_in(cx, |v, window, cx| v.fork_from(MAIN_1, 4, window, cx));
     view.read_with(cx, |v, cx| {
