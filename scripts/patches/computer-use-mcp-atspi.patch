@@ -1,0 +1,83 @@
+diff --git i/src/api.rs w/src/api.rs
+index 05dbce2..b0819ce 100644
+--- i/src/api.rs
++++ w/src/api.rs
+@@ -20,6 +20,9 @@ pub struct SessionOptions {
+     /// The requested size is exact and capture does not depend on host visibility.
+     #[serde(default)]
+     pub headless: bool,
++    /// Pass --a11y=1 to at-spi-bus-launcher. at-spi2-core 2.61 and later abort on it.
++    #[serde(default = "default_true")]
++    pub a11y_flag: bool,
+ }
+ const fn default_width() -> u32 {
+     1280
+@@ -38,6 +41,7 @@ impl Default for SessionOptions {
+             xwayland: true,
+             sandbox: false,
+             headless: false,
++            a11y_flag: true,
+         }
+     }
+ }
+@@ -277,6 +281,12 @@ mod tests {
+                 .unwrap()
+                 .headless
+         );
++        assert!(SessionOptions::default().a11y_flag);
++        assert!(
++            !serde_json::from_str::<SessionOptions>(r#"{"a11y_flag":false}"#)
++                .unwrap()
++                .a11y_flag
++        );
+         assert!(serde_json::from_str::<InputAction>(r#"{"action":"text","text":"你好"}"#).is_ok());
+     }
+     #[test]
+diff --git i/src/session.rs w/src/session.rs
+index 0370f37..b72d8f6 100644
+--- i/src/session.rs
++++ w/src/session.rs
+@@ -315,7 +315,7 @@ impl Session {
+             // identified by global DISPLAY, global socket order, or a host exec.
+             self.remember_xwayland()?;
+         }
+-        self.start_bus(&root).await?;
++        self.start_bus(&root, options.a11y_flag).await?;
+         Ok(())
+     }
+ 
+@@ -339,7 +339,7 @@ impl Session {
+         Ok(())
+     }
+ 
+-    async fn start_bus(&mut self, root: &Path) -> Result<()> {
++    async fn start_bus(&mut self, root: &Path, a11y_flag: bool) -> Result<()> {
+         let launcher = [
+             "/usr/lib/at-spi-bus-launcher",
+             "/usr/libexec/at-spi-bus-launcher",
+@@ -357,7 +357,8 @@ impl Session {
+         fs::write(
+             root.join("services/org.a11y.Bus.service"),
+             format!(
+-                "[D-BUS Service]\nName=org.a11y.Bus\nExec={launcher} --launch-immediately --a11y=1\n"
++                "[D-BUS Service]\nName=org.a11y.Bus\nExec={launcher} --launch-immediately{}\n",
++                if a11y_flag { " --a11y=1" } else { "" }
+             ),
+         )?;
+         fs::write(
+@@ -1278,6 +1279,7 @@ mod tests {
+             xwayland: false,
+             sandbox: false,
+             headless: false,
++            a11y_flag: true,
+         })
+         .await
+         .unwrap();
+@@ -1422,6 +1424,7 @@ else:
+             xwayland: true,
+             sandbox: true,
+             headless: false,
++            a11y_flag: true,
+         })
+         .await
+         .unwrap();

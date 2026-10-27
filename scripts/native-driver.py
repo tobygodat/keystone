@@ -11,12 +11,14 @@ import argparse
 import base64
 import copy
 from contextlib import closing
+import ctypes
 import hashlib
 import json
 import os
 from pathlib import Path
 import queue
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -92,6 +94,176 @@ def default_driver():
         return local
     shared = Path(common).parent / '.audit/tools/computer-use-mcp' if common else local
     return shared if shared.exists() else local
+
+
+def atspi_version():
+    """The installed libatspi's (major, minor, micro), or None without it or before 2.50,
+    which added atspi_get_version. at-spi-bus-launcher comes from the same upstream release."""
+    try:
+        get_version = ctypes.CDLL('libatspi.so.0').atspi_get_version
+    except (OSError, AttributeError):
+        return None
+    parts = [ctypes.c_int() for _ in range(3)]
+    get_version(*map(ctypes.byref, parts))
+    return tuple(part.value for part in parts)
+
+
+def session_options(width, height, headless, version):
+    """at-spi2-core 2.61 removed at-spi-bus-launcher's --a11y=1 and aborts on it. The atspi
+    driver patch omits it on request; older drivers reject the field, so it is sent only there."""
+    options = {'width': width, 'height': height, 'xwayland': True, 'sandbox': False,
+               'headless': headless}
+    if version is not None and version[:2] >= (2, 61):
+        options['a11y_flag'] = False
+    return options
+
+
+# Keeps a recording within 1920x1080, the largest size tools.pr.uploadAsset publishes
+# unscaled, at the even dimensions yuv420p needs, in BT.709 limited range as HD players expect.
+RECORDING_FIT = ('scale=w=min(iw\\,1920):h=min(ih\\,1080):force_original_aspect_ratio=decrease'
+                 ':force_divisible_by=2:out_color_matrix=bt709:out_range=tv,'
+                 'setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709')
+RECORDING_FPS = 30
+UPLOAD_MAX_BYTES = 100_000_000
+
+
+def probe_video(path):
+    """The video stream ffprobe reads from a finished recording."""
+    probe = json.loads(subprocess.run(
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+         'stream=codec_name,pix_fmt,color_space,width,height,r_frame_rate,nb_frames'
+         ':format=duration,size', '-of', 'json', str(path)],
+        capture_output=True, text=True, check=True).stdout)
+    stream = probe['streams'][0]
+    numerator, denominator = map(int, stream['r_frame_rate'].split('/'))
+    return {'codec': stream['codec_name'], 'pix_fmt': stream['pix_fmt'],
+            'color_space': stream.get('color_space'),
+            'width': stream['width'], 'height': stream['height'],
+            'fps': round(numerator / denominator, 3) if denominator else 0,
+            'frames': int(stream.get('nb_frames', 0)),
+            'duration_s': round(float(probe['format']['duration']), 3),
+            'size_bytes': int(probe['format']['size'])}
+
+
+def upload_problems(video):
+    """Why this video is not a 30 fps recording that tools.pr.uploadAsset publishes unchanged."""
+    problems = []
+    if video['codec'] != 'h264' or video['pix_fmt'] != 'yuv420p':
+        problems.append(f'{video["codec"]} {video["pix_fmt"]} is not H.264 yuv420p')
+    if video['width'] > 1920 or video['height'] > 1080:
+        problems.append(f'{video["width"]}x{video["height"]} exceeds 1920x1080')
+    if video['fps'] < RECORDING_FPS:
+        problems.append(f'{video["fps"]} fps is below the {RECORDING_FPS} fps recording rate')
+    if video['fps'] > 60:
+        problems.append(f'{video["fps"]} fps exceeds 60')
+    if video['size_bytes'] > UPLOAD_MAX_BYTES:
+        problems.append(f'{video["size_bytes"]} bytes exceeds {UPLOAD_MAX_BYTES}')
+    return problems
+
+
+class Recording:
+    """Records the private desktop to an H.264 yuv420p MP4 at 30 fps. wf-recorder reads the
+    headless output directly when it is installed. Otherwise grim captures up to 30 frames a
+    second into ffmpeg, which stamps each as it arrives and repeats frames to hold 30 fps."""
+
+    def __init__(self, socket, path, log):
+        self.path = path
+        self.log = log
+        self.started = time.monotonic()
+        self.frames = None
+        self.error = None
+        env = {**os.environ, 'WAYLAND_DISPLAY': str(socket)}
+        recorder = shutil.which('wf-recorder')
+        needed = ['ffprobe'] if recorder else ['grim', 'ffmpeg', 'ffprobe']
+        if missing := [tool for tool in needed if shutil.which(tool) is None]:
+            raise RuntimeError(f'Recording needs wf-recorder, or grim and ffmpeg; '
+                               f'missing {", ".join(missing)}')
+        # -D requests every frame, so an interrupt is handled while the screen is still.
+        # wf-recorder takes colour tags from codec options, not from the filter.
+        if recorder:
+            self.tool, self.thread = 'wf-recorder', None
+            self.process = subprocess.Popen(
+                [recorder, '-D', '-c', 'libx264', '-x', 'yuv420p', '-r', str(RECORDING_FPS),
+                 '-F', RECORDING_FIT, '-p', 'preset=veryfast', '-p', 'crf=20',
+                 *(item for tag in ('color_range=tv', 'colorspace=bt709', 'color_primaries=bt709',
+                                    'color_trc=bt709') for item in ('-p', tag)),
+                 '-f', str(path)],
+                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            time.sleep(0.5)
+            if self.process.poll() is not None:
+                raise RuntimeError(f'wf-recorder exited with {self.process.returncode}; '
+                                   f'see {log.name}')
+            return
+        grim = shutil.which('grim')
+        self.tool, self.frames = 'grim', 0
+        self.process = subprocess.Popen(
+            ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin',
+             '-use_wallclock_as_timestamps', '1', '-f', 'image2pipe', '-c:v', 'ppm', '-i', 'pipe:0',
+             '-vf', RECORDING_FIT, '-fps_mode', 'cfr', '-r', str(RECORDING_FPS),
+             '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+             '-movflags', '+faststart', str(path)],
+            stdin=subprocess.PIPE, stdout=log, stderr=log)
+        self.done = threading.Event()
+        first = threading.Event()
+        self.thread = threading.Thread(target=self.capture, args=(grim, env, first), daemon=True)
+        self.thread.start()
+        if not first.wait(timeout=20):
+            self.process.kill()
+            self.thread.join()
+            self.process.wait()
+            self.log.close()
+            raise RuntimeError(f'ffmpeg stopped reading frames; see {log.name}')
+        if self.error is not None:
+            self.stop()
+            raise RuntimeError(f'grim capture failed: {self.error}')
+
+    def capture(self, grim, env, first):
+        due = time.monotonic()
+        try:
+            while not self.done.is_set():
+                frame = subprocess.run([grim, '-t', 'ppm', '-'], env=env, capture_output=True,
+                                       check=True, timeout=10).stdout
+                self.process.stdin.write(frame)
+                self.process.stdin.flush()
+                self.frames += 1
+                first.set()
+                due = max(due + 1 / RECORDING_FPS, time.monotonic())
+                self.done.wait(due - time.monotonic())
+        except Exception as error:
+            self.error = error
+        finally:
+            first.set()
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
+
+    def stop(self):
+        elapsed = time.monotonic() - self.started
+        if self.thread is None:
+            self.process.send_signal(signal.SIGINT)
+        else:
+            self.done.set()
+            self.thread.join(timeout=30)
+        try:
+            code = self.process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            code = self.process.wait()
+        self.log.close()
+        if self.error is not None and not isinstance(self.error, BrokenPipeError):
+            raise RuntimeError(f'grim capture failed: {self.error}')
+        if code != 0 or not self.path.exists():
+            encoder = 'wf-recorder' if self.thread is None else 'ffmpeg'
+            raise RuntimeError(f'{encoder} exited with {code}; see {self.log.name}')
+        video = probe_video(self.path)
+        if problems := upload_problems(video):
+            raise RuntimeError(f'{self.path} is not a ready recording: ' + '; '.join(problems))
+        result = {'path': str(self.path), 'sha256': digest(self.path), 'recorder': self.tool,
+                  **video}
+        if self.frames is not None:
+            result['captured_fps'] = round(self.frames / elapsed, 1)
+        return result
 
 
 def add_binary_argument(parser):
@@ -199,6 +371,10 @@ class Run:
         self.closed = False
         self.bus = None
         self.bus_address = None
+        self.atspi_version = atspi_version()
+        self.session = None
+        self.recording = None
+        self.recordings = 0
         self.responses = queue.Queue()
         self.log = (self.evidence / 'actions.jsonl').open('a')
         self.stderr = (self.evidence / 'driver.stderr.log').open('w')
@@ -218,6 +394,7 @@ class Run:
         self.record('identity', {'binary': str(self.binary), 'binary_sha256': self.binary_sha,
                                 'driver': str(Path(driver).resolve()),
                                 'driver_sha256': driver_sha, 'scratch': str(self.scratch),
+                                'atspi_version': self.atspi_version,
                                 'driver_pid': self.process.pid, 'trace_wayland': trace_wayland})
 
     def read_responses(self):
@@ -293,8 +470,16 @@ class Run:
                                    'clientInfo': {'name': 'keystone-verifier', 'version': '2'}})
         self.process.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
         self.process.stdin.flush()
-        session = self.call('session_start', {'width': width, 'height': height, 'xwayland': True,
-                                              'sandbox': False, 'headless': headless})
+        version = self.atspi_version
+        try:
+            session = self.call('session_start', session_options(width, height, headless, version))
+        except RuntimeError as error:
+            if 'a11y_flag' in str(error):
+                raise RuntimeError(f'at-spi2-core {".".join(map(str, version))} aborts on --a11y=1, '
+                                   'and this driver predates computer-use-mcp-atspi.patch. '
+                                   'Rebuild it as verify/setup.md describes.') from error
+            raise
+        self.session = session.get('structuredContent', {})
         # HOME, and each provider folder the driver was not itself started with, start
         # empty, so a run that names no fixture never reads or shows the user's own
         # provider config or skills.
@@ -306,7 +491,7 @@ class Run:
             folder.mkdir(exist_ok=True)
         self.env = {**{key: str(folder) for key, folder in homes.items()}, **app_env(env)}
         self.start_bus()
-        return {'session': session.get('structuredContent'), 'bus': self.bus_address,
+        return {'session': self.session, 'bus': self.bus_address,
                 'launch': self.launch()}
 
     def start_bus(self):
@@ -502,11 +687,42 @@ class Run:
         self.record('state_snapshot', result)
         return result
 
+    def record_start(self):
+        if self.recording is not None:
+            raise RuntimeError('A recording is running; call record_stop first')
+        if self.session is None:
+            raise RuntimeError('The desktop did not start')
+        self.recordings += 1
+        path = self.evidence / f'recording-{self.recordings:02d}.mp4'
+        log = path.with_suffix('.log').open('w')
+        try:
+            self.recording = Recording(self.session['wayland_socket'], path, log)
+        except Exception:
+            log.close()
+            raise
+        result = {'path': str(path), 'recorder': self.recording.tool}
+        self.record('record_start', result)
+        return result
+
+    def record_stop(self):
+        if self.recording is None:
+            raise RuntimeError('No recording is running; call record_start first')
+        recording, self.recording = self.recording, None
+        result = recording.stop()
+        self.record('record_stop', result)
+        return result
+
     def stop(self):
         if self.closed:
             return {'already_closed': True}
         self.closed = True
         errors = []
+        recording = None
+        if self.recording is not None:
+            try:
+                recording = self.record_stop()
+            except Exception as error:
+                errors.append(str(error))
         try:
             self.call('session_stop')
         except Exception as error:
@@ -534,6 +750,8 @@ class Run:
                 errors.append(str(error))
         result = {'snapshot': snapshot, 'evidence': str(self.evidence), 'errors': errors,
                   'scratch_retained': str(self.scratch) if errors else None}
+        if recording is not None:
+            result['recording'] = recording
         self.record('cleanup', result)
         self.log.close()
         self.stderr.close()
@@ -587,6 +805,10 @@ TOOLS = [
     ('doctor', 'Read desktop, window, and process identity. Require matches_launch and binary_unchanged.',
      schema()),
     ('screenshot', 'Capture the whole private desktop as a PNG and save it as evidence.', schema()),
+    ('record_start', 'Start recording the private desktop to an H.264 yuv420p MP4 at 30 fps, within '
+     '1920x1080, in the evidence directory. One recording at a time.', schema()),
+    ('record_stop', 'Finish the recording and return its path and ffprobe facts. Fails unless '
+     'tools.pr.uploadAsset can publish it unchanged.', schema()),
     ('elements', 'List named elements from the app\'s latest frame in desktop pixels. `visible` is the '
      'unclipped part; menus that overlap an element are not subtracted. Unnamed controls need a screenshot. '
      'Each element names its window; pass window to list one.',
@@ -651,6 +873,10 @@ class Server:
             width, height = png_size(saved['path'])
             return {**result.get('structuredContent', {}), 'path': saved['path'],
                     'width': width, 'height': height}, image
+        if name == 'record_start':
+            return run.record_start(), None
+        if name == 'record_stop':
+            return run.record_stop(), None
         if name == 'elements':
             return run.elements(arguments.get('window')), None
         if name == 'click':

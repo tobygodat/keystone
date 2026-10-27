@@ -2,12 +2,14 @@
 """Focused wrapper regression tests: python3 scripts/test_native_driver.py."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
 import sqlite3
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('native_driver', Path(__file__).with_name('native-driver.py'))
 driver = importlib.util.module_from_spec(spec)
@@ -48,6 +50,7 @@ class PersistenceTest(unittest.TestCase):
             CREATE TABLE workspace(singleton INTEGER PRIMARY KEY, payload TEXT);
             CREATE TABLE sessions(position INTEGER, payload TEXT);
             CREATE TABLE log_entries(sequence INTEGER, payload TEXT);
+            CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT);
         ''')
         self.saved = {'version': 1, 'next_id': 3, 'future': {'preserved': True},
                       'workspace': {'selected': 2, 'sessions': [], 'theme': 'Dark'}}
@@ -70,6 +73,7 @@ class PersistenceTest(unittest.TestCase):
         run.sequence = 7
         run.record = Mock()
         run.bus = None
+        run.recording = None
         return run
 
     def test_projection_reads_wal_preserves_fields_and_orders_sessions(self):
@@ -382,6 +386,168 @@ class CaptureSizeTest(unittest.TestCase):
                        + (1920).to_bytes(4, 'big') + (1080).to_bytes(4, 'big'))
             file.flush()
             self.assertEqual(driver.png_size(file.name), (1920, 1080))
+
+
+class AtspiTest(unittest.TestCase):
+    def test_launcher_flag_is_dropped_only_where_at_spi_rejects_it(self):
+        def flag(version):
+            return driver.session_options(1920, 1080, True, version).get('a11y_flag', True)
+        self.assertTrue(flag(None))
+        self.assertTrue(flag((2, 50, 0)))
+        self.assertTrue(flag((2, 60, 5)))
+        self.assertFalse(flag((2, 61, 0)))
+        self.assertFalse(flag((2, 62, 1)))
+        self.assertFalse(flag((3, 0, 0)))
+        self.assertNotIn('a11y_flag', driver.session_options(1920, 1080, True, (2, 60, 5)))
+
+    def test_a_driver_without_the_patch_names_the_rebuild(self):
+        run = driver.Run.__new__(driver.Run)
+        run.request = Mock()
+        run.process = Mock()
+        run.atspi_version = (2, 62, 1)
+        run.call = Mock(side_effect=RuntimeError('unknown field `a11y_flag`, expected one of ...'))
+        with self.assertRaisesRegex(RuntimeError, '2.62.1 aborts on --a11y=1.*setup.md'):
+            run.start(1920, 1080, True)
+        self.assertEqual(run.call.call_args.args[1]['a11y_flag'], False)
+
+    def test_installed_version_is_read_from_libatspi(self):
+        version = driver.atspi_version()
+        if version is None:
+            self.skipTest('libatspi is not installed')
+        self.assertEqual(len(version), 3)
+        self.assertGreaterEqual(version[:2], (2, 50))
+
+
+@unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'needs ffmpeg and ffprobe')
+class RecordingTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='keystone-recording-test-')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.bin = self.root / 'bin'
+        self.bin.mkdir()
+        for tool in ('ffmpeg', 'ffprobe', 'cat', 'sleep'):
+            (self.bin / tool).symlink_to(shutil.which(tool))
+        environment = patch.dict(os.environ, {'PATH': str(self.bin)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.run = driver.Run.__new__(driver.Run)
+        self.run.evidence = self.root / 'evidence'
+        self.run.evidence.mkdir()
+        self.run.session = {'wayland_socket': str(self.root / 'wayland-1')}
+        self.run.recording = None
+        self.run.recordings = 0
+        self.run.record = Mock()
+
+    def fake(self, name, script):
+        path = self.bin / name
+        path.write_text(script)
+        path.chmod(0o755)
+
+    def test_grim_frames_become_an_upload_ready_mp4_scaled_into_full_hd(self):
+        frame = self.root / 'frame.ppm'
+        frame.write_bytes(b'P6\n2000 1125\n255\n' + bytes([40, 90, 200]) * (2000 * 1125))
+        self.fake('grim', f'#!/bin/sh\n[ "$WAYLAND_DISPLAY" = "{self.root}/wayland-1" ] || exit 9\n'
+                          f'[ "$*" = "-t ppm -" ] || exit 8\nsleep 0.1\nexec cat {frame}\n')
+        started = driver.time.monotonic()
+        self.assertEqual(self.run.record_start()['recorder'], 'grim')
+        with self.assertRaisesRegex(RuntimeError, 'recording is running'):
+            self.run.record_start()
+        driver.time.sleep(1.5)
+        result = self.run.record_stop()
+        elapsed = driver.time.monotonic() - started
+        self.assertEqual((result['codec'], result['pix_fmt'], result['color_space']),
+                         ('h264', 'yuv420p', 'bt709'))
+        self.assertEqual((result['width'], result['height'], result['fps']), (1920, 1080, 30))
+        self.assertAlmostEqual(result['duration_s'], elapsed, delta=0.4)
+        self.assertLess(result['captured_fps'], 11)
+        self.assertEqual(driver.probe_video(result['path'])['frames'], result['frames'])
+        self.assertEqual(Path(result['path']), self.run.evidence / 'recording-01.mp4')
+        with self.assertRaisesRegex(RuntimeError, 'No recording'):
+            self.run.record_stop()
+
+    def test_wf_recorder_is_preferred_and_finished_by_interrupt(self):
+        argv = self.root / 'argv'
+        self.fake('wf-recorder', f'''#!/bin/sh
+echo "$WAYLAND_DISPLAY $*" > {argv}
+for last; do :; done
+trap 'exec ffmpeg -v error -f lavfi -i testsrc=size=1280x720:rate=30 -t 0.5 -c:v libx264 -pix_fmt yuv420p "$last"' INT
+while :; do sleep 0.05; done
+''')
+        self.assertEqual(self.run.record_start()['recorder'], 'wf-recorder')
+        driver.time.sleep(0.5)
+        result = self.run.record_stop()
+        self.assertEqual((result['width'], result['height'], result['fps']), (1280, 720, 30))
+        recorded = argv.read_text().split()
+        self.assertEqual(recorded[0], self.run.session['wayland_socket'])
+        for option in (['-D'], ['-c', 'libx264'], ['-x', 'yuv420p'], ['-r', '30'],
+                       ['-F', driver.RECORDING_FIT], ['-p', 'color_range=tv'],
+                       ['-f', result['path']]):
+            self.assertIn(' '.join(option), ' '.join(recorded))
+
+    def test_a_failing_grim_fails_record_start(self):
+        self.fake('grim', '#!/bin/sh\nexit 1\n')
+        with self.assertRaisesRegex(RuntimeError, 'grim capture failed'):
+            self.run.record_start()
+        self.assertIsNone(self.run.recording)
+
+    def test_an_encoder_that_dies_is_named(self):
+        frame = self.root / 'frame.ppm'
+        frame.write_bytes(b'P6\n64 48\n255\n' + bytes(64 * 48 * 3))
+        self.fake('grim', f'#!/bin/sh\nsleep 0.3\nexec cat {frame}\n')
+        (self.bin / 'ffmpeg').unlink()
+        self.fake('ffmpeg', '#!/bin/sh\nexit 3\n')
+        with self.assertRaisesRegex(RuntimeError, 'ffmpeg exited with 3'):
+            self.run.record_start()
+
+    def test_missing_tools_are_named_before_recording(self):
+        (self.bin / 'ffmpeg').unlink()
+        self.fake('grim', '#!/bin/sh\nexit 0\n')
+        with self.assertRaisesRegex(RuntimeError, 'missing ffmpeg'):
+            self.run.record_start()
+
+    def test_a_grim_that_times_out_fails_record_start(self):
+        self.fake('grim', '#!/bin/sh\nexit 0\n')
+
+        def hang(command, **options):
+            driver.time.sleep(0.3)
+            raise driver.subprocess.TimeoutExpired(command, options['timeout'])
+        with patch.object(driver.subprocess, 'run', hang), \
+                self.assertRaisesRegex(RuntimeError, 'grim capture failed.*timed out'):
+            self.run.record_start()
+        self.assertIsNone(self.run.recording)
+
+    def test_stop_finishes_a_running_recording_before_the_desktop(self):
+        frame = self.root / 'frame.ppm'
+        frame.write_bytes(b'P6\n65 49\n255\n' + bytes([200, 30, 30]) * (65 * 49))
+        self.fake('grim', f'#!/bin/sh\nexec cat {frame}\n')
+        self.run.record_start()
+        driver.time.sleep(0.5)
+        self.run.closed = False
+        self.run.process = Mock()
+        self.run.log = Mock()
+        self.run.stderr = Mock()
+        self.run.bus = None
+        self.run.scratch = self.root / 'scratch'
+        self.run.scratch.mkdir()
+        self.run.snapshot = Mock(return_value={'state_absent': True})
+        self.run.call = Mock(side_effect=lambda *args: self.assertIsNone(self.run.recording))
+        result = self.run.stop()
+        self.run.call.assert_called_once_with('session_stop')
+        self.assertEqual(result['errors'], [])
+        self.assertTrue(Path(result['recording']['path']).exists())
+        self.assertEqual((result['recording']['width'], result['recording']['height']), (64, 48))
+        self.assertLess(result['recording']['captured_fps'], 35)
+
+    def test_upload_limits(self):
+        good = {'codec': 'h264', 'pix_fmt': 'yuv420p', 'width': 1920, 'height': 1080, 'fps': 30,
+                'size_bytes': 100_000_000}
+        self.assertEqual(driver.upload_problems(good), [])
+        self.assertEqual(len(driver.upload_problems({**good, 'pix_fmt': 'yuv444p'})), 1)
+        self.assertEqual(len(driver.upload_problems({**good, 'width': 2560})), 1)
+        self.assertEqual(len(driver.upload_problems({**good, 'fps': 120})), 1)
+        self.assertEqual(len(driver.upload_problems({**good, 'fps': 15})), 1)
+        self.assertEqual(len(driver.upload_problems({**good, 'size_bytes': 100_000_001})), 1)
 
 
 if __name__ == '__main__':
