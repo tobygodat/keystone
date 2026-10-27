@@ -12,6 +12,8 @@ python3 scripts/screen-walk.py sheet .audit/walk-before .audit/walk-after --out 
 
 `walk` runs at 1920×1080 and, as the narrow check, 720×1080 unless `--width` or `--height` is given. Each width gets a fresh private headless Sway through `scripts/native-driver.py`, a fresh state database, a scratch git project in `/tmp/keystone-walk-<width>` (the same path every run, so before and after shots match; a lock refuses a second walk at the same width), empty provider homes and the scripted `keystone-fake-claude` and `keystone-fake-codex`. No real provider runs, and nothing reads the user's own `~/.claude`, `~/.claude.json` or `~/.codex`. It writes `<out>/<width>/<surface>.png` and `<out>/manifest.json`, which lists every surface as `shot`, `skipped` (a feature this build does not have) or `failed`, with the reason. A surface is `shot` only after an element that proves it opened is drawn, so a broken shortcut fails its surface instead of saving the wrong screen. It exits non-zero when a surface failed. The pointer is parked in the bottom-right corner before each shot so no tooltip or hover state shows.
 
+`--theme` and `--density` set that theme and density in Settings → Appearance before the first shot.
+
 `sheet` tiles one walk four to a row, or pairs two walks before and after, two to a row, into `sheet-<width>-<n>.png` files, in walk order and from the surfaces each manifest marks `shot`. It needs ImageMagick's `montage`.
 
 ## Surfaces

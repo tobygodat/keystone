@@ -584,7 +584,10 @@ impl Keystone {
                 cx,
             )
             .width;
-        (f32::from(measured) + 56.).max(COMPOSER_MIN)
+        let density = cx.theme().density;
+        let padding = density.space(px(20.)) + density.space(px(12.));
+        // The composer pane's 12 px on each side and the composer's 1 px border.
+        (f32::from(measured + padding) + 26.).max(COMPOSER_MIN)
     }
 
     pub(crate) fn update_arrangement_fitting(

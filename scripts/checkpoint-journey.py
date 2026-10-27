@@ -200,7 +200,7 @@ class Journey(screen_walk.Walk):
             self.database = started.get('database')
             self.wait('welcome-claude', 30)
             if self.theme:
-                self.choose_theme()
+                self.choose_appearance()
             if self.record and not self.killed:
                 self.tool('record_start')
             self.journey()

@@ -1837,7 +1837,7 @@ impl Keystone {
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let colors = cx.theme().colors;
+        let (colors, density) = (cx.theme().colors, cx.theme().density);
         let conversation = current.and_then(|(id, _)| self.state.read(cx).conversations().get(&id));
         let running = conversation.is_some_and(|c| c.running);
         let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
@@ -1997,6 +1997,7 @@ impl Keystone {
         v_flex()
             // Not `w_full().max_w(..)`: taffy sizes the field from a pass that measures the
             // draft at the uncapped width, so a wrapped draft overflowed a one-row field.
+            .automation_id("composer")
             .w(px(CONTENT_WIDTH))
             .max_w_full()
             .flex_shrink_0()
@@ -2011,11 +2012,11 @@ impl Keystone {
                 spread_radius: px(0.),
                 inset: false,
             }])
-            .pt(px(16.))
-            .pl(px(20.))
-            .pr(px(12.))
-            .pb(px(12.))
-            .gap(px(12.))
+            .pt(density.space(px(16.)))
+            .pl(density.space(px(20.)))
+            .pr(density.space(px(12.)))
+            .pb(density.space(px(12.)))
+            .gap(density.space(px(12.)))
             .relative()
             .when(current.is_some(), |d| {
                 d.drag_over::<ExternalPaths>(move |style, _, _, _| {
@@ -2755,6 +2756,7 @@ impl Keystone {
             conversation.rows.get(index),
             Some(Row::Item(item)) if item.kind == ItemKind::UserMessage
         );
+        let density = cx.theme().density;
         let app = cx.weak_entity();
         let activation = self.presentation.activation();
         h_flex()
@@ -2809,7 +2811,9 @@ impl Keystone {
                                 .size_full(),
                             )
                     })
-                    .when(index > 0, |d| if starts_turn { d.pt_8() } else { d.pt_3() })
+                    .when(index > 0, |d| {
+                        d.pt(density.space(if starts_turn { px(32.) } else { px(12.) }))
+                    })
                     .text_size(TextSize::Body.px())
                     .line_height(px(22.))
                     .child(content),
@@ -8498,6 +8502,88 @@ mod tests {
         set("word ".repeat(600), cx);
         assert_eq!(field(cx).size.height, px(160.));
         assert_eq!(send(cx), toolbar);
+    }
+
+    /// Adds `turns` questions, each with its reply, to session 1.
+    fn add_turns(view: &Entity<Keystone>, turns: usize, cx: &mut gpui::VisualTestContext) {
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                for turn in 0..turns {
+                    for (kind, text) in [
+                        (ItemKind::UserMessage, format!("Question {turn}")),
+                        (ItemKind::AgentMessage, format!("Reply {turn}")),
+                    ] {
+                        conversation.apply(Event::ItemCompleted(Item {
+                            id: text.clone(),
+                            kind,
+                            text,
+                            status: ItemStatus::Completed,
+                        }));
+                    }
+                }
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    /// Density moves the composer's padding and the transcript's row and turn gaps by a
+    /// quarter either side of Default, on the 4 px grid. Default keeps the spacing it had.
+    #[gpui::test]
+    fn density_spaces_the_composer_and_the_transcript(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = open_with_session(dir.path(), cx);
+        wait_until(cx, &view, |v, cx| {
+            !v.state.read(cx).conversations()[&1].is_loading()
+        });
+        add_turns(&view, 2, cx);
+        let measure = |density, cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |this, window, cx| {
+                this.update_appearance(|appearance| appearance.density = density, window, cx)
+            });
+            cx.run_until_parked();
+            let composer = cx.debug_bounds("composer").unwrap();
+            let field = cx.debug_bounds("composer-field").unwrap();
+            let send = cx.debug_bounds("send").unwrap();
+            let reply = cx.debug_bounds("reply-1-selection-surface").unwrap();
+            let row = |index: usize, cx: &mut gpui::VisualTestContext| {
+                cx.debug_bounds(format!("transcript-row-{index}").leak())
+                    .unwrap()
+            };
+            let border = px(1.);
+            let spacing = [
+                field.top() - composer.top() - border,
+                field.left() - composer.left() - border,
+                composer.right() - send.right() - border,
+                composer.bottom() - send.bottom() - border,
+                send.top() - field.bottom(),
+                reply.top() - row(1, cx).top(),
+            ];
+            (spacing, row(2, cx).size.height)
+        };
+        let [compact, default, spacious] = [
+            keystone_core::Density::Compact,
+            keystone_core::Density::Default,
+            keystone_core::Density::Spacious,
+        ]
+        .map(|density| measure(density, cx));
+        assert_eq!(
+            [compact.0, default.0, spacious.0],
+            [
+                [12., 16., 8., 8., 8., 8.],
+                [16., 20., 12., 12., 12., 12.],
+                [20., 24., 16., 16., 16., 16.],
+            ]
+            .map(|row| row.map(px))
+        );
+        assert_eq!(
+            default.1 - compact.1,
+            px(8.),
+            "a turn starts 24 px down at Compact"
+        );
+        assert_eq!(spacious.1 - default.1, px(8.), "and 40 px down at Spacious");
     }
 
     #[gpui::test]

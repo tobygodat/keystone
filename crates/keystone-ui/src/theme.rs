@@ -19,7 +19,8 @@ pub enum Appearance {
 }
 
 /// How tightly controls and rows are packed. Components size themselves through
-/// [`Density::control`] and [`Density::pad`], so call sites never branch on it.
+/// [`Density::control`], [`Density::pad`] and [`Density::space`], so call sites never
+/// branch on it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Density {
     Compact,
@@ -52,6 +53,18 @@ impl Density {
                 Density::Spacious => 1.,
             })
         .round()
+    }
+
+    /// Space between and around blocks of content, such as transcript rows and the
+    /// composer's padding: `base` at `Default`, three quarters at `Compact` and five
+    /// quarters at `Spacious`, rounded to the 4 px grid. Pass a base on that grid.
+    pub fn space(self, base: Pixels) -> Pixels {
+        let scale = match self {
+            Density::Compact => 0.75,
+            Density::Default => 1.,
+            Density::Spacious => 1.25,
+        };
+        (base * scale / 4.).round() * 4.
     }
 }
 
@@ -343,6 +356,20 @@ mod tests {
             .map(|row| row.map(px))
         );
         assert_eq!(Density::ALL.map(|d| d.pad(px(7.))), [4., 5., 7.].map(px));
+    }
+
+    #[test]
+    fn density_space_stays_on_the_grid() {
+        let space = Density::ALL.map(|d| [12., 16., 20., 32.].map(|base| d.space(px(base))));
+        assert_eq!(
+            space,
+            [
+                [8., 12., 16., 24.],
+                [12., 16., 20., 32.],
+                [16., 20., 24., 40.]
+            ]
+            .map(|row| row.map(px))
+        );
     }
 
     fn contrast(a: Hsla, b: Hsla) -> f32 {
