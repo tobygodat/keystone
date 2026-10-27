@@ -1138,6 +1138,36 @@ impl AppState {
         result
     }
 
+    /// Creates the quick composer's session. See [`keystone_core::Store::create_quick`].
+    pub(crate) fn create_quick(
+        &mut self,
+        provider: Provider,
+        account: Option<AccountId>,
+        model: Option<String>,
+        directory: &WorkingDirectory,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        let result = self
+            .store
+            .create_quick(provider, account, model, directory, now_ms());
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    pub(crate) fn set_quick_draft(
+        &mut self,
+        draft: keystone_core::QuickDraft,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        self.store.set_quick_draft(draft)
+    }
+
     /// Creates a session an agent in `parent` starts, selected in no window, with the
     /// record that brings its result back to `parent`.
     pub(crate) fn create_unselected(
@@ -1522,18 +1552,32 @@ impl AppState {
         provider: Provider,
         cx: &mut Context<Self>,
     ) {
+        if let Some(key) = self.catalog_key(session, provider) {
+            self.request_catalog_for(key, session, cx);
+        }
+    }
+
+    pub(crate) fn catalog_choices(&self, key: &CatalogKey) -> Choices<'_> {
+        self.catalogs.choices(key)
+    }
+
+    /// Asks `key`'s catalog once per app run, for `asker`, whose ID the answer comes
+    /// back under.
+    pub(crate) fn request_catalog_for(
+        &mut self,
+        key: CatalogKey,
+        asker: u64,
+        cx: &mut Context<Self>,
+    ) {
         if self.phase != Phase::Running {
             return;
         }
-        let Some(key) = self.catalog_key(session, provider) else {
-            return;
-        };
+        let (provider, account) = (key.provider, key.account.clone());
         let directory = key.directory.clone();
-        let account = key.account.clone();
-        if self.catalogs.ask(key, session) {
+        if self.catalogs.ask(key, asker) {
             let refused = match self.connection(provider, account.as_ref()) {
                 Ok(connection) => {
-                    connection.request_catalog(session, directory.as_str());
+                    connection.request_catalog(asker, directory.as_str());
                     None
                 }
                 Err(error) => Some(error),
@@ -1541,12 +1585,26 @@ impl AppState {
             if let Some(error) = refused {
                 let failed = Commands::Failed(error.clone());
                 self.catalogs
-                    .apply_commands(provider, account.clone(), session, failed);
+                    .apply_commands(provider, account.clone(), asker, failed);
                 self.catalogs
-                    .apply(provider, account, session, Catalog::Failed(error));
+                    .apply(provider, account, asker, Catalog::Failed(error));
             }
             self.publish(cx);
         }
+    }
+
+    /// Asks `key`'s catalog again, as Retry does.
+    pub(crate) fn retry_catalog_for(
+        &mut self,
+        key: CatalogKey,
+        asker: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        self.catalogs.clear(&key);
+        self.request_catalog_for(key, asker, cx);
     }
 
     pub(crate) fn retry_catalog(
@@ -1555,13 +1613,9 @@ impl AppState {
         provider: Provider,
         cx: &mut Context<Self>,
     ) {
-        if self.phase != Phase::Running {
-            return;
-        }
         if let Some(key) = self.catalog_key(session, provider) {
-            self.catalogs.clear(&key);
+            self.retry_catalog_for(key, session, cx);
         }
-        self.request_catalog(session, provider, cx);
     }
 
     fn conversation(&mut self, session: u64) -> &mut Conversation {

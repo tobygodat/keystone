@@ -18,6 +18,19 @@ Ctrl+Shift+G, **Toggle changes** in the palette, or **Changes** in a tab strip's
 
 The preview saves to `$XDG_DATA_HOME/keystone/workspace.sqlite3`, or `$HOME/.local/share/keystone/workspace.sqlite3`. The legacy `workspace.json` and `sessions/*.jsonl` are imported together on first run and left untouched as backups. Set `KEYSTONE_STATE_PATH` to an isolated state or database path: legacy `*.json` maps to `*.sqlite3`, and other legacy names get `.sqlite3` appended. An existing SQLite file is recognized by its header. A file lock prevents concurrent desktop processes from writing the same workspace. Draft writes wait 250 ms after typing stops. Session changes and normal window close flush the visible draft immediately; failed saves keep the session open. See [storage guarantees](docs/design/storage.md) before copying or repairing a live database.
 
+## Quick composer
+
+`keystone-desktop --quick` opens a small window with the provider, account and model button, a project picker and a text field. Enter starts a session in that project and sends the text, Shift+Enter adds a line, and Escape closes the window and keeps the text for next time. Ctrl+Alt+Space, or **Quick composer** in the palette, opens it from inside Keystone. The new session shows in the sidebar of every window on that project.
+
+The command hands the request to the running Keystone over a Unix socket, in `$XDG_RUNTIME_DIR`, or beside the workspace database where that is unset, as on macOS, and exits. When Keystone is not running, it starts Keystone and then opens the window. Wayland gives apps no global shortcuts, so bind the command in your compositor, and float the window by its title, `Quick composer`. In Sway:
+
+```
+bindsym $mod+Ctrl+space exec keystone-desktop --quick
+for_window [app_id="keystone" title="^Quick composer$"] floating enable
+```
+
+On macOS, bind the command in your own hotkey tool.
+
 ## Customize the sidebar
 
 An early experiment in personalizing the interface in plain language. Click **Customize** in the top bar. It shows the sidebar even if you hid it, and hides it again when you close. You can move the sidebar left or right and set its width from 220 to 520 px. Use the buttons, drag the highlighted inner edge, or press Alt+Left, Alt+Right, Alt+[ and Alt+]. You can also type a request such as "put the sidebar on the right and make it a bit wider", choose Claude Code or Codex, and press **Preview** or Ctrl+Enter.

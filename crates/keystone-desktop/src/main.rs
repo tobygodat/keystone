@@ -20,6 +20,7 @@ mod notifications;
 mod presentation;
 mod projects;
 mod prompts;
+mod quick;
 mod relative_time;
 mod reveal;
 mod second_opinion;
@@ -195,6 +196,7 @@ struct DesktopApp {
     state: Entity<AppState>,
     /// Every open Keystone window, in the order they opened.
     windows: Vec<WeakEntity<Keystone>>,
+    quick: Option<gpui::WindowHandle<quick::QuickComposer>>,
 }
 
 impl gpui::Global for DesktopApp {}
@@ -206,8 +208,12 @@ fn install_app_state(store: Store, cx: &mut App) -> Entity<AppState> {
     cx.set_global(DesktopApp {
         state: state.clone(),
         windows: Vec::new(),
+        quick: None,
     });
     cx.on_action(|_: &Quit, cx| request_quit(cx));
+    cx.on_action(|_: &quick::OpenQuickComposer, cx| {
+        quick::open(cx);
+    });
     state
 }
 
@@ -341,6 +347,10 @@ fn request_quit(cx: &mut App) {
         return;
     }
     cx.defer(move |cx| {
+        if let Err(error) = quick::keep_open(cx) {
+            state.update(cx, |state, cx| state.quit_failed(error, cx));
+            return;
+        }
         let windows = open_windows(cx);
         let mut drafts = Vec::new();
         let mut notes = Vec::new();
@@ -1778,47 +1788,25 @@ impl Keystone {
                                 )
                             })
                             .child(
-                                div()
-                                    .id("send")
-                                    .automation_id("send")
-                                    .flex_shrink_0()
-                                    .size(px(32.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .bg(if can_send {
-                                        colors.element_inverse
-                                    } else {
-                                        colors.element_disabled
-                                    })
-                                    .child(Icon::new(IconName::Up).size(px(16.)).color(
-                                        if can_send {
-                                            Color::Custom(colors.text_inverse)
-                                        } else {
-                                            Color::Faint
-                                        },
-                                    ))
-                                    .tooltip(
-                                        Tooltip::with_key(
-                                            if running { "Steer" } else { "Send" },
-                                            "Ctrl+Enter",
-                                        )
-                                        .builder(),
-                                    )
-                                    .when(can_send, |d| {
-                                        d.cursor_pointer().hover(|s| s.opacity(0.85)).on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                if let Some(draft) = this
-                                                    .composer_draft(cx)
-                                                    .filter(|draft| draft.session == session)
-                                                {
-                                                    this.send_message(draft, window, cx)
-                                                }
-                                            }),
-                                        )
-                                    })
-                                    .when(!can_send, |d| d.cursor_not_allowed()),
+                                send_button(
+                                    "send",
+                                    can_send,
+                                    Tooltip::with_key(
+                                        if running { "Steer" } else { "Send" },
+                                        "Ctrl+Enter",
+                                    ),
+                                    cx,
+                                )
+                                .when(can_send, |d| {
+                                    d.on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(draft) = this
+                                            .composer_draft(cx)
+                                            .filter(|draft| draft.session == session)
+                                        {
+                                            this.send_message(draft, window, cx)
+                                        }
+                                    }))
+                                }),
                             ),
                     );
                 let field = div()
@@ -7012,7 +7000,7 @@ mod tests {
     /// Points Keystone at the scripted Codex. The variables are process-wide, so every
     /// test that sets them holds this lock until it ends, and one test's switches
     /// never reach a process another test starts.
-    fn codex_env() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn codex_env() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // SAFETY: set under the lock, before any thread that reads them starts.
@@ -10081,6 +10069,43 @@ mod tests {
         assert!(cx.debug_bounds("recovery-continue").is_none());
     }
 }
+/// The composer's round send button, which takes clicks only while `can_send`.
+fn send_button(
+    id: &'static str,
+    can_send: bool,
+    tooltip: Tooltip,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let colors = cx.theme().colors;
+    div()
+        .id(id)
+        .automation_id(id)
+        .flex_shrink_0()
+        .size(px(32.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(if can_send {
+            colors.element_inverse
+        } else {
+            colors.element_disabled
+        })
+        .child(Icon::new(IconName::Up).size(px(16.)).color(if can_send {
+            Color::Custom(colors.text_inverse)
+        } else {
+            Color::Faint
+        }))
+        .tooltip(tooltip.builder())
+        .map(|d| {
+            if can_send {
+                d.cursor_pointer().hover(|s| s.opacity(0.85))
+            } else {
+                d.cursor_not_allowed()
+            }
+        })
+}
+
 /// The app's keyboard shortcuts, shared by `main` and the GPUI tests.
 fn bind_keys(cx: &mut App) {
     TextInput::bind_keys(cx);
@@ -10125,6 +10150,8 @@ fn bind_keys(cx: &mut App) {
             keystone_ui::text_input::Up,
             Some("CommandPalette"),
         ),
+        gpui::KeyBinding::new("enter", quick::SendQuick, Some("QuickComposer > TextInput")),
+        gpui::KeyBinding::new("escape", quick::DismissQuick, Some("QuickComposer")),
     ]);
 }
 
@@ -10149,13 +10176,36 @@ fn main() {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(std::path::Path::new("."));
     std::fs::create_dir_all(parent).expect("create Keystone data directory");
+    let quick = std::env::args().skip(1).any(|arg| arg == quick::FLAG);
+    let socket = quick::socket(&path);
+    if quick && quick::ask(&socket, std::time::Duration::from_secs(5)) {
+        return;
+    }
     let state_lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(path.with_extension("lock"))
         .expect("open workspace lock");
-    if let Err(error) = state_lock.try_lock() {
+    // While another process holds the workspace, it may be starting or quitting:
+    // `--quick` hands off once it listens, or takes over once it has gone.
+    let mut locked = state_lock.try_lock();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while quick && locked.is_err() && std::time::Instant::now() < deadline {
+        if quick::ask(
+            &socket,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        ) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        locked = state_lock.try_lock();
+    }
+    if quick && locked.is_err() {
+        eprintln!("The running Keystone did not open the quick composer.");
+        std::process::exit(1);
+    }
+    if let Err(error) = locked {
         eprintln!("Cannot lock workspace. Another Keystone process may be using it: {error}");
         std::process::exit(1);
     }
@@ -10186,6 +10236,12 @@ fn main() {
             if opened == 0 {
                 eprintln!("Cannot open any Keystone window");
                 std::process::exit(1);
+            }
+            if let Err(error) = quick::listen(&socket, cx) {
+                eprintln!("{} will not reach this app: {error}", quick::FLAG);
+            }
+            if quick {
+                quick::open(cx);
             }
             cx.activate(true);
         });

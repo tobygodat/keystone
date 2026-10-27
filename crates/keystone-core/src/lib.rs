@@ -546,6 +546,24 @@ impl Notifications {
     }
 }
 
+/// What the quick composer keeps between openings: its unsent text, and the project
+/// folder, provider, account and model it last sent with.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct QuickDraft {
+    pub text: String,
+    pub project: Option<String>,
+    pub provider: Option<Provider>,
+    pub account: Option<AccountId>,
+    pub model: Option<String>,
+}
+
+impl QuickDraft {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -561,6 +579,8 @@ pub struct Preferences {
     project_tabs: ProjectMap<SavedTabs>,
     #[serde(skip_serializing_if = "SavedWindows::is_empty")]
     windows: SavedWindows,
+    #[serde(skip_serializing_if = "QuickDraft::is_empty")]
+    quick: QuickDraft,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -572,6 +592,10 @@ impl Preferences {
 
     pub fn notifications(&self) -> Notifications {
         self.notifications
+    }
+
+    pub fn quick(&self) -> &QuickDraft {
+        &self.quick
     }
 
     pub fn sidebar_layout(&self) -> &SavedLayout {
@@ -811,6 +835,27 @@ impl Store {
         )
     }
 
+    /// Creates the quick composer's session on `provider`'s `account` with `model`,
+    /// selected in no window, in one write.
+    pub fn create_quick(
+        &mut self,
+        provider: Provider,
+        account: Option<AccountId>,
+        model: Option<String>,
+        directory: &WorkingDirectory,
+        now: u64,
+    ) -> StoreResult<Applied<u64>> {
+        let account = self.provider_account(provider, account)?;
+        self.add_session(
+            |id| Session {
+                account,
+                model,
+                ..Session::new(id, provider, directory, now)
+            },
+            Opening::Unselected,
+        )
+    }
+
     pub fn create_worktree_showing(
         &mut self,
         provider: Provider,
@@ -1015,6 +1060,7 @@ impl Store {
                     }
                 }
             }
+            Opening::Unselected => {}
             Opening::Launched(parent) => {
                 if !sessions.contains(&parent) {
                     return Err(invalid(format!("unknown session ID {parent}")).into());
@@ -1154,6 +1200,10 @@ impl Store {
         self.update_preferences(|preferences| preferences.notifications = notifications)
     }
 
+    pub fn set_quick_draft(&mut self, draft: QuickDraft) -> StoreResult<Applied<()>> {
+        self.update_preferences(|preferences| preferences.quick = draft)
+    }
+
     /// Saves exactly `layout`, readable or not, over the latest preferences, leaving
     /// every other preference as it is.
     pub fn set_sidebar_layout(&mut self, layout: SavedLayout) -> StoreResult<Applied<()>> {
@@ -1272,19 +1322,8 @@ impl Store {
         provider: Provider,
         account: Option<AccountId>,
     ) -> StoreResult<Applied<()>> {
-        let account = account.filter(|account| account.as_str() != AccountId::DEFAULT);
         self.session_provider(id)?;
-        if let Some(account) = &account {
-            match self.workspace.account(account) {
-                Some(found) if found.provider() == provider => {}
-                Some(_) => {
-                    return Err(
-                        invalid(format!("account {account} is not a {provider} account")).into(),
-                    );
-                }
-                None => return Err(invalid(format!("unknown account {account}")).into()),
-            }
-        }
+        let account = self.provider_account(provider, account)?;
         self.update_unstarted(id, |session| {
             if session.provider != provider {
                 session.provider = provider;
@@ -1298,6 +1337,28 @@ impl Store {
                 session.model = None;
             }
         })
+    }
+
+    /// `account` as a session on `provider` saves it: `None` for the default, else one
+    /// of `provider`'s accounts.
+    fn provider_account(
+        &self,
+        provider: Provider,
+        account: Option<AccountId>,
+    ) -> StoreResult<Option<AccountId>> {
+        let account = account.filter(|account| account.as_str() != AccountId::DEFAULT);
+        if let Some(account) = &account {
+            match self.workspace.account(account) {
+                Some(found) if found.provider() == provider => {}
+                Some(_) => {
+                    return Err(
+                        invalid(format!("account {account} is not a {provider} account")).into(),
+                    );
+                }
+                None => return Err(invalid(format!("unknown account {account}")).into()),
+            }
+        }
+        Ok(account)
     }
 
     fn session_provider(&self, id: u64) -> StoreResult<Provider> {
@@ -1758,6 +1819,7 @@ enum Opening<'a> {
         Option<(&'a ProjectId, Composition, SessionTabs, ViewId)>,
     ),
     Launched(u64),
+    Unselected,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -3548,5 +3610,54 @@ mod tests {
             .unwrap();
         assert!(!handed.second_opinion());
         assert_eq!(handed.approval_mode(), ApprovalMode::Provider);
+    }
+
+    #[test]
+    fn a_quick_session_saves_its_account_and_model_and_shows_in_no_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workspace.json");
+        let mut store = Store::open(&path).unwrap();
+        let folder = working_directory();
+        let shown = store.create(Provider::Codex, &folder, 1).unwrap().value;
+        let work = store
+            .add_account(Provider::Claude, "Work", directory.path().join("w"), &[])
+            .unwrap()
+            .value;
+        let refused = store
+            .create_quick(Provider::Codex, Some(work.clone()), None, &folder, 2)
+            .unwrap_err();
+        assert!(refused.to_string().contains("is not a"), "{refused}");
+        let quick = store
+            .create_quick(
+                Provider::Claude,
+                Some(work.clone()),
+                Some("opus".into()),
+                &folder,
+                3,
+            )
+            .unwrap()
+            .value;
+        let draft = QuickDraft {
+            text: "next time".into(),
+            project: Some(folder.as_str().into()),
+            provider: Some(Provider::Claude),
+            account: Some(work.clone()),
+            model: None,
+        };
+        store.set_quick_draft(draft.clone()).unwrap();
+
+        let reopened = Store::open(&path).unwrap();
+        let workspace = reopened.workspace();
+        let session = workspace
+            .sessions()
+            .iter()
+            .find(|s| s.id() == quick)
+            .unwrap();
+        assert_eq!(session.account(), Some(&work));
+        assert_eq!(session.model(), Some("opus"));
+        assert_eq!(session.context(), workspace.sessions()[0].context());
+        assert_eq!(workspace.selected_in(WindowId::FIRST), Some(shown));
+        assert!(workspace.deliveries().is_empty());
+        assert_eq!(workspace.preferences().quick(), &draft);
     }
 }

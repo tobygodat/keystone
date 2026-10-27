@@ -60,7 +60,7 @@ Prefer names and waits over coordinates and sleeps:
 
 A named click proves where the input went, not what it did. Confirm each step through the visible result and the saved state. Re-observe after state changes rather than batching across them. The feature map lists mouse and keyboard entry points; proving one does not prove the others.
 
-To restart, press Ctrl+Q through `input`, wait until `windows_list` is empty and the tracked PID has exited, then call `launch`. A graceful quit has exit code 0 in `doctor`; a crash during quit also removes the window. Launch reuses the run's SQLite database. The configured `state` path is the legacy JSON import location; `start` also returns the live `database` path. Run `doctor` again and inspect the restored UI. Never launch twice against a running instance.
+To restart, press Ctrl+Q through `input`, wait until `windows_list` is empty and the tracked PID has exited, then call `launch`. A graceful quit has exit code 0 in `doctor`; a crash during quit also removes the window. Launch reuses the run's SQLite database. The configured `state` path is the legacy JSON import location; `start` also returns the live `database` path. Run `doctor` again and inspect the restored UI. Never launch twice against a running instance. The one exception is `launch` with `args` `["--quick"]`, which runs `keystone-desktop --quick` in the private session: it hands the request to the running app and exits, and `doctor` lists it as exited. See [quick composer](features/quick.md).
 
 ## Evidence
 

@@ -624,6 +624,7 @@ crates/keystone-desktop/src/commands.rs
 	Open session in new window
 	Open settings
 	Previous tab
+	Quick composer
 	Quit
 	Remove worktree…
 	Rename session
@@ -974,6 +975,15 @@ crates/keystone-desktop/src/projects.rs
 crates/keystone-desktop/src/prompts.rs
 	Prompt no longer available.
 	Search prompts
+
+crates/keystone-desktop/src/quick.rs
+	Choose a project.
+	Draft not saved. {error}
+	Enter
+	Not sent. {error}
+	Quick composer
+	Send
+	Write a draft…
 
 crates/keystone-desktop/src/relative_time.rs
 	Apr

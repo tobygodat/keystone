@@ -39,6 +39,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Multiple windows](windows.md) covers new windows by keyboard, sidebar and tab menus, each window's own tabs, panes, selection and project, one session in two windows, closing a window while its work runs, the last window, and restoring every window after Quit or a crash.
 - [Notifications](notifications.md) covers desktop notifications for a finished turn, an approval request or a failed turn in a session nobody sees, their coalescing, opening a session from one, and their switches in Settings.
 - [Saved prompts](prompts.md) covers the prompt library in Settings → Prompts, global and project scope, inserting from the / menu and the palette's Insert prompt…, shortcuts that a provider command shares, and restart.
+- [Quick composer](quick.md) covers `keystone-desktop --quick` handing off to the running app or starting it, Ctrl+Alt+Space and the palette, the provider, account and model button, the project picker, Enter sending to a new session, Escape keeping the draft, and the draft after Quit.
 - [Notes](notes.md) covers the Notes surface: opening it from the palette, Ctrl+Shift+J and the + menu, one note per project kept in Keystone's database, autosave and restart, and Add to draft for a selection or the whole note.
 - [Command palette](palette.md) covers opening with Ctrl+K or Ctrl+Shift+P, filtering, running a command, dismissing with focus restored, and dialog blocking.
 

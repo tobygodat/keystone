@@ -232,6 +232,7 @@ fn global_runtime_loads_sends_answers_and_logs_both_providers_without_a_view(
             cx.set_global(DesktopApp {
                 state: state.clone(),
                 windows: Vec::new(),
+                quick: None,
             })
         });
         state.downgrade()
@@ -381,6 +382,7 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
         cx.set_global(DesktopApp {
             state: state.clone(),
             windows: Vec::new(),
+            quick: None,
         });
     });
     let window = cx.add_window(|window, cx| Keystone::new(state.clone(), false, window, cx));
@@ -637,6 +639,7 @@ fn dropping_the_global_owner_ends_only_owned_processes_without_a_view(
         cx.set_global(DesktopApp {
             state: state.clone(),
             windows: Vec::new(),
+            quick: None,
         })
     });
     drop(state);

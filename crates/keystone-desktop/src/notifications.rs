@@ -143,8 +143,7 @@ pub(crate) fn offer(alerts: Vec<(u64, Alert)>, cx: &mut App) {
     }
 }
 
-/// Shows the notification's session in the window showing it, else the window used
-/// last, else the first, and asks the compositor to focus that window.
+/// Shows the notification's session and counts its alert as seen.
 fn open(response: SystemNotificationResponse, cx: &mut App) {
     let Some(session) = response
         .tag
@@ -153,6 +152,16 @@ fn open(response: SystemNotificationResponse, cx: &mut App) {
     else {
         return;
     };
+    if let Some(app) = cx.try_global::<DesktopApp>() {
+        let state = app.state.clone();
+        state.update(cx, |state, _| state.notifier.seen(&[session]));
+    }
+    show(session, cx);
+}
+
+/// Shows `session` in the window showing it, else one holding its project, else the
+/// window used last, else the first, and asks the compositor to focus that window.
+pub(crate) fn show(session: u64, cx: &mut App) {
     let Some(state) = cx.try_global::<DesktopApp>().map(|app| app.state.clone()) else {
         return;
     };
@@ -160,7 +169,6 @@ fn open(response: SystemNotificationResponse, cx: &mut App) {
     if state_now.phase != crate::app_state::Phase::Running || state_now.session(session).is_none() {
         return;
     }
-    state.update(cx, |state, _| state.notifier.seen(&[session]));
     // The last window closed while a turn ran: the user wants Keystone back, so it
     // stays open instead of quitting once idle.
     if crate::open_windows(cx).is_empty() {

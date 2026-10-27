@@ -10,6 +10,7 @@ use crate::handoff::HandOff;
 use crate::notes::ToggleNotes;
 use crate::projects::{OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
+use crate::quick::OpenQuickComposer;
 use crate::second_opinion::AskSecondOpinion;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
@@ -272,6 +273,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-alt-n"],
         context: Some(APP),
         action: || Box::new(NewWindow),
+    },
+    Command {
+        id: "quick-composer",
+        label: "Quick composer",
+        keys: &["ctrl-alt-space"],
+        context: Some(APP),
+        action: || Box::new(OpenQuickComposer),
     },
     Command {
         id: "close-window",

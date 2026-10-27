@@ -517,7 +517,7 @@ class Run:
             self.bus.wait()
         self.bus.stdout.close()
 
-    def launch(self):
+    def launch(self, args=()):
         # KS-009: once a temporary virtual keyboard such as wtype's goes away,
         # Sway's seat has no keyboard. A new client then gets no keymap, and
         # GPUI 0.2.2 unwraps the missing keymap on its first modifiers event.
@@ -537,7 +537,7 @@ class Run:
             f'KEYSTONE_AUTOMATION_PATH={self.geometry}',
             f'DBUS_SESSION_BUS_ADDRESS={self.bus_address}', *extra,
             sys.executable, '-I', '-c', REAPER, str(status), str(log),
-            str(self.binary)]})
+            str(self.binary), *args]})
         launched = result.get('structuredContent', {})
         deadline = time.monotonic() + 10
         while (record := read_exit(status)) is None:
@@ -832,8 +832,10 @@ TOOLS = [
     ('workspace', 'Read saved SQLite workspace projections in one read-only transaction.', schema()),
     ('snapshot', 'Back up SQLite including WAL commits and export its workspace JSON into evidence.',
      schema()),
-    ('launch', 'Relaunch the app against the same workspace after it has quit. Never while it runs.',
-     schema()),
+    ('launch', 'Relaunch the app against the same workspace after it has quit. Never while it runs, '
+     'except with args ["--quick"], which hands the quick composer to the running app and exits.',
+     schema({'args': {'type': 'array', 'items': {'type': 'string'}, 'default': [],
+                      'description': 'Arguments after the binary, such as ["--quick"]'}})),
     ('call', 'Call any computer-use-mcp tool directly, such as windows_list.',
      schema({'tool': {'type': 'string'}, 'arguments': {'type': 'object'}}, ['tool'])),
     ('stop', 'Stop the desktop and app, snapshot state, and remove the scratch directory. '
@@ -916,7 +918,10 @@ class Server:
         if name == 'snapshot':
             return run.snapshot(), None
         if name == 'launch':
-            return run.launch(), None
+            args = arguments.get('args', [])
+            if not all(isinstance(arg, str) for arg in args):
+                raise ValueError('args must be strings')
+            return run.launch(args), None
         if name == 'call':
             result = run.call(arguments['tool'], arguments.get('arguments', {}))
             images = [c for c in result.get('content', []) if c.get('type') == 'image']
