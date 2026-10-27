@@ -42,7 +42,7 @@ pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
 };
 pub use note::Note;
-pub use project::{Project, ProjectId};
+pub use project::{Project, ProjectColor, ProjectId};
 use project::{ProjectLayouts, ProjectMap};
 pub use prompt::{Prompt, PromptFields};
 use session_context::SavedSessionContext;

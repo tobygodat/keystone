@@ -4,6 +4,7 @@ use crate::fuzzy;
 use crate::icon::{Icon, IconName};
 use crate::kbd::Kbd;
 use crate::label::Label;
+use crate::monogram::Monogram;
 use crate::styled_ext::{StyledExt, h_flex, v_flex};
 use crate::text_input::{self, InputMode, TextInput};
 use crate::theme::ActiveTheme;
@@ -42,6 +43,7 @@ pub struct PaletteItem {
     pub kbd: Option<SharedString>,
     /// Whether the palette offers to remove it, through `on_remove`.
     pub removable: bool,
+    pub monogram: Option<Monogram>,
 }
 
 impl PaletteItem {
@@ -52,7 +54,14 @@ impl PaletteItem {
             detail: None,
             kbd: None,
             removable: false,
+            monogram: None,
         }
+    }
+
+    /// A tile before the label.
+    pub fn monogram(mut self, monogram: Monogram) -> Self {
+        self.monogram = Some(monogram);
+        self
     }
 
     /// A muted note after the label.
@@ -335,6 +344,7 @@ fn render_row(
         .gap(spacing::SM)
         .rounded(radius::MENU_ROW)
         .when(highlighted, |d| d.bg(cx.theme().colors.selection_fill))
+        .children(item.monogram.clone())
         .child(div().flex_none().child(label))
         .child(
             div()

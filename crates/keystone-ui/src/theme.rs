@@ -117,6 +117,25 @@ pub struct Colors {
     pub code_text: Hsla,
     pub selection: Hsla,
     pub caret: Hsla,
+
+    /// Project tiles, in the order of `keystone_core::ProjectColor::ALL`.
+    pub tiles: [Tint; 7],
+}
+
+/// A colored tile and the text on it.
+#[derive(Clone, Copy)]
+pub struct Tint {
+    pub fill: Hsla,
+    pub text: Hsla,
+}
+
+/// White text on each fill, at least 4.5:1, and each fill at least 3:1 against the
+/// sidebar, overlay and background. A highlighted row's wash is not covered.
+fn tiles(fills: [u32; 7]) -> [Tint; 7] {
+    fills.map(|fill| Tint {
+        fill: rgb(fill).into(),
+        text: rgb(0xffffff).into(),
+    })
 }
 
 #[derive(Clone)]
@@ -245,6 +264,10 @@ impl Colors {
             code_text: rgb(0xb8b8b8).into(),
             selection: rgba(0x5b87d670).into(),
             caret: rgb(0xe6e6e6).into(),
+
+            tiles: tiles([
+                0xaa5a54, 0x946749, 0x3e7d53, 0x3c7b78, 0x5072a3, 0x7f62b2, 0xaa5386,
+            ]),
         }
     }
 
@@ -295,6 +318,10 @@ impl Colors {
             code_text: rgb(0x555555).into(),
             selection: rgba(0x3a6ea540).into(),
             caret: rgb(0x262626).into(),
+
+            tiles: tiles([
+                0xae4e47, 0x94603d, 0x32794a, 0x307674, 0x446da7, 0x7d58bb, 0xad4682,
+            ]),
         }
     }
 }
@@ -316,6 +343,34 @@ mod tests {
             .map(|row| row.map(px))
         );
         assert_eq!(Density::ALL.map(|d| d.pad(px(7.))), [4., 5., 7.].map(px));
+    }
+
+    fn contrast(a: Hsla, b: Hsla) -> f32 {
+        let luminance = |color: Hsla| {
+            let rgba = color.to_rgb();
+            let channel = |c: f32| {
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(rgba.r) + 0.7152 * channel(rgba.g) + 0.0722 * channel(rgba.b)
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn project_tiles_meet_contrast_in_both_themes() {
+        for colors in [Colors::light(), Colors::dark()] {
+            for tint in colors.tiles {
+                assert!(contrast(tint.text, tint.fill) >= 4.5, "{:?}", tint.fill);
+                for surface in [colors.sidebar, colors.overlay, colors.background] {
+                    assert!(contrast(tint.fill, surface) >= 3., "{:?}", tint.fill);
+                }
+            }
+        }
     }
 
     #[test]

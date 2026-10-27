@@ -265,3 +265,136 @@ fn a_duplicate_project_row_is_refused() {
         "{refused}"
     );
 }
+
+#[test]
+fn a_chosen_project_color_persists_and_automatic_restores_the_path_color() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let (a, b, _) = folders(directory.path());
+    let automatic_b = ProjectColor::automatic(&b);
+    let chosen = ProjectColor::ALL
+        .into_iter()
+        .find(|color| *color != automatic_b)
+        .unwrap();
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .open_project(WindowId::FIRST, &b, Some(&a), None, 10)
+            .unwrap();
+        assert_eq!(store.workspace().project_color(&b), automatic_b);
+        store.set_project_color(&b, Some(chosen)).unwrap();
+    }
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.workspace().project_color(&b), chosen);
+    assert_eq!(
+        store.workspace().project_color(&a),
+        ProjectColor::automatic(&a)
+    );
+    let payload: String = rusqlite::Connection::open(store.path())
+        .unwrap()
+        .query_one(
+            "SELECT payload FROM projects WHERE id=?1",
+            [b.path().to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains(r#""color":"#), "{payload}");
+
+    store.set_project_color(&b, None).unwrap();
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.workspace().project_color(&b), automatic_b);
+    assert_eq!(
+        store
+            .workspace()
+            .projects()
+            .iter()
+            .find(|p| p.id() == b)
+            .unwrap()
+            .color(),
+        None
+    );
+}
+
+#[test]
+fn the_automatic_color_follows_the_path_alone() {
+    assert_eq!(
+        ["/home/me/alpha", "/home/me/bravo", "/srv/keystone", "/"]
+            .map(|path| ProjectColor::automatic(&ProjectId::from_saved(path))),
+        [
+            ProjectColor::Red,
+            ProjectColor::Red,
+            ProjectColor::Green,
+            ProjectColor::Pink
+        ],
+        "pinned so a change to the hash, which recolors every project, fails here"
+    );
+}
+
+#[test]
+fn only_a_listed_project_takes_a_color() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let (a, b, _) = folders(directory.path());
+    let mut store = Store::open(&path).unwrap();
+    store
+        .open_project(WindowId::FIRST, &a, None, None, 1)
+        .unwrap();
+    let refused = store
+        .set_project_color(&b, Some(ProjectColor::Teal))
+        .err()
+        .unwrap();
+    assert!(
+        refused.to_string().contains("not on the project list"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_color_from_a_newer_release_reads_as_automatic() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    drop(Store::open(&path).unwrap());
+    rusqlite::Connection::open(path.with_extension("sqlite3"))
+        .unwrap()
+        .execute_batch(
+            r#"INSERT INTO projects VALUES ('/x', 0, '{"path":"/x","color":"ultraviolet"}');
+               INSERT INTO projects VALUES ('/y', 1, '{"path":"/y","color":"teal"}');"#,
+        )
+        .unwrap();
+    let mut store = Store::open(&path).unwrap();
+    let x = ProjectId::from_saved("/x");
+    assert_eq!(
+        store.workspace().project_color(&x),
+        ProjectColor::automatic(&x)
+    );
+    assert_eq!(
+        store
+            .workspace()
+            .project_color(&ProjectId::from_saved("/y")),
+        ProjectColor::Teal
+    );
+    let saved = |store: &Store| -> String {
+        rusqlite::Connection::open(store.path())
+            .unwrap()
+            .query_one("SELECT payload FROM projects WHERE id='/x'", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    store
+        .open_project(WindowId::FIRST, &x, None, None, 50)
+        .unwrap();
+    assert!(
+        saved(&store).contains(r#""color":"ultraviolet""#),
+        "a write that keeps the color keeps the newer release's value: {}",
+        saved(&store)
+    );
+    store
+        .set_project_color(&x, Some(ProjectColor::Blue))
+        .unwrap();
+    assert!(
+        saved(&store).contains(r#""color":"blue""#),
+        "{}",
+        saved(&store)
+    );
+}

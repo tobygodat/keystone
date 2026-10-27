@@ -624,8 +624,10 @@ crates/keystone-desktop/src/changes.rs
 
 crates/keystone-desktop/src/commands.rs
 	Attach files…
+	Change project color…
 	Close tab
 	Close window
+	Color
 	Copy pull request link
 	Customize layout
 	Focus composer
@@ -1015,19 +1017,28 @@ crates/keystone-desktop/src/preview.rs
 	Open in player
 
 crates/keystone-desktop/src/projects.rs
+	Automatic
+	Blue
+	Color not saved. {error}
 	Ctrl+O
 	Ctrl+Shift+O
 	Current
 	Folder missing
+	Green
 	No folder here yet
 	No matches. Type a path.
 	No project
 	Open folder…
+	Orange
+	Pink
 	Project not opened. {error}
 	Project not removed. {error}
 	Project or folder path
+	Purple
+	Red
 	Switch project · {error}
 	Switch project · {}
+	Teal
 	Type a full path, starting with / or ~.
 	Window's project not saved. {error}
 	{path} is no longer on the project list.

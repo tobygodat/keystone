@@ -699,3 +699,159 @@ fn a_session_folder_inside_another_is_offered_as_the_outer_one(cx: &mut TestAppC
         "the nested folder's session is gamma's too"
     );
 }
+
+fn palette_rows(
+    view: &Entity<Keystone>,
+    cx: &mut VisualTestContext,
+) -> Vec<(String, String, Option<Monogram>)> {
+    view.read_with(cx, |this, cx| {
+        this.palette
+            .as_ref()
+            .expect("the palette is open")
+            .state
+            .read(cx)
+            .matches()
+            .map(|item| {
+                (
+                    item.label.to_string(),
+                    item.detail.clone().unwrap_or_default().to_string(),
+                    item.monogram.clone(),
+                )
+            })
+            .collect()
+    })
+}
+
+fn saved_color(path: &Path, project: &ProjectId) -> Option<ProjectColor> {
+    Store::open(path)
+        .unwrap()
+        .workspace()
+        .projects()
+        .into_iter()
+        .find(|p| p.id() == *project)
+        .and_then(|p| p.color())
+}
+
+#[gpui::test]
+fn a_right_click_on_the_project_changes_its_color_and_automatic_restores_it(
+    cx: &mut TestAppContext,
+) {
+    let (folders, path) = seeded(|store, folders| {
+        store
+            .open_project(WindowId::FIRST, &folders.beta, None, None, 5)
+            .unwrap();
+        store
+            .open_project(WindowId::FIRST, &folders.alpha, None, Some(1), 10)
+            .unwrap();
+    });
+    launch(&path, cx);
+    let (view, handle) = first(cx);
+    let cx = visual(handle, cx);
+    let automatic = ProjectColor::automatic(&folders.alpha);
+    let chosen = ProjectColor::ALL
+        .into_iter()
+        .find(|color| *color != automatic)
+        .unwrap();
+
+    let header = cx.debug_bounds("project-switcher").unwrap().center();
+    cx.simulate_mouse_down(header, gpui::MouseButton::Right, gpui::Modifiers::none());
+    cx.simulate_mouse_up(header, gpui::MouseButton::Right, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        view.read_with(cx, |this, _| this.projects.is_none()),
+        "a right click opens the colors, not the project list"
+    );
+    let rows = palette_rows(&view, cx);
+    assert_eq!(
+        rows.iter()
+            .map(|(label, ..)| label.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Automatic",
+            "Red",
+            "Orange",
+            "Green",
+            "Teal",
+            "Blue",
+            "Purple",
+            "Pink"
+        ]
+    );
+    assert_eq!(rows[0].1, "Current");
+    assert_eq!(rows[0].2, Some(Monogram::new("alpha", automatic.index())));
+    for (row, color) in rows[1..].iter().zip(ProjectColor::ALL) {
+        assert_eq!(row.1, "");
+        assert_eq!(row.2, Some(Monogram::new("alpha", color.index())));
+    }
+
+    let name = rows[chosen.index() + 1].0.clone();
+    cx.simulate_input(&name);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |this, _| this.palette.is_none()));
+    assert_eq!(saved_color(&path, &folders.alpha), Some(chosen));
+    assert_eq!(saved_color(&path, &folders.beta), None);
+
+    cx.simulate_keystrokes("ctrl-o");
+    let tiles: Vec<_> = view.read_with(cx, |this, cx| {
+        this.projects
+            .as_ref()
+            .unwrap()
+            .state
+            .read(cx)
+            .matches()
+            .map(|item| item.monogram.clone())
+            .collect()
+    });
+    assert_eq!(
+        tiles,
+        [
+            Some(Monogram::new("alpha", chosen.index())),
+            Some(Monogram::new(
+                "beta",
+                ProjectColor::automatic(&folders.beta).index()
+            )),
+            None,
+        ]
+    );
+    cx.simulate_keystrokes("escape");
+
+    cx.simulate_keystrokes("ctrl-alt-k");
+    cx.run_until_parked();
+    let rows = palette_rows(&view, cx);
+    assert_eq!(rows[0].1, "");
+    assert_eq!(rows[chosen.index() + 1].1, "Current");
+    cx.simulate_input("Automatic");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(saved_color(&path, &folders.alpha), None);
+}
+
+#[gpui::test]
+fn a_color_chosen_in_one_window_repaints_another_on_the_project(cx: &mut TestAppContext) {
+    let (folders, path) = seeded(|_, _| {});
+    launch(&path, cx);
+    let (view, handle) = first(cx);
+    handle
+        .update(cx, |_, window, cx| {
+            view.update(cx, |this, cx| this.open_new_window(None, window, cx))
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let second = cx.update(|cx| open_windows(cx))[1].clone();
+    let repaints = std::rc::Rc::new(std::cell::Cell::new(0));
+    let _observing = cx.update(|cx| {
+        let repaints = repaints.clone();
+        cx.observe(&second, move |_, _| repaints.set(repaints.get() + 1))
+    });
+    let cx = visual(handle, cx);
+    assert_eq!(project(&second, cx), folders.alpha);
+    cx.simulate_keystrokes("ctrl-alt-k");
+    cx.run_until_parked();
+    cx.simulate_input("Teal");
+    repaints.set(0);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(saved_color(&path, &folders.alpha), Some(ProjectColor::Teal));
+    assert!(repaints.get() > 0, "the other window repaints its tile");
+}

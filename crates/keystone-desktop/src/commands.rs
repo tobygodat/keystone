@@ -8,7 +8,7 @@ use crate::files::ToggleFiles;
 use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
 use crate::notes::ToggleNotes;
-use crate::projects::{OpenProject, SwitchProject};
+use crate::projects::{ChangeProjectColor, OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
 use crate::quick::OpenQuickComposer;
 use crate::second_opinion::AskSecondOpinion;
@@ -254,6 +254,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         action: || Box::new(OpenProject),
     },
     Command {
+        id: "change-project-color",
+        label: "Change project color…",
+        keys: &["ctrl-alt-k"],
+        context: Some(APP),
+        action: || Box::new(ChangeProjectColor),
+    },
+    Command {
         id: "new-worktree-session",
         label: "New session in worktree…",
         keys: &["ctrl-alt-g"],
@@ -440,8 +447,16 @@ fn kbd_text(keys: &str) -> String {
 pub(crate) struct Palette {
     pub(crate) state: Entity<CommandPaletteState>,
     pub(crate) restore: Option<FocusHandle>,
-    /// The tab whose destination the palette lists, instead of commands.
-    moving: Option<ViewId>,
+    listing: Listing,
+}
+
+/// What the palette lists.
+pub(crate) enum Listing {
+    Commands,
+    /// The windows this tab can move to.
+    Destinations(ViewId),
+    /// The colors the window's project can take.
+    ProjectColors,
 }
 
 /// The palette row that moves a tab into a new window.
@@ -456,13 +471,13 @@ impl Keystone {
         self.filter_menu = false;
         self.approval_menu = false;
         self.model_menu = None;
-        self.open_palette(palette_items(), None, window, cx);
+        self.open_palette(palette_items(), Listing::Commands, window, cx);
     }
 
-    fn open_palette(
+    pub(crate) fn open_palette(
         &mut self,
         items: Vec<PaletteItem>,
-        moving: Option<ViewId>,
+        listing: Listing,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -472,12 +487,15 @@ impl Keystone {
             .and_then(|list| list.restore)
             .or_else(|| self.prompt_list.take().and_then(|list| list.restore))
             .or_else(|| window.focused(cx));
-        let state = cx.new(|cx| CommandPaletteState::new(items, cx));
+        let state = cx.new(|cx| match listing {
+            Listing::ProjectColors => CommandPaletteState::with_placeholder(items, "Color", cx),
+            Listing::Commands | Listing::Destinations(_) => CommandPaletteState::new(items, cx),
+        });
         state.focus_handle(cx).focus(window, cx);
         self.palette = Some(Palette {
             state,
             restore,
-            moving,
+            listing,
         });
         self.refresh(cx);
     }
@@ -508,10 +526,10 @@ impl Keystone {
             })
             .collect();
         items.push(PaletteItem::new(NEW_WINDOW_ROW, "New window"));
-        self.open_palette(items, Some(view), window, cx);
+        self.open_palette(items, Listing::Destinations(view), window, cx);
     }
 
-    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(palette) = self.palette.take() else {
             return;
         };
@@ -524,7 +542,13 @@ impl Keystone {
 
     /// Closes first so the action reaches the restored focus, as its shortcut would.
     fn confirm_palette(&mut self, item: &PaletteItem, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.palette.as_ref().and_then(|palette| palette.moving) {
+        let Some(palette) = self.palette.as_ref() else {
+            return;
+        };
+        if let Listing::ProjectColors = palette.listing {
+            return self.confirm_project_color(item, window, cx);
+        }
+        if let Listing::Destinations(view) = palette.listing {
             self.close_palette(window, cx);
             let source = cx.entity();
             let destination = if item.id == NEW_WINDOW_ROW {

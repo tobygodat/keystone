@@ -9,16 +9,39 @@ use gpui::{
     IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder, px,
 };
-use keystone_core::{ProjectId, Session, SessionContext};
+use keystone_core::{ProjectColor, ProjectId, Session, SessionContext};
 use keystone_ui::prelude::*;
-use keystone_ui::{CommandPalette, CommandPaletteState, PaletteItem};
+use keystone_ui::{CommandPalette, CommandPaletteState, Monogram, PaletteItem};
 use std::path::{Path, PathBuf};
 
-gpui::actions!(keystone, [SwitchProject, OpenProject]);
+gpui::actions!(keystone, [SwitchProject, OpenProject, ChangeProjectColor]);
 
 const LISTED: &str = "project:";
 const TYPED: &str = "path:";
 const OPEN_FOLDER: &str = "open-folder";
+const COLOR: &str = "color:";
+const AUTOMATIC: &str = "automatic";
+
+/// What the color list and its row ids call `color`.
+fn color_name(color: Option<ProjectColor>) -> &'static str {
+    match color {
+        None => "Automatic",
+        Some(ProjectColor::Red) => "Red",
+        Some(ProjectColor::Orange) => "Orange",
+        Some(ProjectColor::Green) => "Green",
+        Some(ProjectColor::Teal) => "Teal",
+        Some(ProjectColor::Blue) => "Blue",
+        Some(ProjectColor::Purple) => "Purple",
+        Some(ProjectColor::Pink) => "Pink",
+    }
+}
+
+fn color_id(color: Option<ProjectColor>) -> String {
+    match color {
+        None => format!("{COLOR}{AUTOMATIC}"),
+        Some(_) => format!("{COLOR}{}", color_name(color).to_lowercase()),
+    }
+}
 
 /// The open project list and the focus it returns to when it closes.
 pub(crate) struct ProjectList {
@@ -74,6 +97,70 @@ fn typed_item(query: &str) -> Option<PaletteItem> {
 }
 
 impl Keystone {
+    /// `project`'s tile.
+    pub(crate) fn project_tile(&self, project: &ProjectId, cx: &gpui::App) -> Monogram {
+        let workspace = self.state.read(cx).store().workspace();
+        Monogram::new(project.name(), workspace.project_color(project).index())
+    }
+
+    /// Lists the colors the window's project can take, its tile shown in each.
+    pub(crate) fn open_color_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        let Ok(project) = self.presentation.project.clone() else {
+            return;
+        };
+        self.new_menu = false;
+        self.filter_menu = false;
+        self.approval_menu = false;
+        self.model_menu = None;
+        let workspace = self.state.read(cx).store().workspace();
+        let chosen = workspace
+            .projects()
+            .into_iter()
+            .find(|p| p.id() == project)
+            .and_then(|p| p.color());
+        let items = std::iter::once(None)
+            .chain(ProjectColor::ALL.map(Some))
+            .map(|color| {
+                let shown = color.unwrap_or_else(|| ProjectColor::automatic(&project));
+                let item = PaletteItem::new(color_id(color), color_name(color))
+                    .monogram(Monogram::new(project.name(), shown.index()));
+                if color == chosen {
+                    item.detail("Current")
+                } else {
+                    item
+                }
+            })
+            .collect();
+        self.open_palette(items, crate::commands::Listing::ProjectColors, window, cx);
+    }
+
+    pub(crate) fn confirm_project_color(
+        &mut self,
+        item: &PaletteItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_palette(window, cx);
+        let Ok(project) = self.presentation.project.clone() else {
+            return;
+        };
+        let Some(color) = std::iter::once(None)
+            .chain(ProjectColor::ALL.map(Some))
+            .find(|&color| color_id(color) == item.id.as_ref())
+        else {
+            return;
+        };
+        match self
+            .state
+            .update(cx, |state, cx| state.set_project_color(&project, color, cx))
+        {
+            Ok(applied) => self.error = crate::durability_warning(applied.durability),
+            Err(error) => self.error = Some(format!("Color not saved. {error}")),
+        }
+        self.refresh(cx);
+    }
+
     /// The session the window shows on opening `project`: the one it has selected when
     /// that is the project's, else `returning`, the one it showed when it last left, else
     /// the project's most recently viewed session.
@@ -252,7 +339,8 @@ impl Keystone {
                     format!("{LISTED}{}", id.path().display()),
                     id.name().to_owned(),
                 )
-                .detail(detail.join(" · "));
+                .detail(detail.join(" · "))
+                .monogram(self.project_tile(&id, cx));
                 if Some(&id) == current || elsewhere.contains(&id) || unlisted.contains(&id) {
                     item
                 } else {
@@ -411,6 +499,12 @@ impl Keystone {
                 true,
             ),
         };
+        let tile = self
+            .presentation
+            .project
+            .as_ref()
+            .ok()
+            .map(|project| self.project_tile(project, cx));
         h_flex()
             .id("project-switcher")
             .automation_id("project-switcher")
@@ -424,12 +518,19 @@ impl Keystone {
             .cursor_pointer()
             .when(self.projects.is_some(), |d| d.bg(colors.element_hover))
             .hover(|d| d.bg(colors.element_hover))
-            .when(self.projects.is_none(), |d| {
+            .when(self.projects.is_none() && self.palette.is_none(), |d| {
                 d.tooltip(Tooltip::with_key(tooltip, "Ctrl+O").builder())
             })
             .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                 this.open_projects(None, window, cx)
             }))
+            .on_mouse_up(
+                gpui::MouseButton::Right,
+                self.scoped_listener(cx, |this, _: &gpui::MouseUpEvent, window, cx| {
+                    this.open_color_palette(window, cx)
+                }),
+            )
+            .children(tile)
             .child(
                 div().flex_1().min_w_0().child(
                     Label::new(name)

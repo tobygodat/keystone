@@ -3741,6 +3741,12 @@ impl Render for Keystone {
             )
             .on_action(self.scoped_listener(
                 cx,
+                |this, _: &projects::ChangeProjectColor, window, cx| {
+                    this.open_color_palette(window, cx)
+                },
+            ))
+            .on_action(self.scoped_listener(
+                cx,
                 |this, _: &attachments::AttachFiles, window, cx| {
                     this.choose_attachments(window, cx)
                 },

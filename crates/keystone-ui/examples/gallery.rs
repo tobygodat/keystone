@@ -326,7 +326,19 @@ impl Render for Gallery {
                     .w(px(160.))
                     .child(Label::new("A long session title that truncates").truncate())
                     .into_any_element(),
-            ]));
+            ]))
+            .child(row([
+                "keystone",
+                "docs",
+                "2026-plans",
+                "web",
+                "api",
+                "infra",
+                "zed",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(tint, name)| Monogram::new(name, tint).into_any_element())));
         let list = v_flex().w(px(256.)).gap(px(2.)).children(
             [
                 "Refactor storage layer",

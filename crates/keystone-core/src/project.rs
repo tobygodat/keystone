@@ -74,6 +74,58 @@ impl ProjectId {
     }
 }
 
+/// The color of a project's tile, from a fixed palette the theme draws for light and
+/// dark.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectColor {
+    Red,
+    Orange,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+    Pink,
+}
+
+impl ProjectColor {
+    pub const ALL: [Self; 7] = [
+        Self::Red,
+        Self::Orange,
+        Self::Green,
+        Self::Teal,
+        Self::Blue,
+        Self::Purple,
+        Self::Pink,
+    ];
+
+    /// The project's color until the user chooses one: an FNV-1a hash of its path, so
+    /// it stays the same across launches and releases.
+    pub fn automatic(project: &ProjectId) -> Self {
+        let hash = project
+            .0
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        Self::ALL[(hash % Self::ALL.len() as u64) as usize]
+    }
+
+    /// Its place in [`Self::ALL`], which the theme's tile colors follow.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// A saved choice. One this release does not know, from a newer one, reads as
+/// automatic and is written back unchanged until the user chooses another.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(untagged)]
+enum SavedColor {
+    Known(ProjectColor),
+    Unknown(Value),
+}
+
 /// A folder the user opened as a project, listed in its own projection. Forgetting
 /// one only marks this entry removed: its folder, its sessions and its layouts stay,
 /// and the mark keeps its sessions' folder from being offered again.
@@ -85,6 +137,9 @@ pub struct Project {
     last_opened: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     removed: bool,
+    /// The user's choice. `None` is automatic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<SavedColor>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -95,7 +150,16 @@ impl Project {
             path: id.0.clone(),
             last_opened: Some(last_opened),
             removed: false,
+            color: None,
             unknown: Map::new(),
+        }
+    }
+
+    /// The color the user chose, `None` while it is automatic.
+    pub fn color(&self) -> Option<ProjectColor> {
+        match self.color {
+            Some(SavedColor::Known(color)) => Some(color),
+            Some(SavedColor::Unknown(_)) | None => None,
         }
     }
 
@@ -193,6 +257,15 @@ impl<T: Clone> ProjectMap<T> {
 }
 
 impl Workspace {
+    /// The color `project`'s tile wears: the user's choice, else its automatic one.
+    pub fn project_color(&self, project: &ProjectId) -> ProjectColor {
+        self.projects
+            .iter()
+            .find(|p| p.is(project))
+            .and_then(Project::color)
+            .unwrap_or_else(|| ProjectColor::automatic(project))
+    }
+
     /// Lists `project` as opened at `now` unless it is listed already.
     pub(crate) fn list_project(&mut self, project: &ProjectId, now: u64) {
         match self.projects.iter_mut().find(|p| p.is(project)) {
@@ -235,6 +308,28 @@ impl Store {
             Some(listed) => listed.opened(now),
             None => next.projects.push(Project::new(project, now)),
         }
+        self.commit(next, self.next_id)
+    }
+
+    /// Gives listed `project` the tile color `color`, or its automatic one for `None`.
+    pub fn set_project_color(
+        &mut self,
+        project: &ProjectId,
+        color: Option<ProjectColor>,
+    ) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        let Some(listed) = next
+            .projects
+            .iter_mut()
+            .find(|p| p.is(project) && !p.removed)
+        else {
+            return Err(invalid(format!(
+                "{} is not on the project list",
+                project.path().display()
+            ))
+            .into());
+        };
+        listed.color = color.map(SavedColor::Known);
         self.commit(next, self.next_id)
     }
 

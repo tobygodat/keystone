@@ -7,7 +7,7 @@ use keystone_agent::recovery::{self, RecoveryBatch, Snapshot, TurnEvidence};
 use keystone_agent::{Catalog, Commands, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{
-    AccountId, AccountUsage, Applied, Composition, LimitWindow, Placement, ProjectId,
+    AccountId, AccountUsage, Applied, Composition, LimitWindow, Placement, ProjectColor, ProjectId,
     SavedComposition, SessionTabs, ViewId, WindowId, WindowView, WorkingDirectory,
 };
 use std::collections::BTreeMap;
@@ -1253,6 +1253,22 @@ impl AppState {
         self.store
             .open_project(window, project, left, selected, now)
             .map_err(Into::into)
+    }
+
+    /// Every window repaints, since another may show the same project.
+    pub(crate) fn set_project_color(
+        &mut self,
+        project: &ProjectId,
+        color: Option<ProjectColor>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        let result = self.store.set_project_color(project, color);
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result.map_err(Into::into)
     }
 
     /// Takes `project` off the project list. See

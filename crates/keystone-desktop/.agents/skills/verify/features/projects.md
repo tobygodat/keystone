@@ -13,6 +13,8 @@ Each window shows one project at a time and keeps its own. The project decides t
 - Every window keeps its own project. A new window opens on the project of the window it came from.
 - A relaunch shows each window's last project and session. At launch, `KEYSTONE_PROJECT_DIR` opens the first window on that folder instead. A window that never saved a project, as after an upgrade from before projects, opens on the folder of the session it shows, else on the folder Keystone was launched in. A window saves and lists the project it opens on at once, so a crash does not lose it. A saved selection of another project's session gives way to one of this project's; a window with no selection stays empty. Choosing a folder outside the project for a conversation from before folders moves the window to that folder's project, so the conversation stays shown.
 - A project whose folder is missing stays listed with `Folder missing`, and the switcher says so. Its sessions stay readable; no session can start there.
+- Each project wears a tile (`Monogram`): the first letter or digit of its folder name on one of seven colors, in `project-switcher` and on its rows in the list. Until the user picks one, the color comes from a hash of the project's path, so it never changes on relaunch. A project whose folder is missing keeps its tile.
+- A right click on `project-switcher`, Ctrl+Alt+K and the palette's **Change project color…** list **Automatic** and the seven colors, each showing the tile in that color, with `Current` on the project's choice. Choosing one saves it with the project in `workspace.projects` as `color`, and every window showing the project repaints; **Automatic** removes it. A color a newer release saved reads as automatic and is kept until the user chooses another.
 - Shift+Delete on a highlighted row, or its `projects-remove` button, takes the project off the list. The window's own project and projects other windows show cannot be removed. Nothing on disk changes, and its sessions and layouts stay saved. The removal is remembered, so its sessions' folder is not offered again as `Has sessions`; typing its path opens it again.
 
 ## Driving it with keystone-verify
@@ -27,6 +29,7 @@ Make two git repos A and B under the run's scratch folder. Run the driver with a
 - Quit and `launch`. Each window comes back on its project and session.
 - Quit, rename B's folder, `launch`. The window on B still lists B's session, and the switcher says `Folder missing`.
 - Close the window on B, open the list in the other, highlight B and press Shift+Delete. Require it gone from the list and marked `"removed": true` in `workspace.projects`, B's folder and files untouched, and its session still saved.
+- Colors: with A and B listed, their tiles show distinct automatic colors (pick folder names whose colors differ; `ProjectColor::automatic` decides). Right-click `project-switcher` on B, type a color and press Enter: B's tile changes and `workspace.projects` saves `color` for B only. Quit and `launch`: B keeps it and A's is unchanged. Press Ctrl+Alt+K, choose **Automatic**: `color` is gone and the hash color is back.
 - In a separate run with `KEYSTONE_PROJECT_DIR=A`, the first window opens on A, and Quit lists A.
 
 ## Gotchas
