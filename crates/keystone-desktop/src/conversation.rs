@@ -50,6 +50,14 @@ pub struct ForkMark {
     pub point: ForkPoint,
 }
 
+/// The rows of one turn that has a checkpoint of its repository's files, and its
+/// number among the session's checkpoints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckpointMark {
+    pub rows: Range<usize>,
+    pub turn: u64,
+}
+
 /// How a fork from a row can go.
 #[derive(Debug, PartialEq)]
 pub enum ForkFrom<'a> {
@@ -147,6 +155,31 @@ pub struct Conversation {
     limit: Option<UsageLimit>,
     /// Each turn the provider named a fork point for, in row order.
     pub forks: Vec<ForkMark>,
+    /// Each turn given a checkpoint, in row order. A checkpoint is only on disk once
+    /// the app has saved it, and only until it is pruned.
+    pub checkpoints: Vec<CheckpointMark>,
+    /// The highest checkpoint number this session has given a turn.
+    last_checkpoint: u64,
+    /// A checkpoint given to a turn that just ended, for the app to save.
+    checkpoint_due: Option<u64>,
+    /// A turn end was applied that [`Conversation::take_turn_end`] has not taken.
+    turn_ended: bool,
+}
+
+/// Marks that log positions `first` and `last` bound, by the rows they are at now.
+/// One whose rows are gone or out of order is dropped, and so is one overlapping an
+/// earlier mark.
+fn placed<T>(spans: Vec<(T, usize, usize)>, at: &HashMap<usize, usize>) -> Vec<(Range<usize>, T)> {
+    let mut marks: Vec<(Range<usize>, T)> = spans
+        .into_iter()
+        .filter_map(|(mark, first, last)| {
+            let (first, last) = (*at.get(&first)?, *at.get(&last)?);
+            (first <= last).then_some((first..last + 1, mark))
+        })
+        .collect();
+    marks.sort_by_key(|(rows, _)| rows.start);
+    marks.dedup_by(|(later, _), (kept, _)| later.start < kept.end);
+    marks
 }
 
 /// Identifies a run of the app in the log. Each conversation takes a new one, unique
@@ -284,6 +317,7 @@ impl Conversation {
         let mut last_local = false;
         let mut exited = false;
         let mut points: Vec<(ForkPoint, usize, usize)> = Vec::new();
+        let mut checkpoints: Vec<(u64, usize, usize)> = Vec::new();
         // The marker for a recovery batch the log rejected is named after the batch, and
         // a Retry that saved the batch later means nothing was lost.
         let saved: BTreeSet<String> = entries
@@ -307,7 +341,8 @@ impl Conversation {
                 | Entry::ProviderExited
                 | Entry::ForkPoint { .. }
                 | Entry::ForkPointsLost
-                | Entry::OlderNotImported => (None, None),
+                | Entry::OlderNotImported
+                | Entry::Checkpoint { .. } => (None, None),
                 Entry::Item { seq, run, .. }
                 | Entry::Approval { seq, run, .. }
                 | Entry::TurnEnded { seq, run, .. }
@@ -323,15 +358,15 @@ impl Conversation {
                 // another turn never moves its point. A row is named by the log entry
                 // that added it, which the ordering below keeps.
                 Entry::ForkPoint { point, first, last } => {
-                    let turn = &self.rows[self.turn_start..];
-                    let find = |found: Option<usize>| found.map(|n| origins[self.turn_start + n]);
-                    let named =
-                        |row: &Row, id: &str| matches!(row, Row::Item(item) if item.id == id);
-                    if let (Some(first), Some(last)) = (
-                        find(turn.iter().position(|row| named(row, first))),
-                        find(turn.iter().rposition(|row| named(row, last))),
-                    ) {
+                    if let Some((first, last)) = self.logged_span(&origins, first, last) {
                         points.push((point.clone(), first, last));
+                    }
+                    continue;
+                }
+                Entry::Checkpoint { turn, first, last } => {
+                    self.last_checkpoint = self.last_checkpoint.max(*turn);
+                    if let Some((first, last)) = self.logged_span(&origins, first, last) {
+                        checkpoints.push((*turn, first, last));
                     }
                     continue;
                 }
@@ -418,7 +453,8 @@ impl Conversation {
                 Entry::Recovery { .. }
                 | Entry::ProviderExited
                 | Entry::ForkPoint { .. }
-                | Entry::ForkPointsLost => None,
+                | Entry::ForkPointsLost
+                | Entry::Checkpoint { .. } => None,
                 Entry::TurnEnded {
                     status,
                     error,
@@ -489,21 +525,16 @@ impl Conversation {
             .map(|(index, origin)| (*origin, index))
             .collect();
         // A point whose rows are gone, or out of order, is dropped: forking there offers
-        // a handoff instead of guessing.
-        let mut forks: Vec<ForkMark> = points
-            .into_iter()
-            .filter_map(|(point, first, last)| {
-                let (first, last) = (*at.get(&first)?, *at.get(&last)?);
-                (first <= last).then(|| ForkMark {
-                    rows: first..last + 1,
-                    point,
-                })
-            })
-            .collect();
-        forks.sort_by_key(|mark| mark.rows.start);
-        forks.dedup_by(|later, kept| later.rows.start < kept.rows.end);
+        // a handoff instead of guessing. So is a checkpoint, which is then not offered.
         // Recovered rows inserted below move the marks with them.
-        self.forks = forks;
+        self.forks = placed(points, &at)
+            .into_iter()
+            .map(|(rows, point)| ForkMark { rows, point })
+            .collect();
+        self.checkpoints = placed(checkpoints, &at)
+            .into_iter()
+            .map(|(rows, turn)| CheckpointMark { rows, turn })
+            .collect();
         // Each batch applies to the rows logged before it, as it did when it was saved.
         self.origins = Some(origins);
         for (position, batch) in &batches {
@@ -544,6 +575,100 @@ impl Conversation {
     /// Whether Keystone lost track of the last restored turn.
     pub fn open_turn(&self) -> bool {
         self.uncertain_tail
+    }
+
+    /// The rows of the turn running now, bounded by the provider's own items, with the
+    /// first and last item IDs: a message shown but not echoed may be waiting for the
+    /// next turn.
+    fn turn_span(&self) -> Option<(Range<usize>, String, String)> {
+        let mut items =
+            self.rows[self.turn_start..]
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| match row {
+                    Row::Item(item) if !item.id.starts_with(LOCAL) => {
+                        Some((self.turn_start + index, item.id.as_str()))
+                    }
+                    _ => None,
+                });
+        let (start, first) = items.next()?;
+        let (end, last) = items.last().unwrap_or((start, first));
+        Some((start..end + 1, first.to_owned(), last.to_owned()))
+    }
+
+    /// While a restore reads the log: the log positions of the rows named `first` and
+    /// `last` in the current turn. The turn's rows are the ones since it started, so an
+    /// ID reused in another turn never moves the span. A row is named by the log entry
+    /// that added it, which the ordering keeps.
+    fn logged_span(&self, origins: &[usize], first: &str, last: &str) -> Option<(usize, usize)> {
+        let turn = &self.rows[self.turn_start..];
+        let named = |row: &Row, id: &str| matches!(row, Row::Item(item) if item.id == id);
+        let first = turn.iter().position(|row| named(row, first))?;
+        let last = turn.iter().rposition(|row| named(row, last))?;
+        Some((
+            origins[self.turn_start + first],
+            origins[self.turn_start + last],
+        ))
+    }
+
+    /// Draws again the rows that carry a Restore control, since which checkpoints are
+    /// saved changed.
+    pub fn show_checkpoints(&mut self) {
+        let rows: Vec<usize> = self
+            .checkpoints
+            .iter()
+            .flat_map(|m| m.rows.clone())
+            .collect();
+        for index in rows {
+            self.mark(index);
+        }
+    }
+
+    /// The checkpoint a turn just given one waits to have saved.
+    pub fn take_checkpoint_due(&mut self) -> Option<u64> {
+        self.checkpoint_due.take()
+    }
+
+    /// Whether a turn ended since the last call. An end held during a load counts once
+    /// the load applies it.
+    pub fn take_turn_end(&mut self) -> bool {
+        std::mem::take(&mut self.turn_ended)
+    }
+
+    /// Numbers later turns' checkpoints above `turn`, one saved in the repository, so
+    /// a turn whose mark the log lost is never given a checkpoint saved before.
+    pub fn checkpoints_saved_through(&mut self, turn: u64) {
+        self.last_checkpoint = self.last_checkpoint.max(turn);
+    }
+
+    /// The checkpoint whose Restore control the row at `index` carries: the turn's
+    /// last reply.
+    pub fn checkpoint_at(&self, index: usize) -> Option<u64> {
+        let at = self
+            .checkpoints
+            .partition_point(|mark| mark.rows.end <= index);
+        let mark = self.checkpoints.get(at)?;
+        (self.last_reply(mark) == Some(index)).then_some(mark.turn)
+    }
+
+    /// The row carrying `turn`'s checkpoint, as [`Conversation::checkpoint_at`] finds.
+    pub fn checkpoint_row(&self, turn: u64) -> Option<usize> {
+        self.last_reply(self.checkpoints.iter().find(|mark| mark.turn == turn)?)
+    }
+
+    /// The latest turn with a checkpoint shown.
+    pub fn latest_checkpoint(&self) -> Option<u64> {
+        self.checkpoints
+            .iter()
+            .rev()
+            .find(|mark| self.last_reply(mark).is_some())
+            .map(|mark| mark.turn)
+    }
+
+    fn last_reply(&self, mark: &CheckpointMark) -> Option<usize> {
+        mark.rows.clone().rev().find(|row| {
+            matches!(&self.rows[*row], Row::Item(item) if item.kind == ItemKind::AgentMessage)
+        })
     }
 
     /// How a fork from the row at `index` goes. A native fork keeps the row's whole
@@ -779,12 +904,13 @@ impl Conversation {
     /// Inserts a row, keeping the indexes that point past it on the same rows.
     fn insert_row(&mut self, at: usize, row: Row, logged_at: usize) {
         self.rows.insert(at, row);
-        for mark in &mut self.forks {
-            if at <= mark.rows.start {
-                mark.rows.start += 1;
+        let marks = self.forks.iter_mut().map(|mark| &mut mark.rows);
+        for rows in marks.chain(self.checkpoints.iter_mut().map(|mark| &mut mark.rows)) {
+            if at <= rows.start {
+                rows.start += 1;
             }
-            if at < mark.rows.end {
-                mark.rows.end += 1;
+            if at < rows.end {
+                rows.end += 1;
             }
         }
         if let Some(origins) = &mut self.origins {
@@ -943,29 +1069,14 @@ impl Conversation {
             }
             Event::UsageLimit(limit) => self.limit = Some(limit),
             Event::ForkPoint(point) => {
-                // A message shown but not echoed may be waiting for the next turn, so
-                // the provider's own items bound this one.
-                let items: Vec<(usize, &str)> = self.rows[self.turn_start..]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, row)| match row {
-                        Row::Item(item) if !item.id.starts_with(LOCAL) => {
-                            Some((self.turn_start + index, item.id.as_str()))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if let (Some(&(start, first)), Some(&(end, last))) = (items.first(), items.last()) {
+                if let Some((rows, first, last)) = self.turn_span() {
                     let entry = Entry::ForkPoint {
                         point: point.clone(),
-                        first: first.to_owned(),
-                        last: last.to_owned(),
+                        first,
+                        last,
                     };
-                    self.forks.retain(|mark| mark.rows.end <= start);
-                    self.forks.push(ForkMark {
-                        rows: start..end + 1,
-                        point,
-                    });
+                    self.forks.retain(|mark| mark.rows.end <= rows.start);
+                    self.forks.push(ForkMark { rows, point });
                     self.write(entry, false);
                 }
             }
@@ -975,8 +1086,17 @@ impl Conversation {
             }
             Event::TurnCompleted { status, error, .. } => {
                 self.running = false;
+                self.turn_ended = true;
                 self.approvals.clear();
                 self.settle_unfinished();
+                if let Some((rows, first, last)) = self.turn_span() {
+                    let turn = self.last_checkpoint + 1;
+                    self.last_checkpoint = turn;
+                    self.checkpoint_due = Some(turn);
+                    self.checkpoints.retain(|mark| mark.rows.end <= rows.start);
+                    self.checkpoints.push(CheckpointMark { rows, turn });
+                    self.write(Entry::Checkpoint { turn, first, last }, false);
+                }
                 let limit = self.limit.take().filter(|_| status == TurnStatus::Failed);
                 let shown = status != TurnStatus::Completed;
                 let entry = Entry::TurnEnded {
@@ -1312,6 +1432,100 @@ mod tests {
         let mut conversation = Conversation::loading();
         conversation.restore(Ok(entries));
         conversation
+    }
+
+    #[test]
+    fn a_turn_after_saved_checkpoints_is_numbered_above_them() {
+        let mut conversation = Conversation::default();
+        conversation.checkpoints_saved_through(7);
+        forked_turns(&mut conversation, &["one"]);
+        assert_eq!(conversation.take_checkpoint_due(), Some(8));
+        assert_eq!(conversation.latest_checkpoint(), Some(8));
+    }
+
+    #[test]
+    fn a_turn_end_held_during_a_load_counts_once_applied() {
+        let mut conversation = Conversation::loading();
+        conversation.apply(Event::TurnStarted);
+        conversation.apply(Event::TurnCompleted {
+            status: TurnStatus::Completed,
+            error: None,
+            stopped: false,
+        });
+        assert!(!conversation.take_turn_end(), "held while loading");
+        conversation.restore(Ok(Vec::new()));
+        assert!(conversation.take_turn_end());
+        assert!(!conversation.take_turn_end());
+    }
+
+    #[test]
+    fn each_turn_gets_a_checkpoint_on_its_last_reply_numbered_across_restores() {
+        let mut live = Conversation::default();
+        forked_turns(&mut live, &["one", "two"]);
+        assert_eq!(
+            live.take_checkpoint_due(),
+            Some(2),
+            "the latest turn's waits to be saved"
+        );
+        assert_eq!(live.take_checkpoint_due(), None);
+        let restorable: Vec<_> = (0..live.rows.len())
+            .filter_map(|index| Some((index, live.checkpoint_at(index)?)))
+            .collect();
+        assert_eq!(
+            restorable,
+            [(2, 1), (5, 2)],
+            "only each turn's reply carries it"
+        );
+        let entries: Vec<Entry> = live.take_writes().into_iter().map(|w| w.entry).collect();
+
+        let mut restored = restored(entries.clone());
+        assert_eq!(restored.checkpoints, live.checkpoints);
+        assert_eq!(
+            restored.take_checkpoint_due(),
+            None,
+            "a restore saves nothing again"
+        );
+        forked_turns(&mut restored, &["three"]);
+        assert_eq!(restored.take_checkpoint_due(), Some(3));
+        assert_eq!(
+            restored.checkpoint_at(9),
+            Some(3),
+            "after turn two's failure row"
+        );
+
+        let ForkFrom::Native { end, .. } = live.fork_from(2) else {
+            panic!("turn one forks natively");
+        };
+        let fork = live.fork_log(end);
+        assert!(
+            !fork
+                .iter()
+                .any(|w| matches!(w.entry, Entry::Checkpoint { .. })),
+            "a fork's checkpoints are its own"
+        );
+    }
+
+    #[test]
+    fn a_turn_with_no_reply_has_no_restore_control() {
+        let mut live = Conversation::default();
+        live.apply(Event::TurnStarted);
+        live.apply(Event::ItemCompleted(Item {
+            id: "u".into(),
+            kind: ItemKind::UserMessage,
+            text: "hi".into(),
+            status: ItemStatus::Completed,
+        }));
+        live.apply(Event::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            error: None,
+            stopped: true,
+        });
+        assert_eq!(
+            live.take_checkpoint_due(),
+            Some(1),
+            "its files are still saved"
+        );
+        assert!((0..live.rows.len()).all(|index| live.checkpoint_at(index).is_none()));
     }
 
     #[test]

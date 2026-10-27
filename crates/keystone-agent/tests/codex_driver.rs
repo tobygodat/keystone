@@ -265,6 +265,48 @@ fn a_message_during_a_turn_steers_and_starts_a_new_turn_if_that_turn_ended() {
     assert_eq!(next["params"]["input"][0]["text"], "second");
 }
 
+/// A steer that becomes the next turn waits until the app has seen the turn end, so
+/// the files the turn left can be read first. A release that came first lets it go.
+#[test]
+fn a_steer_that_starts_the_next_turn_waits_until_the_turn_end_is_released() {
+    for release_first in [false, true] {
+        let mut driver = opened();
+        driver.hold_follow_ups(SESSION);
+        let mut out = Outputs::default();
+        let send = |text: &str| Command::Send {
+            session: SESSION,
+            text: text.into(),
+            images: Vec::new(),
+        };
+        driver.command(send("first"), &mut out);
+        driver.on_line(started("T1").as_bytes(), &mut out);
+        let mut out = Outputs::default();
+        driver.command(send("second"), &mut out);
+        let steer: Value = serde_json::from_str(&out.writes[0]).unwrap();
+        let mut out = Outputs::default();
+        driver.on_line(completed("T1").as_bytes(), &mut out);
+        if release_first {
+            driver.release_follow_ups(SESSION, &mut out);
+        }
+        let rejected = format!(
+            r#"{{"id":{},"error":{{"code":-32600,"message":"no active turn"}}}}"#,
+            steer["id"]
+        );
+        driver.on_line(rejected.as_bytes(), &mut out);
+        if !release_first {
+            assert!(out.writes.is_empty(), "held until released");
+            assert!(
+                driver.is_running(SESSION),
+                "a held follow-up counts as running"
+            );
+            driver.release_follow_ups(SESSION, &mut out);
+        }
+        let next: Value = serde_json::from_str(&out.writes[0]).unwrap();
+        assert_eq!(next["method"], "turn/start");
+        assert_eq!(next["params"]["input"][0]["text"], "second");
+    }
+}
+
 /// Images go as `localImage` items after the text, on a new turn and on a steer, as
 /// the TOB-59 probe found Codex 0.163.0 takes them.
 #[test]

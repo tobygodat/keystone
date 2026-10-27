@@ -63,6 +63,10 @@
 //! An account whose config home holds a `.fake-usage-limit` file is at its usage limit
 //! (see `support/limit.rs`): each turn fails on it, in Claude Code 2.1.301's frames.
 //!
+//! Each line or `;`-separated part of a prompt reading `write <path>: <text>` writes that file in the
+//! working directory, folders included, and `delete <path>` deletes it, as an agent's
+//! edits would, before the reply.
+//!
 //! A prompt containing "usage NN" gives its reply's last assistant message token usage
 //! (NN/2 % of a 200,000-token context) and, before its `result`, a synthetic, labelled
 //! `rate_limit_event` with the 5-hour window at NN%. `get_usage` answers like a Claude
@@ -1338,6 +1342,7 @@ fn answer(
             "Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan} **Model:** `{model}`{images}"
         )
     });
+    edit_files(text);
     if text.contains("long") {
         for n in 1..=200 {
             reply.push_str(&format!(" word{n}"));
@@ -1760,4 +1765,23 @@ fn image_block(block: &Value) -> Option<Value> {
     .unwrap_or_default();
     Some(json!({"provider": "claude", "source": source["type"],
         "media_type": source["media_type"], "sha256": images::sha256(&data), "bytes": data.len()}))
+}
+
+/// Applies the prompt's `write <path>: <text>` and `delete <path>` lines in the working
+/// directory.
+fn edit_files(text: &str) {
+    for line in text.split(['\n', ';']).map(str::trim) {
+        if let Some((path, contents)) = line
+            .strip_prefix("write ")
+            .and_then(|rest| rest.split_once(": "))
+        {
+            let path = std::path::Path::new(path.trim());
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, format!("{contents}\n"));
+        } else if let Some(path) = line.strip_prefix("delete ") {
+            let _ = std::fs::remove_file(path.trim());
+        }
+    }
 }

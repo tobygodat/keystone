@@ -589,6 +589,11 @@ mod tests {
         fn request_catalog(&self, _: u64, _: &str) {}
         fn set_approval(&self, _: u64, _: ApprovalState) {}
         fn set_fork(&self, _: u64, _: keystone_core::ForkPoint) {}
+        fn run_in_order(&self, _: u64, job: Box<dyn FnOnce() + Send>) {
+            job();
+        }
+        fn hold_follow_ups(&self, _: u64) {}
+        fn release_follow_ups(&self, _: u64) {}
         fn command(&self, command: Command) {
             self.commands.lock().unwrap().push(command);
         }

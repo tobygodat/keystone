@@ -623,6 +623,64 @@ fn a_steer_before_claude_reports_anything_waits_for_it() {
     assert_eq!(user_writes(&out), 3);
 }
 
+/// A message held when its turn ends starts the next turn only once the app has seen
+/// that end, so the files the turn left can be read first.
+#[test]
+fn a_held_follow_up_waits_until_the_turn_end_is_released() {
+    for hold in [false, true] {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+        if hold {
+            driver.hold_follow_ups();
+        }
+        ready(&mut driver, &mut out, ApprovalMode::Provider);
+        driver.command(send(4), &mut out);
+        driver.command(send(5), &mut out);
+        assert_eq!(user_writes(&out), 1);
+        feed(
+            &mut driver,
+            &mut out,
+            &[r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#.into()],
+        );
+        assert_eq!(turn_ends(&out), [TurnStatus::Completed]);
+        assert!(driver.is_running(), "the follow-up's turn started");
+        assert_eq!(user_writes(&out), if hold { 1 } else { 2 });
+        driver.release_follow_ups(&mut out);
+        assert_eq!(user_writes(&out), 2);
+        driver.release_follow_ups(&mut out);
+        assert_eq!(user_writes(&out), 2);
+    }
+}
+
+/// A held follow-up moved to a replacement process stays held until the release.
+#[test]
+fn a_held_follow_up_stays_held_in_a_replacement_driver() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    driver.hold_follow_ups();
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    driver.command(send(4), &mut out);
+    driver.command(send(5), &mut out);
+    feed(
+        &mut driver,
+        &mut out,
+        &[r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#.into()],
+    );
+    assert!(driver.end_unseen());
+    let carried = driver.take_unsent();
+    assert_eq!(carried.len(), 1);
+
+    let mut out = Outputs::default();
+    let mut replacement = ClaudeDriver::new(SESSION, true, SEED, ApprovalMode::Provider, &mut out);
+    replacement.hold_follow_ups();
+    ready(&mut replacement, &mut out, ApprovalMode::Provider);
+    replacement.set_end_unseen();
+    replacement.carry(carried, &mut out);
+    assert_eq!(user_writes(&out), 0, "held until released");
+    replacement.release_follow_ups(&mut out);
+    assert_eq!(user_writes(&out), 1);
+}
+
 /// Stop cancels a follow-up that was queued behind a message whose result already
 /// came in. The turn did not finish its work, so it is not reported as completed.
 #[test]

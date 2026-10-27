@@ -13,6 +13,7 @@ use crate::projects::{ChangeProjectColor, OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
 use crate::pull_request::TogglePullRequest;
 use crate::quick::OpenQuickComposer;
+use crate::restore::RestoreToHere;
 use crate::screenshot::CaptureScreenshot;
 use crate::second_opinion::AskSecondOpinion;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
@@ -388,6 +389,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-f"],
         context: Some(TRANSCRIPT),
         action: || Box::new(ForkFromHere),
+    },
+    Command {
+        id: "restore-to-here",
+        label: "Transcript: restore to the focused turn",
+        keys: &["ctrl-shift-z"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(RestoreToHere),
     },
     Command {
         id: "transcript-focus-latest",

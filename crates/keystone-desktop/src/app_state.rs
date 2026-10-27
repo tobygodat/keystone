@@ -22,6 +22,9 @@ mod orchestrator;
 #[path = "delivery.rs"]
 pub(crate) mod delivery;
 
+#[path = "checkpoints.rs"]
+pub(crate) mod checkpoints;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Phase {
     Running,
@@ -91,6 +94,17 @@ pub(crate) struct AppState {
     /// One connection per Claude account, each with a process per session.
     claude: BTreeMap<Option<AccountId>, ClaudeConnection>,
     conversations: HashMap<u64, Conversation>,
+    /// Each session's checkpoints, as last read from its repository.
+    checkpoints: HashMap<u64, checkpoints::State>,
+    /// The tree each session's next or running turn starts from.
+    turn_starts: checkpoints::Starts,
+    /// The name this workspace's checkpoints are saved under, once read.
+    checkpoint_store: Option<String>,
+    /// Repositories whose files a restore is putting back. No message to a session in
+    /// one goes until it ends.
+    restoring: std::collections::HashSet<PathBuf>,
+    /// Checkpoint saves queued and not done yet, by session.
+    saving: HashMap<u64, usize>,
     catalogs: Catalogs,
     logs: Logs,
     log_losses: std::collections::BTreeMap<u64, String>,
@@ -160,6 +174,10 @@ pub(crate) struct AppState {
     /// The `codex` and `claude` every new connection runs, in place of the ones found.
     #[cfg(test)]
     pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
+    /// Whether turns take checkpoints. Off in tests unless one turns it on, so a test
+    /// whose session works in this repository never writes refs into it.
+    #[cfg(test)]
+    pub(crate) test_checkpoints: bool,
     pub(crate) notifier: crate::notifications::Notifier,
     pub(crate) pull_requests: crate::pull_request::Monitor,
     /// Where attached images are copied, beside the workspace database.
@@ -1503,6 +1521,11 @@ impl AppState {
             codex: BTreeMap::new(),
             claude: BTreeMap::new(),
             conversations: HashMap::new(),
+            checkpoints: HashMap::new(),
+            turn_starts: checkpoints::Starts::default(),
+            checkpoint_store: None,
+            restoring: Default::default(),
+            saving: HashMap::new(),
             catalogs: Catalogs::default(),
             logs,
             log_losses: Default::default(),
@@ -1556,6 +1579,8 @@ impl AppState {
             save_calls: 0,
             #[cfg(test)]
             test_programs: None,
+            #[cfg(test)]
+            test_checkpoints: false,
             notifier: Default::default(),
             pull_requests: Default::default(),
             attachments,
@@ -1910,6 +1935,9 @@ impl AppState {
                             recover.push(session);
                         }
                     }
+                    // A turn that ended during the load was given its checkpoint just now.
+                    self.turn_ended(session, cx);
+                    self.read_checkpoints(session, cx);
                     // Events held during the load, such as an approval or a turn's
                     // end, apply only now.
                     sidebar_changed = true;
@@ -2018,6 +2046,7 @@ impl AppState {
                 );
             let thread = self.conversation(session).apply(event);
             self.commit(session);
+            self.turn_ended(session, cx);
             // Before the batch's later events, so the result is this turn's reply.
             if failed.is_some() && self.finished.contains_key(&session) {
                 self.save_results();
@@ -3251,6 +3280,15 @@ impl AppState {
         {
             return false;
         }
+        // A result also waits for a restore in its repository to end.
+        if self.restoring(id) {
+            if kind != SendKind::Result {
+                self.conversation(id).error = Some(checkpoints::RESTORING.into());
+                self.commit(id);
+                self.publish(cx);
+            }
+            return false;
+        }
         let Some(directory) = self.dispatch_directory(id, cx) else {
             return false;
         };
@@ -3330,6 +3368,10 @@ impl AppState {
             self.refresh(cx);
             return false;
         }
+        // A message that starts a turn first reads the files the turn starts from.
+        let steer = self.conversations.get(&id).is_some_and(|c| c.running)
+            || self.started(id).is_some_and(|c| c.is_running(id));
+        self.begin_checkpoint(id, cwd, steer);
         let sent = match self.connection(provider, account.as_ref()) {
             Ok(connection) => {
                 // A native fork's first message opens the provider's fork of its source.

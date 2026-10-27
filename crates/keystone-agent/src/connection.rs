@@ -14,7 +14,7 @@ use crate::version::{self, Provider};
 use crate::worker::Worker;
 use keystone_core::ApprovalMode;
 use keystone_core::ForkPoint;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -106,6 +106,18 @@ pub trait Connection {
     /// own, fork `point`'s instead of starting a new one. Once the provider reports
     /// the fork's own conversation ([`Event::ThreadReady`]), that one is resumed.
     fn set_fork(&self, session: u64, point: ForkPoint);
+    /// Runs `job` on the thread that delivers the session's commands, after every
+    /// command given before it and before any given after it. A checkpoint taken there
+    /// sees the session's files as the provider left them, before the next message
+    /// reaches it.
+    fn run_in_order(&self, session: u64, job: Box<dyn FnOnce() + Send>);
+    /// From now on, when one of the session's turns ends, messages sent during it wait
+    /// to start the next turn until [`Connection::release_follow_ups`]. The files the
+    /// turn left can be read in between.
+    fn hold_follow_ups(&self, session: u64);
+    /// After every command given before it, like [`Connection::run_in_order`], lets
+    /// the messages held at the session's last turn end start the next turn.
+    fn release_follow_ups(&self, session: u64);
     /// Stops or answers within a session.
     fn command(&self, command: Command);
     /// Ends the session's process that `candidate` names, once the app has saved
@@ -216,6 +228,8 @@ struct Shared {
     /// Set when the connection is dropped, so queued commands start nothing.
     closed: bool,
     before_start: Option<StartHook>,
+    /// Sessions given [`Connection::hold_follow_ups`], for every driver.
+    holds: HashSet<u64>,
 }
 
 impl Shared {
@@ -675,11 +689,15 @@ impl Starter {
             let mut shared = self.shared.lock().unwrap();
             if !shared.closed && shared.generation == generation {
                 let mut out = Outputs::default();
-                shared.driver = Some(CodexDriver::with_widgets(
+                let mut driver = CodexDriver::with_widgets(
                     &self.client_version,
                     compatibility.widgets,
                     &mut out,
-                ));
+                );
+                for &session in &shared.holds {
+                    driver.hold_follow_ups(session);
+                }
+                shared.driver = Some(driver);
                 shared.notice = compatibility.notice;
                 deliver(&mut shared, &self.inbox, out);
             }
@@ -863,6 +881,38 @@ impl Connection for CodexConnection {
         CodexConnection::set_approval(self, session, approval);
     }
 
+    fn run_in_order(&self, _session: u64, job: Box<dyn FnOnce() + Send>) {
+        if let Some(worker) = &self.worker {
+            worker.run(job);
+        }
+    }
+
+    fn hold_follow_ups(&self, session: u64) {
+        let mut shared = self.shared.lock().unwrap();
+        shared.holds.insert(session);
+        if let Some(driver) = &mut shared.driver {
+            driver.hold_follow_ups(session);
+        }
+    }
+
+    fn release_follow_ups(&self, session: u64) {
+        let Some(worker) = &self.worker else { return };
+        let (shared, inbox, wake) = (self.shared.clone(), self.inbox.clone(), self.wake.clone());
+        worker.run(move || {
+            let mut shared = shared.lock().unwrap();
+            let mut out = Outputs::default();
+            let Some(driver) = &mut shared.driver else {
+                return;
+            };
+            driver.release_follow_ups(session, &mut out);
+            let woken = deliver(&mut shared, &inbox, out);
+            drop(shared);
+            if woken {
+                wake();
+            }
+        });
+    }
+
     fn set_fork(&self, session: u64, point: ForkPoint) {
         self.shared.lock().unwrap().forks.insert(session, point);
     }
@@ -979,6 +1029,8 @@ struct ClaudeShared {
     forks: HashMap<u64, ForkPoint>,
     /// Messages per session that `send` accepted and the worker has not sent yet.
     queued: HashMap<u64, usize>,
+    /// Sessions given [`Connection::hold_follow_ups`], for every driver.
+    holds: HashSet<u64>,
     /// Each session's approval state. A process is launched in its mode, and replaced
     /// before a turn that its mode cannot run.
     approvals: HashMap<u64, ApprovalState>,
@@ -1770,6 +1822,7 @@ impl ClaudeStarter {
             _ => None,
         };
         let mut carried = Vec::new();
+        let mut unseen = false;
         let mut lost = false;
         if let Some(live) = shared.live.get_mut(&session) {
             if !message && !command {
@@ -1784,6 +1837,7 @@ impl ClaudeStarter {
                 message && live.driver.needs_restart()
             };
             if replace {
+                unseen = live.driver.end_unseen();
                 carried = live.driver.take_unsent();
                 let live = shared.live.remove(&session).expect("checked above");
                 start = start.or(Some((
@@ -1802,6 +1856,10 @@ impl ClaudeStarter {
                 && (message || !carried.is_empty())
             {
                 let act = move |driver: &mut ClaudeDriver, out: &mut Outputs| {
+                    // A turn end the app has not released still holds what it carries.
+                    if unseen {
+                        driver.set_end_unseen();
+                    }
                     driver.carry(carried, out);
                     if message {
                         act(driver, out);
@@ -1872,6 +1930,9 @@ impl ClaudeStarter {
         driver.set_sign_in(self.profile.sign_in());
         if fork.is_some() {
             driver.set_forking();
+        }
+        if shared.holds.contains(&session) {
+            driver.hold_follow_ups();
         }
         let mut lease = None;
         if launch == Launch::Chat
@@ -2429,6 +2490,30 @@ impl Connection for ClaudeConnection {
 
     fn set_approval(&self, session: u64, approval: ApprovalState) {
         ClaudeConnection::set_approval(self, session, approval);
+    }
+
+    fn run_in_order(&self, session: u64, job: Box<dyn FnOnce() + Send>) {
+        self.starter.on_worker(session, move |_| job());
+    }
+
+    fn hold_follow_ups(&self, session: u64) {
+        let mut shared = self.starter.shared.lock().unwrap();
+        shared.holds.insert(session);
+        if let Some(live) = shared.live.get_mut(&session) {
+            live.driver.hold_follow_ups();
+        }
+    }
+
+    fn release_follow_ups(&self, session: u64) {
+        self.starter.on_worker(session, move |starter| {
+            let mut shared = starter.shared.lock().unwrap();
+            let mut out = Outputs::default();
+            let Some(live) = shared.live.get_mut(&session) else {
+                return;
+            };
+            live.driver.release_follow_ups(&mut out);
+            starter.deliver(shared, session, out);
+        });
     }
 
     fn set_fork(&self, session: u64, point: ForkPoint) {

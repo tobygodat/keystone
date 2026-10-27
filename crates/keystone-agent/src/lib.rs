@@ -5,6 +5,7 @@
 //! keeps blocking work off the UI thread, and [`git`] and [`github`] run the user's
 //! own git and gh. See `docs/design/providers.md`.
 
+pub mod checkpoint;
 pub mod claude;
 pub mod codex;
 mod commands;

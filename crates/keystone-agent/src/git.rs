@@ -138,7 +138,7 @@ pub struct Status {
 /// `git` in `folder`, in a session of its own with no controlling terminal, so a hook,
 /// a signing program or a credential helper that asks on the terminal fails at once
 /// instead of waiting for an answer nobody can type.
-fn git(folder: &Path) -> Command {
+pub(crate) fn git(folder: &Path) -> Command {
     program(Path::new("git"), folder)
 }
 
@@ -431,7 +431,7 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn path(bytes: &[u8]) -> PathBuf {
+pub(crate) fn path(bytes: &[u8]) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(bytes))
 }
 

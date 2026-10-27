@@ -95,6 +95,15 @@ pub enum Entry {
     /// The session was imported from the provider's own history without its older
     /// turns; the rows after it are the newest. Builds before import skip it.
     OlderNotImported,
+    /// The turn ending here has the session's checkpoint `turn`, saved in its
+    /// repository as `refs/keystone/checkpoints/<session>/<turn>` once the turn's files
+    /// are read. `first` and `last` place it among the rows as for a fork point.
+    /// Builds before checkpoints skip it.
+    Checkpoint {
+        turn: u64,
+        first: String,
+        last: String,
+    },
     /// An agent-built widget, whole, saved each time it changes. The latest entry for
     /// a `call` replaces earlier ones; `seq` and `run` place its row as for an item.
     Surface {

@@ -1227,3 +1227,123 @@ fn an_abandoned_import_read_keeps_no_answer(cx: &mut gpui::TestAppContext) {
         assert!(state.native.lock().unwrap().is_empty());
     });
 }
+
+fn git(folder: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(folder)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Each turn of a session in a repository gets a checkpoint, and restoring one puts
+/// the files back while no message to a session in that repository goes.
+#[gpui::test]
+fn turns_get_checkpoints_and_a_restore_holds_messages_to_the_repository(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "start\n").unwrap();
+    git(&repo, &["add", "--all"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-q",
+            "-m",
+            "start",
+        ],
+    );
+    let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+    let directory = WorkingDirectory::new(&repo).unwrap();
+    for provider in [Provider::Codex, Provider::Claude] {
+        store.create(provider, &directory, 1).unwrap();
+    }
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    connect(&state, dir.path(), 0, false, cx);
+    state.update(cx, |state, _| state.test_checkpoints = true);
+    let send = |state: &mut AppState, session: u64, text: &str, cx: &mut Context<AppState>| {
+        state.send_message(
+            ComposerDraft {
+                session,
+                text: text.into(),
+                attachments: Vec::new(),
+            },
+            cx,
+        )
+    };
+    let saved = |state: &AppState, turns: usize| match state.checkpoints(2) {
+        Some(checkpoints::State::Saved(saved)) => saved.turns.len() == turns,
+        _ => false,
+    };
+    for (turn, text) in [
+        (1, "write a.txt: one"),
+        (2, "write a.txt: two; write b.txt: new"),
+    ] {
+        state.update(cx, |state, cx| assert!(send(state, 2, text, cx)));
+        wait_until(cx, &state, |state| {
+            completed(state, 2) && saved(state, turn)
+        });
+    }
+    state.read_with(cx, |state, _| match state.checkpoints(2) {
+        Some(checkpoints::State::Saved(saved)) => {
+            assert_eq!(
+                saved.turns.values().copied().collect::<Vec<_>>(),
+                [Some(1), Some(2)]
+            )
+        }
+        other => panic!("{other:?}"),
+    });
+
+    let restored = state.update(cx, |state, cx| {
+        let restored = state.restore_checkpoint(2, 1, cx).unwrap();
+        assert!(
+            state.restoring(1),
+            "the other session shares the repository"
+        );
+        assert!(!send(state, 1, "too soon", cx));
+        assert_eq!(
+            state.conversations[&1].error.as_deref(),
+            Some(checkpoints::RESTORING)
+        );
+        restored
+    });
+    let result = Arc::new(Mutex::new(None));
+    let slot = result.clone();
+    cx.spawn(async move |_| *slot.lock().unwrap() = Some(restored.await))
+        .detach();
+    wait_until(cx, &state, |_| result.lock().unwrap().is_some());
+    let restored = result.lock().unwrap().take().unwrap().unwrap().unwrap();
+    assert!(restored.skipped.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert!(!repo.join("b.txt").exists());
+    state.read_with(cx, |state, _| assert!(!state.restoring(1)));
+    let refs = git(
+        &repo,
+        &["for-each-ref", "--format=%(refname)", "refs/keystone"],
+    );
+    let store = state.read_with(cx, |state, _| state.checkpoint_store.clone().unwrap());
+    assert_eq!(
+        refs.lines().collect::<Vec<_>>(),
+        ["1", "2", "before-restore"]
+            .map(|name| format!("refs/keystone/checkpoints/{store}/2/{name}"))
+    );
+    assert_eq!(git(&repo, &["status", "--porcelain"]), " M a.txt\n");
+}

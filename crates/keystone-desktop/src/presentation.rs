@@ -363,6 +363,13 @@ impl Keystone {
         {
             self.worktree_dialog = None;
         }
+        if !self
+            .restore_dialog
+            .as_ref()
+            .is_some_and(crate::restore::RestoreDialog::busy)
+        {
+            self.restore_dialog = None;
+        }
         self.window_drag = false;
         self.sync_draft(cx);
         self.refresh(cx);

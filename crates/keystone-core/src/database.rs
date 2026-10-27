@@ -582,6 +582,26 @@ impl Database {
         })
     }
 
+    /// The name this workspace's checkpoints are saved under in each repository:
+    /// `fresh` the first time it is asked for, and the same name from then on.
+    pub fn checkpoint_store(&self, fresh: &str) -> io::Result<String> {
+        self.connection(false, |connection| {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO metadata(key, value) VALUES ('checkpoint_store', ?1)",
+                    [fresh],
+                )
+                .map_err(sql_error)?;
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='checkpoint_store'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sql_error)
+        })
+    }
+
     /// Saves an account's usage readings under `account`: a `usage.recorded` event
     /// and its projection in `metadata`, which older builds leave alone. Saved windows
     /// `usage` does not carry are kept, so a reading this process never loaded is not
@@ -1042,6 +1062,21 @@ mod tests {
         fs::write(path, r#"{"version":1,"next_id":2,"future":{"kept":true},"workspace":{"selected":1,"sessions":[{"id":1,"title":"Imported","provider":"Codex","settled":false,"draft":"saved draft","model_locked":false,"future_session":42}],"preferences":{"future_preference":"kept"}}}"#).unwrap();
         fs::create_dir(path.parent().unwrap().join("sessions")).unwrap();
         fs::write(path.parent().unwrap().join("sessions/1.jsonl"), "{\"entry\":\"turn_started\"}\n{\"entry\":\"turn_ended\",\"status\":\"completed\",\"error\":null}\n{torn").unwrap();
+    }
+
+    #[test]
+    fn the_checkpoint_store_name_is_kept_across_reopening() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let first = Database::open(&path)
+            .unwrap()
+            .checkpoint_store("a1")
+            .unwrap();
+        let again = Database::open(&path)
+            .unwrap()
+            .checkpoint_store("b2")
+            .unwrap();
+        assert_eq!((first.as_str(), again.as_str()), ("a1", "a1"));
     }
 
     #[test]

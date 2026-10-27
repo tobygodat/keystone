@@ -214,6 +214,11 @@ struct Session {
 }
 
 pub struct CodexDriver {
+    /// Sessions whose turn's end waits for [`CodexDriver::release_follow_ups`] before
+    /// messages sent during that turn start the next one.
+    holds: HashSet<u64>,
+    /// Sessions whose last turn's end has not been released yet.
+    unseen_ends: HashSet<u64>,
     initialize_params: Value,
     initialization_error: Option<String>,
     next_id: u64,
@@ -252,6 +257,8 @@ impl CodexDriver {
             params["capabilities"]["experimentalApi"] = json!(true);
         }
         let mut driver = Self {
+            holds: HashSet::new(),
+            unseen_ends: HashSet::new(),
             initialize_params: params.clone(),
             initialization_error: None,
             next_id: 0,
@@ -280,10 +287,23 @@ impl CodexDriver {
             .is_some_and(|s| s.thread.is_some() || s.opening)
     }
 
+    pub fn hold_follow_ups(&mut self, session: u64) {
+        self.holds.insert(session);
+    }
+
+    /// Lets messages sent during the session's turn that ended last start the next
+    /// one.
+    pub fn release_follow_ups(&mut self, session: u64, out: &mut Outputs) {
+        if self.unseen_ends.remove(&session) {
+            self.flush(session, out);
+        }
+    }
+
+    /// Whether a turn runs, or a held follow-up waits to start one.
     pub fn is_running(&self, session: u64) -> bool {
-        self.sessions
-            .get(&session)
-            .is_some_and(|s| s.turn != Turn::Idle)
+        self.sessions.get(&session).is_some_and(|s| {
+            s.turn != Turn::Idle || (self.unseen_ends.contains(&session) && !s.waiting.is_empty())
+        })
     }
 
     pub(crate) fn set_mcp(&mut self, session: u64, url: String, token: String) {
@@ -741,8 +761,10 @@ impl CodexDriver {
                 },
             );
         }
+        let held = self.unseen_ends.contains(&session);
         let state = self.sessions.entry(session).or_default();
         match (state.thread.clone(), state.turn.clone()) {
+            (Some(_), Turn::Idle) if held => state.waiting.push(message),
             (None, _) if !state.opening => out.event(
                 session,
                 Event::Failed {
@@ -1333,6 +1355,9 @@ impl CodexDriver {
                             stopped,
                         },
                     );
+                    if self.holds.contains(&session) {
+                        self.unseen_ends.insert(session);
+                    }
                     // Messages that waited for this turn's ID start the next turn.
                     self.flush(session, out);
                 }

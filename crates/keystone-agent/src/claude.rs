@@ -228,6 +228,11 @@ struct Pending {
 
 pub struct ClaudeDriver {
     cancel_queued: bool,
+    /// A turn's end waits for [`ClaudeDriver::release_follow_ups`] before messages
+    /// sent during that turn start the next one.
+    hold_follow_ups: bool,
+    /// The last turn's end has not been released yet.
+    end_unseen: bool,
     session: u64,
     resume: bool,
     /// Whether the process was started to fork another conversation.
@@ -361,6 +366,8 @@ impl ClaudeDriver {
     ) -> Self {
         let mut driver = Self {
             cancel_queued: true,
+            hold_follow_ups: false,
+            end_unseen: false,
             session,
             resume,
             forking: false,
@@ -517,6 +524,27 @@ impl ClaudeDriver {
 
     pub(crate) fn set_cancel_queued(&mut self, enabled: bool) {
         self.cancel_queued = enabled;
+    }
+
+    pub fn hold_follow_ups(&mut self) {
+        self.hold_follow_ups = true;
+    }
+
+    /// Whether the last turn's end waits for [`ClaudeDriver::release_follow_ups`].
+    pub fn end_unseen(&self) -> bool {
+        self.end_unseen
+    }
+
+    /// Holds what this driver carries from a replaced one whose end was not released.
+    pub fn set_end_unseen(&mut self) {
+        self.end_unseen = true;
+    }
+
+    /// Lets messages sent during the turn that ended last start the next one.
+    pub fn release_follow_ups(&mut self, out: &mut Outputs) {
+        if std::mem::take(&mut self.end_unseen) {
+            self.pump(out);
+        }
     }
 
     fn interrupt_request(&self) -> Value {
@@ -1104,7 +1132,7 @@ impl ClaudeDriver {
         if !self.mcp_ready {
             return;
         }
-        if self.turn.as_ref().is_none_or(|turn| turn.held.is_empty()) {
+        if self.turn.as_ref().is_none_or(|turn| turn.held.is_empty()) || self.end_unseen {
             return;
         }
         if !self.mode_confirmed() {
@@ -1317,6 +1345,7 @@ impl ClaudeDriver {
                 stopped,
             },
         );
+        self.end_unseen = self.hold_follow_ups;
         if !carried.is_empty() {
             self.turn = Some(Turn {
                 held: carried,

@@ -1459,6 +1459,12 @@ impl Keystone {
                                 this.fork_focused_row(key, window, cx)
                             },
                         ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::restore::RestoreToHere, window, cx| {
+                                this.restore_focused_row(key, window, cx)
+                            },
+                        ))
                         .on_mouse_down(
                             MouseButton::Left,
                             self.scoped_listener(cx, move |this, _, window, cx| {
@@ -1913,6 +1919,7 @@ impl Keystone {
             || self.approval_menu
             || self.renaming.is_some()
             || self.worktree_dialog.is_some()
+            || self.restore_dialog.is_some()
             || self.confirm_full_access.is_some()
             || self.preview.is_some()
             || self.presentation.current.customization.chooser().is_some()

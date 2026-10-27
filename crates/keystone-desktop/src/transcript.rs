@@ -33,6 +33,8 @@ pub struct RowControls {
     pub result: Option<SharedString>,
     /// A message row's Fork from here control.
     pub fork: Option<ForkControl>,
+    /// The Restore to here control on the last reply of a turn with a checkpoint.
+    pub restore: Option<RestoreControl>,
     /// A finished reply's Second opinion control: its selector and what it does.
     pub second_opinion: Option<(
         String,
@@ -40,6 +42,45 @@ pub struct RowControls {
     )>,
     /// How the row's images and videos show and open.
     pub previews: Option<crate::preview::Previews>,
+}
+
+pub struct RestoreControl {
+    /// How many files the turn changed, when known.
+    pub files: Option<usize>,
+    /// Why the session has no checkpoints, shown in place of Restore to here.
+    pub unavailable: Option<&'static str>,
+    pub on_click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+}
+
+/// A turn's checkpoint: Restore to here, and how many files the turn changed.
+fn restore_button(index: usize, control: RestoreControl) -> AnyElement {
+    let files = control
+        .files
+        .filter(|files| *files > 0)
+        .map(|files| match files {
+            1 => "1 file".to_owned(),
+            files => format!("{files} files"),
+        });
+    h_flex()
+        .gap_1()
+        .child(
+            IconButton::new(("restore", index), IconName::Restore)
+                .size(ButtonSize::Compact)
+                .aria_label(control.unavailable.unwrap_or("Restore to here"))
+                .tooltip(Tooltip::text(
+                    control.unavailable.unwrap_or("Restore to here"),
+                ))
+                .debug_selector(move || format!("restore-{index}"))
+                .on_click(move |event, window, cx| (control.on_click)(event, window, cx)),
+        )
+        .when_some(files, |d, files| {
+            d.child(
+                div()
+                    .automation_id(format!("checkpoint-files-{index}"))
+                    .child(Label::new(files).size(TextSize::Sm).color(Color::Muted)),
+            )
+        })
+        .into_any_element()
 }
 
 pub struct ForkControl {
@@ -157,6 +198,7 @@ pub fn row(
         widget,
         result,
         fork,
+        restore,
         second_opinion,
         previews,
     } = controls;
@@ -254,24 +296,19 @@ pub fn row(
                             .when_some(fork.filter(|_| row_copy), |d, fork| {
                                 d.child(fork_button(index, fork, &action))
                             })
-                            .when_some(
-                                second_opinion.filter(|_| row_copy),
-                                |d, (selector, ask)| {
-                                    d.child(
-                                        IconButton::new(("second-opinion", index), IconName::Chat)
-                                            .size(ButtonSize::Compact)
-                                            .aria_label("Ask for a second opinion on this reply")
-                                            .tooltip(Tooltip::with_key(
-                                                "Second opinion…",
-                                                "Ctrl+Alt+O",
-                                            ))
-                                            .debug_selector(move || selector)
-                                            .on_click(move |event, window, cx| {
-                                                ask(event, window, cx)
-                                            }),
-                                    )
-                                },
-                            ),
+                            .when_some(second_opinion.filter(|_| row_copy), |d, (selector, ask)| {
+                                d.child(
+                                    IconButton::new(("second-opinion", index), IconName::Chat)
+                                        .size(ButtonSize::Compact)
+                                        .aria_label("Ask for a second opinion on this reply")
+                                        .tooltip(Tooltip::with_key("Second opinion…", "Ctrl+Alt+O"))
+                                        .debug_selector(move || selector)
+                                        .on_click(move |event, window, cx| ask(event, window, cx)),
+                                )
+                            })
+                            .when_some(restore.filter(|_| row_copy), |d, restore| {
+                                d.child(restore_button(index, restore))
+                            }),
                     )
                     .into_any_element()
             }

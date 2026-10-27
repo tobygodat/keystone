@@ -25,6 +25,7 @@ mod prompts;
 mod pull_request;
 mod quick;
 mod relative_time;
+mod restore;
 mod reveal;
 mod screenshot;
 mod second_opinion;
@@ -449,6 +450,7 @@ struct Keystone {
     renaming: Option<Renaming>,
     rename_input: Entity<TextInput>,
     worktree_dialog: Option<worktrees::WorktreeDialog>,
+    restore_dialog: Option<restore::RestoreDialog>,
     worktree_input: Entity<TextInput>,
     /// The image open over the window, from a thumbnail in a conversation.
     preview: Option<preview::Open>,
@@ -846,6 +848,7 @@ impl Keystone {
             renaming: None,
             rename_input,
             worktree_dialog: None,
+            restore_dialog: None,
             worktree_input,
             preview: None,
             window_drag: false,
@@ -2553,6 +2556,24 @@ impl Keystone {
                         this.fork_from(key, index, window, cx)
                     })),
                 });
+                let restore = conversation.checkpoint_at(index).and_then(|turn| {
+                    use app_state::checkpoints::{State, UNAVAILABLE};
+                    let (files, unavailable) = match self.state.read(cx).checkpoints(key.session)? {
+                        State::Saved(saved) => (*saved.turns.get(&turn)?, None),
+                        // Said once, on the latest turn.
+                        State::Unavailable if conversation.latest_checkpoint() == Some(turn) => {
+                            (None, Some(UNAVAILABLE))
+                        }
+                        State::Unavailable | State::Failed(_) => return None,
+                    };
+                    Some(transcript::RestoreControl {
+                        files,
+                        unavailable,
+                        on_click: Box::new(self.scoped_listener(cx, move |this, _, window, cx| {
+                            this.open_restore(key, index, window, cx)
+                        })),
+                    })
+                });
                 let second_opinion = reply.is_some().then(|| {
                     let selector =
                         arrangement::selector(&format!("second-opinion-{index}"), key.view);
@@ -2579,6 +2600,7 @@ impl Keystone {
                         widget,
                         result,
                         fork,
+                        restore,
                         second_opinion,
                     },
                     cx,
@@ -3536,6 +3558,7 @@ impl Render for Keystone {
                     if event.keystroke.key != "escape"
                         || this.renaming.is_some()
                         || this.worktree_dialog.is_some()
+                        || this.restore_dialog.is_some()
                         || this.confirm_full_access.is_some()
                         || this.settings.is_some()
                         || this.preview.is_some()
@@ -3890,6 +3913,7 @@ impl Render for Keystone {
             .children(self.rename_dialog(cx))
             .children(self.merge_dialog(cx))
             .children(self.worktree_dialog_view(cx))
+            .children(self.restore_dialog_view(cx))
             .children(self.palette_overlay(cx))
             .children(self.projects_overlay(cx))
             .children(self.prompt_list_overlay(cx))
