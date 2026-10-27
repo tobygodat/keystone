@@ -175,29 +175,40 @@ fn enqueue(
     check_cancel(&cancel)?;
     static WORKER: OnceLock<Result<SyncSender<Job>, DiagramError>> = OnceLock::new();
     let sender = WORKER
-        .get_or_init(|| {
-            let (sender, receiver) = mpsc::sync_channel::<Job>(8);
-            std::thread::Builder::new()
-                .name("diagram-quickjs".into())
-                .spawn(move || {
-                    let mut engine: Option<Engine> = None;
-                    let mut layouts = Cache::default();
-                    let mut images = Cache::default();
-                    for job in receiver {
-                        let result = process(&job, &mut engine, &mut layouts, &mut images);
-                        let _ = job.reply.send(result);
-                    }
-                })
-                .map_err(|e| DiagramError::new(format!("Cannot start diagram worker: {e}")))?;
-            Ok(sender)
-        })
+        .get_or_init(spawn_worker)
         .as_ref()
         .map_err(Clone::clone)?;
+    send(sender, request, cancel, measurer)
+}
+
+fn spawn_worker() -> Result<SyncSender<Job>, DiagramError> {
+    let (sender, receiver) = mpsc::sync_channel::<Job>(8);
+    std::thread::Builder::new()
+        .name("diagram-quickjs".into())
+        .spawn(move || {
+            let mut engine: Option<Engine> = None;
+            let mut layouts = Cache::default();
+            let mut images = Cache::default();
+            for job in receiver {
+                let result = process(&job, &mut engine, &mut layouts, &mut images);
+                let _ = job.reply.send(result);
+            }
+        })
+        .map_err(|e| DiagramError::new(format!("Cannot start diagram worker: {e}")))?;
+    Ok(sender)
+}
+
+fn send(
+    sender: &SyncSender<Job>,
+    request: RenderRequest,
+    cancel: Arc<AtomicBool>,
+    measurer: Option<TextMeasurer>,
+) -> Result<RenderTicket, DiagramError> {
     let (reply, response) = oneshot::channel();
     let job = Job {
         request,
         measurer,
-        cancel: cancel.clone(),
+        cancel,
         expires: Instant::now() + WAIT_TIME,
         reply,
     };
@@ -1433,38 +1444,40 @@ mod tests {
     }
 
     #[test]
-    fn public_worker_is_lazy_bounded_and_recovers_after_cancellation() {
+    fn worker_queue_is_bounded_and_public_renders_measure_and_cancel() {
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let released = Arc::new(AtomicBool::new(false));
         let release = released.clone();
         let first_call = Arc::new(AtomicBool::new(true));
-        let first = std::thread::spawn(move || {
-            render_with_measurer(
-                request(FLOW, 401, false),
-                Arc::new(AtomicBool::new(false)),
-                TextMeasurer {
-                    cache_key: 99,
-                    measure: Arc::new(move |text, size, _| {
-                        if first_call.swap(false, Ordering::Relaxed) {
-                            started_tx.send(()).unwrap();
-                            let until = Instant::now() + Duration::from_secs(2);
-                            while !release.load(Ordering::Relaxed) && Instant::now() < until {
-                                std::thread::sleep(Duration::from_millis(5));
-                            }
+        let worker = spawn_worker().unwrap();
+        let submit = |request, measurer| {
+            let job = job(request);
+            send(&worker, job.request, job.cancel, Some(measurer))
+        };
+        let first = submit(
+            request(FLOW, 401, false),
+            TextMeasurer {
+                cache_key: 99,
+                measure: Arc::new(move |text, size, _| {
+                    if first_call.swap(false, Ordering::Relaxed) {
+                        started_tx.send(()).unwrap();
+                        let until = Instant::now() + Duration::from_secs(2);
+                        while !release.load(Ordering::Relaxed) && Instant::now() < until {
+                            std::thread::sleep(Duration::from_millis(5));
                         }
-                        text.len() as f32 * size * 0.6
-                    }),
-                },
-            )
-        });
+                    }
+                    text.len() as f32 * size * 0.6
+                }),
+            },
+        )
+        .unwrap();
         started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         let mut queued = Vec::new();
         let mut errors = Vec::new();
         let start = Instant::now();
         for i in 0..12 {
-            match submit_async(
+            match submit(
                 request(PIE, 500 + i, false),
-                Arc::new(AtomicBool::new(false)),
                 TextMeasurer {
                     cache_key: 100,
                     measure: Arc::new(|text, size, _| text.len() as f32 * size * 0.6),
@@ -1495,7 +1508,7 @@ mod tests {
         assert!(Pin::new(&mut queued[0]).poll(&mut context).is_pending());
         assert!(start.elapsed() < Duration::from_millis(100));
         released.store(true, Ordering::Relaxed);
-        first.join().unwrap().unwrap();
+        wait_for_ticket(first, Arc::new(AtomicBool::new(false))).unwrap();
         for ticket in queued {
             wait_for_ticket(ticket, Arc::new(AtomicBool::new(false))).unwrap();
         }
@@ -1503,13 +1516,21 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(true));
         let error = render(request(FLOW, 400, false), cancelled).unwrap_err();
         assert!(error.message.contains("cancelled") && !error.is_transient());
-        assert!(
-            render(
-                request(SEQUENCE, 400, false),
-                Arc::new(AtomicBool::new(false))
-            )
-            .is_ok()
-        );
+        let measured = Arc::new(AtomicUsize::new(0));
+        let calls = measured.clone();
+        render_with_measurer(
+            request(SEQUENCE, 402, false),
+            Arc::new(AtomicBool::new(false)),
+            TextMeasurer {
+                cache_key: 101,
+                measure: Arc::new(move |text, size, _| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    text.len() as f32 * size * 0.6
+                }),
+            },
+        )
+        .unwrap();
+        assert!(measured.load(Ordering::Relaxed) > 0);
     }
 
     #[test]

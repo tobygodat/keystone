@@ -295,7 +295,7 @@ impl AppState {
     pub(crate) fn test_catalogs_mut(&mut self) -> &mut Catalogs {
         &mut self.catalogs
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "ui-tests"))]
     pub(crate) fn test_sync_directory(&mut self, sync: fn(&std::fs::File) -> std::io::Result<()>) {
         self.store.sync_directory = sync;
     }
