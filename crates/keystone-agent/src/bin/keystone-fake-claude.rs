@@ -8,6 +8,8 @@
 //! to change the pause between streamed words,
 //! and `KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1` to answer like a Claude with no login.
 //! `KEYSTONE_FAKE_CLAUDE_REPLY` replaces the reply text exactly.
+//! `KEYSTONE_FAKE_CLAUDE_WRITE` names a path, relative to the working directory, that
+//! each turn reports a completed Write of before its reply. Nothing is written.
 //! `KEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE=1` acts like a Claude older than
 //! `msg_lifecycle_v1`: no `command_lifecycle` frames and no such capability.
 //! `--resume missing` fails like a conversation Claude no longer has.
@@ -1404,6 +1406,31 @@ fn answer(
             out,
             json!({"type": "user", "message": {"role": "user", "content":
                    [{"type": "tool_result", "tool_use_id": tool, "content": content, "is_error": is_error}]},
+                   "parent_tool_use_id": null, "uuid": uuid}),
+        );
+    }
+    if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CLAUDE_WRITE") {
+        let path = std::env::current_dir().unwrap_or_default().join(path);
+        let message = format!("fake-write-{}-{turn}", std::process::id());
+        let tool = format!("fake-write-toolu-{}-{turn}", std::process::id());
+        let content = json!([{"type": "tool_use", "id": tool, "name": "Write",
+                              "input": {"file_path": path, "content": ""}}]);
+        let uuid = store(
+            "assistant",
+            json!({"id": message, "role": "assistant", "content": content}),
+            None,
+        );
+        emit(
+            out,
+            json!({"type": "assistant", "message": {"id": message, "content": content},
+                   "parent_tool_use_id": null, "uuid": uuid}),
+        );
+        let result = json!([{"type": "tool_result", "tool_use_id": tool,
+                             "content": "File written.", "is_error": false}]);
+        let uuid = store("user", json!({"role": "user", "content": result}), None);
+        emit(
+            out,
+            json!({"type": "user", "message": {"role": "user", "content": result},
                    "parent_tool_use_id": null, "uuid": uuid}),
         );
     }

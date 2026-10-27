@@ -203,7 +203,7 @@ fn visit(block: &Block, visitor: &mut impl FnMut(&SharedString, &[(Range<usize>,
                 visitor(&text.text, &text.links);
             }
         }
-        Block::Diagram { .. } | Block::Rule => {}
+        Block::Diagram { .. } | Block::Rule | Block::Images(_) => {}
     }
 }
 

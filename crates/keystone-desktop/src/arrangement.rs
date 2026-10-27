@@ -1877,6 +1877,7 @@ impl Keystone {
             || self.renaming.is_some()
             || self.worktree_dialog.is_some()
             || self.confirm_full_access.is_some()
+            || self.preview.is_some()
             || self.presentation.current.customization.chooser().is_some()
             || self.presentation.current.arrangement.surface_menu.is_some()
             || (self.presentation.current.arrangement.sidebar_overlay

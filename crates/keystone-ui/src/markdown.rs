@@ -80,7 +80,20 @@ pub enum Block {
         rows: Vec<Vec<Inline>>,
     },
     Rule,
+    /// A paragraph of nothing but images whose destinations are local paths. The host
+    /// draws each one; see [`Markdown::images`].
+    Images(Vec<ImageRef>),
 }
+
+/// A Markdown image: its destination as written and its alt text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageRef {
+    pub url: SharedString,
+    pub alt: SharedString,
+}
+
+/// Draws a local image of a reply. Hosts decide what a path means and whether to show it.
+pub type ImageRenderer = Rc<dyn Fn(&ImageRef, &mut Window, &mut App) -> AnyElement>;
 
 /// One run of text with styled ranges. Ranges are byte offsets, in order, and never overlap.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -264,7 +277,9 @@ struct Builder {
     style: Style,
     /// Nesting depth of each inline style, so `**a *b* c**` keeps bold after the inner end.
     depth: [u32; 4],
-    links: Vec<(usize, SharedString)>,
+    /// Open links and images: where their text starts, their destination, and whether
+    /// each is an image.
+    links: Vec<(usize, SharedString, bool)>,
     /// Open quotes, lists, and items past [`MAX_NESTING`]. Their content goes to the
     /// innermost kept container.
     flattened: usize,
@@ -275,6 +290,8 @@ struct InlineBuilder {
     text: String,
     spans: Vec<(Range<usize>, Style)>,
     links: Vec<(Range<usize>, SharedString)>,
+    /// Images among `links`: their text's range and destination.
+    images: Vec<(Range<usize>, SharedString)>,
 }
 
 impl InlineBuilder {
@@ -293,6 +310,35 @@ impl InlineBuilder {
             }
             _ => self.spans.push((start..self.text.len(), style)),
         }
+    }
+
+    /// The images, when the text is nothing but images with local destinations.
+    fn only_local_images(&self) -> Option<Vec<ImageRef>> {
+        if self.images.is_empty() || !self.images.iter().all(|(_, url)| is_local(url)) {
+            return None;
+        }
+        let mut at = 0;
+        for (range, _) in &self.images {
+            if !self.text[at..range.start].trim().is_empty() {
+                return None;
+            }
+            at = range.end;
+        }
+        if !self.text[at..].trim().is_empty() {
+            return None;
+        }
+        Some(
+            self.images
+                .iter()
+                .map(|(range, url)| ImageRef {
+                    url: url.clone(),
+                    alt: match &self.text[range.clone()] {
+                        alt if alt == url.as_ref() => SharedString::default(),
+                        alt => alt.to_owned().into(),
+                    },
+                })
+                .collect(),
+        )
     }
 
     fn finish(self) -> Inline {
@@ -328,6 +374,11 @@ impl Builder {
     /// Ends implicit paragraph text, such as a tight list item's, before another block.
     fn flush_inline(&mut self) {
         if let Some((target, inline)) = self.inline.take() {
+            if target == Target::Paragraph
+                && let Some(images) = inline.only_local_images()
+            {
+                return self.emit(Block::Images(images));
+            }
             let inline = inline.finish();
             match target {
                 Target::Paragraph if inline.text.trim().is_empty() => {}
@@ -433,6 +484,12 @@ impl Builder {
         }
     }
 
+    fn open_link(&mut self, url: String, image: bool) {
+        let start = self.inline.as_ref().map_or(0, |(_, i)| i.text.len());
+        self.links.push((start, url.into(), image));
+        self.set_style(3, true);
+    }
+
     fn start(&mut self, tag: Tag) {
         match tag {
             Tag::Paragraph => self.start_inline(Target::Paragraph),
@@ -489,11 +546,8 @@ impl Builder {
             Tag::Strong => self.set_style(0, true),
             Tag::Emphasis => self.set_style(1, true),
             Tag::Strikethrough => self.set_style(2, true),
-            Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
-                let start = self.inline.as_ref().map_or(0, |(_, i)| i.text.len());
-                self.links.push((start, dest_url.to_string().into()));
-                self.set_style(3, true);
-            }
+            Tag::Link { dest_url, .. } => self.open_link(dest_url.to_string(), false),
+            Tag::Image { dest_url, .. } => self.open_link(dest_url.to_string(), true),
             // Footnotes, metadata, definition lists, and other extensions are off, so these
             // are not produced; their text still lands in the surrounding block.
             _ => {}
@@ -570,13 +624,34 @@ impl Builder {
             TagEnd::Emphasis => self.set_style(1, false),
             TagEnd::Strikethrough => self.set_style(2, false),
             TagEnd::Link | TagEnd::Image => {
+                let open = self.links.pop();
+                // An image with no alt text shows its destination, unless that is still
+                // streaming or is the image's data itself.
+                if let Some((start, url, true)) = &open
+                    && url != mend::PENDING_LINK_URL
+                    && !url
+                        .get(..5)
+                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+                    && self
+                        .inline
+                        .as_ref()
+                        .is_none_or(|(_, i)| i.text.len() == *start)
+                {
+                    self.text(&url.clone(), self.style);
+                }
                 self.set_style(3, false);
-                if let Some((start, url)) = self.links.pop()
+                if let Some((start, url, image)) = open
                     && let Some((_, inline)) = &mut self.inline
                     && start < inline.text.len()
                 {
                     let end = inline.text.len();
-                    inline.links.push((start..end, url));
+                    // An image or link inside another one is part of that one.
+                    if self.links.is_empty() {
+                        if image {
+                            inline.images.push((start..end, url.clone()));
+                        }
+                        inline.links.push((start..end, url));
+                    }
                 }
             }
             _ => {}
@@ -619,6 +694,18 @@ impl Builder {
     }
 }
 
+/// Whether an image destination is a path rather than a URL: it has no scheme and is
+/// not network-relative. Remote images are never fetched; they stay links.
+fn is_local(url: &str) -> bool {
+    let scheme = url.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    !url.trim().is_empty() && !scheme && !url.starts_with("//") && !url.starts_with('#')
+}
+
 /// Only web and mail links open. Agent text is not trusted to launch other handlers.
 pub fn is_openable(url: &str) -> bool {
     let lower = url.trim_start().to_ascii_lowercase();
@@ -640,6 +727,7 @@ pub struct Markdown {
     managed_focus: bool,
     selection_focus: Option<FocusHandle>,
     on_selection_start: Option<selection::StartHandler>,
+    images: Option<ImageRenderer>,
 }
 
 impl Markdown {
@@ -654,6 +742,7 @@ impl Markdown {
             managed_focus: false,
             selection_focus: None,
             on_selection_start: None,
+            images: None,
         }
     }
 
@@ -685,6 +774,12 @@ impl Markdown {
         self
     }
 
+    /// Draws each [`Block::Images`] image. Without it, an image shows as its alt text or path.
+    pub fn images(mut self, render: ImageRenderer) -> Self {
+        self.images = Some(render);
+        self
+    }
+
     /// Activates the host's text-selection action on a pointer press and returns
     /// its reusable focus handle, or rejects a stale press with `None`.
     /// Managed Markdown allocates no private handle.
@@ -708,6 +803,7 @@ struct Ctx {
     diagram_toggle_focus: Option<(usize, FocusHandle)>,
     managed_focus: bool,
     selection: Entity<selection::Selection>,
+    images: Option<ImageRenderer>,
 }
 
 impl RenderOnce for Markdown {
@@ -736,6 +832,7 @@ impl RenderOnce for Markdown {
             diagram_toggle_focus: self.diagram_toggle_focus,
             managed_focus: self.managed_focus,
             selection: selection.clone(),
+            images: self.images,
         };
         let blocks: Vec<_> = self
             .document
@@ -872,6 +969,23 @@ fn render_block(block: &Block, ctx: &mut Ctx, window: &mut Window, cx: &mut App)
             rows,
         } => table(alignments, header, rows, ctx, cx),
         Block::Rule => div().h(px(1.)).bg(colors.border).into_any_element(),
+        Block::Images(images) => h_flex()
+            .min_w_0()
+            .flex_wrap()
+            .gap_2()
+            .children(images.iter().map(|image| {
+                match &ctx.images {
+                    Some(render) => render(image, window, cx),
+                    None => Label::new(if image.alt.trim().is_empty() {
+                        image.url.clone()
+                    } else {
+                        image.alt.clone()
+                    })
+                    .color(Color::Muted)
+                    .into_any_element(),
+                }
+            }))
+            .into_any_element(),
     }
 }
 
@@ -1249,7 +1363,7 @@ mod tests {
                 Block::Table { header, rows, .. } => {
                     header.iter().chain(rows.iter().flatten()).for_each(check)
                 }
-                Block::Code { .. } | Block::Diagram { .. } | Block::Rule => {}
+                Block::Code { .. } | Block::Diagram { .. } | Block::Rule | Block::Images(_) => {}
             }
         }
     }
@@ -1279,7 +1393,7 @@ mod tests {
                 Block::Diagram { source, .. } => out.push(source.to_string()),
                 Block::List { items, .. } => items.iter().for_each(|b| texts(b, out)),
                 Block::Quote(b) => texts(b, out),
-                Block::Table { .. } | Block::Rule => {}
+                Block::Table { .. } | Block::Rule | Block::Images(_) => {}
             }
         }
     }
@@ -1377,6 +1491,82 @@ mod tests {
         assert!(!is_openable("file:///etc/passwd"));
         assert!(!is_openable("javascript:alert(1)"));
         assert!(!is_openable("/usr/bin/xdg-open"));
+    }
+
+    #[test]
+    fn a_paragraph_of_local_images_is_an_image_block() {
+        let image = |url: &str, alt: &str| ImageRef {
+            url: url.to_owned().into(),
+            alt: alt.to_owned().into(),
+        };
+        assert_eq!(
+            top(&Document::parse("![](./shot.png)")),
+            [Block::Images(vec![image("./shot.png", "")])]
+        );
+        assert_eq!(
+            top(&Document::parse("- ![a](a.png)\n  ![b](/tmp/b.jpg)")),
+            [Block::List {
+                start: None,
+                items: vec![vec![Block::Images(vec![
+                    image("a.png", "a"),
+                    image("/tmp/b.jpg", "b"),
+                ])]],
+            }]
+        );
+    }
+
+    #[test]
+    fn remote_and_inline_images_stay_links_showing_their_destination() {
+        for (source, text, url) in [
+            (
+                "![](https://e.x/a.png)",
+                "https://e.x/a.png",
+                "https://e.x/a.png",
+            ),
+            ("![](//e.x/a.png)", "//e.x/a.png", "//e.x/a.png"),
+            ("![chart](http://e.x/c.png)", "chart", "http://e.x/c.png"),
+            ("See ![](./shot.png) here", "./shot.png", "./shot.png"),
+        ] {
+            let doc = Document::parse(source);
+            let inline = paragraph(&doc);
+            assert_eq!(inline.links.len(), 1, "{source}");
+            assert_eq!(&inline.text[inline.links[0].0.clone()], text, "{source}");
+            assert_eq!(inline.links[0].1, url, "{source}");
+        }
+        assert!(
+            !paragraph(&Document::parse("x ![](data:image/png;base64,AAAA)"))
+                .text
+                .contains("base64")
+        );
+        let mixed = Document::parse("![](a.png) ![](https://e.x/b.png)");
+        assert_eq!(paragraph(&mixed).links.len(), 2);
+        for source in [
+            "[![chart](shot.png)](https://e.x)",
+            "[![](shot.png)](https://e.x)",
+        ] {
+            let links = paragraph(&Document::parse(source)).links.clone();
+            assert_eq!(links.len(), 1, "{source}");
+            assert_eq!(links[0].1, "https://e.x", "{source}");
+        }
+        let mut parser = IncrementalParser::new();
+        parser.append("Done.\n\n![](./sh");
+        let shown = parser.display();
+        let blocks = top(&shown);
+        let Some(Block::Paragraph(inline)) = blocks.last() else {
+            panic!("{blocks:?}");
+        };
+        assert!(!inline.text.contains(mend::PENDING_LINK_URL), "{inline:?}");
+        assert!(matches!(
+            &top(&Document::parse("![![inner](in.png)](out.png)"))[0],
+            Block::Images(images) if images.len() == 1 && images[0].url == "out.png"
+        ));
+        for nested in ["![![inner](in.png)](out.png)", "![![](in.png)](out.png) x"] {
+            let mut parser = IncrementalParser::new();
+            for ch in nested.chars() {
+                parser.append(&ch.to_string());
+                parser.display();
+            }
+        }
     }
 
     #[test]

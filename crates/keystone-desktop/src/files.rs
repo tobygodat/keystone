@@ -167,7 +167,17 @@ fn opens_detached(words: &[String]) -> bool {
         && !needs_terminal(words)
 }
 
-/// `$VISUAL`, then `$EDITOR`, then `xdg-open`. A value that does not parse as shell
+/// The program that opens a file with its default app: `open` on macOS, `xdg-open`
+/// elsewhere.
+fn system_opener() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    }
+}
+
+/// `$VISUAL`, then `$EDITOR`, then the [`system_opener`]. A value that does not parse as shell
 /// words, names no program, or names a terminal editor is skipped.
 fn editor_command(env: impl Fn(&str) -> Option<String>) -> EditorCommand {
     ["VISUAL", "EDITOR"]
@@ -176,7 +186,7 @@ fn editor_command(env: impl Fn(&str) -> Option<String>) -> EditorCommand {
         .find(|words| opens_detached(words))
         .map_or_else(
             || EditorCommand {
-                program: "xdg-open".into(),
+                program: system_opener().into(),
                 args: Vec::new(),
             },
             |mut words| EditorCommand {
@@ -196,6 +206,12 @@ impl EditorCommand {
     /// Starts the editor in a session of its own with no terminal, so quitting
     /// Keystone or a hangup to its process group leaves the editor running.
     fn spawn(&self, path: &Path) -> Result<(), Notice> {
+        let mut child = self.start(path)?;
+        std::thread::spawn(move || child.wait());
+        Ok(())
+    }
+
+    fn start(&self, path: &Path) -> Result<std::process::Child, Notice> {
         let mut command = self.command(path);
         command
             .stdin(Stdio::null())
@@ -210,12 +226,10 @@ impl EditorCommand {
                 Ok(())
             });
         }
-        let mut child = command.spawn().map_err(|error| Notice::SpawnFailed {
+        command.spawn().map_err(|error| Notice::SpawnFailed {
             command: self.to_string(),
             error: error.to_string(),
-        })?;
-        std::thread::spawn(move || child.wait());
-        Ok(())
+        })
     }
 }
 
@@ -234,6 +248,20 @@ pub(crate) fn open_in_editor(path: &Path) -> Result<(), String> {
     editor_command(|name| std::env::var(name).ok())
         .spawn(path)
         .map_err(|notice| notice.to_string())
+}
+
+/// Opens `path` with its default app through the [`system_opener`], and waits for the
+/// opener to exit. Some desktops' `xdg-open` runs the app itself, so that can be when the
+/// app quits: call it on a thread of its own. Returns whether it succeeded.
+pub(crate) fn open_with_system(path: &Path) -> bool {
+    EditorCommand {
+        program: system_opener().into(),
+        args: Vec::new(),
+    }
+    .start(path)
+    .ok()
+    .and_then(|mut child| child.wait().ok())
+    .is_some_and(|status| status.success())
 }
 
 /// A lazily read tree of one folder. Node 0 is the folder itself, and `paths` holds
@@ -635,7 +663,7 @@ mod tests {
             (&[("VISUAL", "vim"), ("EDITOR", "gedit")], &["gedit", path]),
             (
                 &[("VISUAL", "/usr/bin/nvim"), ("EDITOR", "emacs -nw")],
-                &["xdg-open", path],
+                &[system_opener(), path],
             ),
             (&[("EDITOR", "emacs")], &["emacs", path]),
             (
@@ -644,9 +672,9 @@ mod tests {
             ),
             (
                 &[("VISUAL", "'unclosed"), ("EDITOR", "")],
-                &["xdg-open", path],
+                &[system_opener(), path],
             ),
-            (&[], &["xdg-open", path]),
+            (&[], &[system_opener(), path]),
             (
                 &[("VISUAL", "env nvim"), ("EDITOR", "gedit")],
                 &["gedit", path],
@@ -659,7 +687,7 @@ mod tests {
                 &[("VISUAL", "env FOO=1 code --wait")],
                 &["env", "FOO=1", "code", "--wait", path],
             ),
-            (&[("VISUAL", "env FOO=1")], &["xdg-open", path]),
+            (&[("VISUAL", "env FOO=1")], &[system_opener(), path]),
             (
                 &[("VISUAL", "vim.tiny"), ("EDITOR", "gedit")],
                 &["gedit", path],

@@ -18,6 +18,7 @@ mod model_selector;
 mod notes;
 mod notifications;
 mod presentation;
+mod preview;
 mod projects;
 mod prompts;
 mod quick;
@@ -442,6 +443,8 @@ struct Keystone {
     rename_input: Entity<TextInput>,
     worktree_dialog: Option<worktrees::WorktreeDialog>,
     worktree_input: Entity<TextInput>,
+    /// The image open over the window, from a thumbnail in a conversation.
+    preview: Option<preview::Open>,
     /// Set by a press on the top bar. The first move then hands the window to the
     /// compositor, so a plain click never starts a move.
     window_drag: bool,
@@ -824,6 +827,7 @@ impl Keystone {
             rename_input,
             worktree_dialog: None,
             worktree_input,
+            preview: None,
             window_drag: false,
             settled_open: false,
             fixture,
@@ -2537,11 +2541,13 @@ impl Keystone {
                         Box::new(ask) as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
                     )
                 });
+                let previews = Some(self.previews(session, cx));
                 Some(transcript::row(
                     row,
                     index,
                     reply,
                     transcript::RowControls {
+                        previews,
                         action,
                         selected: focused,
                         activity,
@@ -3491,6 +3497,7 @@ impl Render for Keystone {
                         || this.worktree_dialog.is_some()
                         || this.confirm_full_access.is_some()
                         || this.settings.is_some()
+                        || this.preview.is_some()
                     {
                         return;
                     }
@@ -3814,7 +3821,8 @@ impl Render for Keystone {
             .children(self.palette_overlay(cx))
             .children(self.projects_overlay(cx))
             .children(self.prompt_list_overlay(cx))
-            .children(self.context_menu_overlay(cx));
+            .children(self.context_menu_overlay(cx))
+            .children(self.preview.as_ref().map(preview::Open::overlay));
         let root = self.settings_yields_to_workspace(root, cx);
         self.on_arrangement_drag(root, cx)
     }

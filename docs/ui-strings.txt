@@ -1003,6 +1003,17 @@ crates/keystone-desktop/src/presentation.rs
 	Project not opened. {error}
 	Saved conversation folder is not supported by this version
 
+crates/keystone-desktop/src/preview.rs
+	Close
+	Copied
+	Copy path
+	Couldn't open
+	Couldn't read image
+	Esc
+	Fit
+	Open externally
+	Open in player
+
 crates/keystone-desktop/src/projects.rs
 	Ctrl+O
 	Ctrl+Shift+O

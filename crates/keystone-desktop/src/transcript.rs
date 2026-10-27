@@ -38,6 +38,8 @@ pub struct RowControls {
         String,
         Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
     )>,
+    /// How the row's images and videos show and open.
+    pub previews: Option<crate::preview::Previews>,
 }
 
 pub struct ForkControl {
@@ -156,6 +158,7 @@ pub fn row(
         result,
         fork,
         second_opinion,
+        previews,
     } = controls;
     let colors = cx.theme().colors;
     match row {
@@ -209,6 +212,9 @@ pub fn row(
                         .managed_focus()
                         .when_some(selection_start, |markdown, start| {
                             markdown.on_selection_start(start)
+                        })
+                        .when_some(previews.as_ref(), |markdown, previews| {
+                            markdown.images(previews.markdown(index, row_copy))
                         });
                 let markdown = match &action {
                     Some((CopyTarget::Code(n), focus)) => markdown.copy_focus(*n, focus),
@@ -356,7 +362,8 @@ pub fn row(
                     })
                     .into_any_element()
             }
-            ItemKind::FileChange { paths } => div()
+            ItemKind::FileChange { paths } => v_flex()
+                .gap_2()
                 .text_size(TextSize::Ui.px())
                 .text_color(colors.text_muted)
                 .child(format!(
@@ -364,6 +371,11 @@ pub fn row(
                     paths.join(", "),
                     outcome_note(item.status)
                 ))
+                .children(
+                    previews
+                        .as_ref()
+                        .and_then(|previews| previews.changed(index, item.status, paths)),
+                )
                 .into_any_element(),
             ItemKind::Other { .. }
                 if item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX) =>
@@ -452,7 +464,12 @@ pub fn row(
             crate::widget::SurfaceView::new(surface.clone(), widget.expect("widget controls"))
                 .into_any_element()
         }
-        Row::Attachments(attachments) => crate::attachments::sent(index, attachments, cx),
+        Row::Attachments(attachments) => crate::attachments::sent(
+            index,
+            attachments,
+            previews.map(|previews| previews.open),
+            cx,
+        ),
         Row::Decision { action, .. } => Label::new(format!("Denied: {action}"))
             .size(TextSize::Ui)
             .color(Color::Muted)

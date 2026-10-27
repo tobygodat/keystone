@@ -10,7 +10,7 @@ Attach images to a draft by paste, drop or the attach button, see them as chips,
 - `attach-chips` shows each image under the draft as a chip with a thumbnail, its name and a remove button. A file that is not a png, jpeg, gif or webp image is mentioned at the caret as `@path` instead.
 - `attach-refuse` refuses an image over the limit (20 MiB, or `KEYSTONE_ATTACHMENT_MAX_MB`) with its size and the limit, in red under the draft, and leaves the draft as it was.
 - `attach-restore` saves the draft's images with the draft, so they return after Quit and relaunch.
-- `attach-send` sends the images with the message, or alone. Claude Code gets base64 image blocks after the text; Codex gets `localImage` items whose paths are the copies in the data folder. The message's row shows the images as chips under it, and the draft's images clear.
+- `attach-send` sends the images with the message, or alone. Claude Code gets base64 image blocks after the text; Codex gets `localImage` items whose paths are the copies in the data folder. The message's row shows the images as thumbnails under it, and the draft's images clear.
 
 ## How to get to it (user POV)
 
@@ -41,4 +41,4 @@ Named elements: `attach`, `attach-path`, `attach-path-confirm`, `attachment-<n>`
 ## Not covered
 
 - A native drop needs a Wayland drag source on the run's socket, which the driver does not provide; the GPUI tests cover drops.
-- Image previews in replies are TOB-60 and screenshot capture TOB-61.
+- Screenshot capture is TOB-61. Sent images' thumbnails and their preview are in [previews](previews.md).

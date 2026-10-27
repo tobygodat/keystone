@@ -8,7 +8,7 @@
 use crate::{Keystone, mentions};
 use gpui::{
     AnyElement, App, ClipboardEntry, Context, ElementId, Entity, ExternalPaths, Focusable,
-    ObjectFit, SharedString, StyledImage, Window, div, img, prelude::*, px,
+    SharedString, Window, div, prelude::*, px,
 };
 use keystone_core::Attachment;
 use keystone_ui::prelude::*;
@@ -492,22 +492,7 @@ pub(crate) fn chip(
         .border_1()
         .border_color(colors.border)
         .bg(colors.surface_raised)
-        .child(
-            img(attachment.path(dir))
-                .size(px(28.))
-                .flex_none()
-                .rounded(px(4.))
-                .object_fit(ObjectFit::Cover)
-                .with_fallback(|| {
-                    div()
-                        .size(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(Icon::new(IconName::File).size(px(16.)).color(Color::Muted))
-                        .into_any_element()
-                }),
-        )
+        .child(crate::preview::ChipImage::new(attachment.path(dir)))
         .child(
             div().max_w(px(160.)).min_w_0().child(
                 Label::new(attachment.name.clone())
@@ -523,8 +508,14 @@ pub(crate) fn chip(
 pub(crate) struct AttachmentsDir(pub(crate) PathBuf);
 impl gpui::Global for AttachmentsDir {}
 
-/// The images sent with a message, under it in the transcript.
-pub(crate) fn sent(index: usize, attachments: &[Attachment], cx: &App) -> AnyElement {
+/// The images sent with a message, under it in the transcript, as thumbnails that
+/// `open` previews. A copy no longer kept is a chip.
+pub(crate) fn sent(
+    index: usize,
+    attachments: &[Attachment],
+    open: Option<crate::preview::OpenPreview>,
+    cx: &App,
+) -> AnyElement {
     let dir = cx
         .try_global::<AttachmentsDir>()
         .map(|dir| dir.0.clone())
@@ -535,12 +526,16 @@ pub(crate) fn sent(index: usize, attachments: &[Attachment], cx: &App) -> AnyEle
         .flex_wrap()
         .gap(px(6.))
         .children(attachments.iter().enumerate().map(|(n, attachment)| {
-            chip(
-                SharedString::from(format!("sent-attachment-{index}-{n}")),
-                attachment,
-                &dir,
-                cx,
-            )
+            let id = SharedString::from(format!("sent-attachment-{index}-{n}"));
+            let chip = chip(id.clone(), attachment, &dir, cx).into_any_element();
+            match &open {
+                Some(open) => {
+                    crate::preview::Thumbnail::new(id, attachment.path(&dir), index, open.clone())
+                        .fallback(chip)
+                        .into_any_element()
+                }
+                None => chip,
+            }
         }))
         .into_any_element()
 }
