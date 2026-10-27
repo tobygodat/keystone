@@ -8,8 +8,8 @@ use crate::session_tabs::{bring_forward, conversations, replacement};
 use crate::{AppState, DesktopApp, Keystone, durability_warning, open_windows, register_window};
 use gpui::{
     App, AppContext, Bounds, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Point, Stateful, Styled, Window, WindowBounds, WindowOptions, anchored, deferred,
-    point, prelude::FluentBuilder, px, size,
+    Pixels, Point, Stateful, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    anchored, deferred, point, prelude::FluentBuilder, px, size,
 };
 use keystone_core::{
     Axis, Component, Composition, Edit, Place, Placement, Size, ViewId, WindowId, WindowView,
@@ -156,7 +156,10 @@ pub(crate) fn open(
     cx.open_window(
         WindowOptions {
             window_bounds: Some(bounds(placement, cx)),
-            titlebar: None,
+            titlebar: cfg!(target_os = "macos").then(|| TitlebarOptions {
+                appears_transparent: true,
+                ..Default::default()
+            }),
             app_id: Some("keystone".into()),
             ..Default::default()
         },

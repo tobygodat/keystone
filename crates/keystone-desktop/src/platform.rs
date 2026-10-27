@@ -1,7 +1,22 @@
 //! What differs between Linux and macOS outside GPUI: where the workspace lives, the
-//! environment a Finder launch lacks, and the macOS menu bar.
+//! environment a Finder launch lacks, the macOS menu bar, and the room the top bar
+//! leaves for the macOS traffic lights.
 
+use gpui::{Pixels, px};
 use std::path::PathBuf;
+
+/// How far the macOS traffic lights sit from the window's top and left edges, so they
+/// are centred on a top bar `height` tall.
+pub(crate) fn traffic_light_margin(height: Pixels) -> Pixels {
+    ((height - px(14.)) / 2.).round()
+}
+
+/// Where a top bar `height` tall starts its own content on macOS: past the traffic
+/// lights, three 14 px buttons 9 px apart on macOS 27, with their margin on both sides.
+pub(crate) fn traffic_lights_inset(height: Pixels) -> Pixels {
+    let margin = traffic_light_margin(height);
+    margin + px(60.) + margin
+}
 
 /// The folder Keystone keeps its workspace in: `$XDG_DATA_HOME/keystone` or
 /// `~/.local/share/keystone` on Linux, `~/Library/Application Support/Keystone` on macOS.

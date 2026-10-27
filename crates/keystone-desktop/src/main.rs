@@ -110,6 +110,8 @@ gpui::actions!(
 
 /// The transcript and the composer share one centred column.
 const CONTENT_WIDTH: f32 = 720.;
+/// The top bar's height at Spacious density, which smaller densities scale down.
+const TOP_BAR: Pixels = px(48.);
 
 /// Keystone's mark: two muted side stones and the keystone in the accent colour.
 fn arch_mark(size: Pixels) -> impl IntoElement {
@@ -515,6 +517,10 @@ struct Keystone {
     /// Set by a press on the top bar. The first move then hands the window to the
     /// compositor, so a plain click never starts a move.
     window_drag: bool,
+    /// How far from the window's edges the traffic lights were last placed, so they move
+    /// only when the top bar's height does.
+    #[cfg(target_os = "macos")]
+    traffic_light_margin: Option<Pixels>,
     /// Whether the sidebar's Settled section is expanded. It starts collapsed.
     settled_open: bool,
     fixture: bool,
@@ -925,6 +931,8 @@ impl Keystone {
             worktree_input,
             preview: None,
             window_drag: false,
+            #[cfg(target_os = "macos")]
+            traffic_light_margin: None,
             settled_open: false,
             fixture,
             presentation,
@@ -1401,6 +1409,7 @@ impl Keystone {
     }
 
     /// The main column's bar: the sidebar toggle, the breadcrumb, and the window controls.
+    /// macOS draws its own controls, the traffic lights, over the bar's left end.
     fn top_bar(
         &self,
         session: Option<(String, bool, Option<(String, bool)>)>,
@@ -1408,10 +1417,14 @@ impl Keystone {
     ) -> impl IntoElement {
         let hover = cx.theme().colors.element_hover;
         let in_session = session.is_some();
+        let height = cx.theme().density.control(TOP_BAR);
         let bar = h_flex()
             .flex_shrink_0()
-            .h(cx.theme().density.control(px(48.)))
+            .h(height)
             .px(px(8.))
+            .when(cfg!(target_os = "macos"), |d| {
+                d.pl(platform::traffic_lights_inset(height))
+            })
             .gap(px(8.))
             .child(
                 self.own_press(
@@ -1491,42 +1504,44 @@ impl Keystone {
                 d.children(self.split_toggle(cx))
                     .child(self.customize_toggle(cx))
             })
-            .child(
-                self.own_press(
-                    h_flex()
-                        .ml(px(8.))
-                        .gap(px(4.))
-                        .child(
-                            IconButton::new("minimize", IconName::Minus)
-                                .debug_selector(|| "minimize".into())
-                                .tooltip(Tooltip::text("Minimize"))
-                                .on_click(|_, window, _| window.minimize_window()),
-                        )
-                        .child(
-                            IconButton::new("maximize", IconName::Square)
-                                .debug_selector(|| "maximize".into())
-                                .tooltip(Tooltip::text("Maximize"))
-                                .on_click(|_, window, _| window.zoom_window()),
-                        )
-                        .child(
-                            IconButton::new("close", IconName::Close)
-                                .debug_selector(|| "close".into())
-                                .tooltip(Tooltip::with_key(
-                                    "Close window",
-                                    keystone_ui::shortcut_text("secondary-shift-w"),
-                                ))
-                                .on_click({
-                                    let root = cx.weak_entity();
-                                    move |_, window, cx| {
-                                        if close_window(&root, window, cx) {
-                                            window.remove_window();
+            .when(!cfg!(target_os = "macos"), |d| {
+                d.child(
+                    self.own_press(
+                        h_flex()
+                            .ml(px(8.))
+                            .gap(px(4.))
+                            .child(
+                                IconButton::new("minimize", IconName::Minus)
+                                    .debug_selector(|| "minimize".into())
+                                    .tooltip(Tooltip::text("Minimize"))
+                                    .on_click(|_, window, _| window.minimize_window()),
+                            )
+                            .child(
+                                IconButton::new("maximize", IconName::Square)
+                                    .debug_selector(|| "maximize".into())
+                                    .tooltip(Tooltip::text("Maximize"))
+                                    .on_click(|_, window, _| window.zoom_window()),
+                            )
+                            .child(
+                                IconButton::new("close", IconName::Close)
+                                    .debug_selector(|| "close".into())
+                                    .tooltip(Tooltip::with_key(
+                                        "Close window",
+                                        keystone_ui::shortcut_text("secondary-shift-w"),
+                                    ))
+                                    .on_click({
+                                        let root = cx.weak_entity();
+                                        move |_, window, cx| {
+                                            if close_window(&root, window, cx) {
+                                                window.remove_window();
+                                            }
                                         }
-                                    }
-                                }),
-                        ),
-                    cx,
-                ),
-            );
+                                    }),
+                            ),
+                        cx,
+                    ),
+                )
+            });
         self.drag_window(bar, cx)
     }
 
@@ -3622,6 +3637,13 @@ impl Render for Keystone {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.focus_project_transition(window, cx);
         self.sync_title(window);
+        #[cfg(target_os = "macos")]
+        {
+            let margin = platform::traffic_light_margin(cx.theme().density.control(TOP_BAR));
+            if self.traffic_light_margin.replace(margin) != Some(margin) {
+                window.set_traffic_light_position(point(margin, margin));
+            }
+        }
         let theme = cx.theme();
         let (background, text) = (theme.colors.background, theme.colors.text);
         let current = self
@@ -8525,18 +8547,47 @@ mod tests {
         });
         let toggle_x =
             |cx: &mut gpui::VisualTestContext| cx.debug_bounds("sidebar-toggle").unwrap().origin.x;
-        assert_eq!(toggle_x(cx), px(8.));
+        let home = if cfg!(target_os = "macos") {
+            px(88.)
+        } else {
+            px(8.)
+        };
+        assert_eq!(toggle_x(cx), home);
         assert!(cx.debug_bounds("search-field").is_some());
 
         click(cx, "sidebar-toggle");
-        assert_eq!(toggle_x(cx), px(8.));
+        assert_eq!(toggle_x(cx), home);
 
         cx.simulate_keystrokes("secondary-f");
-        assert_eq!(toggle_x(cx), px(8.));
+        assert_eq!(toggle_x(cx), home);
         assert!(cx.debug_bounds("search-field").is_some());
         view.update_in(cx, |this, window, cx| {
             assert!(this.search.focus_handle(cx).is_focused(window))
         });
+    }
+
+    #[gpui::test]
+    fn the_top_bar_draws_window_controls_only_where_the_system_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("workspace.json")).unwrap();
+        cx.update(keystone_ui::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        for control in ["minimize", "maximize", "close"] {
+            assert_eq!(
+                cx.debug_bounds(control).is_some(),
+                !cfg!(target_os = "macos"),
+                "{control}"
+            );
+        }
     }
 
     #[test]
@@ -10809,6 +10860,8 @@ fn main() {
             quick::open(cx);
         }
         keystone_ui::automation::serve_inbox(cx);
-        cx.activate(true);
+        if !keystone_ui::automation::background() {
+            cx.activate(true);
+        }
     });
 }

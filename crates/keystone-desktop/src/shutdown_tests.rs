@@ -590,6 +590,18 @@ fn nonselected_terminal_loss_is_visible_before_any_quit_attempt(cx: &mut TestApp
     });
 }
 
+/// Keystone's drawn close button, or on macOS the traffic light, which asks the window
+/// whether it may close.
+fn close_from_title_bar(cx: &mut VisualTestContext) {
+    if cfg!(target_os = "macos") {
+        cx.simulate_close();
+    } else {
+        let close = cx.debug_bounds("close").unwrap();
+        cx.simulate_click(close.center(), gpui::Modifiers::none());
+    }
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 fn directory_sync_failure_vetoes_title_bar_close_until_explicit_retry(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -598,16 +610,12 @@ fn directory_sync_failure_vetoes_title_bar_close_until_explicit_retry(cx: &mut T
         s.test_sync_directory(|_| Err(std::io::Error::other("injected sync failure")))
     });
     draft(&view, cx, "directory sync draft");
-    let close = cx.debug_bounds("close").unwrap();
-    cx.simulate_click(close.center(), gpui::Modifiers::none());
-    cx.run_until_parked();
+    close_from_title_bar(cx);
     assert_eq!(phase(&state, cx), Phase::Running);
     assert!(cx.debug_bounds("shutdown-error").is_some());
     let writes = state.read_with(cx, |s, _| s.store().writes());
     state.update(cx, |s, _| s.test_sync_directory(std::fs::File::sync_all));
-    let close = cx.debug_bounds("close").unwrap();
-    cx.simulate_click(close.center(), gpui::Modifiers::none());
-    cx.run_until_parked();
+    close_from_title_bar(cx);
     state.read_with(cx, |s, _| {
         assert_eq!(s.phase, Phase::Exiting);
         assert_eq!(s.store().writes(), writes);

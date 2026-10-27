@@ -33,6 +33,13 @@ pub fn enabled() -> bool {
     output().is_some()
 }
 
+/// Whether a driver asked this debug launch to stay behind other apps
+/// (`KEYSTONE_AUTOMATION_BACKGROUND`), so it never takes focus from the person at the
+/// machine.
+pub fn background() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("KEYSTONE_AUTOMATION_BACKGROUND").is_some()
+}
+
 struct Entry {
     id: String,
     bounds: Bounds<Pixels>,
