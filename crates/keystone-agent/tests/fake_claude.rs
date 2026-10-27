@@ -1201,3 +1201,57 @@ fn attached_images_reach_claude_as_their_bytes() {
         })
     ));
 }
+
+/// The scripted `get_usage` answer reaches the account's usage before the first turn
+/// ends, without a `rate_limit_event`; an error answer, or the default one with no
+/// login, reports nothing, and the turn completes all the same.
+#[test]
+fn a_chat_process_reports_the_get_usage_answer_as_its_first_turn_runs() {
+    let (conn, wake) = connect();
+    let custom = r#"{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":7,"resets_at":null}}}"#;
+    for (session, setting) in [(1, "85"), (2, "error"), (3, ""), (4, custom)] {
+        let dir = tempfile::tempdir().unwrap();
+        if !setting.is_empty() {
+            std::fs::write(dir.path().join(".fake-claude-get-usage"), setting).unwrap();
+        }
+        let cwd = dir.path().to_str().unwrap();
+        conn.send(session, cwd, None, None, NO_MODE, "hello".into())
+            .unwrap();
+        let events = until(&conn, &wake, completed);
+        let usage: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Usage(windows) => Some(
+                    windows
+                        .iter()
+                        .map(|w| (w.id.as_str(), w.used_percent, w.resets_at.is_some()))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let expected = match session {
+            1 => vec![vec![
+                ("five_hour", 85.0, true),
+                ("seven_day", 20.0, true),
+                ("seven_day_sonnet", 6.0, true),
+            ]],
+            4 => vec![vec![("five_hour", 7.0, false)]],
+            _ => Vec::new(),
+        };
+        assert_eq!(usage, expected, "{setting}: {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Failed { .. } | Event::Warning { .. })),
+            "{events:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Event::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            })
+        ));
+    }
+}

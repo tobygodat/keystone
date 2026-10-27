@@ -19,6 +19,14 @@ fn wire(line: &str) -> Value {
     serde_json::from_str(line).unwrap()
 }
 
+/// Whether a line is the `get_usage` a chat process writes once Claude answers
+/// `initialize`: after any `mcp_set_servers` and before any message.
+fn usage_request(line: &str) -> bool {
+    wire(line)
+        == json!({"type": "control_request", "request_id": "keystone-usage",
+            "request": {"subtype": "get_usage", "skip_behaviors": true}})
+}
+
 fn claude_init(driver: &mut ClaudeDriver, out: &mut Outputs) {
     driver.on_line(br#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-1","response":{"current_permission_mode":"default"}}}"#, out);
 }
@@ -78,7 +86,8 @@ fn claude_injects_after_initialize_and_holds_messages_until_server_success() {
         assert_eq!(wire(&out.writes[0])["request"]["subtype"], "initialize");
         out.writes.clear();
         claude_init(&mut driver, &mut out);
-        assert_eq!(out.writes.len(), 1);
+        assert_eq!(out.writes.len(), 2);
+        assert!(usage_request(&out.writes[1]));
         let set = wire(&out.writes[0]);
         assert_eq!(set["request"]["subtype"], "mcp_set_servers");
         assert_eq!(set["request"]["servers"]["keystone"]["type"], "http");
@@ -454,7 +463,11 @@ fn launch_authorization_is_rechecked_at_actual_claude_and_codex_writes() {
         }
         out = Outputs::default();
         claude_init(&mut claude, &mut out);
-        assert!(out.writes.is_empty());
+        assert!(
+            matches!(out.writes.as_slice(), [line] if usage_request(line)),
+            "{:?}",
+            out.writes
+        );
         assert!(!claude.is_running());
         codex_initialized(&mut codex, &mut out);
         out = Outputs::default();
@@ -512,8 +525,9 @@ fn claude_refused_launch_keeps_human_input_held_behind_it() {
     assert!(out.events.iter().any(|(_, event)| {
         matches!(event, Event::TurnCompleted { status: crate::item::TurnStatus::Failed, error: Some(message), .. } if message.contains("launching agent"))
     }));
-    assert_eq!(out.writes.len(), 1, "{:?}", out.writes);
-    assert_eq!(wire(&out.writes[0])["message"]["content"], "human");
+    assert_eq!(out.writes.len(), 2, "{:?}", out.writes);
+    assert!(usage_request(&out.writes[0]));
+    assert_eq!(wire(&out.writes[1])["message"]["content"], "human");
     assert!(driver.is_running());
 }
 
@@ -533,8 +547,9 @@ fn admitted_launch_survives_parent_turn_completion() {
     issuer.set_running(99, false);
     out = Outputs::default();
     claude_init(&mut driver, &mut out);
-    assert_eq!(out.writes.len(), 1);
-    assert_eq!(wire(&out.writes[0])["message"]["content"], "admitted");
+    assert_eq!(out.writes.len(), 2);
+    assert!(usage_request(&out.writes[0]));
+    assert_eq!(wire(&out.writes[1])["message"]["content"], "admitted");
 }
 
 #[test]

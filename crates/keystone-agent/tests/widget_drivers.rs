@@ -48,8 +48,10 @@ fn claude(accept: bool) -> (ClaudeDriver, Outputs) {
         json!({"keystone_ui": {"type": "sdk", "name": "keystone_ui", "timeout": 86_400_000,
             "disableAutoBackground": true}})
     );
-    // The message waits for the answer, so the tool is there for its turn.
-    assert_eq!(out.writes.len(), 1);
+    // Then only `get_usage`: the message waits for the answer, so the tool is there
+    // for its turn.
+    assert_eq!(out.writes.len(), 2);
+    assert_eq!(parse(&out.writes[1])["request"]["subtype"], "get_usage");
     let answer = if accept {
         json!({"added": ["keystone_ui"], "removed": [], "errors": {}})
     } else {

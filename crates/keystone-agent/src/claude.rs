@@ -48,6 +48,12 @@ pub const ARGS: [&str; 12] = [
 /// frames.
 pub const STEER_NOT_YET: &str = "Claude Code cannot steer this turn yet. Send again in a moment.";
 
+/// The request ID of the `get_usage` a chat process is asked once Claude answers
+/// `initialize`. It is outside the `keystone-N` numbering, so no other request's ID
+/// moves, and it is never timed or waited for: no answer, an error or an answer
+/// Keystone cannot read only leaves the account's usage as it was.
+const USAGE_REQUEST: &str = "keystone-usage";
+
 /// Claude's `--permission-mode` for an approval mode, or `None` to pass none.
 /// `default` is the mode Claude 2.1.300 also calls `manual`.
 pub fn permission_mode(mode: ApprovalMode) -> Option<&'static str> {
@@ -251,6 +257,10 @@ pub struct ClaudeDriver {
     api_error: Option<String>,
     /// The usage limit that refused this turn's request, for its end.
     limit: Option<UsageLimit>,
+    /// The windows `rate_limit_event`s reported in this process. A later `get_usage`
+    /// answer leaves them alone: it was asked for first, so it is taken as the older
+    /// reading.
+    reported: HashSet<String>,
     /// The limit the latest rejected `rate_limit_event` named. Claude sends one when an
     /// account's limit refuses a request, before the error it reports.
     rejected: Option<UsageLimit>,
@@ -369,6 +379,7 @@ impl ClaudeDriver {
             approvals: HashMap::new(),
             api_error: None,
             limit: None,
+            reported: HashSet::new(),
             rejected: None,
             sign_in: None,
             launched: mode,
@@ -687,6 +698,22 @@ impl ClaudeDriver {
             self.activity += 1;
             return;
         };
+        // Like a `rate_limit_event`, the answer says nothing about this process's work.
+        if envelope.kind == "control_response"
+            && let Ok(answer) = serde_json::from_slice::<UsageAnswer>(line)
+            && answer.response.request_id == USAGE_REQUEST
+        {
+            let mut windows = if answer.response.subtype == "success" {
+                usage_windows(&answer.response.response)
+            } else {
+                Vec::new()
+            };
+            windows.retain(|window| !self.reported.contains(&window.id));
+            if !windows.is_empty() {
+                out.event(self.session, Event::Usage(windows));
+            }
+            return;
+        }
         if !self.passive(&envelope, line) {
             self.activity += 1;
         }
@@ -707,6 +734,8 @@ impl ClaudeDriver {
                         self.rejected = Some(event.rate_limit_info.limit(false));
                     }
                     let windows = event.rate_limit_info.windows();
+                    self.reported
+                        .extend(windows.iter().map(|window| window.id.clone()));
                     if !windows.is_empty() {
                         out.event(self.session, Event::Usage(windows));
                     }
@@ -1972,6 +2001,13 @@ impl ClaudeDriver {
                     .and_then(|r| r.current_permission_mode)
                     .or_else(|| permission_mode(self.launched).map(str::to_owned));
                 self.request_servers(false, out);
+                if self.launch == Launch::Chat {
+                    out.writes.push(
+                        json!({"type": "control_request", "request_id": USAGE_REQUEST,
+                            "request": {"subtype": "get_usage", "skip_behaviors": true}})
+                        .to_string(),
+                    );
+                }
                 return self.pump(out);
             }
             Request::Initialize => "Claude Code did not start",
@@ -2451,22 +2487,126 @@ impl RateLimitInfo {
     }
 }
 
-fn limit_window(id: &str, used_percent: f64, resets_at: Option<u64>) -> LimitWindow {
-    let label = match id {
+/// The label of a window Claude's `rate_limit_event` names, if Keystone knows it.
+fn window_label(id: &str) -> Option<&'static str> {
+    Some(match id {
         "five_hour" => "5-hour",
         "seven_day" => "Weekly",
         "seven_day_opus" => "Weekly Opus",
         "seven_day_sonnet" => "Weekly Sonnet",
         "seven_day_overage_included" => "Weekly with extra usage",
         "overage" => "Extra usage",
-        other => other,
-    };
+        _ => return None,
+    })
+}
+
+fn limit_window(id: &str, used_percent: f64, resets_at: Option<u64>) -> LimitWindow {
     LimitWindow {
         id: id.to_owned(),
-        label: label.to_owned(),
+        label: window_label(id).unwrap_or(id).to_owned(),
         used_percent,
         resets_at,
     }
+}
+
+/// A `control_response` read only as far as its request ID, so an answer of any shape
+/// is recognized as the `get_usage` one.
+#[derive(Deserialize)]
+struct UsageAnswer {
+    response: UsageResult,
+}
+
+#[derive(Deserialize)]
+struct UsageResult {
+    #[serde(default)]
+    subtype: Value,
+    request_id: Value,
+    #[serde(default)]
+    response: Value,
+}
+
+/// The windows of a `get_usage` answer, as Claude Code 2.1.301 reports them:
+/// `rate_limits_available` and `rate_limits`, each window's `utilization` a percentage
+/// and `resets_at` an RFC 3339 time. The schema is experimental, so each window is read
+/// on its own, and one Keystone cannot read is left out. So is one Keystone has no label
+/// for, such as `model_scoped`, which would otherwise show under its raw ID.
+fn usage_windows(answer: &Value) -> Vec<LimitWindow> {
+    let Some(limits) = answer["rate_limits"]
+        .as_object()
+        .filter(|_| answer["rate_limits_available"] == true)
+    else {
+        return Vec::new();
+    };
+    let mut windows: Vec<LimitWindow> = limits
+        .iter()
+        .filter_map(|(id, window)| {
+            window_label(id)?;
+            let used = window["utilization"].as_f64()?;
+            let resets_at = window["resets_at"].as_str().and_then(rfc3339_seconds);
+            Some(limit_window(id, used, resets_at))
+        })
+        .collect();
+    windows.sort_by(|a, b| a.id.cmp(&b.id));
+    windows
+}
+
+/// Unix seconds for an RFC 3339 time from 1970 to 9999, such as
+/// `2026-10-21T07:00:00.123+00:00`. Anything else, an impossible date included, is
+/// `None`.
+fn rfc3339_seconds(text: &str) -> Option<u64> {
+    let digits = |part: &str, width: usize, range: std::ops::RangeInclusive<i64>| {
+        (part.len() == width && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+            .filter(|n| range.contains(n))
+    };
+    let (date, time) = (text.get(..10)?, text.get(11..)?);
+    if !matches!(text.as_bytes()[10], b'T' | b't' | b' ') {
+        return None;
+    }
+    let &[year, month, day] = &date.split('-').collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let (year, month) = (digits(year, 4, 1970..=9999)?, digits(month, 2, 1..=12)?);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    let day = digits(day, 2, 1..=days_in_month)?;
+    let (clock, zone) = time.split_at(time.find(['Z', 'z', '+', '-'])?);
+    let (clock, fraction) = clock.split_once('.').unwrap_or((clock, "0"));
+    if fraction.is_empty() || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let &[hour, minute, second] = &clock.split(':').collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let seconds = digits(hour, 2, 0..=23)? * 3600 + digits(minute, 2, 0..=59)? * 60;
+    let seconds = seconds + digits(second, 2, 0..=60)?;
+    let offset = match zone {
+        "Z" | "z" => 0,
+        _ => {
+            let (hours, minutes) = zone[1..].split_once(':')?;
+            let offset = digits(hours, 2, 0..=23)? * 3600 + digits(minutes, 2, 0..=59)? * 60;
+            if zone.starts_with('-') {
+                -offset
+            } else {
+                offset
+            }
+        }
+    };
+    // Days since 1970-01-01 from the civil date (Howard Hinnant's algorithm), the
+    // inverse of [`surface::iso8601`]. Every field is bounded, so nothing overflows.
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + seconds - offset).ok()
 }
 
 #[derive(Deserialize)]
@@ -2762,6 +2902,250 @@ mod tests {
             usage[2],
             vec![limit_window("seven_day_opus", 100.0, Some(1_800_600_000))]
         );
+    }
+
+    /// A `get_usage` answer as Claude Code 2.1.301 sends one, with synthetic values.
+    fn usage_answer(subtype: &str, response: &str) -> String {
+        format!(
+            r#"{{"type":"control_response","response":{{"subtype":"{subtype}","request_id":"keystone-usage","response":{response}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_chat_process_asks_get_usage_after_initialize_and_reports_its_windows() {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(1, false, 7, ApprovalMode::Provider, &mut out);
+        assert_eq!(out.writes.len(), 1, "only initialize before its answer");
+        out.writes.clear();
+        driver.on_line(
+            br#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-1","response":{}}}"#,
+            &mut out,
+        );
+        let asked: Vec<Value> = out
+            .writes
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            asked,
+            vec![
+                json!({"type": "control_request", "request_id": "keystone-usage",
+                "request": {"subtype": "get_usage", "skip_behaviors": true}})
+            ]
+        );
+        let (mut driver, mut out) = idle_driver();
+        out.events.clear();
+        let activity = driver.activity();
+        driver.on_line(
+            usage_answer(
+                "success",
+                r#"{"rate_limits_available":true,"rate_limits":{
+                    "five_hour":{"utilization":41.0,"resets_at":"2027-01-15T08:00:00.000Z"},
+                    "seven_day":{"utilization":12.5,"resets_at":"2027-01-19T08:00:00.123456+00:00"},
+                    "seven_day_sonnet":{"utilization":3,"resets_at":null},
+                    "seven_day_opus":{"utilization":null,"resets_at":null},
+                    "model_scoped":{"utilization":7.0,"resets_at":"2027-01-19T08:00:00Z"}}}"#,
+            )
+            .as_bytes(),
+            &mut out,
+        );
+        assert_eq!(
+            usage_events(&out),
+            vec![vec![
+                limit_window("five_hour", 41.0, Some(1_800_000_000)),
+                limit_window("seven_day", 12.5, Some(1_800_345_600)),
+                limit_window("seven_day_sonnet", 3.0, None),
+            ]]
+        );
+        assert_eq!(usage_events(&out)[0][0].label, "5-hour");
+        assert_eq!(driver.activity(), activity);
+        assert_eq!(driver.unknown, 0);
+        assert_eq!(driver.idle_blocker(), None);
+    }
+
+    #[test]
+    fn a_get_usage_error_or_unreadable_answer_is_ignored_quietly() {
+        let (mut driver, mut out) = idle_driver();
+        out.events.clear();
+        out.writes.clear();
+        let activity = driver.activity();
+        for line in [
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"keystone-usage","error":"Unknown subtype: get_usage"}}"#.to_owned(),
+            usage_answer("success", r#"{"rate_limits_available":false,"rate_limits":null}"#),
+            usage_answer(
+                "success",
+                r#"{"rate_limits_available":false,"rate_limits":{"five_hour":{"utilization":50,"resets_at":null}}}"#,
+            ),
+            usage_answer("success", r#"{"rate_limits_available":true,"rate_limits":[1,2]}"#),
+            usage_answer(
+                "success",
+                r#"{"rate_limits_available":true,"rate_limits":{"five_hour":"full","seven_day":{"utilization":"12"},"model_scoped":{"opus":{"utilization":5}}}}"#,
+            ),
+            usage_answer("success", r#""a string""#),
+            usage_answer("success", r#"{"mode":7,"models":"none","session_state":false}"#),
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-usage"}}"#.to_owned(),
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"keystone-usage","error":"no","response":{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":50,"resets_at":null}}}}}"#.to_owned(),
+            r#"{"type":"control_response","response":{"request_id":"keystone-usage","response":{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":50,"resets_at":null}}}}}"#.to_owned(),
+            r#"{"type":"control_response","response":{"request_id":"keystone-usage","subtype":7}}"#.to_owned(),
+            r#"{"type":"control_response","response":{"request_id":"keystone-usage","subtype":{"ok":true},"response":{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":50,"resets_at":null}}}}}"#.to_owned(),
+        ] {
+            driver.on_line(line.as_bytes(), &mut out);
+        }
+        assert!(out.events.is_empty(), "{:?}", out.events);
+        assert!(out.writes.is_empty(), "{:?}", out.writes);
+        assert_eq!(driver.activity(), activity);
+        assert_eq!(driver.unknown, 0);
+        assert_eq!(driver.idle_blocker(), None);
+        // An unreadable reset time keeps the window, without one.
+        driver.on_line(
+            usage_answer(
+                "success",
+                r#"{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":9,"resets_at":"soon"},"seven_day":{"utilization":2,"resets_at":"2027-01-19T9223372036854775807:00:00Z"}}}"#,
+            )
+            .as_bytes(),
+            &mut out,
+        );
+        assert_eq!(
+            usage_events(&out),
+            vec![vec![
+                limit_window("five_hour", 9.0, None),
+                limit_window("seven_day", 2.0, None),
+            ]]
+        );
+    }
+
+    #[test]
+    fn the_layout_helper_never_asks_get_usage() {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::launched(
+            1,
+            false,
+            7,
+            ApprovalMode::ReadOnly,
+            Launch::LayoutHelper,
+            &mut out,
+        );
+        out.writes.clear();
+        driver.on_line(
+            br#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-1","response":{"commands":[],"current_permission_mode":"plan"}}}"#,
+            &mut out,
+        );
+        assert!(
+            !out.writes.iter().any(|line| line.contains("get_usage")),
+            "{:?}",
+            out.writes
+        );
+    }
+
+    #[test]
+    fn a_get_usage_answer_during_the_first_turn_or_a_check_changes_neither() {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(1, false, 7, ApprovalMode::Provider, &mut out);
+        driver.on_line(
+            br#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-1","response":{}}}"#,
+            &mut out,
+        );
+        driver.command(
+            Command::Send {
+                session: 1,
+                text: "hi".into(),
+                images: Vec::new(),
+            },
+            &mut out,
+        );
+        driver.on_line(
+            br#"{"type":"system","subtype":"init","session_id":"s1","capabilities":["msg_lifecycle_v1"]}"#,
+            &mut out,
+        );
+        assert!(driver.is_running());
+        let (activity, blocker) = (driver.activity(), driver.idle_blocker());
+        let mut out = Outputs::default();
+        let answer = usage_answer(
+            "success",
+            r#"{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":30,"resets_at":"2027-01-15T08:00:00Z"}}}"#,
+        );
+        driver.on_line(answer.as_bytes(), &mut out);
+        assert!(driver.is_running());
+        assert_eq!(
+            (driver.activity(), driver.idle_blocker()),
+            (activity, blocker)
+        );
+        assert!(out.writes.is_empty());
+        assert_eq!(
+            usage_events(&out),
+            vec![vec![limit_window("five_hour", 30.0, Some(1_800_000_000))]]
+        );
+        assert_eq!(out.events.len(), 1);
+
+        let (mut driver, _) = idle_driver();
+        let activity = driver.activity();
+        assert_eq!(
+            check(&mut driver, &[QUIET, answer.as_str(), NO_TASKS]),
+            Some(Ok(()))
+        );
+        assert_eq!(driver.activity(), activity);
+    }
+
+    #[test]
+    fn a_late_get_usage_answer_keeps_the_windows_a_rate_limit_event_reported() {
+        let (mut driver, mut out) = idle_driver();
+        out.events.clear();
+        driver.on_line(
+            br#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","utilization":0.4,"resetsAt":1800000000},"uuid":"u","session_id":"s1"}"#,
+            &mut out,
+        );
+        driver.on_line(
+            usage_answer(
+                "success",
+                r#"{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":30,"resets_at":"2027-01-15T08:00:00Z"},"seven_day":{"utilization":12,"resets_at":"2027-01-19T08:00:00Z"}}}"#,
+            )
+            .as_bytes(),
+            &mut out,
+        );
+        assert_eq!(
+            usage_events(&out),
+            vec![
+                vec![limit_window("five_hour", 40.0, Some(1_800_000_000))],
+                vec![limit_window("seven_day", 12.0, Some(1_800_345_600))],
+            ]
+        );
+    }
+
+    #[test]
+    fn rfc3339_times_become_unix_seconds() {
+        for seconds in [0, 951_868_799, 1_800_000_000, 4_102_444_800] {
+            assert_eq!(
+                rfc3339_seconds(&surface::iso8601(seconds * 1000)),
+                Some(seconds)
+            );
+        }
+        for (text, seconds) in [
+            ("2027-01-19T08:00:00+00:00", Some(1_800_345_600)),
+            ("2027-01-19T03:00:00.999999-05:00", Some(1_800_345_600)),
+            ("2027-01-19t13:30:00+05:30", Some(1_800_345_600)),
+            ("2027-01-19 08:00:00Z", Some(1_800_345_600)),
+            ("2027-13-19T08:00:00Z", None),
+            ("2027-01-19T08:00:00", None),
+            ("2027-01-19", None),
+            ("2028-02-29T00:00:00Z", Some(1_835_395_200)),
+            ("1969-12-31T23:59:59Z", None),
+            ("1970-01-01T00:00:00+01:00", None),
+            ("2027-02-29T00:00:00Z", None),
+            ("2027-02-31T00:00:00Z", None),
+            ("2027-01-19T24:00:00Z", None),
+            ("2027-01-19T08:60:00Z", None),
+            ("2027-01-19T08:00:00+24:00", None),
+            ("2027-01-19T08:00:00:17Z", None),
+            ("2027-01-19T08:00:00.Z", None),
+            ("2027-1-19T08:00:00Z", None),
+            ("99999999999999-01-01T00:00:00Z", None),
+            ("2027-01-19T9223372036854775807:00:00Z", None),
+            ("2027-01-19T08:00:00+9223372036854775807:00", None),
+            ("2027-01-19é08:00:00Z", None),
+            ("", None),
+        ] {
+            assert_eq!(rfc3339_seconds(text), seconds, "{text}");
+        }
     }
 
     /// A second turn after [`idle_driver`]'s, fed `lines` then its lifecycle end: the

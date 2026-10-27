@@ -65,7 +65,11 @@
 //!
 //! A prompt containing "usage NN" gives its reply's last assistant message token usage
 //! (NN/2 % of a 200,000-token context) and, before its `result`, a synthetic, labelled
-//! `rate_limit_event` with the 5-hour window at NN%. `get_usage` is not scripted.
+//! `rate_limit_event` with the 5-hour window at NN%. `get_usage` answers like a Claude
+//! with no login (`rate_limits_available: false`) unless a `get-usage` setting scripts
+//! it: `error` answers with an error, a number NN gives synthetic, labelled windows in
+//! Claude Code 2.1.301's shape (see [`scripted_usage`]), and anything else is sent as
+//! the answer's JSON.
 //!
 //! `init` lists tools unless launched with `--tools ""`, the MCP servers the fixture
 //! config turns on (see [`mcp_servers`]), and no slash commands or skills. The `initialize` answer's `commands` lists the skills and
@@ -813,6 +817,18 @@ fn main() {
                             );
                         }
                     }
+                    Some("get_usage") => match setting("get-usage") {
+                        Some(usage) if usage == "error" => emit(
+                            &out,
+                            json!({"type": "control_response", "response":
+                                {"subtype": "error", "request_id": id, "error": "Scripted get_usage failure"}}),
+                        ),
+                        Some(usage) => reply(usage.parse().map_or_else(
+                            |_| serde_json::from_str(&usage).unwrap_or_default(),
+                            scripted_usage,
+                        )),
+                        None => reply(json!({"rate_limits_available": false, "rate_limits": null})),
+                    },
                     Some("interrupt") => {
                         if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CLAUDE_INTERRUPT_LOG") {
                             let _ = std::fs::write(path, message["request"].to_string());
@@ -1534,6 +1550,23 @@ fn answer(
     }
     emit(out, result);
     "completed"
+}
+
+/// A synthetic, labelled `get_usage` answer: the 5-hour window at `percent`, resetting
+/// in two hours, the weekly one at 20% and the weekly Sonnet one at 6%, resetting in
+/// four days, a weekly Opus window with no utilization, and a `model_scoped` one.
+fn scripted_usage(percent: f64) -> Value {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let at = |seconds: u64| keystone_agent::surface::iso8601((now + seconds) * 1000);
+    let (five_hour, weekly) = (at(2 * 3600), at(4 * 86_400));
+    json!({"keystone_fake": "synthetic test data", "rate_limits_available": true, "rate_limits": {
+        "five_hour": {"utilization": percent, "resets_at": five_hour},
+        "seven_day": {"utilization": 20.0, "resets_at": weekly},
+        "seven_day_sonnet": {"utilization": 6.0, "resets_at": weekly},
+        "seven_day_opus": {"utilization": null, "resets_at": null},
+        "model_scoped": {"utilization": 3.0, "resets_at": weekly}}})
 }
 
 /// The percentage a prompt such as "usage 85" asks the fake to report.

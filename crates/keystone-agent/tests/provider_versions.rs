@@ -329,7 +329,18 @@ fn observed_non_inference_handshakes_accept_the_installed_cli_versions_and_early
         claude.on_line(frame.to_string().as_bytes(), &mut out);
     }
     assert!(!claude.is_running());
-    assert!(out.writes.is_empty());
+    let written: Vec<Value> = out
+        .writes
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        written,
+        [
+            serde_json::json!({"type": "control_request", "request_id": "keystone-usage",
+            "request": {"subtype": "get_usage", "skip_behaviors": true}})
+        ]
+    );
     assert!(
         !out.events
             .iter()
