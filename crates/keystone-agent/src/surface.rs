@@ -116,7 +116,8 @@ pub enum Status {
     Answered,
     /// It has no Button, so nothing waits on the user.
     Shown,
-    /// The user stopped the turn that asked for it before answering.
+    /// The provider stopped waiting for an answer: it withdrew the call, or the turn
+    /// that asked ended.
     Stopped,
 }
 

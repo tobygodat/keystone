@@ -1,5 +1,7 @@
+use crate::widget::WidgetFocus;
 use gpui::{App, FocusHandle, ListAlignment, ListOffset, ListState, Window, px};
 use keystone_core::ViewId;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
@@ -21,6 +23,8 @@ struct Transcript {
     fully_visible_rows: Option<Range<usize>>,
     visible_anchor: Option<ListOffset>,
     collapsed_activity: HashSet<usize>,
+    /// Each widget's controls, by the tool call that showed it.
+    widgets: RefCell<HashMap<String, WidgetFocus>>,
 }
 
 pub struct TranscriptKeyboard {
@@ -76,6 +80,7 @@ impl ViewStates {
                 fully_visible_rows: None,
                 visible_anchor: None,
                 collapsed_activity: HashSet::new(),
+                widgets: RefCell::default(),
             })
             .list
             .clone()
@@ -114,8 +119,60 @@ impl ViewStates {
         self.transcripts.get(&key)?.keyboard.as_ref()
     }
 
+    /// The controls of the widget tool call `call` showed.
+    pub fn widget_focus(&self, key: ViewKey, call: &str) -> WidgetFocus {
+        self.transcripts
+            .get(&key)
+            .map_or_else(WidgetFocus::default, |t| {
+                t.widgets
+                    .borrow_mut()
+                    .entry(call.to_owned())
+                    .or_default()
+                    .clone()
+            })
+    }
+
+    /// The focusable controls of the widget `call` showed, in Tab order, as last drawn.
+    pub fn widget_controls(&self, key: ViewKey, call: &str) -> Vec<FocusHandle> {
+        self.transcripts
+            .get(&key)
+            .and_then(|t| {
+                let widgets = t.widgets.borrow();
+                let order = widgets.get(call)?.borrow().order().to_vec();
+                Some(order)
+            })
+            .unwrap_or_default()
+    }
+
+    /// The tool call of the widget whose control has focus.
+    pub fn focused_widget(&self, key: ViewKey, window: &Window) -> Option<String> {
+        let t = self.transcripts.get(&key)?;
+        let widgets = t.widgets.borrow();
+        widgets
+            .iter()
+            .find(|(_, controls)| {
+                controls
+                    .borrow()
+                    .order()
+                    .iter()
+                    .any(|f| f.is_focused(window))
+            })
+            .map(|(call, _)| call.clone())
+    }
+
+    /// Whether the list painted the widget `call` showed in this frame.
+    pub fn widget_drawn(&self, key: ViewKey, call: &str) -> bool {
+        self.transcripts
+            .get(&key)
+            .and_then(|t| t.widgets.borrow().get(call).map(|c| c.borrow().drawn))
+            .unwrap_or(false)
+    }
+
     pub fn begin_frame(&mut self, key: ViewKey) {
         let t = self.transcripts.get_mut(&key).unwrap();
+        for controls in t.widgets.borrow().values() {
+            controls.borrow_mut().drawn = false;
+        }
         t.visible_rows = None;
         t.fully_visible_rows = None;
         t.visible_anchor = None;

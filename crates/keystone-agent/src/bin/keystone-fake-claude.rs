@@ -1155,6 +1155,18 @@ fn work(
 /// Sends a control request and waits for its answer, or `None` if the turn is
 /// stopped first, after withdrawing the request as Claude does.
 fn ask(out: &Out, shared: &Shared, id: &str, request: Value) -> Option<Value> {
+    ask_within(out, shared, id, request, None)
+}
+
+/// [`ask`], also withdrawing the request when `limit` passes without an answer.
+fn ask_within(
+    out: &Out,
+    shared: &Shared,
+    id: &str,
+    request: Value,
+    limit: Option<Duration>,
+) -> Option<Value> {
+    let asked = Instant::now();
     let (tx, rx) = mpsc::channel();
     shared.calls.lock().unwrap().insert(id.to_owned(), tx);
     emit(
@@ -1167,7 +1179,10 @@ fn ask(out: &Out, shared: &Shared, id: &str, request: Value) -> Option<Value> {
             Err(RecvTimeoutError::Disconnected) => return None,
             Err(RecvTimeoutError::Timeout) => {
                 let state = shared.state.lock().unwrap();
-                if state.abort == Some(Abort::Stop) || state.closed {
+                if state.abort == Some(Abort::Stop)
+                    || state.closed
+                    || limit.is_some_and(|limit| asked.elapsed() >= limit)
+                {
                     drop(state);
                     shared.calls.lock().unwrap().remove(id);
                     emit(
@@ -1212,7 +1227,16 @@ fn connect_widgets(out: &Out, shared: &Shared) {
 
 /// One `show_ui` call: the tool use, its permission check, `tools/call`, and its
 /// result. Returns the result text, or `None` when the turn was stopped.
-fn show_ui(out: &Out, shared: &Shared, turn: u64, n: usize, arguments: Value) -> Option<String> {
+/// With `withdraw`, a call no one answers in time is withdrawn and the turn then runs
+/// until it is stopped.
+fn show_ui(
+    out: &Out,
+    shared: &Shared,
+    turn: u64,
+    n: usize,
+    arguments: Value,
+    withdraw: bool,
+) -> Option<String> {
     let pid = std::process::id();
     let message = format!("fake-ui-{pid}-{turn}-{n}");
     let tool = format!("fake-ui-toolu-{pid}-{turn}-{n}");
@@ -1247,7 +1271,7 @@ fn show_ui(out: &Out, shared: &Shared, turn: u64, n: usize, arguments: Value) ->
     )?;
     let (text, is_error) = if allowed["response"]["behavior"] == "allow" {
         let id = format!("fake-ui-call-{pid}-{turn}-{n}");
-        let answer = ask(
+        let answer = ask_within(
             out,
             shared,
             &id,
@@ -1256,7 +1280,30 @@ fn show_ui(out: &Out, shared: &Shared, turn: u64, n: usize, arguments: Value) ->
                     "name": "show_ui", "arguments": arguments,
                     "_meta": {"claudecode/toolUseId": tool}}}),
             ),
-        )?;
+            withdraw.then_some(widgets::WITHDRAW_AFTER),
+        );
+        let Some(answer) = answer else {
+            let state = shared.state.lock().unwrap();
+            if !withdraw || state.abort == Some(Abort::Stop) || state.closed {
+                return None;
+            }
+            drop(state);
+            let result = json!([{"type": "tool_result", "tool_use_id": tool,
+                "content": [{"type": "text", "text": "Withdrawn (test data)."}], "is_error": true}]);
+            emit(
+                out,
+                json!({"type": "user", "message": {"role": "user", "content": result},
+                       "parent_tool_use_id": null}),
+            );
+            loop {
+                let state = shared.state.lock().unwrap();
+                if state.abort == Some(Abort::Stop) || state.closed {
+                    return None;
+                }
+                drop(state);
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
         let result = &answer["response"]["mcp_response"]["result"];
         (
             result["content"][0]["text"]
@@ -1469,7 +1516,7 @@ fn answer(
         };
         let mut results = Vec::new();
         for (n, arguments) in calls.into_iter().enumerate().filter(|_| widgets) {
-            match show_ui(out, shared, turn, n, arguments) {
+            match show_ui(out, shared, turn, n, arguments, widgets::withdraws(text)) {
                 Some(result) => results.push(result),
                 None => return stopped(out),
             }

@@ -2043,6 +2043,7 @@ impl AppState {
                     Event::ApprovalRequested(_)
                         | Event::ApprovalResolved { .. }
                         | Event::SurfaceShown { .. }
+                        | Event::SurfaceStopped { .. }
                 );
             let thread = self.conversation(session).apply(event);
             self.commit(session);

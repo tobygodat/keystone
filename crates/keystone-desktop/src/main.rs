@@ -2531,6 +2531,7 @@ impl Keystone {
                 });
             }),
             selector: arrangement::selector(&format!("widget-{index}"), key.view).to_string(),
+            focus: self.presentation.current.views.widget_focus(key, call),
         }
     }
 
@@ -9272,6 +9273,285 @@ mod tests {
         cx.simulate_input("!");
         wait_until(cx, &view, |view, cx| {
             widget(view, cx).unwrap().1.value("/summary") == Some(&serde_json::json!("Changed!"))
+        });
+    }
+
+    /// A window on session 1, running the scripted `provider` with the widget tool.
+    fn widget_view<'a>(
+        provider: Provider,
+        dir: &Path,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (Entity<Keystone>, &'a mut gpui::VisualTestContext) {
+        let mut store = Store::open(dir.join("workspace.json")).unwrap();
+        store.create(provider, &working_directory(), 1).unwrap();
+        store.select(1).unwrap();
+        let program = match provider {
+            Provider::Claude => claude_script(dir, ""),
+            Provider::Codex => wrapper(
+                dir,
+                "keystone-fake-codex",
+                "KEYSTONE_FAKE_CODEX_DELAY_MS=2 KEYSTONE_FAKE_CODEX_VERSION=0.163.0",
+            ),
+        };
+        cx.update(|cx| {
+            keystone_ui::init(cx);
+            bind_keys(cx);
+        });
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, _| match provider {
+                Provider::Claude => state.test_set_claude(Some(ClaudeConnection::new(
+                    Some(program),
+                    state.test_wake().clone(),
+                ))),
+                Provider::Codex => state.test_set_codex(Some(CodexConnection::new(
+                    Some(program),
+                    "test",
+                    state.test_wake().clone(),
+                ))),
+            })
+        });
+        (view, cx)
+    }
+
+    /// Session 1's widget and its row.
+    fn surface_row(view: &Keystone, cx: &App) -> Option<(usize, keystone_agent::surface::Surface)> {
+        view.state.read(cx).conversations()[&1]
+            .rows
+            .iter()
+            .enumerate()
+            .find_map(|(index, row)| match row {
+                Row::Surface(surface) => Some((index, surface.clone())),
+                _ => None,
+            })
+    }
+
+    /// The provider gives up on a widget's call while its turn goes on: the widget is
+    /// Stopped at once and the session leaves Needs action, without waiting for the turn
+    /// to end.
+    fn widget_withdrawn(provider: Provider, cx: &mut gpui::TestAppContext) {
+        use keystone_agent::surface::Status;
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = widget_view(provider, dir.path(), cx);
+        send_text(&view, cx, "show a widget checklist withdraw");
+        wait_until(cx, &view, |view, cx| {
+            surface_row(view, cx).is_some_and(|(_, surface)| surface.waiting())
+        });
+        cx.run_until_parked();
+        assert!(in_section(cx, "session-1", Section::Attention));
+        wait_until(cx, &view, |view, cx| {
+            surface_row(view, cx).unwrap().1.status == Status::Stopped
+        });
+        view.read_with(cx, |view, cx| {
+            assert!(
+                view.state.read(cx).conversations()[&1].running,
+                "the turn goes on"
+            )
+        });
+        cx.run_until_parked();
+        assert!(in_section(cx, "session-1", Section::Working));
+        view.update_in(cx, |this, window, cx| this.stop_turn(1, window, cx));
+        wait_until(cx, &view, |view, cx| {
+            !view.state.read(cx).conversations()[&1].running
+        });
+        assert_eq!(
+            view.read_with(cx, |view, cx| surface_row(view, cx).unwrap().1.status),
+            Status::Stopped
+        );
+    }
+
+    #[gpui::test]
+    fn a_claude_widget_the_provider_withdraws_is_stopped(cx: &mut gpui::TestAppContext) {
+        widget_withdrawn(Provider::Claude, cx);
+    }
+
+    #[gpui::test]
+    fn a_codex_widget_the_provider_withdraws_is_stopped(cx: &mut gpui::TestAppContext) {
+        widget_withdrawn(Provider::Codex, cx);
+    }
+
+    /// Presses each key and lets it go, as a keyboard does.
+    fn press_keys(cx: &mut gpui::VisualTestContext, strokes: &str) {
+        for key in strokes.split_whitespace() {
+            cx.simulate_keystrokes(key);
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    /// Which of session 1's widget controls has focus, by Tab position.
+    fn focused_control(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> Option<usize> {
+        view.update_in(cx, |v, window, cx| {
+            let call = surface_row(v, cx).unwrap().1.call;
+            v.presentation
+                .current
+                .views
+                .widget_controls(MAIN_1, &call)
+                .iter()
+                .position(|focus| focus.is_focused(window))
+        })
+    }
+
+    /// From the transcript, Tab walks the checklist's boxes and buttons in order, Space
+    /// ticks a box and Enter sends it, all inside the transcript; past the last
+    /// control Tab returns to the row, and Escape leaves for the composer.
+    #[gpui::test]
+    fn a_widget_is_completed_with_the_keyboard_alone(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = widget_view(Provider::Claude, dir.path(), cx);
+        send_text(&view, cx, "show a widget checklist");
+        wait_until(cx, &view, |view, cx| {
+            surface_row(view, cx).is_some_and(|(_, surface)| surface.waiting())
+        });
+        press_keys(cx, "ctrl-shift-t end");
+        assert_eq!(focused_control(&view, cx), None);
+        press_keys(cx, "tab");
+        assert_eq!(focused_control(&view, cx), Some(0), "Docs updated");
+        press_keys(cx, "tab");
+        assert_eq!(focused_control(&view, cx), Some(1), "Tests pass");
+        press_keys(cx, "space");
+        wait_until(cx, &view, |view, cx| {
+            surface_row(view, cx).unwrap().1.value("/items/tests") == Some(&serde_json::json!(true))
+        });
+        assert_eq!(focused_control(&view, cx), Some(1), "the box keeps focus");
+        press_keys(cx, "shift-tab");
+        assert_eq!(focused_control(&view, cx), Some(0));
+        press_keys(cx, "tab tab tab tab");
+        assert_eq!(focused_control(&view, cx), Some(4), "Send checklist");
+        view.update_in(cx, |v, window, cx| {
+            assert!(
+                v.presentation
+                    .current
+                    .views
+                    .contains_focus(MAIN_1, window, cx)
+            );
+        });
+        press_keys(cx, "tab");
+        assert_eq!(focused_control(&view, cx), None);
+        view.update_in(cx, |v, window, _| {
+            assert!(
+                v.presentation.current.views.focused_region(MAIN_1, window),
+                "past the last control, Tab returns to the row"
+            );
+        });
+        press_keys(cx, "shift-tab");
+        assert_eq!(
+            focused_control(&view, cx),
+            Some(4),
+            "and Shift+Tab goes back in"
+        );
+        press_keys(cx, "enter");
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "Widget results", cx).is_some()
+        });
+        view.read_with(cx, |view, cx| {
+            let reply = reply_with(view, "Widget results", cx).unwrap();
+            assert!(reply.contains(r#""tests":true"#), "{reply}");
+            let (_, surface) = surface_row(view, cx).unwrap();
+            assert_eq!(surface.status, keystone_agent::surface::Status::Answered);
+            assert_eq!(surface.last_action.as_deref(), Some("submit"));
+        });
+        press_keys(cx, "escape");
+        assert!(composer_focused(&view, cx), "Escape leaves the widget");
+    }
+
+    /// Generic Tab from the composer never lands on a widget control, and a focused
+    /// control that new rows push out of view hands focus back to the transcript, so
+    /// its keys keep working.
+    #[gpui::test]
+    fn widget_controls_stay_inside_the_transcript_focus_model(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = widget_view(Provider::Claude, dir.path(), cx);
+        send_text(&view, cx, "show a widget form");
+        wait_until(cx, &view, |view, cx| {
+            surface_row(view, cx).is_some_and(|(_, surface)| surface.waiting())
+        });
+        view.update_in(cx, |v, window, cx| v.focus_composer(window, cx));
+        for step in 0..32 {
+            press_keys(cx, "tab");
+            assert_eq!(focused_control(&view, cx), None, "generic Tab, step {step}");
+        }
+
+        press_keys(cx, "ctrl-shift-t end shift-tab");
+        assert_eq!(focused_control(&view, cx), Some(9), "File bug");
+        view.update(cx, |v, cx| {
+            v.state.update(cx, |state, _| {
+                let conversation = state.test_conversation(1);
+                for n in 0..60 {
+                    conversation.apply(Event::ItemCompleted(Item {
+                        id: format!("later-{n}"),
+                        kind: ItemKind::AgentMessage,
+                        text: format!("A later reply {n}."),
+                        status: ItemStatus::Completed,
+                    }));
+                }
+            });
+            v.commit(1, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(focused_control(&view, cx), None);
+        view.update_in(cx, |v, window, _| {
+            assert!(v.presentation.current.views.focused_region(MAIN_1, window));
+        });
+        press_keys(cx, "escape");
+        assert!(composer_focused(&view, cx), "Escape still leaves");
+    }
+
+    /// Every kind of control answers the keyboard: type in the text field, Space picks
+    /// an option and a chip and ticks a box, Right moves the slider, and Enter files
+    /// the form.
+    #[gpui::test]
+    fn every_widget_control_works_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, cx) = widget_view(Provider::Codex, dir.path(), cx);
+        send_text(&view, cx, "show a widget form");
+        wait_until(cx, &view, |view, cx| {
+            surface_row(view, cx).is_some_and(|(_, surface)| surface.waiting())
+        });
+        press_keys(cx, "ctrl-shift-t end tab");
+        assert_eq!(focused_control(&view, cx), Some(0), "Summary");
+        cx.simulate_input("Sidebar flickers");
+        press_keys(cx, "tab tab tab space");
+        assert_eq!(focused_control(&view, cx), Some(3), "High");
+        press_keys(cx, "tab space");
+        assert_eq!(focused_control(&view, cx), Some(4), "the Sidebar chip");
+        press_keys(cx, "tab tab tab right right right");
+        assert_eq!(focused_control(&view, cx), Some(7), "Confidence");
+        press_keys(cx, "tab space tab");
+        assert_eq!(focused_control(&view, cx), Some(9), "File bug");
+        wait_until(cx, &view, |view, cx| {
+            let surface = surface_row(view, cx).unwrap().1;
+            surface.value("/summary") == Some(&serde_json::json!("Sidebar flickers"))
+                && surface.value("/severity") == Some(&serde_json::json!(["high"]))
+                && surface.value("/areas") == Some(&serde_json::json!(["sidebar"]))
+                && surface.value("/confidence") == Some(&serde_json::json!(8))
+                && surface.value("/notify") == Some(&serde_json::json!(true))
+        });
+        press_keys(cx, "enter");
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "Widget results", cx).is_some()
+        });
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                surface_row(view, cx).unwrap().1.last_action.as_deref(),
+                Some("file_bug")
+            );
+            assert_eq!(
+                view.composer.read(cx).value(),
+                "",
+                "nothing went to the composer"
+            );
         });
     }
 

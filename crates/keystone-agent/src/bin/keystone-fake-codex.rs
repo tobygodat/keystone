@@ -921,11 +921,16 @@ fn run_turn(
             json!({"id": request, "method": "item/tool/call", "params": with(json!({
                 "callId": call_id, "tool": "show_ui", "arguments": arguments}))}),
         );
+        let asked = std::time::Instant::now();
+        let withdraw = widgets::withdraws(text);
         let answer = loop {
             match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(answer) => break Some(answer),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break None,
-                Err(mpsc::RecvTimeoutError::Timeout) if turn.interrupt.load(Ordering::Relaxed) => {
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if turn.interrupt.load(Ordering::Relaxed)
+                        || (withdraw && asked.elapsed() >= widgets::WITHDRAW_AFTER) =>
+                {
                     break None;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -943,6 +948,9 @@ fn run_turn(
                 "item/completed",
                 with(json!({"item": item("failed", json!(false), json!([]))})),
             );
+            while withdraw && !turn.interrupt.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(20));
+            }
             return finish(out, thread, turn_id, "interrupted");
         };
         let result = &answer["result"];

@@ -110,6 +110,15 @@ of a Button sends A2UI's `action` message with the button's `name`, the surface 
 component IDs, a timestamp, and its `context` with every binding resolved; with
 `sendDataModel` the whole data model rides along in `metadata`.
 
+Every control works from the keyboard. With the widget's row selected in the transcript,
+Tab and Shift+Tab walk its controls in document order after the row's own actions,
+and past the last one return to the row; Enter or Space presses a button or ticks a
+box, typing fills a focused field, and Left or Right moves a slider. A focused control
+shows the focus ring and scrolls into view. Escape leaves for the composer from any
+control. Up, Down, Home and End move between rows, except in a text field, where they
+move the caret. A focused control that scrolls out of view gives focus back to the
+transcript.
+
 A surface with a Button **waits** for the user. While the provider's tool call waits
 for it, the first press is the tool's result, and the agent goes on in the same turn.
 A surface with no Button is answered at once with a note that no action will come.
@@ -125,8 +134,11 @@ call and carries the same action. Sending it leaves the composer's draft alone.
 A waiting surface puts its session in Needs action as "Waiting for your answer",
 after an approval and before a failed turn. Like an approval, it blocks settling:
 settling never answers a widget, and the user is asked to answer it first. The surface
-says it is waiting, and once pressed it says which action was sent. When the turn that
-asked ends without an answer, the surface says a press now sends a new message.
+says it is waiting, and once pressed it says which action was sent. When the provider
+stops waiting without an answer, the surface is stopped and says a press now sends a
+new message. That happens as soon as Claude withdraws the call
+(`control_cancel_request`) or Codex resolves it (`serverRequest/resolved`), even while
+the turn goes on, and otherwise when the turn that asked ends.
 
 ## Persistence
 
@@ -144,7 +156,9 @@ The tool call's own row is not shown: the surface stands for it.
 `keystone-fake-claude` and `keystone-fake-codex` script the tool (see
 `crates/keystone-agent/src/bin/support/widgets.rs`). A prompt containing "show a widget"
 and "checklist" or "form" shows that example and replies with what came back; "invalid"
-first sends a call that fails validation. Fake Claude takes the SDK server, runs the
-MCP handshake, asks permission and calls `tools/call`; fake Codex refuses
+first sends a call that fails validation; "withdraw" withdraws a call no one answers
+within two seconds and keeps the turn running until it is stopped. Fake Claude takes
+the SDK server, runs the MCP handshake, asks permission and calls `tools/call`; fake
+Codex refuses
 `dynamicTools` without `experimentalApi`, as Codex 0.163 does. Run fake Codex with
 `KEYSTONE_FAKE_CODEX_VERSION=0.163.0`, since its default version predates the tool.

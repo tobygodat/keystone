@@ -1432,7 +1432,13 @@ impl CodexDriver {
                     let request = RequestId(note.request_id.to_string());
                     if let Some(state) = self.sessions.get_mut(&session) {
                         state.approvals.remove(&request);
-                        state.ui_calls.retain(|_, waiting| *waiting != request);
+                        state.ui_calls.retain(|call, waiting| {
+                            let waits = *waiting != request;
+                            if !waits {
+                                out.event(session, Event::SurfaceStopped { call: call.clone() });
+                            }
+                            waits
+                        });
                     }
                     out.event(session, Event::ApprovalResolved { request });
                 }

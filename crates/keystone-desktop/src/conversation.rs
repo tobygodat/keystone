@@ -12,7 +12,7 @@ use keystone_agent::{
     Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
 };
 use keystone_core::{ForkPoint, UsageLimit};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -256,18 +256,30 @@ impl Conversation {
     /// Whether a widget waits for the user to answer it, counting widgets that arrived
     /// while the history loads.
     pub fn awaiting_widget(&self) -> bool {
-        let mut waiting = self
+        let mut waiting: HashSet<&str> = self
             .rows
             .iter()
-            .any(|row| matches!(row, Row::Surface(surface) if surface.waiting()));
+            .filter_map(|row| match row {
+                Row::Surface(surface) if surface.waiting() => Some(surface.call.as_str()),
+                _ => None,
+            })
+            .collect();
         for pending in self.pending.iter().flatten() {
             match pending {
-                Pending::Event(Event::SurfaceShown { waiting: true, .. }) => waiting = true,
-                Pending::Event(Event::TurnCompleted { .. }) => waiting = false,
+                Pending::Event(Event::SurfaceShown {
+                    surface,
+                    waiting: true,
+                }) => {
+                    waiting.insert(&surface.call);
+                }
+                Pending::Event(Event::SurfaceStopped { call }) => {
+                    waiting.remove(call.as_str());
+                }
+                Pending::Event(Event::TurnCompleted { .. }) => waiting.clear(),
                 _ => {}
             }
         }
-        waiting
+        !waiting.is_empty()
     }
 
     /// Rebuilds the rows from the session's log, in the order they were first shown,
@@ -1067,6 +1079,11 @@ impl Conversation {
                 };
                 self.log_surface(index);
             }
+            Event::SurfaceStopped { call } => {
+                if let Some(index) = self.surface_row(&call) {
+                    self.stop_surface(index);
+                }
+            }
             Event::UsageLimit(limit) => self.limit = Some(limit),
             Event::ForkPoint(point) => {
                 if let Some((rows, first, last)) = self.turn_span() {
@@ -1137,7 +1154,7 @@ impl Conversation {
     }
 
     /// The row of the widget tool call `call` showed.
-    fn surface_row(&self, call: &str) -> Option<usize> {
+    pub fn surface_row(&self, call: &str) -> Option<usize> {
         self.rows
             .iter()
             .position(|row| matches!(row, Row::Surface(surface) if surface.call == call))
@@ -1237,19 +1254,24 @@ impl Conversation {
             self.log_item(index, item);
         }
         // The tool call that waited for a widget ends with its turn.
-        let waiting: Vec<usize> = (start..self.rows.len())
-            .filter(
-                |&index| matches!(&self.rows[index], Row::Surface(surface) if surface.waiting()),
-            )
-            .collect();
-        for index in waiting {
-            if let Row::Surface(surface) = &mut self.rows[index] {
-                surface.status = Status::Stopped;
-                self.unsaved_surfaces.remove(&surface.call);
-            }
-            self.mark(index);
-            self.log_surface(index);
+        for index in start..self.rows.len() {
+            self.stop_surface(index);
         }
+    }
+
+    /// Marks the widget in row `index` Stopped if it still waits for the user: its tool
+    /// call no longer takes a press as its result.
+    fn stop_surface(&mut self, index: usize) {
+        let Some(Row::Surface(surface)) = self.rows.get_mut(index) else {
+            return;
+        };
+        if !surface.waiting() {
+            return;
+        }
+        surface.status = Status::Stopped;
+        self.unsaved_surfaces.remove(&surface.call);
+        self.mark(index);
+        self.log_surface(index);
     }
 
     pub fn decide(&mut self, request: &RequestId, allowed: bool) -> Option<Approval> {
@@ -3159,6 +3181,51 @@ mod tests {
         });
         assert!(!loading.awaiting_widget());
         assert_eq!(loading.settle_blocker(), None);
+    }
+
+    /// The provider giving up on one widget's call, live or while the history loads,
+    /// stops that widget only; another one still waits.
+    #[test]
+    fn a_withdrawn_widget_call_stops_only_that_widget() {
+        for mut conversation in [Conversation::default(), Conversation::loading()] {
+            conversation.apply(Event::TurnStarted);
+            for call in ["call-1", "call-2"] {
+                conversation.apply(Event::SurfaceShown {
+                    surface: checklist(call),
+                    waiting: true,
+                });
+            }
+            conversation.apply(Event::SurfaceStopped {
+                call: "call-1".into(),
+            });
+            assert!(conversation.awaiting_widget());
+            conversation.apply(Event::SurfaceStopped {
+                call: "call-2".into(),
+            });
+            assert!(!conversation.awaiting_widget());
+            assert_eq!(conversation.settle_blocker(), None);
+        }
+
+        let mut live = Conversation::default();
+        live.apply(Event::TurnStarted);
+        live.apply(Event::SurfaceShown {
+            surface: checklist("call-1"),
+            waiting: true,
+        });
+        live.take_writes();
+        live.apply(Event::SurfaceStopped {
+            call: "call-1".into(),
+        });
+        let Some(Row::Surface(surface)) = live.rows.last() else {
+            panic!("the widget row stays");
+        };
+        assert_eq!(surface.status, keystone_agent::surface::Status::Stopped);
+        assert!(
+            live.take_writes().iter().any(|write| matches!(&write.entry,
+                Entry::Surface { surface, .. }
+                    if surface.status == keystone_agent::surface::Status::Stopped)),
+            "Stopped is saved"
+        );
     }
 
     #[test]

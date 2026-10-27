@@ -172,6 +172,11 @@ pub enum Event {
         surface: crate::surface::Surface,
         waiting: bool,
     },
+    /// The provider stopped waiting for the widget `call` showed, while its turn may
+    /// go on: it withdrew the call, or it was interrupted.
+    SurfaceStopped {
+        call: String,
+    },
     /// A press could not be returned as the tool's result, because the provider no
     /// longer waits for it. `text` is the action, to send as a steer or new message.
     ActionUndelivered {

@@ -813,8 +813,14 @@ impl ClaudeDriver {
             ("control_request", _) => self.on_control_request(line, out),
             ("control_cancel_request", _) => {
                 if let Ok(cancel) = serde_json::from_slice::<CancelRequest>(line) {
-                    self.ui_calls
-                        .retain(|_, (request_id, _)| *request_id != cancel.request_id);
+                    let session = self.session;
+                    self.ui_calls.retain(|call, (request_id, _)| {
+                        let waits = *request_id != cancel.request_id;
+                        if !waits {
+                            out.event(session, Event::SurfaceStopped { call: call.clone() });
+                        }
+                        waits
+                    });
                     let request = self.request_id(&cancel.request_id);
                     if self.approvals.remove(&request).is_some() {
                         out.event(self.session, Event::ApprovalResolved { request });

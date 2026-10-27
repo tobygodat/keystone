@@ -236,6 +236,11 @@ fn claude_drops_a_waiting_call_when_claude_cancels_it_or_exits() {
     call(&mut driver, "c1", "toolu_1", surface::examples::checklist());
     let mut out = Outputs::default();
     driver.on_line(
+        &line(json!({"type": "control_cancel_request", "request_id": "other"})),
+        &mut out,
+    );
+    assert!(out.events.is_empty(), "{:?}", out.events);
+    driver.on_line(
         &line(json!({"type": "control_cancel_request", "request_id": "c1"})),
         &mut out,
     );
@@ -247,10 +252,17 @@ fn claude_drops_a_waiting_call_when_claude_cancels_it_or_exits() {
         },
         &mut out,
     );
-    assert!(matches!(
-        out.events.as_slice(),
-        [(_, Event::ActionUndelivered { .. })]
-    ));
+    assert!(
+        matches!(
+            out.events.as_slice(),
+            [
+                (_, Event::SurfaceStopped { call }),
+                (_, Event::ActionUndelivered { .. })
+            ] if call == "toolu_1"
+        ),
+        "{:?}",
+        out.events
+    );
 
     call(&mut driver, "c2", "toolu_2", surface::examples::checklist());
     let mut out = Outputs::default();
@@ -652,6 +664,46 @@ fn a_waiting_codex_call_ends_with_its_turn() {
         out.events.as_slice(),
         [(_, Event::ActionUndelivered { .. })]
     ));
+}
+
+#[test]
+fn a_codex_call_codex_resolves_without_an_answer_is_stopped() {
+    let (mut driver, _) = codex(true);
+    open(&mut driver, 2);
+    turn(&mut driver, "turn/started", "turn-1");
+    tool_call(&mut driver, 51, "call-1", surface::examples::checklist());
+    tool_call(&mut driver, 52, "call-2", surface::examples::checklist());
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Act {
+            session: SESSION,
+            call: "call-2".into(),
+            text: "{}".into(),
+        },
+        &mut out,
+    );
+    let resolved = |request: u64| {
+        line(json!({"method": "serverRequest/resolved",
+            "params": {"threadId": "thread-1", "requestId": request}}))
+    };
+    let mut out = Outputs::default();
+    driver.on_line(&resolved(52), &mut out);
+    assert!(
+        !out.events
+            .iter()
+            .any(|(_, event)| matches!(event, Event::SurfaceStopped { .. })),
+        "an answered call is not stopped: {:?}",
+        out.events
+    );
+    let mut out = Outputs::default();
+    driver.on_line(&resolved(51), &mut out);
+    assert!(
+        out.events
+            .iter()
+            .any(|(_, event)| matches!(event, Event::SurfaceStopped { call } if call == "call-1")),
+        "{:?}",
+        out.events
+    );
 }
 
 /// The scripted providers show a widget, take the press as the tool's result, and say

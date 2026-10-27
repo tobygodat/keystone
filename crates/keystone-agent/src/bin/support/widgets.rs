@@ -1,10 +1,19 @@
 //! The `show_ui` calls both fake providers make. A prompt containing "show a widget"
 //! asks for them: with "checklist" or "form" it shows that example, and with "invalid" it first
 //! sends a call that fails validation, then the checklist, as an agent fixing its call
-//! would. Without the tool, the reply says so in plain text.
+//! would. With "withdraw" the provider gives up on a call no one answered within
+//! [`WITHDRAW_AFTER`] and keeps the turn running until it is stopped. Without the tool,
+//! the reply says so in plain text.
 
 use keystone_agent::surface::examples;
 use serde_json::Value;
+use std::time::Duration;
+
+pub const WITHDRAW_AFTER: Duration = Duration::from_secs(2);
+
+pub fn withdraws(prompt: &str) -> bool {
+    prompt.contains("withdraw")
+}
 
 pub fn calls(prompt: &str) -> Vec<Value> {
     let mut calls = Vec::new();

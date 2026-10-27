@@ -1,10 +1,12 @@
 //! How an agent-built widget looks: Keystone's A2UI catalog drawn with its own
 //! components. Inputs write to the widget's data model and Buttons press through the
-//! callbacks the transcript passes in; nothing here keeps state of its own except the
-//! text fields' editors. See `docs/design/widgets.md`.
+//! callbacks the transcript passes in. The controls' focus handles and the text fields'
+//! editors live in [`Controls`], which the transcript keeps per widget, and each draw
+//! lists the focusable controls in Tab order for the transcript's Tab cycle. See
+//! `docs/design/widgets.md`.
 
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable, FontWeight, MouseButton, SharedString,
+    AnyElement, App, Entity, FocusHandle, Focusable, FontWeight, MouseButton, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
 use keystone_agent::surface::{
@@ -14,12 +16,33 @@ use keystone_ui::prelude::*;
 use keystone_ui::text_input::Changed;
 use keystone_ui::{Slider, spacing};
 use serde_json::Value;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Writes `value` at a JSON Pointer in the widget's data model.
 pub type EditHandler = Rc<dyn Fn(&str, Value, &mut App)>;
 /// Presses the Button with this component ID.
 pub type PressHandler = Rc<dyn Fn(&str, &mut App)>;
+pub type WidgetFocus = Rc<RefCell<Controls>>;
+
+/// A widget's controls, kept while its transcript view lives so focus and typing
+/// survive its row scrolling out of the list and back.
+#[derive(Default)]
+pub struct Controls {
+    handles: HashMap<String, FocusHandle>,
+    fields: HashMap<String, Field>,
+    /// The focusable controls in Tab order, as last drawn.
+    order: Vec<FocusHandle>,
+    /// Whether the list painted the widget in this frame.
+    pub drawn: bool,
+}
+
+impl Controls {
+    pub fn order(&self) -> &[FocusHandle] {
+        &self.order
+    }
+}
 
 /// What a widget can do to the app: write a bound value, or press a Button.
 #[derive(Clone)]
@@ -28,6 +51,7 @@ pub struct WidgetControl {
     pub on_press: PressHandler,
     /// The automation ID of the widget; each component's is `{selector}-{id}`.
     pub selector: String,
+    pub focus: WidgetFocus,
 }
 
 #[derive(IntoElement)]
@@ -42,8 +66,10 @@ impl SurfaceView {
     }
 }
 
-/// A text field's editor, kept while its row is drawn.
+/// A text field's editor, for the binding and mode it was made for.
 struct Field {
+    pointer: String,
+    mode: InputMode,
     input: Entity<TextInput>,
     _changed: Subscription,
 }
@@ -55,6 +81,8 @@ struct Draw<'a> {
 
 impl RenderOnce for SurfaceView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.control.focus.borrow_mut().order.clear();
+        let painted = self.control.focus.clone();
         let draw = Draw {
             surface: &self.surface,
             control: &self.control,
@@ -78,7 +106,18 @@ impl RenderOnce for SurfaceView {
             .automation_id(self.control.selector.clone())
             .max_w(px(620.))
             .gap_1()
+            .relative()
             .child(root)
+            .child(
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |_, _, _, _| {
+                        painted.borrow_mut().drawn = true;
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .when(!note.is_empty(), |d| {
                 d.child(
                     div()
@@ -96,6 +135,19 @@ impl Draw<'_> {
 
     fn element_id(&self, component: &str) -> SharedString {
         format!("widget-{}-{component}", self.surface.call).into()
+    }
+
+    /// The focus handle of control `key`, next in Tab order. Not a window tab stop:
+    /// the transcript's Tab reaches it.
+    fn focus(&self, key: &str, cx: &mut App) -> FocusHandle {
+        let mut controls = self.control.focus.borrow_mut();
+        let focus = controls
+            .handles
+            .entry(key.to_owned())
+            .or_insert_with(|| cx.focus_handle())
+            .clone();
+        controls.order.push(focus.clone());
+        focus
     }
 
     /// One component and, inside a Row or Column, the parent's direction for `weight`.
@@ -210,6 +262,8 @@ impl Draw<'_> {
                 let press = self.control.on_press.clone();
                 let component = id.to_owned();
                 Button::new(gpui::ElementId::Name(self.element_id(id)), label)
+                    .track_focus(&self.focus(id, cx))
+                    .reveal_on_focus()
                     .style(match variant {
                         ButtonVariant::Primary => ButtonStyle::Primary,
                         ButtonVariant::Default => ButtonStyle::Subtle,
@@ -224,7 +278,8 @@ impl Draw<'_> {
             }
             Kind::CheckBox { label, value } => {
                 let on = self.surface.value(value) == Some(&Value::Bool(true));
-                self.check(id, self.surface.text(label), on, value, Value::Bool(!on))
+                let label = self.surface.text(label);
+                self.check(id, label, on, value, Value::Bool(!on), cx)
             }
             Kind::TextField {
                 label,
@@ -244,31 +299,40 @@ impl Draw<'_> {
                 let on_edit = self.control.on_edit.clone();
                 let pointer = value.clone();
                 let current = text.clone();
-                let field = window.use_keyed_state(
-                    gpui::ElementId::Name(self.element_id(id)),
-                    cx,
-                    move |_, cx: &mut Context<Field>| {
+                let mut controls = self.control.focus.borrow_mut();
+                let input = match controls
+                    .fields
+                    .get(id)
+                    .filter(|field| field.pointer == *value && field.mode == mode)
+                {
+                    Some(field) => field.input.clone(),
+                    None => {
                         let input = cx.new(|cx| {
                             let mut input = TextInput::new("", mode, cx);
                             input.set_value(text, cx);
                             input
                         });
-                        let _ = input.read(cx).focus_handle(cx).tab_stop(true);
-                        let changed = cx.subscribe(&input, move |_, input, _: &Changed, cx| {
+                        let changed = cx.subscribe(&input, move |input, _: &Changed, cx| {
                             let text = input.read(cx).value().to_owned();
                             on_edit(&pointer, Value::String(text), cx);
                         });
-                        Field {
-                            input,
+                        let field = Field {
+                            pointer: value.clone(),
+                            mode,
+                            input: input.clone(),
                             _changed: changed,
-                        }
-                    },
-                );
-                let input = field.read(cx).input.clone();
+                        };
+                        controls.fields.insert(id.to_owned(), field);
+                        input
+                    }
+                };
                 let focus = input.read(cx).focus_handle(cx);
+                controls.order.push(focus.clone());
+                drop(controls);
+                let focused = focus.is_focused(window);
                 // Another field or view may have changed the value; the one being typed
                 // in keeps its own text and selection.
-                if !focus.is_focused(window) && input.read(cx).value() != current {
+                if !focused && input.read(cx).value() != current {
                     input.update(cx, |input, cx| input.set_value(current, cx));
                 }
                 v_flex()
@@ -292,15 +356,24 @@ impl Draw<'_> {
                             .py_1()
                             .rounded(radius::CONTROL)
                             .border_1()
-                            .border_color(colors.border)
+                            .border_color(if focused {
+                                colors.border_focused
+                            } else {
+                                colors.border
+                            })
                             .bg(colors.background)
                             // The conversation takes focus on a click inside it; the
                             // field keeps it.
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                focus.focus(window, cx);
-                                cx.stop_propagation();
+                            .relative()
+                            .on_mouse_down(MouseButton::Left, {
+                                let focus = focus.clone();
+                                move |_, window, cx| {
+                                    focus.focus(window, cx);
+                                    cx.stop_propagation();
+                                }
                             })
-                            .child(input),
+                            .child(input)
+                            .child(reveal(focus)),
                     )
                     .into_any_element()
             }
@@ -344,6 +417,8 @@ impl Draw<'_> {
                         let on_edit = self.control.on_edit.clone();
                         let pointer = value.clone();
                         Button::new(gpui::ElementId::Name(self.element_id(&key)), text)
+                            .track_focus(&self.focus(&key, cx))
+                            .reveal_on_focus()
                             .style(ButtonStyle::Subtle)
                             .selected(on)
                             .when(on, |b| b.icon(IconName::Check))
@@ -354,7 +429,7 @@ impl Draw<'_> {
                             .on_click(move |_, _, cx| on_edit(&pointer, next.clone(), cx))
                             .into_any_element()
                     } else {
-                        self.check(&key, text, on, value, next)
+                        self.check(&key, text, on, value, next, cx)
                     }
                 });
                 let choices = if *chips {
@@ -397,6 +472,7 @@ impl Draw<'_> {
                 };
                 let on_edit = self.control.on_edit.clone();
                 let pointer = value.clone();
+                let focus = self.focus(id, cx);
                 v_flex()
                     .gap_1()
                     .child(
@@ -423,23 +499,29 @@ impl Draw<'_> {
                             ),
                     )
                     .child(
-                        div().w(px(280.)).max_w_full().child(
-                            Slider::new(
-                                self.element_id(id),
-                                current as f32,
-                                *min as f32..=*max as f32,
-                                step,
-                            )
-                            .on_change(move |value, _, cx| {
-                                let value = f64::from(*value);
-                                let value = if whole {
-                                    Value::from(value.round() as i64)
-                                } else {
-                                    Value::from(value)
-                                };
-                                on_edit(&pointer, value, cx)
-                            }),
-                        ),
+                        div()
+                            .w(px(280.))
+                            .max_w_full()
+                            .relative()
+                            .child(reveal(focus.clone()))
+                            .child(
+                                Slider::new(
+                                    self.element_id(id),
+                                    current as f32,
+                                    *min as f32..=*max as f32,
+                                    step,
+                                )
+                                .track_focus(&focus)
+                                .on_change(move |value, _, cx| {
+                                    let value = f64::from(*value);
+                                    let value = if whole {
+                                        Value::from(value.round() as i64)
+                                    } else {
+                                        Value::from(value)
+                                    };
+                                    on_edit(&pointer, value, cx)
+                                }),
+                            ),
                     )
                     .into_any_element()
             }
@@ -448,11 +530,21 @@ impl Draw<'_> {
 
     /// A checkbox row: a box that is ticked when `on`, and its label. A press writes
     /// `next` at `pointer`.
-    fn check(&self, key: &str, label: String, on: bool, pointer: &str, next: Value) -> AnyElement {
+    fn check(
+        &self,
+        key: &str,
+        label: String,
+        on: bool,
+        pointer: &str,
+        next: Value,
+        cx: &mut App,
+    ) -> AnyElement {
         let on_edit = self.control.on_edit.clone();
         let pointer = pointer.to_owned();
         let state = format!("{label}, {}", if on { "checked" } else { "not checked" });
         let button = Button::new(gpui::ElementId::Name(self.element_id(key)), label)
+            .track_focus(&self.focus(key, cx))
+            .reveal_on_focus()
             .icon(if on {
                 IconName::Check
             } else {
@@ -472,4 +564,18 @@ impl Draw<'_> {
         // As wide as its label, not the column.
         h_flex().child(button).into_any_element()
     }
+}
+
+/// Scrolls a control focused from the keyboard into view, as focused buttons do.
+fn reveal(focus: FocusHandle) -> impl IntoElement {
+    gpui::canvas(
+        move |bounds, window, _| {
+            if focus.is_focused(window) && window.last_input_was_keyboard() {
+                window.request_autoscroll(bounds);
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
 }

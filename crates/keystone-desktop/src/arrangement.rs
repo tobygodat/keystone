@@ -1535,6 +1535,7 @@ impl Keystone {
                                                         this.presentation.current.views.focus(key, cx).focus(window, cx);
                                                         cx.notify();
                                                     }
+                                                    this.release_undrawn_widget_focus(key, window, cx);
                                                     this.observe_conversation(
                                                         key, revision, window, cx,
                                                     )

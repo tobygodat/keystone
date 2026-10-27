@@ -231,6 +231,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.follow_widget_focus(key, window, cx);
         let Some(conversation) = self.state.read(cx).conversations().get(&key.session) else {
             return;
         };
@@ -332,6 +333,80 @@ impl Keystone {
         read(&copy_actions(row, document.as_deref()))
     }
 
+    /// The row of the widget whose control has focus.
+    pub(crate) fn focused_widget_row(
+        &self,
+        key: ViewKey,
+        window: &Window,
+        cx: &App,
+    ) -> Option<usize> {
+        let call = self
+            .presentation
+            .current
+            .views
+            .focused_widget(key, window)?;
+        self.state
+            .read(cx)
+            .conversations()
+            .get(&key.session)?
+            .surface_row(&call)
+    }
+
+    /// A focused widget control whose row the list no longer draws, scrolled or pushed
+    /// out, receives no keys; the conversation takes focus back. Runs after a paint.
+    pub(crate) fn release_undrawn_widget_focus(
+        &mut self,
+        key: ViewKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let views = &self.presentation.current.views;
+        if views
+            .focused_widget(key, window)
+            .is_some_and(|call| !views.widget_drawn(key, &call))
+        {
+            self.presentation
+                .current
+                .views
+                .focus(key, cx)
+                .focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// A widget control can take focus by a click, outside the transcript's own
+    /// keyboard; its row becomes the transcript's row.
+    pub(crate) fn follow_widget_focus(
+        &mut self,
+        key: ViewKey,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(row) = self.focused_widget_row(key, window, cx) {
+            self.presentation.current.views.keyboard(key, cx).row = Some(row);
+        }
+    }
+
+    /// The controls of the widget in the transcript's row, in Tab order.
+    fn row_widget_controls(&self, key: ViewKey, cx: &App) -> Vec<FocusHandle> {
+        let views = &self.presentation.current.views;
+        let Some(row) = views.keyboard_state(key).and_then(|k| k.row) else {
+            return Vec::new();
+        };
+        match self
+            .state
+            .read(cx)
+            .conversations()
+            .get(&key.session)
+            .and_then(|c| c.rows.get(row))
+        {
+            Some(Row::Surface(surface)) => views.widget_controls(key, &surface.call),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Tab and Shift+Tab: the row, then its copy actions, then its widget's controls,
+    /// then Jump to latest when it shows, and round again.
     pub(crate) fn transcript_action(
         &mut self,
         key: ViewKey,
@@ -339,6 +414,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.follow_widget_focus(key, window, cx);
         if self
             .presentation
             .current
@@ -354,19 +430,22 @@ impl Keystone {
             |actions| actions.iter().map(|(target, _)| *target).collect(),
             cx,
         );
+        let controls = self.row_widget_controls(key, cx);
         let jump = self.presentation.current.views.scrolled_up(key);
         let keyboard = self.presentation.current.views.keyboard(key, cx);
         let at = if keyboard.jump_focus.is_focused(window) {
-            actions.len() + 1
+            actions.len() + controls.len() + 1
         } else if keyboard.action_focus.is_focused(window) {
             keyboard
                 .action
                 .and_then(|target| actions.iter().position(|t| *t == target))
                 .map_or(0, |n| n + 1)
+        } else if let Some(n) = controls.iter().position(|c| c.is_focused(window)) {
+            actions.len() + n + 1
         } else {
             0
         };
-        let count = actions.len() + usize::from(jump) + 1;
+        let count = actions.len() + controls.len() + usize::from(jump) + 1;
         keyboard.selection_from_pointer = false;
         let next = if backwards {
             (at + count - 1) % count
@@ -378,7 +457,11 @@ impl Keystone {
                 keyboard.action = Some(actions[n - 1]);
                 keyboard.action_focus.focus(window, cx);
             }
-            n if n == actions.len() + 1 && jump => {
+            n if n > actions.len() && n <= actions.len() + controls.len() => {
+                keyboard.action = None;
+                controls[n - actions.len() - 1].focus(window, cx);
+            }
+            n if n == actions.len() + controls.len() + 1 && jump => {
                 keyboard.action = None;
                 keyboard.jump_focus.focus(window, cx);
             }
@@ -401,6 +484,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.follow_widget_focus(key, window, cx);
         if self
             .presentation
             .current

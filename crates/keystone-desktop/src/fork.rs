@@ -111,6 +111,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.follow_widget_focus(key, window, cx);
         let Some(index) = self
             .presentation
             .current
