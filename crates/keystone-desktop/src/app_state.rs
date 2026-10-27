@@ -1461,15 +1461,19 @@ impl AppState {
         self.conversations.values().any(|c| c.running)
     }
 
-    /// Whether a running turn waits for the user to answer an approval request.
-    pub(crate) fn awaiting_answer(&self) -> bool {
+    /// The lowest-numbered session whose running turn waits for the user to answer an
+    /// approval request.
+    pub(crate) fn asking(&self) -> Option<u64> {
         self.conversations
-            .values()
-            .any(|c| c.running && c.awaiting_approval())
+            .iter()
+            .filter(|(_, c)| c.running && c.awaiting_approval())
+            .map(|(&session, _)| session)
+            .min()
     }
 
     /// While no window is open: quits once no turn runs, and opens the windows again
-    /// when a turn asks for an approval, so the user can answer it.
+    /// on the session asking when a turn asks for an approval, so the user can answer
+    /// it.
     fn quit_if_idle(&mut self, cx: &mut Context<Self>) {
         if !self.quit_when_idle || self.phase != Phase::Running {
             return;
@@ -1477,10 +1481,15 @@ impl AppState {
         if !self.turn_running() {
             self.quit_when_idle = false;
             cx.defer(request_quit);
-        } else if self.awaiting_answer() {
+        } else if let Some(session) = self.asking() {
             self.quit_when_idle = false;
             let state = cx.entity();
-            cx.defer(move |cx| windows::reopen(state, cx));
+            cx.defer(move |cx| {
+                notifications::show(session, cx);
+                if open_windows(cx).is_empty() {
+                    state.update(cx, |state, _| state.quit_when_idle = true);
+                }
+            });
         }
     }
 

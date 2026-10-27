@@ -520,6 +520,35 @@ fn an_approval_asked_with_no_window_open_opens_the_window_again(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn a_window_reopened_for_an_approval_shows_the_session_asking(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launch(&seeded(dir.path(), |_| {}), cx);
+    let other_dir = dir.path().join("other");
+    std::fs::create_dir(&other_dir).unwrap();
+    let other = keystone_core::ProjectId::new(&other_dir).unwrap();
+    let first = view_in(WindowId::FIRST, cx);
+    new_window(&first, Some(2), cx);
+    running(&state, 2, true, cx);
+    assert!(close(&view_in(WindowId(1), cx), cx));
+    first.update(cx, |this, _| this.presentation.project = Ok(other.clone()));
+    assert!(close(&first, cx));
+    assert!(cx.windows().is_empty());
+    ask_approval(&state, 2, cx);
+    assert_eq!(cx.windows().len(), 1);
+    let reopened = view_in(WindowId::FIRST, cx);
+    assert_eq!(
+        selected(&reopened, cx),
+        Some(2),
+        "the window that showed it was forgotten, so the first window shows it"
+    );
+    assert_eq!(
+        cx.read(|cx| reopened.read(cx).presentation.project.clone()),
+        Ok(keystone_core::ProjectId::new(&std::env::current_dir().unwrap()).unwrap()),
+        "on the project it belongs to"
+    );
+}
+
+#[gpui::test]
 fn an_agent_started_session_changes_no_windows_selection(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");
@@ -575,7 +604,7 @@ fn a_window_entering_a_session_shows_what_another_window_is_typing(cx: &mut Test
 }
 
 #[gpui::test]
-fn a_window_reopened_for_an_approval_shows_the_project_it_last_showed(cx: &mut TestAppContext) {
+fn a_window_reopened_by_a_second_launch_shows_the_project_it_last_showed(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let other_dir = dir.path().join("other");
     std::fs::create_dir(&other_dir).unwrap();
@@ -585,7 +614,7 @@ fn a_window_reopened_for_an_approval_shows_the_project_it_last_showed(cx: &mut T
     first.update(cx, |this, _| this.presentation.project = Ok(other.clone()));
     running(&state, 1, true, cx);
     assert!(close(&first, cx));
-    ask_approval(&state, 1, cx);
+    assert!(cx.update(show_all));
     let reopened = view_in(WindowId::FIRST, cx);
     assert_eq!(
         cx.read(|cx| reopened.read(cx).presentation.project.clone()),
@@ -989,4 +1018,52 @@ fn a_tab_moving_to_where_its_session_has_a_hidden_tab_brings_it_forward_in_one_w
     assert_eq!(active_view(&second, cx), hidden, "its tab comes forward");
     assert_eq!(writes(&state, cx), moved, "nothing saves after the move");
     assert_eq!(moved - before, 1, "the move is one write");
+}
+
+fn bounds_of(id: WindowId, cx: &mut TestAppContext) -> Bounds<Pixels> {
+    handle(&view_in(id, cx), cx)
+        .update(cx, |_, window, _| window.bounds())
+        .unwrap()
+}
+
+fn placed(x: f32, y: f32, width: f32, height: f32) -> Placement {
+    Placement {
+        x,
+        y,
+        width,
+        height,
+        maximized: false,
+    }
+}
+
+#[gpui::test]
+fn a_window_saved_off_the_display_opens_on_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path(), |store| {
+        store
+            .set_placement(WindowId::FIRST, placed(2600., 1400., 2560., 1440.), None)
+            .unwrap();
+        store
+            .open_window(None, None, Some(placed(-3000., 200., 900., 600.)))
+            .unwrap();
+        store
+            .open_window(None, None, Some(placed(100., 80., 900., 600.)))
+            .unwrap();
+    });
+    launch(&path, cx);
+    assert_eq!(
+        bounds_of(WindowId::FIRST, cx),
+        Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1080.))),
+        "a window from a larger display that has gone fills the one there is"
+    );
+    assert_eq!(
+        bounds_of(WindowId(1), cx),
+        Bounds::new(point(px(0.), px(200.)), size(px(900.), px(600.))),
+        "a window from a display to the left moves just onto this one"
+    );
+    assert_eq!(
+        bounds_of(WindowId(2), cx),
+        Bounds::new(point(px(100.), px(80.)), size(px(900.), px(600.))),
+        "a window on the display opens where it was"
+    );
 }

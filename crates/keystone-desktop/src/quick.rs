@@ -1,7 +1,8 @@
 //! The quick composer: a small window that starts a session and sends its first message
 //! in one step. `keystone --quick` opens it in the running app over a Unix socket, so a
 //! compositor binding or a hotkey tool can call it, and starts the app first when none
-//! runs. Escape closes it and keeps the text for the next opening.
+//! runs. Escape closes it and keeps the text for the next opening. A launch without
+//! `--quick` asks the running app over the same socket to show its windows.
 
 use crate::app_state::Phase;
 use crate::model_selector::{self, CatalogKey, Choices, Selection};
@@ -30,7 +31,6 @@ gpui::actions!(keystone, [OpenQuickComposer, SendQuick, DismissQuick]);
 
 pub(crate) const FLAG: &str = "--quick";
 const TITLE: &str = "Quick composer";
-const REQUEST: &str = "quick\n";
 const ANSWER: &str = "ok\n";
 /// The IDs catalogs answer the quick composer under, one per request so answers for
 /// two folders never cross. Session IDs count up from 1 and never reach them.
@@ -65,21 +65,39 @@ pub(crate) fn socket(state: &Path) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
-/// Asks the app listening on `socket` to open the quick composer. False when none
-/// answers within `wait`.
-pub(crate) fn ask(socket: &Path, wait: Duration) -> bool {
+/// What a launch asks the app already holding the workspace for.
+#[derive(Clone, Copy)]
+pub(crate) enum Request {
+    /// The quick composer, for `--quick`.
+    Quick,
+    /// Its windows, opened again when none is open.
+    Windows,
+}
+
+impl Request {
+    fn line(self) -> &'static str {
+        match self {
+            Self::Quick => "quick\n",
+            Self::Windows => "windows\n",
+        }
+    }
+}
+
+/// Asks the app listening on `socket` for `request`. False when none answers within
+/// `wait`.
+pub(crate) fn ask(socket: &Path, request: Request, wait: Duration) -> bool {
     let Ok(mut stream) = UnixStream::connect(socket) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(wait.max(Duration::from_millis(100))));
     let mut answer = String::new();
-    stream.write_all(REQUEST.as_bytes()).is_ok()
+    stream.write_all(request.line().as_bytes()).is_ok()
         && BufReader::new(stream).read_line(&mut answer).is_ok()
         && answer == ANSWER
 }
 
-/// Opens the quick composer for each request on `socket` while the app runs. Only the
-/// process holding the workspace lock listens, so a socket already there is stale.
+/// Answers each request on `socket` while the app runs. Only the process holding the
+/// workspace lock listens, so a socket already there is stale.
 pub(crate) fn listen(socket: &Path, cx: &mut App) -> std::io::Result<()> {
     match std::fs::remove_file(socket) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
@@ -96,8 +114,11 @@ pub(crate) fn listen(socket: &Path, cx: &mut App) -> std::io::Result<()> {
         }
     });
     cx.spawn(async move |cx| {
-        while let Some(opened) = received.next().await {
-            let _ = opened.send(cx.update(open));
+        while let Some((request, shown)) = received.next().await {
+            let _ = shown.send(cx.update(|cx| match request {
+                Request::Quick => open(cx),
+                Request::Windows => crate::windows::show_all(cx),
+            }));
         }
     })
     .detach();
@@ -110,15 +131,24 @@ pub(crate) fn listen(socket: &Path, cx: &mut App) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Answers once the quick composer shows, so `--quick` fails when it cannot.
-fn answer(stream: UnixStream, requests: &UnboundedSender<oneshot::Sender<bool>>) {
+/// Answers once what was asked for shows, so the launch that asked fails when it
+/// cannot.
+fn answer(stream: UnixStream, requests: &UnboundedSender<(Request, oneshot::Sender<bool>)>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-    let mut request = String::new();
-    if BufReader::new(&stream).read_line(&mut request).is_err() || request != REQUEST {
+    let mut line = String::new();
+    if BufReader::new(&stream).read_line(&mut line).is_err() {
         return;
     }
+    let Some(request) = [Request::Quick, Request::Windows]
+        .into_iter()
+        .find(|request| request.line() == line)
+    else {
+        return;
+    };
     let (opened, shown) = oneshot::channel();
-    if requests.unbounded_send(opened).is_ok() && futures::executor::block_on(shown) == Ok(true) {
+    if requests.unbounded_send((request, opened)).is_ok()
+        && futures::executor::block_on(shown) == Ok(true)
+    {
         let _ = (&stream).write_all(ANSWER.as_bytes());
     }
 }
@@ -135,10 +165,7 @@ pub(crate) fn open(cx: &mut App) -> bool {
         return false;
     }
     cx.activate(true);
-    if crate::open_windows(cx).is_empty() {
-        state.update(cx, |state, _| state.quit_when_idle = false);
-        crate::windows::reopen(state.clone(), cx);
-    }
+    crate::windows::reopen(state.clone(), cx);
     if let Some(window) = quick
         && window
             .update(cx, |_, window, _| window.activate_window())

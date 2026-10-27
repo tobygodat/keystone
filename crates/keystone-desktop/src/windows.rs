@@ -3,8 +3,9 @@
 //! accounts and recovery belong to the app, so closing a window leaves its work
 //! running, and every window's sidebar reaches it.
 
+use crate::app_state::Phase;
 use crate::session_tabs::{bring_forward, conversations, replacement};
-use crate::{AppState, Keystone, durability_warning, open_windows, register_window};
+use crate::{AppState, DesktopApp, Keystone, durability_warning, open_windows, register_window};
 use gpui::{
     App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Pixels, Point, Styled, Window, WindowBounds, WindowOptions, anchored, deferred, point,
@@ -56,15 +57,41 @@ fn bounds(placement: Option<Placement>, cx: &App) -> WindowBounds {
     else {
         return default();
     };
-    let bounds = Bounds {
+    let saved = Bounds {
         origin: point(px(p.x), px(p.y)),
         size: size(px(p.width.max(MIN_SIZE)), px(p.height.max(MIN_SIZE))),
+    };
+    let bounds = match cx.primary_display() {
+        Some(display) => fit(saved, display.visible_bounds()),
+        None => saved,
     };
     if p.maximized {
         WindowBounds::Maximized(bounds)
     } else {
         WindowBounds::Windowed(bounds)
     }
+}
+
+/// `saved` shrunk and moved as little as it takes to lie within `area`, the visible
+/// part of the primary display a window opens on where the platform has one, as on
+/// macOS and X11, so a window saved on a display that has gone or has shrunk opens
+/// where it can be seen and moved. Wayland has no primary display and places windows
+/// itself, so there the compositor fits them.
+fn fit(saved: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
+    let size = saved.size.min(&area.size);
+    let origin = point(
+        saved
+            .origin
+            .x
+            .min(area.right() - size.width)
+            .max(area.left()),
+        saved
+            .origin
+            .y
+            .min(area.bottom() - size.height)
+            .max(area.top()),
+    );
+    Bounds { origin, size }
 }
 
 /// Opens saved window `id` where it was, showing what it saved.
@@ -210,15 +237,43 @@ pub(crate) fn move_tab(
     }
 }
 
-/// Opens every saved window again, after the last one closed and the Quit that
-/// followed could not save, so its error shows and Quit can be retried.
+/// Opens every saved window again while none is open: for a running turn that asks
+/// for an approval, a notification, the quick composer or a second launch, and to show
+/// why a Quit could not save. Keystone then stays open once the last turn ends.
 pub(crate) fn reopen(state: Entity<AppState>, cx: &mut App) {
+    if !open_windows(cx).is_empty() {
+        return;
+    }
     let saved = state.read(cx).store().workspace().preferences().windows();
     for (id, placement) in saved {
         if let Err(error) = open(state.clone(), id, placement, false, false, cx) {
             eprintln!("Could not reopen a Keystone window: {error}");
         }
     }
+    if !open_windows(cx).is_empty() {
+        state.update(cx, |state, _| state.quit_when_idle = false);
+    }
+}
+
+/// Brings Keystone's windows forward for a second launch, opening the saved ones again
+/// when none is open. Says whether a window shows.
+pub(crate) fn show_all(cx: &mut App) -> bool {
+    let Some(state) = cx.try_global::<DesktopApp>().map(|app| app.state.clone()) else {
+        return false;
+    };
+    if state.read(cx).phase != Phase::Running {
+        return false;
+    }
+    cx.activate(true);
+    reopen(state, cx);
+    let Some(first) = open_windows(cx).into_iter().next() else {
+        return false;
+    };
+    first
+        .read(cx)
+        .handle
+        .update(cx, |_, window, _| window.activate_window())
+        .is_ok()
 }
 
 impl Keystone {

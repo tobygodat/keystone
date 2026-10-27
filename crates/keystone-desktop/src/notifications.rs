@@ -224,12 +224,7 @@ pub(crate) fn show(session: u64, cx: &mut App) {
     if state_now.phase != crate::app_state::Phase::Running || state_now.session(session).is_none() {
         return;
     }
-    // The last window closed while a turn ran: the user wants Keystone back, so it
-    // stays open instead of quitting once idle.
-    if crate::open_windows(cx).is_empty() {
-        state.update(cx, |state, _| state.quit_when_idle = false);
-        crate::windows::reopen(state.clone(), cx);
-    }
+    crate::windows::reopen(state.clone(), cx);
     let mut windows: Vec<_> = cx
         .windows()
         .into_iter()

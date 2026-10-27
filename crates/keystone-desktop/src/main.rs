@@ -287,7 +287,7 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
         .into_iter()
         .filter(|other| other != &view)
         .count();
-    if others == 0 && state.read(cx).awaiting_answer() {
+    if others == 0 && state.read(cx).asking().is_some() {
         view.update(cx, |view, cx| {
             view.error = Some(
                 "Answer the approval request before closing the last window, or Quit to stop the turn."
@@ -436,9 +436,7 @@ fn save_and_teardown(state: &Entity<AppState>, can_cancel: bool, cx: &mut App) -
     }
     if let Err(error) = state.update(cx, |state, cx| state.save(drafts, notes, saved, cx)) {
         if can_cancel {
-            if windows.is_empty() {
-                windows::reopen(state.clone(), cx);
-            }
+            windows::reopen(state.clone(), cx);
             return false;
         }
         eprintln!("Could not save before quitting. {error}");
@@ -468,7 +466,6 @@ fn reopen_from_dock(cx: &mut App) {
     if state.read(cx).phase != app_state::Phase::Running || !open_windows(cx).is_empty() {
         return;
     }
-    state.update(cx, |state, _| state.quit_when_idle = false);
     windows::reopen(state, cx);
 }
 
@@ -10707,8 +10704,15 @@ fn main() {
         .unwrap_or(std::path::Path::new("."));
     std::fs::create_dir_all(parent).expect("create Keystone data directory");
     let quick = std::env::args().skip(1).any(|arg| arg == quick::FLAG);
+    let request = if quick {
+        quick::Request::Quick
+    } else {
+        quick::Request::Windows
+    };
     let socket = quick::socket(&path);
-    if quick && quick::ask(&socket, std::time::Duration::from_secs(5)) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+    if quick::ask(&socket, request, left()) {
         return;
     }
     let state_lock = std::fs::OpenOptions::new()
@@ -10717,15 +10721,11 @@ fn main() {
         .write(true)
         .open(path.with_extension("lock"))
         .expect("open workspace lock");
-    // While another process holds the workspace, it may be starting or quitting:
-    // `--quick` hands off once it listens, or takes over once it has gone.
+    // While another process holds the workspace, it may be starting or quitting: a
+    // launch hands off once it listens, or takes over once it has gone.
     let mut locked = state_lock.try_lock();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while quick && locked.is_err() && std::time::Instant::now() < deadline {
-        if quick::ask(
-            &socket,
-            deadline.saturating_duration_since(std::time::Instant::now()),
-        ) {
+    while locked.is_err() && !left().is_zero() {
+        if quick::ask(&socket, request, left()) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -10775,7 +10775,7 @@ fn main() {
             std::process::exit(1);
         }
         if let Err(error) = quick::listen(&socket, cx) {
-            eprintln!("{} will not reach this app: {error}", quick::FLAG);
+            eprintln!("Another launch will not reach this app: {error}");
         }
         if quick {
             quick::open(cx);

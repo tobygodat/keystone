@@ -33,13 +33,23 @@ pub struct Placement {
     pub maximized: bool,
 }
 
+/// A placement as saved, with the fields a newer version of Keystone added, which
+/// stay when this version saves the window's placement again.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct SavedPlacement {
+    #[serde(flatten)]
+    placement: Placement,
+    #[serde(flatten)]
+    unknown: Map<String, Value>,
+}
+
 /// One window as saved. The first window's entry holds only its placement and
 /// project.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct SavedWindow {
     id: WindowId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    placement: Option<Placement>,
+    placement: Option<SavedPlacement>,
     /// The project the window shows, by directory. Each window shows any project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) project: Option<String>,
@@ -64,6 +74,11 @@ impl SavedWindow {
             tabs: ProjectMap::default(),
             unknown: Map::new(),
         }
+    }
+
+    fn place(&mut self, placement: Placement) {
+        let unknown = self.placement.take().map(|p| p.unknown).unwrap_or_default();
+        self.placement = Some(SavedPlacement { placement, unknown });
     }
 }
 
@@ -221,12 +236,15 @@ impl Preferences {
     pub fn windows(&self) -> Vec<(WindowId, Option<Placement>)> {
         let mut windows = vec![(
             WindowId::FIRST,
-            self.windows.get(WindowId::FIRST).and_then(|w| w.placement),
+            self.windows
+                .get(WindowId::FIRST)
+                .and_then(|w| w.placement.as_ref())
+                .map(|p| p.placement),
         )];
         if let SavedWindows::Supported(saved) = &self.windows {
             for window in saved {
                 if windows.iter().all(|(id, _)| *id != window.id) {
-                    windows.push((window.id, window.placement));
+                    windows.push((window.id, window.placement.as_ref().map(|p| p.placement)));
                 }
             }
         }
@@ -341,7 +359,10 @@ impl Workspace {
             .map(WindowId)
             .ok_or_else(|| invalid("window ID exhausted"))?;
         windows.push(SavedWindow {
-            placement,
+            placement: placement.map(|placement| SavedPlacement {
+                placement,
+                unknown: Map::new(),
+            }),
             project: project.map(|p| p.as_saved().to_owned()),
             selected,
             ..SavedWindow::new(id)
@@ -477,7 +498,7 @@ impl Store {
     ) -> StoreResult<Applied<()>> {
         let mut next = self.workspace.clone();
         let saved = next.preferences.windows.entry(window)?;
-        saved.placement = Some(placement);
+        saved.place(placement);
         if let Some(project) = project {
             saved.project = Some(project.as_saved().to_owned());
         }
@@ -508,7 +529,7 @@ impl Store {
         if let SavedWindows::Supported(_) = next.preferences.windows {
             for (window, placement, project) in &windows {
                 let saved = next.preferences.windows.entry(*window)?;
-                saved.placement = Some(*placement);
+                saved.place(*placement);
                 if let Some(project) = project {
                     saved.project = Some(project.as_saved().to_owned());
                 }

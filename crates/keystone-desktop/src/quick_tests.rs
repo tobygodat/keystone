@@ -3,7 +3,7 @@ use crate::conversation::Row;
 use crate::{Keystone, install_app_state, open_windows, request_quit};
 use gpui::{TestAppContext, VisualTestContext, WindowHandle};
 use keystone_agent::{ItemKind, ItemStatus};
-use keystone_core::{Store, WindowId};
+use keystone_core::{Provider, Store, WindowId, WorkingDirectory};
 
 /// Launches Keystone on a new workspace as `main` does, with `seed` saved first.
 fn launch(
@@ -52,10 +52,10 @@ fn first_view(cx: &mut TestAppContext) -> Entity<Keystone> {
     cx.update(|cx| open_windows(cx)).remove(0)
 }
 
-/// Asks on another thread, as `--quick` does, while the app runs.
-fn ask_app(socket: &Path, cx: &mut TestAppContext) -> bool {
+/// Asks on another thread, as a launch does, while the app runs.
+fn ask_app(socket: &Path, request: Request, cx: &mut TestAppContext) -> bool {
     let socket = socket.to_owned();
-    let asked = std::thread::spawn(move || ask(&socket, Duration::from_secs(5)));
+    let asked = std::thread::spawn(move || ask(&socket, request, Duration::from_secs(5)));
     while !asked.is_finished() {
         cx.run_until_parked();
         std::thread::sleep(Duration::from_millis(5));
@@ -68,17 +68,20 @@ fn a_request_on_the_socket_opens_one_quick_composer(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (_, state) = launch(dir.path(), |_| {}, cx);
     let socket = dir.path().join("quick.sock");
-    assert!(!ask(&socket, Duration::from_secs(5)), "nothing listens yet");
+    assert!(
+        !ask(&socket, Request::Quick, Duration::from_secs(5)),
+        "nothing listens yet"
+    );
     std::fs::write(&socket, "").unwrap();
     assert!(
-        !ask(&socket, Duration::from_secs(5)),
+        !ask(&socket, Request::Quick, Duration::from_secs(5)),
         "a stale socket file answers nothing"
     );
     cx.update(|cx| listen(&socket, cx)).unwrap();
-    assert!(ask_app(&socket, cx));
+    assert!(ask_app(&socket, Request::Quick, cx));
     assert_eq!(cx.windows().len(), 2, "a second window opened");
     assert!(quick_window(cx).is_some());
-    assert!(ask_app(&socket, cx));
+    assert!(ask_app(&socket, Request::Quick, cx));
     assert_eq!(
         cx.windows().len(),
         2,
@@ -91,8 +94,58 @@ fn a_request_on_the_socket_opens_one_quick_composer(cx: &mut TestAppContext) {
     assert_eq!(answer, "", "anything else is not answered");
 
     state.update(cx, |state, _| state.phase = Phase::Exiting);
-    assert!(!ask_app(&socket, cx), "a quitting app answers no");
+    assert!(
+        !ask_app(&socket, Request::Quick, cx),
+        "a quitting app answers no"
+    );
     state.update(cx, |state, _| state.phase = Phase::Running);
+}
+
+#[gpui::test]
+fn a_launch_while_keystone_runs_without_a_window_opens_its_windows(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = WorkingDirectory::new(dir.path()).unwrap();
+    let (_, state) = launch(
+        dir.path(),
+        |store| {
+            store.create(Provider::Codex, &folder, 0).unwrap();
+        },
+        cx,
+    );
+    let socket = dir.path().join("quick.sock");
+    cx.update(|cx| listen(&socket, cx)).unwrap();
+    assert!(ask_app(&socket, Request::Windows, cx));
+    assert_eq!(cx.windows().len(), 1, "an open window is brought forward");
+
+    state.update(cx, |state, cx| {
+        state.test_conversation(1).running = true;
+        state.publish(cx);
+    });
+    let first = first_view(cx);
+    let root = first.downgrade();
+    let handle = cx.read(|cx| first.read(cx).handle);
+    handle
+        .update(cx, |_, window, cx| {
+            assert!(crate::close_window(&root, window, cx));
+            window.remove_window();
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert!(cx.windows().is_empty(), "the turn keeps Keystone running");
+
+    assert!(ask_app(&socket, Request::Windows, cx));
+    assert_eq!(cx.windows().len(), 1, "the saved window opens again");
+    assert!(quick_window(cx).is_none());
+    state.update(cx, |state, cx| {
+        state.test_conversation(1).running = false;
+        state.publish(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| state.read(cx).phase),
+        Phase::Running,
+        "Keystone stays open once the turn ends"
+    );
 }
 
 #[test]

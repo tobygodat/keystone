@@ -345,6 +345,62 @@ fn a_state_from_before_windows_opens_one_window_and_unreadable_windows_are_kept(
 }
 
 #[test]
+fn a_placement_keeps_the_fields_a_newer_version_saved() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"next_id":2,"workspace":{"sessions":[{"id":1,"title":"Old","provider":"Codex","settled":false,"draft":""}],"selected":1,"preferences":{"windows":[{"id":0,"placement":{"x":5,"y":6,"width":700,"height":500,"display":"DP-2"}},{"id":1,"placement":{"x":9,"y":9,"width":800,"height":600,"display":"HDMI-1","fullscreen":true}}]}}}"#,
+    )
+    .unwrap();
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.workspace().preferences().windows(),
+        [
+            (
+                WindowId::FIRST,
+                Some(Placement {
+                    x: 5.,
+                    y: 6.,
+                    width: 700.,
+                    height: 500.,
+                    maximized: false
+                })
+            ),
+            (
+                WindowId(1),
+                Some(Placement {
+                    x: 9.,
+                    y: 9.,
+                    width: 800.,
+                    height: 600.,
+                    maximized: false
+                })
+            ),
+        ]
+    );
+    store
+        .set_placement(WindowId(1), placement(40.), None)
+        .unwrap();
+    store
+        .save_for_quit(Vec::new(), vec![(WindowId::FIRST, placement(30.), None)], 1)
+        .unwrap();
+    assert_eq!(
+        saved_windows(directory.path()),
+        Some(serde_json::json!([
+            {"id": 0, "placement": {"x": 30.0, "y": 20.0, "width": 900.0, "height": 600.0, "display": "DP-2"}},
+            {"id": 1, "placement": {"x": 40.0, "y": 20.0, "width": 900.0, "height": 600.0, "display": "HDMI-1", "fullscreen": true}},
+        ]))
+    );
+    store.close_window(WindowId::FIRST).unwrap();
+    assert_eq!(
+        saved_windows(directory.path()).unwrap()[0]["placement"],
+        serde_json::json!({"x": 40.0, "y": 20.0, "width": 900.0, "height": 600.0, "display": "HDMI-1", "fullscreen": true}),
+        "the heir's placement takes the first window's place whole"
+    );
+}
+
+#[test]
 fn each_window_saves_the_project_it_shows_and_the_heir_keeps_its_own() {
     let directory = tempfile::tempdir().unwrap();
     let (mut store, project) = three_sessions(directory.path());
