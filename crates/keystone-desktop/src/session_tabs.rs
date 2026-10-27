@@ -13,6 +13,7 @@ use crate::{Keystone, durability_warning};
 use gpui::{App, Context, IntoElement, Window};
 use keystone_core::{Axis, Component, Composition, Edit, Place, SessionTabs, Size, ViewId};
 use keystone_ui::prelude::*;
+use std::collections::HashSet;
 use std::num::NonZeroU16;
 
 gpui::actions!(
@@ -82,7 +83,6 @@ impl Keystone {
         let Ok(project) = &self.presentation.project else {
             return SessionTabs::default();
         };
-        let c = self.shown_composition(cx);
         let workspace = self.state.read(cx).store().workspace();
         let mut tabs = workspace
             .preferences()
@@ -90,12 +90,14 @@ impl Keystone {
         if tabs.is_empty() {
             return tabs;
         }
-        let sessions: std::collections::HashSet<u64> = workspace
+        let held: HashSet<u64> = tabs.iter().map(|(_, session)| session).collect();
+        let sessions: HashSet<u64> = workspace
             .sessions()
             .iter()
-            .filter(|s| crate::projects::holds(project, s))
+            .filter(|s| held.contains(&s.id()) && crate::projects::holds(project, s))
             .map(|s| s.id())
             .collect();
+        let c = self.shown_composition(cx);
         tabs.retain(|view, session| {
             c.component(view) == Some(Component::Conversation) && sessions.contains(&session)
         });
@@ -183,8 +185,9 @@ impl Keystone {
             return;
         }
         let selected = self.selected(cx);
-        let first = self.presentation.current.arrangement.seen.is_none();
-        if self.presentation.current.arrangement.seen == Some(selected) {
+        let picked = std::mem::take(&mut self.presentation.current.arrangement.picked);
+        let first = self.presentation.current.arrangement.seen.is_none() && !picked;
+        if !picked && self.presentation.current.arrangement.seen == Some(selected) {
             return;
         }
         self.presentation.current.arrangement.seen = Some(selected);

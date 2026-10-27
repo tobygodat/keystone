@@ -462,9 +462,15 @@ fn dragging_a_tab_to_a_pane_edge_splits_it_out(cx: &mut TestAppContext) {
 
 /// 200 sessions, 40 of them open as tabs in two panes.
 fn many_tabs(dir: &Path) -> PathBuf {
+    tabbed(dir, 200, 40)
+}
+
+/// `sessions` sessions, `count` of them open as tabs in two panes, the first selected.
+fn tabbed(dir: &Path, sessions: u64, count: u32) -> PathBuf {
+    assert!(count >= 2, "two panes need a tab each");
     let path = dir.join("workspace.json");
     let mut store = Store::open(&path).unwrap();
-    for n in 0..200u64 {
+    for n in 0..sessions {
         let provider = if n % 2 == 0 {
             Provider::Claude
         } else {
@@ -487,7 +493,7 @@ fn many_tabs(dir: &Path) -> PathBuf {
     let mut tabs = SessionTabs::default();
     tabs.hold(ViewId::MAIN, 1);
     tabs.hold(ViewId(3), 2);
-    for n in 0..38u32 {
+    for n in 0..count - 2 {
         let view = ViewId(4 + n);
         let anchor = if n % 2 == 0 { ViewId::MAIN } else { ViewId(3) };
         c = c
@@ -571,6 +577,56 @@ fn perf_split_open(cx: &mut TestAppContext) {
     }
     assert_eq!(panes(&view, cx).len(), 40);
     report("split_open", frames);
+}
+
+/// What switching, opening and closing a tab cost with `count` tabs open among 250
+/// sessions. Each tab opened is closed again, so every action sees `count` or one more.
+fn tabs_at_scale(count: u32, cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = tabbed(dir.path(), 250, count);
+    let (view, cx) = open(&path, cx);
+    let open_tabs = |view: &Entity<Keystone>, cx: &mut VisualTestContext| panes(view, cx).len();
+    assert_eq!(open_tabs(&view, cx), count as usize);
+    let mut switched = Vec::new();
+    for _ in 0..60 {
+        let before = active(&view, cx);
+        switched.push(timed(&view, cx, |this, window, cx| {
+            this.cycle_tab(false, window, cx)
+        }));
+        assert_ne!(active(&view, cx), before, "the switch moved to another tab");
+    }
+    let (mut opened, mut closed) = (Vec::new(), Vec::new());
+    for _ in 0..20 {
+        opened.push(timed(&view, cx, |this, window, cx| {
+            this.new_tab(window, cx)
+        }));
+        assert_eq!(open_tabs(&view, cx), count as usize + 1);
+        closed.push(timed(&view, cx, |this, window, cx| {
+            this.close_active_tab(window, cx)
+        }));
+        assert_eq!(open_tabs(&view, cx), count as usize);
+    }
+    report(&format!("tab_open_{count}"), opened);
+    report(&format!("tab_switch_{count}"), switched);
+    report(&format!("tab_close_{count}"), closed);
+}
+
+#[gpui::test]
+#[ignore = "benchmark; run through scripts/perf.py"]
+fn perf_tabs_5(cx: &mut TestAppContext) {
+    tabs_at_scale(5, cx);
+}
+
+#[gpui::test]
+#[ignore = "benchmark; run through scripts/perf.py"]
+fn perf_tabs_50(cx: &mut TestAppContext) {
+    tabs_at_scale(50, cx);
+}
+
+#[gpui::test]
+#[ignore = "benchmark; run through scripts/perf.py"]
+fn perf_tabs_200(cx: &mut TestAppContext) {
+    tabs_at_scale(200, cx);
 }
 
 #[gpui::test]
@@ -959,6 +1015,117 @@ fn a_sidebar_select_made_in_customize_shows_once_it_closes(cx: &mut TestAppConte
             (ViewId(3), Some(2)),
             (ViewId(4), Some(4))
         ]
+    );
+}
+
+#[gpui::test]
+fn a_sidebar_select_made_in_customize_shows_once_it_closes_even_over_an_apply(
+    cx: &mut TestAppContext,
+) {
+    for (before, after, picked) in [
+        (&[][..], &["session-4"][..], 4),
+        (&[], &["session-4", "session-3"], 3),
+        (&[], &["session-3"], 3),
+        (&["session-4"], &[], 4),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = seeded(dir.path(), |store| {
+            store
+                .create(Provider::Claude, &working_directory(), 3)
+                .unwrap();
+            store.rename(4, "Session 4").unwrap();
+            split_layout(store);
+        });
+        let (view, cx) = open(&path, cx);
+        use crate::arrangement_editor::Action;
+        view.update_in(cx, |this, window, cx| {
+            this.customize(Action::Open, window, cx)
+        });
+        cx.run_until_parked();
+        for &row in before {
+            click(cx, row);
+        }
+        view.update_in(cx, |this, window, cx| {
+            this.customize(Action::Edit(Edit::Close(ViewId(4))), window, cx);
+            this.customize(Action::Apply, window, cx);
+        });
+        cx.run_until_parked();
+        for &row in after {
+            click(cx, row);
+        }
+        view.update_in(cx, |this, window, cx| {
+            this.customize(Action::Close, window, cx)
+        });
+        cx.run_until_parked();
+        let case = format!("{before:?} then Apply then {after:?}");
+        assert_eq!(selected(&view, cx), Some(picked), "{case}");
+        assert_eq!(
+            active(&view, cx),
+            Some((ViewId::MAIN, Some(picked))),
+            "{case}"
+        );
+        assert_eq!(
+            panes(&view, cx),
+            [(ViewId::MAIN, Some(picked)), (ViewId(3), Some(2))],
+            "{case}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_session_started_in_customize_after_apply_shows_once_it_closes(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path(), split_layout);
+    let (view, cx) = open(&path, cx);
+    view.update_in(cx, |this, window, cx| {
+        use crate::arrangement_editor::Action;
+        this.customize(Action::Open, window, cx);
+        this.customize(Action::Edit(Edit::Close(ViewId(4))), window, cx);
+        this.customize(Action::Apply, window, cx);
+        this.start(Provider::Codex, window, cx);
+        this.customize(Action::Close, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(selected(&view, cx), Some(4));
+    assert_eq!(
+        panes(&view, cx),
+        [(ViewId::MAIN, Some(4)), (ViewId(3), Some(2))]
+    );
+}
+
+#[gpui::test]
+fn a_session_picked_in_customize_still_shows_after_a_project_round_trip(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path(), |store| {
+        store
+            .create(Provider::Claude, &working_directory(), 3)
+            .unwrap();
+        store.rename(4, "Session 4").unwrap();
+        split_layout(store);
+    });
+    let elsewhere = tempfile::tempdir().unwrap();
+    let elsewhere = keystone_core::ProjectId::new(elsewhere.path()).unwrap();
+    let (view, cx) = open(&path, cx);
+    use crate::arrangement_editor::Action;
+    view.update_in(cx, |this, window, cx| {
+        this.customize(Action::Open, window, cx);
+        this.customize(Action::Edit(Edit::Close(ViewId(4))), window, cx);
+        this.customize(Action::Apply, window, cx);
+    });
+    cx.run_until_parked();
+    click(cx, "session-4");
+    view.update(cx, |this, cx| this.open_project(elsewhere, cx));
+    cx.run_until_parked();
+    view.update(cx, |this, cx| this.open_project(project(), cx));
+    cx.run_until_parked();
+    view.update_in(cx, |this, window, cx| {
+        this.customize(Action::Close, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(selected(&view, cx), Some(4));
+    assert_eq!(
+        panes(&view, cx),
+        [(ViewId::MAIN, Some(4)), (ViewId(3), Some(2))]
     );
 }
 

@@ -136,15 +136,19 @@ pub(crate) struct Shown<'a> {
 
 impl Shown<'_> {
     /// Drops `project`'s tabs for views its layout no longer has, so a view id used
-    /// again never inherits a session.
+    /// again never inherits a session. Tabs of a layout this version cannot read stay.
     pub(crate) fn forget_closed_tabs(&mut self, project: &ProjectId, sidebar: &Composition) {
         let Some(SavedTabs::Supported(tabs)) = self.tabs.get(project) else {
             return;
         };
-        let layout = self
-            .layouts
-            .get(project)
-            .map_or_else(|| sidebar.clone(), SavedComposition::shown);
+        if let ProjectMap::Unexpected(_) = self.layouts {
+            return;
+        }
+        let layout = match self.layouts.get(project).map(SavedComposition::supported) {
+            None => sidebar.clone(),
+            Some(Some(layout)) => layout.clone(),
+            Some(None) => return,
+        };
         let mut tabs = tabs.clone();
         tabs.retain(|view, _| layout.component(view) == Some(Component::Conversation));
         let _ = self.tabs.set(
@@ -255,6 +259,31 @@ impl Workspace {
             tabs: &mut saved.tabs,
             selected: &mut saved.selected,
         })
+    }
+
+    /// Drops every window's tabs for views its layouts no longer have. A build from
+    /// before tabs keeps the tabs as they are when it closes a view, and a view opened
+    /// later with the same id would take the closed view's session.
+    pub(crate) fn forget_closed_tabs(&mut self) {
+        let sidebar = Composition::from_sidebar(self.preferences.sidebar_layout.shown());
+        let mut windows = vec![WindowId::FIRST];
+        if let SavedWindows::Supported(saved) = &self.preferences.windows {
+            windows.extend(
+                saved
+                    .iter()
+                    .map(|w| w.id)
+                    .filter(|&id| id != WindowId::FIRST),
+            );
+        }
+        for window in windows {
+            let Ok(mut shown) = self.shown_mut(window) else {
+                continue;
+            };
+            let projects: Vec<ProjectId> = shown.tabs.iter().map(|(project, _)| project).collect();
+            for project in projects {
+                shown.forget_closed_tabs(&project, &sidebar);
+            }
+        }
     }
 
     fn exists(&self, session: u64) -> bool {

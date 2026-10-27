@@ -1192,6 +1192,8 @@ impl Keystone {
         };
         if self.selected(cx) != previous {
             self.presentation.selection_changed();
+            self.presentation.current.arrangement.picked |=
+                self.presentation.current.customization.is_open();
             self.approval_menu = false;
             self.attach.menu = false;
             self.confirm_full_access = None;
@@ -1312,6 +1314,8 @@ impl Keystone {
             Ok(applied) => durability_warning(applied.durability),
             Err(error) => Some(error.to_string()),
         };
+        self.presentation.current.arrangement.picked |=
+            saved && self.presentation.current.customization.is_open();
         if self.selected(cx) != previous {
             self.presentation.selection_changed();
             self.approval_menu = false;

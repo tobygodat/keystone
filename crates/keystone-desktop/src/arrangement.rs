@@ -38,6 +38,9 @@ pub struct Arrangement {
     pub active: Option<ViewId>,
     /// The selection `follow_selection` last placed, so it places each one once.
     pub seen: Option<Option<u64>>,
+    /// Whether the user chose the selection while Customize was open, so it shows once
+    /// Customize closes, even after an Apply or a visit to another project.
+    pub picked: bool,
     /// The inactive view keyboard focus is in, so focus moving there activates it once.
     pub focused: Option<ViewId>,
     /// Each drawn tab strip's id and its views, so a tab dropped from another strip can
@@ -385,31 +388,35 @@ impl Keystone {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.shown_composition(cx).component(view) == Some(Component::Conversation) {
-            return self.view_session(view, cx).is_some_and(|session| {
-                self.presentation.current.views.contains_focus(
-                    ViewKey { view, session },
-                    window,
-                    cx,
-                )
-            });
-        }
-        if self.shown_composition(cx).component(view) == Some(Component::Notes) {
-            return self.notes_contain_focus(window, cx);
-        }
-        let handle = match self.shown_composition(cx).component(view) {
+        let component = self.shown_composition(cx).component(view);
+        self.surface_contains_focus(view, component, window, cx)
+    }
+
+    /// Whether `view`, showing `component`, holds keyboard focus.
+    fn surface_contains_focus(
+        &mut self,
+        view: ViewId,
+        component: Option<Component>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let handle = match component {
+            Some(Component::Conversation) => {
+                return self.view_session(view, cx).is_some_and(|session| {
+                    self.presentation.current.views.contains_focus(
+                        ViewKey { view, session },
+                        window,
+                        cx,
+                    )
+                });
+            }
+            Some(Component::Notes) => return self.notes_contain_focus(window, cx),
             Some(Component::Files) => self
                 .files_root(cx)
                 .ok()
                 .map(|root| self.files.browser(&root, cx).focus_handle(cx)),
             Some(Component::Changes) => self.changes_panel(cx).map(|panel| panel.focus_handle(cx)),
             Some(Component::PullRequest) => Some(self.pull_request_focus.clone()),
-            Some(Component::Conversation) => self.view_session(view, cx).map(|session| {
-                self.presentation
-                    .current
-                    .views
-                    .focus(ViewKey { view, session }, cx)
-            }),
             _ => None,
         };
         handle.is_some_and(|handle| handle.contains_focused(window, cx))
@@ -750,11 +757,11 @@ impl Keystone {
             })
             .map(|(view, _)| view)
             .collect();
-        for (view, _) in c
+        for (view, component) in c
             .views()
             .filter(|(view, component)| component.is_surface() && !displayed.contains(view))
         {
-            if self.view_contains_focus(view, window, cx) {
+            if self.surface_contains_focus(view, Some(component), window, cx) {
                 let replacement = tabs_holding(c.root(), view)
                     .map(|(views, selected)| views[selected])
                     .filter(|view| displayed.contains(view))

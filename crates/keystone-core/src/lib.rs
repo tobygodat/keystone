@@ -813,7 +813,8 @@ impl Store {
     }
 
     pub fn from_database(database: Database) -> StoreResult<Self> {
-        let (snapshot, database_revision) = database.snapshot()?;
+        let (mut snapshot, database_revision) = database.snapshot()?;
+        snapshot.workspace.forget_closed_tabs();
         Ok(Self {
             path: database.path().to_path_buf(),
             database,
@@ -3343,6 +3344,117 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(ViewId::MAIN, first), (ViewId(3), second)]
         );
+    }
+
+    #[test]
+    fn a_view_a_build_without_tabs_closed_leaves_no_session_for_a_view_opened_later() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        for provider in [Provider::Codex, Provider::Claude] {
+            store.create(provider, &working_directory(), 1).unwrap();
+        }
+        let tabbed = Composition::default()
+            .edit(Edit::Open {
+                view: ViewId(3),
+                component: Component::Conversation,
+                at: Place::TabWith(ViewId::MAIN),
+                size: Size::Fill(std::num::NonZeroU16::MIN),
+            })
+            .unwrap();
+        let mut tabs = SessionTabs::default();
+        tabs.hold(ViewId::MAIN, 1);
+        tabs.hold(ViewId(3), 2);
+        store.show(&a, Some(tabbed.clone()), tabs, Some(1)).unwrap();
+        let mut saved = store.saved_snapshot().unwrap();
+        drop(store);
+        saved["workspace"]["preferences"]["project_layouts"][a.path().to_str().unwrap()] =
+            serde_json::to_value(SavedComposition::from(Composition::default())).unwrap();
+        let older = tempfile::tempdir().unwrap();
+        let path = older.path().join("state.json");
+        std::fs::write(&path, saved.to_string()).unwrap();
+
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .workspace()
+                .preferences()
+                .session_tabs(&a)
+                .iter()
+                .collect::<Vec<_>>(),
+            [(ViewId::MAIN, 1)]
+        );
+        store.set_project_layout(&a, Some(tabbed.into())).unwrap();
+        assert_eq!(store.workspace().preferences().held(&a, ViewId(3)), None);
+        assert_eq!(
+            project_tabs(&path),
+            Some(serde_json::json!({
+                a.path().to_str().unwrap(): [{"view": 0, "session": 1}]
+            }))
+        );
+    }
+
+    #[test]
+    fn another_window_forgets_tabs_of_views_its_layout_lacks_on_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        let project = a.path().to_str().unwrap().to_owned();
+        let mut store = Store::open(&path).unwrap();
+        for provider in [Provider::Codex, Provider::Claude] {
+            store.create(provider, &working_directory(), 1).unwrap();
+        }
+        let mut saved = store.saved_snapshot().unwrap();
+        drop(store);
+        let layout = serde_json::to_value(SavedComposition::from(Composition::default())).unwrap();
+        saved["workspace"]["preferences"]["windows"] = serde_json::json!([{
+            "id": 1,
+            "layouts": {&project: layout},
+            "tabs": {&project: [{"view": 0, "session": 1}, {"view": 7, "session": 2}]},
+        }, {
+            "id": 2,
+            "tabs": {&project: [{"view": 7, "session": 1}]},
+        }]);
+        let older = tempfile::tempdir().unwrap();
+        let path = older.path().join("state.json");
+        std::fs::write(&path, saved.to_string()).unwrap();
+        let store = Store::open(&path).unwrap();
+        let preferences = store.workspace().preferences();
+        assert_eq!(
+            preferences
+                .session_tabs_in(&a, WindowId(1))
+                .iter()
+                .collect::<Vec<_>>(),
+            [(ViewId::MAIN, 1)]
+        );
+        assert!(
+            preferences.session_tabs_in(&a, WindowId(2)).is_empty(),
+            "a window on the sidebar layout has no view 7"
+        );
+    }
+
+    #[test]
+    fn tabs_of_a_layout_this_version_cannot_read_stay_through_a_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let a = ProjectId::new(directory.path()).unwrap();
+        let project = a.path().to_str().unwrap().to_owned();
+        let layouts = serde_json::json!({&project: {"version": 99, "views": [5]}});
+        let tabs = serde_json::json!({&project: [{"view": 5, "session": 1}]});
+        seeded(
+            &path,
+            &format!(r#","project_layouts":{layouts},"project_tabs":{tabs}"#),
+        );
+        let mut store = Store::open(&path).unwrap();
+        store.set_draft(1, "edited".into()).unwrap();
+        store
+            .set_project_layout(
+                &a,
+                store.workspace().preferences().project_layout(&a).cloned(),
+            )
+            .unwrap();
+        assert_eq!(project_tabs(&path), Some(tabs));
     }
 
     #[test]
