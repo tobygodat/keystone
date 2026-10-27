@@ -4,9 +4,9 @@ use gpui::{
     AnyElement, App, Bounds, ClipboardItem, DispatchPhase, Element, ElementId, Entity, FocusHandle,
     Global, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, KeyBinding,
     LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
-    TextAlign, TextLayout, TextRun, Window, div, prelude::*, px,
+    TextAlign, TextLayout, TextRun, WeakEntity, Window, WindowId, div, prelude::*, px,
 };
-use std::{ops::Range, rc::Rc, sync::Arc};
+use std::{collections::HashMap, ops::Range, rc::Rc, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) type StartHandler = Rc<dyn Fn(&mut Window, &mut App) -> Option<FocusHandle>>;
@@ -38,6 +38,22 @@ gpui::actions!(
 
 struct Bindings;
 impl Global for Bindings {}
+
+/// Each window's selection that had focus when it last rendered.
+#[derive(Default)]
+struct Focused(HashMap<WindowId, WeakEntity<Selection>>);
+impl Global for Focused {}
+
+/// The text selected in the Markdown that has focus in `window`, if any.
+pub(super) fn focused_text(window: &Window, cx: &App) -> Option<String> {
+    let state = cx
+        .try_global::<Focused>()?
+        .0
+        .get(&window.window_handle().window_id())?
+        .upgrade()?;
+    let state = state.read(cx);
+    (state.is_focused(window) && !state.range().is_empty()).then(|| state.selected_text())
+}
 
 fn bind_keys(cx: &mut App) {
     if cx.has_global::<Bindings>() {
@@ -314,6 +330,11 @@ impl Selection {
             state.document = document.clone();
             state.layouts = vec![None; state.texts.len()];
         });
+        if state.read(cx).is_focused(window) {
+            cx.default_global::<Focused>()
+                .0
+                .insert(window.window_handle().window_id(), state.downgrade());
+        }
         state
     }
 
@@ -1207,6 +1228,28 @@ mod tests {
         cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
         cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("alpha bold italic code."));
+    }
+
+    #[gpui::test]
+    fn markdown_selection_is_readable_only_while_focused(cx: &mut TestAppContext) {
+        let (view, cx) = reply(cx, "alpha **bold** *italic* `code`.");
+        let focused = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| crate::markdown::focused_selection(window, cx))
+        };
+        assert_eq!(focused(cx), None);
+        let bounds = cx.debug_bounds("reply-bounds").unwrap();
+        let start = bounds.origin + point(px(0.), px(8.));
+        let end = start + point(px(310.), px(0.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
+        assert_eq!(focused(cx).as_deref(), Some("alpha bold italic code."));
+        cx.update(|window, cx| {
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(focused(cx), None);
     }
 
     #[gpui::test]

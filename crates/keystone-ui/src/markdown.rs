@@ -706,6 +706,12 @@ fn is_local(url: &str) -> bool {
     !url.trim().is_empty() && !scheme && !url.starts_with("//") && !url.starts_with('#')
 }
 
+/// The text selected in the [`Markdown`] that has focus in `window`, as copying it would
+/// give, or `None` when that Markdown has no selection or nothing Markdown has focus.
+pub fn focused_selection(window: &Window, cx: &App) -> Option<String> {
+    selection::focused_text(window, cx)
+}
+
 /// Only web and mail links open. Agent text is not trusted to launch other handlers.
 pub fn is_openable(url: &str) -> bool {
     let lower = url.trim_start().to_ascii_lowercase();

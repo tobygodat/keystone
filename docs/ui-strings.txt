@@ -735,6 +735,7 @@ crates/keystone-desktop/src/commands.rs
 	Rename session
 	Retry recovery
 	Second opinion…
+	Send selection to agent
 	Settle session
 	Split right
 	Switch project
@@ -838,12 +839,29 @@ crates/keystone-desktop/src/delivery.rs
 	{from} is waiting.
 	{from} waits until you un-settle this session.
 
+crates/keystone-desktop/src/excerpt.rs
+	> {line}
+	Send to {}
+	line {}
+	lines {}-{}
+	{path} {lines}:\n{fence}\n{}\n{fence}
+
+crates/keystone-desktop/src/file_view.rs
+	Back
+	Couldn't read this file.
+	Esc
+	Not a text file.
+	Open in editor
+	Too large to show.
+
 crates/keystone-desktop/src/files.rs
 	Copy path
 	Couldn't read {}: {error}
 	Couldn't run {command}: {error}
 	Mention in composer
 	No project folder to browse. {error}
+	Space
+	View
 
 crates/keystone-desktop/src/fork.rs
 	Choose a message to fork from.

@@ -1,9 +1,11 @@
 use crate::Keystone;
 use crate::arrangement_editor::FILES_WIDTH;
+use crate::excerpt::Excerpt;
+use crate::file_view::FileView;
 use crate::presentation::ConversationFolder;
 use gpui::{
-    AnyElement, App, AppContext, ClipboardItem, Context, Entity, Focusable, IntoElement,
-    KeyBinding, Render, WeakEntity, Window, div, prelude::*, px,
+    AnyElement, App, AppContext, ClipboardItem, Context, DismissEvent, Entity, Focusable,
+    IntoElement, KeyBinding, Render, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use keystone_core::Component;
 use keystone_ui::prelude::*;
@@ -15,7 +17,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-gpui::actions!(files, [CopyPath, MentionInComposer, ToggleFiles]);
+gpui::actions!(files, [CopyPath, MentionInComposer, ToggleFiles, ViewFile]);
 
 const CONTEXT: &str = "FileTree";
 
@@ -23,6 +25,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-shift-c", CopyPath, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-m", MentionInComposer, Some(CONTEXT)),
+        KeyBinding::new("space", ViewFile, Some(CONTEXT)),
     ]);
 }
 
@@ -274,6 +277,8 @@ pub(crate) struct FileBrowser {
     notice: Option<Notice>,
     /// The window whose composer "Mention in composer" writes to.
     keystone: WeakEntity<Keystone>,
+    /// The file shown read-only in the tree's place.
+    view: Option<(Entity<FileView>, Subscription)>,
 }
 
 impl FileBrowser {
@@ -290,6 +295,7 @@ impl FileBrowser {
             loading: HashMap::new(),
             notice: None,
             keystone,
+            view: None,
         };
         if let Some(root) = browser.tree.update(cx, |tree, cx| tree.expand(0, cx)) {
             browser.load(root, cx);
@@ -374,6 +380,26 @@ impl FileBrowser {
             .update(cx, |keystone, cx| keystone.mention_file(&path, window, cx));
     }
 
+    /// Shows the file `node` read-only in the tree's place, until Back or Escape.
+    fn view(&mut self, node: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.paths[node as usize].clone();
+        let name = path
+            .strip_prefix(&self.paths[0])
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let keystone = self.keystone.clone();
+        let view = cx.new(|cx| FileView::new(path, name, keystone, cx));
+        let back = cx.subscribe_in(&view, window, |this, _, _: &DismissEvent, window, cx| {
+            this.view = None;
+            window.focus(&this.tree.read(cx).focus_handle(cx), cx);
+            cx.notify();
+        });
+        window.focus(&view.focus_handle(cx), cx);
+        self.view = Some((view, back));
+        cx.notify();
+    }
+
     fn copy_path(&self, node: NodeId, cx: &mut App) {
         let path = self.paths[node as usize].to_string_lossy().into_owned();
         cx.write_to_clipboard(ClipboardItem::new_string(path));
@@ -382,12 +408,18 @@ impl FileBrowser {
 
 impl Focusable for FileBrowser {
     fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
-        self.tree.read(cx).focus_handle(cx)
+        match &self.view {
+            Some((view, _)) => view.focus_handle(cx),
+            None => self.tree.read(cx).focus_handle(cx),
+        }
     }
 }
 
 impl Render for FileBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((view, _)) = &self.view {
+            return view.clone().into_any_element();
+        }
         let browser = cx.weak_entity();
         v_flex()
             .size_full()
@@ -395,6 +427,14 @@ impl Render for FileBrowser {
             .on_action(cx.listener(|this, _: &CopyPath, _, cx| {
                 if let Some(node) = this.tree.read(cx).highlighted_node(cx) {
                     this.copy_path(node, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ViewFile, window, cx| {
+                let tree = this.tree.read(cx);
+                if let Some(node) = tree.highlighted_node(cx)
+                    && tree.model().node(node).kind() == NodeKind::File
+                {
+                    this.view(node, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &MentionInComposer, window, cx| {
@@ -438,6 +478,24 @@ impl Render for FileBrowser {
                                     .min_w_0()
                                     .child(Label::new(entry.name.clone()).truncate()),
                             )
+                            .when(highlighted && entry.kind == NodeKind::File, |d| {
+                                let browser = browser.clone();
+                                d.child(
+                                    IconButton::new(("view-file", id as usize), IconName::Eye)
+                                        .size(ButtonSize::Compact)
+                                        .debug_selector(|| "view-file".into())
+                                        .aria_label("View")
+                                        .tooltip(Tooltip::with_key("View", "Space"))
+                                        .on_click(move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            if let Some(browser) = browser.upgrade() {
+                                                browser.update(cx, |browser, cx| {
+                                                    browser.view(id, window, cx)
+                                                });
+                                            }
+                                        }),
+                                )
+                            })
                             .when(
                                 highlighted
                                     && entry.kind == NodeKind::File
@@ -496,6 +554,7 @@ impl Render for FileBrowser {
                 .min_h_0()
                 .px_1(),
             )
+            .into_any_element()
     }
 }
 
@@ -510,6 +569,18 @@ impl Keystone {
             (_, Ok(project)) => Ok(project.path().to_owned()),
             (_, Err(error)) => Err(error.clone()),
         }
+    }
+
+    /// The lines selected in this window's Files view, while it has focus.
+    pub(crate) fn file_view_excerpt(&self, window: &Window, cx: &App) -> Option<Excerpt> {
+        let root = self.files_root(cx).ok()?;
+        let browser = self.files.browsers.borrow().get(&root)?.clone();
+        let (view, _) = browser.read(cx).view.as_ref()?;
+        let view = view.read(cx);
+        view.focus_handle(cx)
+            .contains_focused(window, cx)
+            .then(|| view.excerpt())
+            .flatten()
     }
 
     pub(crate) fn focus_files(&self, window: &mut Window, cx: &mut Context<Self>) {

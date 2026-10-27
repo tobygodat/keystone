@@ -8,6 +8,8 @@ mod commands;
 mod conversation;
 mod customization;
 mod customization_agent;
+mod excerpt;
+mod file_view;
 mod files;
 mod fork;
 mod handoff;
@@ -474,7 +476,7 @@ struct Keystone {
     /// Which saved window this is. Its layout, tabs and selection are its own.
     window_id: keystone_core::WindowId,
     handle: gpui::AnyWindowHandle,
-    /// The menu a right click on a session or a tab opened.
+    /// The menu a right click on a session, a tab or a selection opened.
     context_menu: Option<windows::ContextMenu>,
     placement_task: Option<gpui::Task<()>>,
     /// The saved window the platform title names, set once it has been.
@@ -874,6 +876,19 @@ impl Keystone {
                 this.runtime_changed(changed, cx);
             }),
         );
+        // An open right-click menu takes Escape before any binding of the focused element,
+        // such as a reply's Clear or the Files view's Back.
+        let (menu_owner, menu_window) = (cx.weak_entity(), window.window_handle());
+        subscriptions.push(cx.intercept_keystrokes(move |event, window, cx| {
+            if event.keystroke.key == "escape"
+                && window.window_handle() == menu_window
+                && menu_owner
+                    .update(cx, |this, cx| this.close_context_menu(cx))
+                    .unwrap_or(false)
+            {
+                cx.stop_propagation();
+            }
+        }));
         let slash = slash_menu::SlashMenu::new(&composer, cx);
         let mentions = mentions::Mentions::new(&composer, cx);
         let mut result = Self {
@@ -2635,6 +2650,15 @@ impl Keystone {
                 } else {
                     None
                 };
+                let selection_menu = reply.is_some().then(|| {
+                    Box::new(self.scoped_listener(
+                        cx,
+                        move |this, position: &gpui::Point<gpui::Pixels>, window, cx| {
+                            this.open_reply_menu(key, index, *position, window, cx)
+                        },
+                    ))
+                        as Box<dyn Fn(&gpui::Point<gpui::Pixels>, &mut Window, &mut App)>
+                });
                 let widget = match row {
                     Row::Surface(surface) => Some(self.widget_control(key, index, &surface.call)),
                     _ => None,
@@ -2687,6 +2711,7 @@ impl Keystone {
                         selected: focused,
                         activity,
                         selection_start,
+                        selection_menu,
                         widget,
                         result,
                         fork,
@@ -3700,9 +3725,6 @@ impl Render for Keystone {
                     if this.presentation.current.customization.chooser().is_some() {
                         this.customize(arrangement_editor::Action::CloseChooser, window, cx);
                         cx.stop_propagation();
-                    } else if this.context_menu.take().is_some() {
-                        cx.notify();
-                        cx.stop_propagation();
                     } else if this.new_menu
                         || this.filter_menu
                         || this.approval_menu
@@ -3865,6 +3887,11 @@ impl Render for Keystone {
             .on_action(
                 self.scoped_listener(cx, |this, _: &FocusComposer, window, cx| {
                     this.focus_composer(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &excerpt::SendSelection, window, cx| {
+                    this.send_selection(window, cx)
                 }),
             )
             .on_action(self.scoped_listener(
@@ -10641,6 +10668,7 @@ fn bind_keys(cx: &mut App) {
     customization::bind_keys(cx);
     cx.bind_keys(commands::bindings());
     files::bind_keys(cx);
+    file_view::bind_keys(cx);
     changes::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new(

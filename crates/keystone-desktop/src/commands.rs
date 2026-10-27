@@ -4,6 +4,7 @@
 use crate::attachments::AttachFiles;
 use crate::changes::{CopyPullRequestLink, ToggleChanges};
 use crate::customization::OpenCustomize;
+use crate::excerpt::{SEND_SELECTION, SendSelection, Taken};
 use crate::files::ToggleFiles;
 use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
@@ -109,6 +110,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-f"],
         context: Some(APP),
         action: || Box::new(FocusSearch),
+    },
+    Command {
+        id: SEND_SELECTION,
+        label: "Send selection to agent",
+        keys: &["secondary-shift-a"],
+        context: Some(APP),
+        action: || Box::new(SendSelection),
     },
     Command {
         id: "focus-composer",
@@ -460,6 +468,8 @@ pub(crate) struct Palette {
     pub(crate) state: Entity<CommandPaletteState>,
     pub(crate) restore: Option<FocusHandle>,
     listing: Listing,
+    /// What was selected when it opened. A reply's selection clears once focus leaves it.
+    selection: Option<Taken>,
 }
 
 /// What the palette lists.
@@ -500,6 +510,9 @@ impl Keystone {
             .and_then(|list| list.restore)
             .or_else(|| self.prompt_list.take().and_then(|list| list.restore))
             .or_else(|| window.focused(cx));
+        let selection = matches!(listing, Listing::Commands)
+            .then(|| self.take_selection(window, cx))
+            .flatten();
         let state = cx.new(|cx| match listing {
             Listing::ProjectColors => CommandPaletteState::with_placeholder(items, "Color", cx),
             Listing::Commands | Listing::Destinations(_) => CommandPaletteState::new(items, cx),
@@ -509,6 +522,7 @@ impl Keystone {
             state,
             restore,
             listing,
+            selection,
         });
         self.refresh(cx);
     }
@@ -577,6 +591,14 @@ impl Keystone {
             };
             if let Some(destination) = destination {
                 cx.defer(move |cx| windows::move_tab(&source, view, destination, &source, cx));
+            }
+            return;
+        }
+        if item.id == SEND_SELECTION {
+            let selection = palette.selection.clone();
+            self.close_palette(window, cx);
+            if let Some(selection) = selection {
+                self.send_excerpt(&selection, window, cx);
             }
             return;
         }

@@ -27,6 +27,8 @@ pub struct RowControls {
     pub selected: bool,
     pub activity: Option<ActivityControl>,
     pub selection_start: Option<Box<dyn Fn(&mut Window, &mut App) -> Option<FocusHandle>>>,
+    /// What a right click on a reply does: open the menu for its selection.
+    pub selection_menu: Option<Box<dyn Fn(&gpui::Point<gpui::Pixels>, &mut Window, &mut App)>>,
     /// What a widget row's inputs and Buttons do.
     pub widget: Option<crate::widget::WidgetControl>,
     /// For a launched session's delivered result, that session's title.
@@ -205,6 +207,7 @@ pub fn row(
         selected,
         activity,
         selection_start,
+        selection_menu,
         widget,
         result,
         fork,
@@ -279,6 +282,11 @@ pub fn row(
                 v_flex()
                     .group("agent-reply")
                     .gap_1()
+                    .when_some(selection_menu, |d, open| {
+                        d.on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+                            open(&event.position, window, cx)
+                        })
+                    })
                     .child(markdown)
                     .when(item.status == ItemStatus::Interrupted, |d| {
                         d.child(

@@ -7,9 +7,9 @@ use crate::app_state::Phase;
 use crate::session_tabs::{bring_forward, conversations, replacement};
 use crate::{AppState, DesktopApp, Keystone, durability_warning, open_windows, register_window};
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Point, Styled, Window, WindowBounds, WindowOptions, anchored, deferred, point,
-    prelude::FluentBuilder, px, size,
+    App, AppContext, Bounds, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Point, Stateful, Styled, Window, WindowBounds, WindowOptions, anchored, deferred,
+    point, prelude::FluentBuilder, px, size,
 };
 use keystone_core::{
     Axis, Component, Composition, Edit, Place, Placement, Size, ViewId, WindowId, WindowView,
@@ -30,10 +30,24 @@ const MIN_SIZE: f32 = 320.;
 /// a client choose.
 const CASCADE: f32 = 32.;
 
-/// The menu a right click on a sidebar session or a session tab opens.
+/// The menu a right click on a sidebar session, a session tab or a selection opens.
 pub(crate) struct ContextMenu {
-    session: u64,
+    target: MenuTarget,
     position: Point<Pixels>,
+}
+
+enum MenuTarget {
+    Session(u64),
+    Selection(crate::excerpt::Taken),
+}
+
+impl ContextMenu {
+    pub(crate) fn selection(taken: crate::excerpt::Taken, position: Point<Pixels>) -> Self {
+        Self {
+            target: MenuTarget::Selection(taken),
+            position,
+        }
+    }
 }
 
 /// What the window list and title bar call `id`.
@@ -482,8 +496,20 @@ impl Keystone {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu { session, position });
+        self.context_menu = Some(ContextMenu {
+            target: MenuTarget::Session(session),
+            position,
+        });
         cx.notify();
+    }
+
+    /// Closes the right-click menu, and says whether one was open.
+    pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.context_menu.take().is_some();
+        if open {
+            cx.notify();
+        }
+        open
     }
 
     /// Keeps the window list's title in step with which saved window this is.
@@ -494,9 +520,21 @@ impl Keystone {
         }
     }
 
-    pub(crate) fn context_menu_overlay(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    pub(crate) fn context_menu_overlay(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let stale = match &self.context_menu {
+            Some(ContextMenu {
+                target: MenuTarget::Selection((session, _)),
+                ..
+            }) => self.selected(cx) != Some(*session),
+            _ => false,
+        };
+        if stale {
+            self.context_menu = None;
+        }
         let menu = self.context_menu.as_ref()?;
-        let session = menu.session;
         let card = v_flex()
             .id("context-menu")
             .occlude()
@@ -507,29 +545,11 @@ impl Keystone {
             .on_mouse_down_out(self.scoped_listener(cx, |this, _, _, cx| {
                 this.context_menu = None;
                 cx.notify();
-            }))
-            .child(
-                MenuItem::new("open-in-new-window", "Open in new window")
-                    .icon(IconName::Plus)
-                    .debug_selector(|| "menu-open-in-new-window".into())
-                    .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                        this.open_new_window(Some(session), window, cx)
-                    })),
-            )
-            .when(
-                self.session(session, cx)
-                    .is_some_and(|s| s.worktree().is_some()),
-                |card| {
-                    card.child(
-                        MenuItem::new("remove-worktree", "Remove worktree…")
-                            .icon(IconName::Branch)
-                            .debug_selector(|| "menu-remove-worktree".into())
-                            .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
-                                this.open_remove_worktree(session, window, cx)
-                            })),
-                    )
-                },
-            );
+            }));
+        let card = match &menu.target {
+            MenuTarget::Selection(taken) => card.child(self.selection_menu_item(taken, cx)?),
+            &MenuTarget::Session(session) => self.session_menu(card, session, cx),
+        };
         Some(
             deferred(
                 anchored()
@@ -538,6 +558,36 @@ impl Keystone {
                     .child(card),
             )
             .priority(2),
+        )
+    }
+
+    fn session_menu(
+        &self,
+        card: Stateful<Div>,
+        session: u64,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        card.child(
+            MenuItem::new("open-in-new-window", "Open in new window")
+                .icon(IconName::Plus)
+                .debug_selector(|| "menu-open-in-new-window".into())
+                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                    this.open_new_window(Some(session), window, cx)
+                })),
+        )
+        .when(
+            self.session(session, cx)
+                .is_some_and(|s| s.worktree().is_some()),
+            |card| {
+                card.child(
+                    MenuItem::new("remove-worktree", "Remove worktree…")
+                        .icon(IconName::Branch)
+                        .debug_selector(|| "menu-remove-worktree".into())
+                        .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                            this.open_remove_worktree(session, window, cx)
+                        })),
+                )
+            },
         )
     }
 }
