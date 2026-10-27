@@ -1,11 +1,12 @@
 //! Usage-limit recovery through the app with the scripted Claude, whose account is at
 //! its limit while its config home holds a `.fake-usage-limit` file: the card names
 //! the limit and its reset, nothing is sent until the user chooses, a scheduled
-//! continue goes once after the reset and survives a restart, sending anything
-//! cancels it, and another account continues in a linked session.
+//! continue goes once after the reset and survives a restart (one missed while closed
+//! or asleep waits for a click), sending anything cancels it, and another account
+//! continues in a linked session.
 
 use crate::app_state::CONTINUE_TEXT;
-use crate::limit::CONTINUE_GRACE_MS;
+use crate::limit::{CONTINUE_GRACE_MS, CONTINUE_MISSED_MS};
 use crate::*;
 use keystone_agent::ItemStatus;
 use std::os::unix::fs::PermissionsExt;
@@ -521,5 +522,142 @@ fn a_codex_limit_takes_its_reset_from_the_usage_reading_and_any_hand_off_cancels
         continue_at(&view, vcx),
         None,
         "the plain Hand off cancels the source's scheduled continue too"
+    );
+}
+
+#[gpui::test]
+fn a_continue_that_came_due_while_closed_waits_for_a_click(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.json");
+    limit(&dir.path().join("default-claude"), 6);
+    let reset_ms = {
+        let (view, vcx) = open(&path, dir.path(), cx);
+        click(vcx, "welcome-claude");
+        type_and_send(&view, vcx, "Fix the login bug");
+        wait(vcx, &view, "the limit card", |view, cx| {
+            limited(view, 1, cx)
+        });
+        click(vcx, "limit-schedule");
+        assert!(continue_at(&view, vcx).is_some());
+        let reset_ms = view.read_with(vcx, |view, cx| {
+            conversation(view, 1, cx)
+                .unwrap()
+                .usage_limit()
+                .unwrap()
+                .resets_at
+                .unwrap()
+                * 1000
+        });
+        view.update(vcx, |view, cx| {
+            view.state.update(cx, |state, cx| {
+                state.save(Vec::new(), Vec::new(), Vec::new(), cx).unwrap();
+                state.teardown(cx);
+            })
+        });
+        reset_ms
+    };
+
+    // Keystone stays closed past the reset and the scheduled time.
+    while now_ms() <= reset_ms {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Store::open(&path)
+        .unwrap()
+        .set_continue_at(1, Some(now_ms() - 1_000))
+        .unwrap();
+
+    let (view, vcx) = open(&path, dir.path(), cx);
+    view.update(vcx, |view, cx| view.select(1, cx));
+    wait(vcx, &view, "the restored limit card", |view, cx| {
+        limited(view, 1, cx)
+    });
+    for _ in 0..10 {
+        vcx.executor().advance_clock(Duration::from_millis(300));
+        vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        view.read_with(vcx, |view, cx| sent(view, 1, cx)),
+        ["Fix the login bug"],
+        "nothing sent at launch"
+    );
+    assert_eq!(continue_at(&view, vcx), None);
+    assert_eq!(
+        Store::open(&path).unwrap().workspace().sessions()[0].continue_at(),
+        None,
+        "the missed schedule is cleared on disk"
+    );
+    assert!(
+        vcx.debug_bounds("limit-cancel").is_none(),
+        "no schedule left to cancel"
+    );
+
+    click(vcx, "limit-continue");
+    wait(vcx, &view, "the continue after the click", |view, cx| {
+        replied(view, 1, "Continue where you left off", cx)
+    });
+    assert_eq!(
+        view.read_with(vcx, |view, cx| sent(view, 1, cx)),
+        ["Fix the login bug", CONTINUE_TEXT]
+    );
+}
+
+#[gpui::test]
+fn a_continue_found_overdue_on_wake_waits_for_a_click(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.json");
+    limit(&dir.path().join("default-claude"), 4);
+    let (view, vcx) = open(&path, dir.path(), cx);
+    click(vcx, "welcome-claude");
+    type_and_send(&view, vcx, "Fix the login bug");
+    wait(vcx, &view, "the limit card", |view, cx| {
+        limited(view, 1, cx)
+    });
+    let reset_ms = view.read_with(vcx, |view, cx| {
+        conversation(view, 1, cx)
+            .unwrap()
+            .usage_limit()
+            .unwrap()
+            .resets_at
+            .unwrap()
+            * 1000
+    });
+    wait(vcx, &view, "the reset", |_, _| now_ms() > reset_ms);
+    let schedule = |vcx: &mut gpui::VisualTestContext, at: u64| {
+        view.update(vcx, |view, cx| {
+            view.state
+                .update(cx, |state, cx| state.schedule_continue(1, Some(at), cx))
+        });
+    };
+
+    // The timer wakes, as after the computer slept, well past the scheduled time.
+    schedule(vcx, now_ms() - CONTINUE_MISSED_MS - 60_000);
+    for _ in 0..10 {
+        vcx.executor().advance_clock(Duration::from_millis(300));
+        vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        view.read_with(vcx, |view, cx| sent(view, 1, cx)),
+        ["Fix the login bug"],
+        "nothing sent on wake"
+    );
+    assert_eq!(continue_at(&view, vcx), None);
+    assert_eq!(
+        Store::open(&path).unwrap().workspace().sessions()[0].continue_at(),
+        None,
+        "the missed schedule is cleared on disk"
+    );
+    assert!(vcx.debug_bounds("limit-cancel").is_none());
+    assert!(vcx.debug_bounds("limit-continue").is_some());
+
+    // Found late but within the grace, it still goes by itself.
+    schedule(vcx, now_ms() - CONTINUE_MISSED_MS / 2);
+    wait(vcx, &view, "the continue within the grace", |view, cx| {
+        replied(view, 1, "Continue where you left off", cx)
+    });
+    assert_eq!(
+        view.read_with(vcx, |view, cx| sent(view, 1, cx)),
+        ["Fix the login bug", CONTINUE_TEXT]
     );
 }

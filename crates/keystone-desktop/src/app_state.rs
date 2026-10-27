@@ -1325,7 +1325,7 @@ impl AppState {
             Some(bytes) => logs.with_budget(bytes),
             None => logs,
         };
-        let state = Self {
+        let mut state = Self {
             removing_worktrees: Arc::default(),
             error: None,
             shutdown_error: None,
@@ -1387,10 +1387,21 @@ impl AppState {
             attachments,
             store,
         };
-        // Continues the user scheduled before a restart still go once they are due.
-        for session in state.store.workspace().sessions() {
-            if let Some(at) = session.continue_at() {
-                Self::wait_to_continue(session.id(), at, at.saturating_sub(now_ms()), cx);
+        // A continue scheduled before a restart still goes once it is due. One that came
+        // due while Keystone was closed is not sent: it waits for the user on the card.
+        let now = now_ms();
+        let scheduled: Vec<_> = state
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .filter_map(|session| Some((session.id(), session.continue_at()?)))
+            .collect();
+        for (session, at) in scheduled {
+            if at > now {
+                Self::wait_to_continue(session, at, at - now, cx);
+            } else if let Err(error) = state.store.set_continue_at(session, None) {
+                eprintln!("Keystone could not clear a missed continue: {error}");
             }
         }
         state
@@ -2629,6 +2640,8 @@ impl AppState {
     /// The scheduled continue for `at` is due. It is cancelled before it is sent, so
     /// it goes at most once. Gone when the user cancelled or moved it, or a turn
     /// started; dropped, saying so, when the conversation no longer ends at the limit.
+    /// Found more than `CONTINUE_MISSED_MS` late, it is only cancelled, and the card
+    /// offers Continue, as for one that came due while Keystone was closed.
     fn continue_when_due(&mut self, session: u64, at: u64, cx: &mut Context<Self>) {
         if self.phase == Phase::Exiting
             || self.session(session).and_then(|s| s.continue_at()) != Some(at)
@@ -2653,6 +2666,9 @@ impl AppState {
             return Self::wait_to_continue(session, at, CONTINUE_RETRY_MS, cx);
         }
         self.refresh(cx);
+        if now > at + crate::limit::CONTINUE_MISSED_MS {
+            return;
+        }
         self.pump(cx);
         if self.conversation(session).usage_limit().is_none() {
             let conversation = self.conversation(session);

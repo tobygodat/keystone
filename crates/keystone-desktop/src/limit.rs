@@ -18,6 +18,10 @@ pub(crate) const CONTINUE_GRACE_MS: u64 = 15_000;
 /// The longest any limit timer waits before reading the wall clock again.
 pub(crate) const CLOCK_CHECK_MS: u64 = 60_000;
 
+/// How late a scheduled continue may go by itself. Later than this, Keystone was not
+/// running when it came due (the computer slept), so it waits for a click.
+pub(crate) const CONTINUE_MISSED_MS: u64 = 120_000;
+
 /// When a limit resets, in unix milliseconds: as the error says, else as the account's
 /// latest usage reading says.
 pub(crate) fn reset_at(
