@@ -44,40 +44,43 @@ pub struct RowControls {
     pub previews: Option<crate::preview::Previews>,
 }
 
-pub struct RestoreControl {
-    /// How many files the turn changed, when known.
-    pub files: Option<usize>,
-    /// Why the session has no checkpoints, shown in place of Restore to here.
-    pub unavailable: Option<&'static str>,
-    pub on_click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+pub enum RestoreControl {
+    /// Restore to here, with how many files the turn changed, when known.
+    Offered {
+        files: Option<usize>,
+        on_click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+    },
+    /// The session has no checkpoints; the tooltip says why, and a click does nothing.
+    Unavailable(&'static str),
 }
 
 /// A turn's checkpoint: Restore to here, and how many files the turn changed.
 fn restore_button(index: usize, control: RestoreControl, quiet: bool) -> AnyElement {
-    let files = control
-        .files
-        .filter(|files| *files > 0)
-        .map(|files| match files {
-            1 => "1 file".to_owned(),
-            files => format!("{files} files"),
-        });
+    let (label, files, on_click) = match control {
+        RestoreControl::Offered { files, on_click } => ("Restore to here", files, Some(on_click)),
+        RestoreControl::Unavailable(why) => (why, None, None),
+    };
+    let files = files.filter(|files| *files > 0).map(|files| match files {
+        1 => "1 file".to_owned(),
+        files => format!("{files} files"),
+    });
+    let unavailable = on_click.is_none();
     h_flex()
         .gap_1()
         .child(
             div()
-                .when(
-                    quiet && files.is_none() && control.unavailable.is_none(),
-                    |d| d.opacity(0.).group_hover("agent-reply", |s| s.opacity(1.)),
-                )
+                .when(quiet && files.is_none() && !unavailable, |d| {
+                    d.opacity(0.).group_hover("agent-reply", |s| s.opacity(1.))
+                })
                 .child(
                     IconButton::new(("restore", index), IconName::Restore)
                         .size(ButtonSize::Compact)
-                        .aria_label(control.unavailable.unwrap_or("Restore to here"))
-                        .tooltip(Tooltip::text(
-                            control.unavailable.unwrap_or("Restore to here"),
-                        ))
+                        .aria_label(label)
+                        .tooltip(Tooltip::text(label))
                         .debug_selector(move || format!("restore-{index}"))
-                        .on_click(move |event, window, cx| (control.on_click)(event, window, cx)),
+                        .when_some(on_click, |button, on_click| {
+                            button.on_click(move |event, window, cx| on_click(event, window, cx))
+                        }),
                 ),
         )
         .when_some(files, |d, files| {

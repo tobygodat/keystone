@@ -1306,8 +1306,8 @@ fn turns_get_checkpoints_and_a_restore_holds_messages_to_the_repository(
         other => panic!("{other:?}"),
     });
 
-    let restored = state.update(cx, |state, cx| {
-        let restored = state.restore_checkpoint(2, 1, cx).unwrap();
+    let restoring = state.update(cx, |state, cx| {
+        let restoring = state.restore_checkpoint(2, 1, cx).unwrap();
         assert!(
             state.restoring(1),
             "the other session shares the repository"
@@ -1317,14 +1317,9 @@ fn turns_get_checkpoints_and_a_restore_holds_messages_to_the_repository(
             state.conversations[&1].error.as_deref(),
             Some(checkpoints::RESTORING)
         );
-        restored
+        restoring
     });
-    let result = Arc::new(Mutex::new(None));
-    let slot = result.clone();
-    cx.spawn(async move |_| *slot.lock().unwrap() = Some(restored.await))
-        .detach();
-    wait_until(cx, &state, |_| result.lock().unwrap().is_some());
-    let restored = result.lock().unwrap().take().unwrap().unwrap().unwrap();
+    let restored = finish(restoring, true, &state, cx).unwrap();
     assert!(restored.skipped.is_empty());
     assert_eq!(
         std::fs::read_to_string(repo.join("a.txt")).unwrap(),
@@ -1343,4 +1338,215 @@ fn turns_get_checkpoints_and_a_restore_holds_messages_to_the_repository(
             .map(|name| format!("refs/keystone/checkpoints/{store}/2/{name}"))
     );
     assert_eq!(git(&repo, &["status", "--porcelain"]), " M a.txt\n");
+}
+
+/// Waits for a restore to end, keeping its files once they are in place when `keep`.
+fn finish(
+    restoring: checkpoints::Restoring,
+    keep: bool,
+    state: &Entity<AppState>,
+    cx: &mut gpui::TestAppContext,
+) -> keystone_agent::checkpoint::Result<keystone_agent::checkpoint::Restored> {
+    let checkpoints::Restoring { placed, done, .. } = restoring;
+    let result = Arc::new(Mutex::new(None));
+    let slot = result.clone();
+    cx.spawn(async move |_| {
+        if let Ok(placed) = placed.await
+            && keep
+        {
+            placed.keep();
+        }
+        *slot.lock().unwrap() = Some(done.await.unwrap());
+    })
+    .detach();
+    wait_until(cx, state, |_| result.lock().unwrap().is_some());
+    result.lock().unwrap().take().unwrap()
+}
+
+/// A repository with one commit, and a runtime with `sessions` in folders of it or of
+/// other repositories, numbered from 1, whose providers write files as told.
+fn repositories(
+    dir: &Path,
+    sessions: &[(&str, Provider)],
+    cx: &mut gpui::TestAppContext,
+) -> Entity<AppState> {
+    let mut store = Store::open(dir.join("workspace.json")).unwrap();
+    for (folder, provider) in sessions {
+        let repo = dir.join(folder);
+        if !repo.exists() {
+            std::fs::create_dir(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            std::fs::write(repo.join("a.txt"), "start\n").unwrap();
+            git(&repo, &["add", "--all"]);
+            git(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "start",
+                ],
+            );
+        }
+        store
+            .create(*provider, &WorkingDirectory::new(&repo).unwrap(), 1)
+            .unwrap();
+    }
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    connect(&state, dir, 0, false, cx);
+    state.update(cx, |state, _| state.test_checkpoints = true);
+    state
+}
+
+/// Sends `text` to the session and waits for its turn's checkpoint.
+fn checkpointed_turn(
+    state: &Entity<AppState>,
+    session: u64,
+    text: &str,
+    turns: usize,
+    cx: &mut gpui::TestAppContext,
+) {
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(
+            ComposerDraft {
+                session,
+                text: text.into(),
+                attachments: Vec::new(),
+            },
+            cx,
+        ))
+    });
+    wait_until(cx, state, |state| {
+        completed(state, session)
+            && matches!(state.checkpoints(session),
+                Some(checkpoints::State::Saved(saved)) if saved.turns.len() == turns)
+    });
+}
+
+/// Makes git's conversion of `*.txt` files in `repo` hang, writing the filter's process
+/// id to the returned file.
+fn hang_conversions(repo: &Path) -> PathBuf {
+    let pid = repo.join(".git/filter-pid");
+    git(
+        repo,
+        &[
+            "config",
+            "filter.slow.smudge",
+            &format!("echo $$ > '{}'; sleep 30; cat", pid.display()),
+        ],
+    );
+    std::fs::write(repo.join(".git/info/attributes"), "*.txt filter=slow\n").unwrap();
+    pid
+}
+
+fn hanging(pid: &Path) -> bool {
+    std::fs::read_to_string(pid).is_ok_and(|pid| pid.trim().parse::<u32>().is_ok())
+}
+
+/// A restore stuck in a filter is cancelled: no file changes, and the repository's
+/// sessions can be sent to again.
+#[gpui::test]
+fn a_cancelled_restore_changes_nothing_and_releases_the_repository(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let state = repositories(
+        dir.path(),
+        &[("repo", Provider::Codex), ("repo", Provider::Claude)],
+        cx,
+    );
+    checkpointed_turn(&state, 2, "write a.txt: one", 1, cx);
+    std::fs::write(repo.join("a.txt"), "later\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "later\n").unwrap();
+    let pid = hang_conversions(&repo);
+
+    let restoring = state.update(cx, |state, cx| state.restore_checkpoint(2, 1, cx).unwrap());
+    let cancel = restoring.cancel.clone();
+    wait_until(cx, &state, |_| hanging(&pid));
+    cancel.cancel();
+    let restored = finish(restoring, true, &state, cx);
+
+    assert!(
+        matches!(restored, Err(keystone_agent::checkpoint::Error::Cancelled)),
+        "{restored:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "later\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("b.txt")).unwrap(),
+        "later\n"
+    );
+    state.update(cx, |state, cx| {
+        assert!(!state.restoring(1));
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text: "after the cancel".into(),
+                attachments: Vec::new(),
+            },
+            cx,
+        ));
+    });
+}
+
+/// A restore that takes long in one repository holds no Codex session in another,
+/// though one app-server serves them both.
+#[gpui::test]
+fn a_slow_restore_holds_no_codex_session_elsewhere(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = repositories(
+        dir.path(),
+        &[("slow", Provider::Codex), ("other", Provider::Codex)],
+        cx,
+    );
+    checkpointed_turn(&state, 1, "first", 1, cx);
+    let slow = dir.path().join("slow");
+    std::fs::write(slow.join("a.txt"), "later\n").unwrap();
+    let pid = hang_conversions(&slow);
+    let restoring = state.update(cx, |state, cx| state.restore_checkpoint(1, 1, cx).unwrap());
+    wait_until(cx, &state, |_| hanging(&pid));
+
+    checkpointed_turn(&state, 2, "elsewhere", 1, cx);
+
+    restoring.cancel.cancel();
+    assert!(finish(restoring, true, &state, cx).is_err());
+}
+
+/// Quitting while a restore is stuck in a filter stops it at once and puts every file
+/// back.
+#[gpui::test]
+fn quitting_during_a_restore_puts_every_file_back(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let state = repositories(dir.path(), &[("repo", Provider::Claude)], cx);
+    checkpointed_turn(&state, 1, "write a.txt: one", 1, cx);
+    std::fs::write(repo.join("a.txt"), "later\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "later\n").unwrap();
+    let pid = hang_conversions(&repo);
+    let restoring = state.update(cx, |state, cx| state.restore_checkpoint(1, 1, cx).unwrap());
+    wait_until(cx, &state, |_| hanging(&pid));
+
+    let start = Instant::now();
+    state.update(cx, |state, cx| state.teardown(cx));
+
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "later\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("b.txt")).unwrap(),
+        "later\n"
+    );
+    drop(restoring);
 }

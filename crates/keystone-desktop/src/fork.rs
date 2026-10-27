@@ -16,6 +16,9 @@ use keystone_core::SessionContext;
 
 gpui::actions!(fork, [ForkFromHere]);
 
+/// Why a fork didn't open, when nothing more is known.
+const NOT_OPENED: &str = "The fork didn't open.";
+
 /// What a row's Fork control says about the fork it makes.
 pub(crate) fn label(from: &ForkFrom) -> &'static str {
     match from {
@@ -32,7 +35,7 @@ pub(crate) fn forkable(row: &Row) -> bool {
 
 impl Keystone {
     /// Forks the session in `key`'s view from the row at `index`, opening the fork in a
-    /// tab beside it with the composer focused.
+    /// tab beside it with the composer focused, or says why it couldn't.
     pub(crate) fn fork_from(
         &mut self,
         key: ViewKey,
@@ -40,38 +43,45 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) = self.fork(key, index, window, cx) {
+            self.error = Some(error);
+            self.refresh(cx);
+        }
+    }
+
+    /// [`Keystone::fork_from`], returning the fork, or why it couldn't be made.
+    pub(crate) fn fork(
+        &mut self,
+        key: ViewKey,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
         if self.selected(cx) != Some(key.session) {
             self.activate(key.view, cx);
-            if self.selected(cx) != Some(key.session) {
-                return;
-            }
         }
-        let Some(session) = self.selected_session(cx) else {
-            return;
+        let Some(session) = self
+            .selected_session(cx)
+            .filter(|session| session.id() == key.session)
+        else {
+            return Err(NOT_OPENED.into());
         };
         let (id, provider) = (session.id(), session.provider());
         let SessionContext::Recorded { directory, .. } = session.context() else {
-            self.error = Some(crate::handoff::NO_FOLDER.into());
-            return self.refresh(cx);
+            return Err(crate::handoff::NO_FOLDER.into());
         };
         let state = self.state.read(cx);
         let Some(conversation) = state.conversations().get(&id).filter(|c| !c.is_loading()) else {
-            self.error = Some(crate::handoff::LOADING.into());
-            return self.refresh(cx);
+            return Err(crate::handoff::LOADING.into());
         };
         if conversation.load_error.is_some() {
-            self.error = Some(crate::handoff::UNREADABLE.into());
-            return self.refresh(cx);
+            return Err(crate::handoff::UNREADABLE.into());
         }
         if !conversation.rows.get(index).is_some_and(forkable) {
-            self.error = Some("Choose a message to fork from.".into());
-            return self.refresh(cx);
+            return Err("Choose a message to fork from.".into());
         }
         let (point, draft, log) = match conversation.fork_from(index) {
-            ForkFrom::Running => {
-                self.error = Some("This turn is still running.".into());
-                return self.refresh(cx);
-            }
+            ForkFrom::Running => return Err("This turn is still running.".into()),
             ForkFrom::Native { point, end } => (
                 Some(point.clone()),
                 String::new(),
@@ -92,16 +102,14 @@ impl Keystone {
             }
         };
         let window_id = self.window_id;
-        if self
+        let fork = self
             .create_beside(id, true, cx, |state, show, cx| {
                 state.fork(id, point, draft, log, now_ms(), window_id, show, cx)
             })
-            .is_none()
-        {
-            return;
-        }
+            .ok_or_else(|| self.error.take().unwrap_or_else(|| NOT_OPENED.into()))?;
         self.composer.focus_handle(cx).focus(window, cx);
         cx.notify();
+        Ok(fork)
     }
 
     /// Forks from the transcript row the keyboard is on.

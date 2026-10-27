@@ -2650,21 +2650,22 @@ impl Keystone {
                 });
                 let restore = conversation.checkpoint_at(index).and_then(|turn| {
                     use app_state::checkpoints::{State, UNAVAILABLE};
-                    let (files, unavailable) = match self.state.read(cx).checkpoints(key.session)? {
-                        State::Saved(saved) => (*saved.turns.get(&turn)?, None),
+                    match self.state.read(cx).checkpoints(key.session)? {
+                        State::Saved(saved) => Some(transcript::RestoreControl::Offered {
+                            files: *saved.turns.get(&turn)?,
+                            on_click: Box::new(self.scoped_listener(
+                                cx,
+                                move |this, _, window, cx| {
+                                    this.open_restore(key, index, window, cx)
+                                },
+                            )),
+                        }),
                         // Said once, on the latest turn.
                         State::Unavailable if conversation.latest_checkpoint() == Some(turn) => {
-                            (None, Some(UNAVAILABLE))
+                            Some(transcript::RestoreControl::Unavailable(UNAVAILABLE))
                         }
-                        State::Unavailable | State::Failed(_) => return None,
-                    };
-                    Some(transcript::RestoreControl {
-                        files,
-                        unavailable,
-                        on_click: Box::new(self.scoped_listener(cx, move |this, _, window, cx| {
-                            this.open_restore(key, index, window, cx)
-                        })),
-                    })
+                        State::Unavailable | State::Failed(_) => None,
+                    }
                 });
                 let second_opinion = reply.is_some().then(|| {
                     let selector =
@@ -2895,7 +2896,11 @@ impl Keystone {
             )
         {
             empty = false;
-            view = view.child(Label::new(error.clone()).size(TextSize::Ui).color(color));
+            view = view.child(
+                div()
+                    .automation_id(arrangement::selector("conversation-notice", key.view))
+                    .child(Label::new(error.clone()).size(TextSize::Ui).color(color)),
+            );
         }
         (!empty).then(|| view.into_any_element())
     }
@@ -9984,6 +9989,11 @@ mod tests {
     mod fork {
         use super::*;
         include!("fork_tests.rs");
+    }
+
+    mod restore {
+        use super::*;
+        include!("restore_tests.rs");
     }
 
     mod second_opinion {

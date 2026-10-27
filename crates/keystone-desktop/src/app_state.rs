@@ -102,7 +102,7 @@ pub(crate) struct AppState {
     checkpoint_store: Option<String>,
     /// Repositories whose files a restore is putting back. No message to a session in
     /// one goes until it ends.
-    restoring: std::collections::HashSet<PathBuf>,
+    restoring: HashMap<PathBuf, checkpoints::InFlight>,
     /// Checkpoint saves queued and not done yet, by session.
     saving: HashMap<u64, usize>,
     catalogs: Catalogs,
@@ -422,6 +422,7 @@ impl AppState {
 
     pub(crate) fn teardown(&mut self, cx: &mut Context<Self>) {
         self.phase = Phase::Exiting;
+        self.stop_restores();
         drop(self.orchestrator.take());
         self.pull_requests.stop();
         self.codex.clear();

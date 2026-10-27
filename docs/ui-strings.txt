@@ -3,14 +3,19 @@
 
 crates/keystone-agent/src/checkpoint.rs
 	\nFiles: {files}\n
+	--format=%(refname) %(objectname) %(committerdate:unix)
 	100644 blob {blob}\tleft-out\n
 	Files: 
 	Keystone
 	Keystone checkpoint: session {}, turn {turn}\n
 	Keystone: before restoring turn {turn}\n
 	Left out: 
+	Restore cancelled.
 	This checkpoint is no longer saved.
+	core.hooksPath=/dev/null
+	delete {name} {oid}\n
 	delete {}\n
+	{cause} Some files could not be put back. They are in {}.
 
 crates/keystone-agent/src/claude.rs
 	Authorization
@@ -198,6 +203,7 @@ crates/keystone-agent/src/connection.rs
 	{name} stopped: {}
 
 crates/keystone-agent/src/git.rs
+	Cancelled.
 	Couldn't run git: {error}
 	HEAD^{commit}
 	This repository has no remote.
@@ -689,9 +695,9 @@ crates/keystone-desktop/src/checkpoints.rs
 	A turn is running here. Stop it first.
 	Checkpoint not saved. {}
 	Checkpoints need a git repository.
+	Keystone stopped before restoring.
 	Not sent. Files are being restored.
 	This checkpoint is no longer saved.
-	This session's provider is unavailable.
 
 crates/keystone-desktop/src/commands.rs
 	Attach files…
@@ -843,6 +849,7 @@ crates/keystone-desktop/src/fork.rs
 	Choose a message to fork from.
 	Fork from here
 	Fork from here (handoff)
+	The fork didn't open.
 	This turn is still running.
 
 crates/keystone-desktop/src/handoff.rs
@@ -1214,7 +1221,6 @@ crates/keystone-desktop/src/relative_time.rs
 crates/keystone-desktop/src/restore.rs
 	Choose a turn's last reply.
 	Files go back to this turn, and the conversation continues in a fork.
-	Keystone stopped before restoring.
 	Not restored: {} and {} more.
 	Not restored: {}.
 	Restore

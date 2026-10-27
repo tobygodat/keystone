@@ -2,18 +2,23 @@
 //! turn's start is read before its first message goes, and its end as it ends, both on
 //! the thread that sends the session's messages, so each sees the files as the
 //! provider left them. A message sent during a turn that starts the next one waits
-//! for that read ([`Connection::hold_follow_ups`]). Restore to here runs on that
-//! thread too, and no message to a session in the same repository goes until it ends.
+//! for that read ([`Connection::hold_follow_ups`]). Restore to here runs on a thread of
+//! its own, so a slow restore holds no provider's other sessions, and no message to a
+//! session in the same repository goes until it ends.
 
 use super::AppState;
 use futures::channel::oneshot;
 use gpui::Context;
 use keystone_agent::Connection;
 use keystone_agent::checkpoint::{self, Checkpoints, Restored, Snapshot};
+use keystone_agent::git::Cancel;
 use keystone_core::SessionContext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// What a non-git session says where a checkpoint would be.
 pub(crate) const UNAVAILABLE: &str = "Checkpoints need a git repository.";
@@ -32,6 +37,32 @@ pub(crate) enum State {
 
 /// The tree each session's next or running turn starts from, by session.
 pub(crate) type Starts = Arc<Mutex<HashMap<u64, String>>>;
+
+/// A restore under way in a repository: what stops it, and its thread.
+pub(crate) struct InFlight {
+    cancel: Cancel,
+    thread: JoinHandle<()>,
+}
+
+/// A restore started for the Restore to here dialog.
+pub(crate) struct Restoring {
+    /// Stops it and puts every file back, until its files are kept.
+    pub(crate) cancel: Cancel,
+    /// Arrives once every file is in place.
+    pub(crate) placed: oneshot::Receiver<Placed>,
+    /// How it ended, once messages to its repository may go again.
+    pub(crate) done: oneshot::Receiver<checkpoint::Result<Restored>>,
+}
+
+/// Every file of a restore is in place. Dropped without [`Placed::keep`], they are all
+/// put back.
+pub(crate) struct Placed(mpsc::SyncSender<bool>);
+
+impl Placed {
+    pub(crate) fn keep(self) {
+        let _ = self.0.send(true);
+    }
+}
 
 /// How many checkpoints each session keeps; scripted native runs may set fewer.
 fn keep() -> usize {
@@ -101,7 +132,15 @@ impl AppState {
         !self.restoring.is_empty()
             && self
                 .checkpoint_folder(session)
-                .is_some_and(|folder| self.restoring.iter().any(|root| within(&folder, root)))
+                .is_some_and(|folder| self.restoring.keys().any(|root| within(&folder, root)))
+    }
+
+    /// Stops every restore under way and waits until each has put its files back.
+    pub(crate) fn stop_restores(&mut self) {
+        for (_, restore) in self.restoring.drain() {
+            restore.cancel.cancel();
+            let _ = restore.thread.join();
+        }
     }
 
     /// The session's checkpoints, named for this workspace.
@@ -221,12 +260,6 @@ impl AppState {
         }
     }
 
-    /// After a restore's fork opened: a launched session's result held meanwhile may go.
-    pub(crate) fn restore_finished(&mut self, cx: &mut Context<Self>) {
-        self.deliveries_due = true;
-        self.publish(cx);
-    }
-
     /// Says `message` in the session's conversation, as a checkpoint's own error is.
     pub(crate) fn checkpoint_notice(
         &mut self,
@@ -338,24 +371,23 @@ impl AppState {
         self.publish(cx);
     }
 
-    /// Puts the session's repository's working tree back the way its checkpoint for
-    /// `turn` saved it. Refused at once, with the reason, while a turn runs in that
-    /// repository or when the checkpoint is not saved; otherwise the result arrives
-    /// through the returned channel. No message to a session in that repository goes
-    /// until it ends.
+    /// Starts putting the session's repository's working tree back the way its
+    /// checkpoint for `turn` saved it. Refused at once, with the reason, while a turn runs
+    /// in that repository or when the checkpoint is not saved. No message to a session
+    /// in that repository goes, and no launched session's result, until it ends.
     pub(crate) fn restore_checkpoint(
         &mut self,
         session: u64,
         turn: u64,
         cx: &mut Context<Self>,
-    ) -> Result<oneshot::Receiver<Result<Restored, String>>, String> {
+    ) -> Result<Restoring, String> {
         let root = match self.checkpoints.get(&session) {
             Some(State::Saved(saved)) if saved.turns.contains_key(&turn) => saved.root.clone(),
             Some(State::Unavailable) => return Err(UNAVAILABLE.into()),
             Some(State::Failed(error)) => return Err(error.clone()),
             _ => return Err("This checkpoint is no longer saved.".into()),
         };
-        let busy = self.restoring.iter().any(|other| other == &root)
+        let busy = self.restoring.contains_key(&root)
             || self.conversations.iter().any(|(id, conversation)| {
                 (conversation.running
                     || self.saving.contains_key(id)
@@ -371,24 +403,65 @@ impl AppState {
             return Err("A turn is running here. Stop it first.".into());
         }
         let key = self.checkpoint_session(session)?;
-        let (sender, receiver) = oneshot::channel();
-        self.restoring.insert(root.clone());
-        let (reserved, restored_root) = (root.clone(), root.clone());
-        let queued = self.in_order(
-            session,
-            move || checkpoint::restore(&restored_root, &key, turn).map_err(|e| e.to_string()),
-            move |this, restored, cx| {
-                this.restoring.remove(&reserved);
-                this.changes.files.push(session);
-                this.publish(cx);
-                let _ = sender.send(restored);
+        let cancel = Cancel::default();
+        let (placed_sender, placed) = oneshot::channel();
+        let (ended, end) = oneshot::channel();
+        let (stop, restored_root) = (cancel.clone(), root.clone());
+        let thread = std::thread::Builder::new()
+            .name("keystone-restore".into())
+            .spawn(move || {
+                // Asked once every file is in place: the dialog keeps them by opening the
+                // fork. A cancel, or a dialog that is gone, puts them back.
+                let keep = || {
+                    let (answer, asked) = mpsc::sync_channel(1);
+                    if placed_sender.send(Placed(answer)).is_err() {
+                        return false;
+                    }
+                    loop {
+                        match asked.recv_timeout(Duration::from_millis(50)) {
+                            Ok(keep) => return keep,
+                            // An answer sent as the cancel came still counts.
+                            Err(RecvTimeoutError::Timeout) if stop.is_cancelled() => {
+                                return asked.try_recv().unwrap_or(false);
+                            }
+                            Err(RecvTimeoutError::Timeout) => {}
+                            Err(RecvTimeoutError::Disconnected) => return false,
+                        }
+                    }
+                };
+                let _ = ended.send(checkpoint::restore(&restored_root, &key, turn, &stop, keep));
+            })
+            .map_err(|error| error.to_string())?;
+        self.restoring.insert(
+            root.clone(),
+            InFlight {
+                cancel: cancel.clone(),
+                thread,
             },
-            cx,
         );
-        if !queued {
-            self.restoring.remove(&root);
-            return Err("This session's provider is unavailable.".into());
-        }
-        Ok(receiver)
+        let (finished, done) = oneshot::channel();
+        cx.spawn(async move |this, cx| {
+            let restored = end.await.unwrap_or_else(|_| {
+                Err(checkpoint::Error::Io(std::io::Error::other(
+                    "Keystone stopped before restoring.",
+                )))
+            });
+            let _ = this.update(cx, |this, cx| {
+                if let Some(restore) = this.restoring.remove(&root) {
+                    let _ = restore.thread.join();
+                }
+                this.changes.files.push(session);
+                // A launched session's result held meanwhile may go.
+                this.deliveries_due = true;
+                this.publish(cx);
+            });
+            let _ = finished.send(restored);
+        })
+        .detach();
+        Ok(Restoring {
+            cancel,
+            placed,
+            done,
+        })
     }
 }

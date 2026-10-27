@@ -9,6 +9,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -51,12 +53,15 @@ pub enum Error {
         output: String,
         code: Option<i32>,
     },
+    /// Its [`Cancel`] fired: it was stopped, or never started.
+    Cancelled,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Spawn(error) => write!(f, "Couldn't run git: {error}"),
+            Self::Cancelled => f.write_str("Cancelled."),
             Self::Failed {
                 command, output, ..
             } if output.trim().is_empty() => {
@@ -196,18 +201,49 @@ pub(crate) enum Output {
     Merged,
 }
 
-/// Runs `command` with `input` on stdin.
-pub(crate) fn run(command: Command, input: Option<Vec<u8>>, output: Output) -> Result<Vec<u8>> {
-    run_within(command, input, output, None)
+/// Stops the commands run with it, from any thread: the one running is killed with
+/// whatever it started, and later ones fail before they start. Clones share it.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
-/// [`run`], but a command still running after `limit` is killed and fails.
-pub(crate) fn run_within(
+/// When a running command is given up.
+#[derive(Clone, Copy)]
+pub(crate) enum Until<'a> {
+    Exit,
+    /// Fails as having had no answer.
+    Deadline(Duration),
+    /// Fails with [`Error::Cancelled`].
+    Cancelled(&'a Cancel),
+}
+
+/// Runs `command` with `input` on stdin.
+pub(crate) fn run(command: Command, input: Option<Vec<u8>>, output: Output) -> Result<Vec<u8>> {
+    run_until(command, input, output, Until::Exit)
+}
+
+/// [`run`], but a command is killed, with whatever it started, and fails once
+/// `until` gives it up.
+pub(crate) fn run_until(
     mut command: Command,
     input: Option<Vec<u8>>,
     output: Output,
-    limit: Option<Duration>,
+    until: Until,
 ) -> Result<Vec<u8>> {
+    if let Until::Cancelled(cancel) = until
+        && cancel.is_cancelled()
+    {
+        return Err(Error::Cancelled);
+    }
     let name = describe(&command);
     let spawn = |error: io::Error| Error::Spawn(error.to_string());
     let (reader, writer) = io::pipe().map_err(spawn)?;
@@ -230,27 +266,37 @@ pub(crate) fn run_within(
     });
     let stdout = child.stdout.take().map(drain);
     let written = drain(reader);
-    let status = match limit {
-        None => child.wait().map_err(spawn)?,
-        Some(limit) => {
-            let deadline = Instant::now() + limit;
+    let given_up = |started: Instant| match until {
+        Until::Exit => None,
+        Until::Deadline(limit) => (started.elapsed() >= limit)
+            .then(|| Error::Spawn(format!("no answer after {} seconds", limit.as_secs()))),
+        Until::Cancelled(cancel) => cancel.is_cancelled().then_some(Error::Cancelled),
+    };
+    let status = match until {
+        Until::Exit => child.wait().map_err(spawn)?,
+        _ => {
+            let started = Instant::now();
+            // Short at first under a cancel, so each quick command of a restore is not
+            // held up by the polling.
+            let mut pause = match until {
+                Until::Cancelled(_) => Duration::from_millis(1),
+                _ => Duration::from_millis(50),
+            };
             loop {
                 if let Some(status) = child.try_wait().map_err(spawn)? {
                     break status;
                 }
-                if Instant::now() >= deadline {
+                if let Some(error) = given_up(started) {
                     // A command from `program` leads its own process group, so whatever it
                     // started goes with it and lets go of the output pipes.
                     // SAFETY: kill has no memory effects; a pid that leads no group fails.
                     unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(Error::Spawn(format!(
-                        "no answer after {} seconds",
-                        limit.as_secs()
-                    )));
+                    return Err(error);
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(50));
             }
         }
     };
@@ -1309,18 +1355,23 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
             &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
         ]);
         let start = Instant::now();
-        let result = run_within(
+        let result = run_until(
             command,
             None,
             Output::Separate,
-            Some(Duration::from_millis(200)),
+            Until::Deadline(Duration::from_millis(200)),
         );
         assert!(
             matches!(&result, Err(Error::Spawn(message)) if message.contains("no answer")),
             "{result:?}"
         );
         assert!(start.elapsed() < Duration::from_secs(5));
-        let child: libc::pid_t = std::fs::read_to_string(&pid_file)
+        assert_gone(&pid_file);
+    }
+
+    /// Waits for the process whose pid `pid_file` holds to be gone.
+    fn assert_gone(pid_file: &Path) {
+        let child: libc::pid_t = std::fs::read_to_string(pid_file)
             .unwrap()
             .trim()
             .parse()
@@ -1334,5 +1385,61 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn a_cancelled_command_is_stopped_with_what_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut command = program(Path::new("sh"), dir.path());
+        command.args([
+            "-c",
+            &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+        ]);
+        let cancel = Cancel::default();
+        let firing = cancel.clone();
+        let fire = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            firing.cancel();
+        });
+        let start = Instant::now();
+        let result = run_until(command, None, Output::Separate, Until::Cancelled(&cancel));
+        fire.join().unwrap();
+        assert_eq!(result, Err(Error::Cancelled));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_gone(&pid_file);
+    }
+
+    #[test]
+    fn a_command_cancelled_before_it_starts_never_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let mut command = program(Path::new("sh"), dir.path());
+        command.args(["-c", &format!("touch '{}'", marker.display())]);
+        let cancel = Cancel::default();
+        cancel.cancel();
+        let result = run_until(command, None, Output::Separate, Until::Cancelled(&cancel));
+        assert_eq!(result, Err(Error::Cancelled));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_quick_command_under_a_cancel_is_not_slowed_by_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = Cancel::default();
+        let timed = |until: Until| {
+            let start = Instant::now();
+            for _ in 0..20 {
+                let mut command = program(Path::new("sleep"), dir.path());
+                command.arg("0.01");
+                run_until(command, None, Output::Separate, until).unwrap();
+            }
+            start.elapsed()
+        };
+        let (cancellable, deadline) = (
+            timed(Until::Cancelled(&cancel)),
+            timed(Until::Deadline(Duration::from_secs(60))),
+        );
+        assert!(cancellable < deadline, "{cancellable:?} vs {deadline:?}");
     }
 }

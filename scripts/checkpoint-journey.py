@@ -7,20 +7,25 @@ Build first: `cargo build -p keystone-desktop -p keystone-agent --bins --locked`
 fixture repository with a commit, a staged file, a stash and ignored files, launches
 target/debug/keystone-desktop on a private headless Sway through scripts/native-driver.py with
 the scripted Claude in store mode and empty provider homes, and drives two turns whose prompts
-make the fake write, edit and delete files. It then checks the refs, that a restore during a
-running turn is refused, that Restore to here on turn one brings its files back without
-touching the index, HEAD, stash or ignored files, that a linked fork holds turn one, and that
-retention prunes the oldest ref. With --outside-git it uses a folder outside any repository
-instead and checks that Restore says checkpoints need one. Screenshots, DIR/frames for a
-step-by-step video and DIR/report.json record each check; the script exits non-zero when one
-fails.
+make the fake write, edit and delete files. It then checks the refs, that a save expires
+another workspace's refs older than 30 days, that a restore during a running turn is refused,
+that Cancel stops a restore stuck in a git filter, that a failing filter or a fork that can't
+open (the workspace database held by another writer) changes no file, that Restore to here on
+turn one brings its files back without touching the index, HEAD, stash or ignored files, that
+a linked fork holds turn one, and that retention prunes the oldest ref. With --outside-git it
+uses a folder outside any repository instead and checks that Restore says checkpoints need one
+only in its tooltip. --theme picks Settings → Appearance first, and --record saves the run as
+DIR/journey.mp4. Screenshots, DIR/frames for a step-by-step video and DIR/report.json record
+each check; the script exits non-zero when one fails.
 """
 import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -37,9 +42,13 @@ TURN_TWO = ('Turn two; write edited.txt: turn two; write deleted.txt: back in tu
             'write two/nested.txt: turn two; delete one.txt; write debug.log: written in turn two')
 
 
-def git(repo, *args):
+# Another workspace's store, whose refs the fixture dates back.
+AGED = 'aged'
+
+
+def git(repo, *args, env=None):
     return subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True,
-                          text=True).stdout
+                          text=True, env=env).stdout
 
 
 def digest(path):
@@ -47,9 +56,9 @@ def digest(path):
 
 
 class Journey(screen_walk.Walk):
-    def __init__(self, width, height, out, driver, plain=False):
+    def __init__(self, width, height, out, driver, plain=False, theme=None, record=False):
         self.width, self.height = width, height
-        self.plain = plain
+        self.plain, self.theme, self.record = plain, theme, record
         self.out = out
         shutil.rmtree(out, ignore_errors=True)
         out.mkdir(parents=True)
@@ -90,6 +99,14 @@ class Journey(screen_walk.Walk):
         (repo / 'debug.log').write_text('ignored\n')
         (repo / 'build').mkdir()
         (repo / 'build/out.bin').write_bytes(b'\x00ignored\x01')
+        tree = git(repo, 'rev-parse', 'HEAD^{tree}').strip()
+        for session, days in [(1, 31), (2, 29)]:
+            date = f'@{int(time.time()) - days * 24 * 60 * 60} +0000'
+            env = {'PATH': '/usr/bin:/bin', 'GIT_AUTHOR_DATE': date, 'GIT_COMMITTER_DATE': date,
+                   'GIT_AUTHOR_NAME': 'Fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.com',
+                   'GIT_COMMITTER_NAME': 'Fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.com'}
+            commit = git(repo, 'commit-tree', tree, '-m', f'{days} days old', env=env).strip()
+            git(repo, 'update-ref', f'refs/keystone/checkpoints/{AGED}/{session}/1', commit)
 
     def untouched(self):
         return {'index': digest(self.repo / '.git/index'), 'HEAD': git(self.repo, 'rev-parse', 'HEAD').strip(),
@@ -112,9 +129,18 @@ class Journey(screen_walk.Walk):
             tree[name] = hashlib.sha256(git(self.repo, 'cat-file', 'blob', meta.split()[2]).encode()).hexdigest()
         return tree
 
+    def aged(self):
+        """The refs left of the other workspace's dated store, as <session>/<name>."""
+        names = git(self.repo, 'for-each-ref', '--format=%(refname)', f'refs/keystone/checkpoints/{AGED}').split()
+        return [name.split('/', 4)[4] for name in names]
+
+    def leftovers(self):
+        return sorted(p.name for p in (self.repo / '.git').iterdir() if p.name.startswith('keystone-'))
+
     def refs(self):
         """The checkpoint refs as <session>/<name>, after the workspace's store name."""
-        names = git(self.repo, 'for-each-ref', '--format=%(refname)', 'refs/keystone').split()
+        names = [name for name in git(self.repo, 'for-each-ref', '--format=%(refname)', 'refs/keystone').split()
+                 if name.split('/')[3] != AGED]
         self.stores = {name.split('/')[3] for name in names}
         if self.stores:
             self.store = min(self.stores)
@@ -168,8 +194,15 @@ class Journey(screen_walk.Walk):
                 'KEYSTONE_TEST_CHECKPOINT_KEEP': '3',
                 'CLAUDE_CONFIG_DIR': str(self.homes['claude']), 'CODEX_HOME': str(self.homes['codex'])})
             self.evidence = started.get('evidence') or started.get('evidence_dir')
+            self.database = started.get('database')
             self.wait('welcome-claude', 30)
+            if self.theme:
+                self.choose_theme()
+            if self.record:
+                self.tool('record_start')
             self.journey()
+            if self.record:
+                shutil.copy(self.tool('record_stop')['path'], self.out / 'journey.mp4')
         finally:
             try:
                 stop = self.tool('stop')
@@ -201,13 +234,85 @@ class Journey(screen_walk.Walk):
         center = next(e['center'] for e in self.tool('elements')['elements'] if e['id'] == control)
         self.tool('input', actions=[{'action': 'move', 'x': center['x'], 'y': center['y']}])
         time.sleep(1.5)
-        shutil.copy(self.tool('screenshot')['path'], self.out / '6-outside-git-tooltip.png')
+        shutil.copy(self.tool('screenshot')['path'], self.out / '10-outside-git-tooltip.png')
         self.click(control)
         time.sleep(0.5)
         self.check('no dialog outside git', self.find('restore-dialog-confirm') is None)
+        self.check('no conversation line outside git', self.find('conversation-notice') is None,
+                   [i for i in self.ids() or [] if i.startswith('conversation-notice')])
         self.check('no files count outside git', not any(i.startswith('checkpoint-files') for i in self.ids() or []))
         self.check('no .git was made', not (self.repo / '.git').exists())
-        self.snap('7-outside-git-pressed')
+        self.snap('11-outside-git-pressed')
+
+    def confirm_turn_one(self):
+        self.click(self.restores()[0][1])
+        self.wait('restore-dialog-confirm', 5)
+        self.click('restore-dialog-confirm')
+
+    def cancel_stuck_restore(self):
+        pid = self.repo / '.git/filter-pid'
+        git(self.repo, 'config', 'filter.slow.smudge', f"echo $$ > '{pid}'; sleep 60; cat")
+        (self.repo / '.git/info/attributes').write_text('*.txt filter=slow\n')
+        before = self.files()
+        self.confirm_turn_one()
+        self.wait('restore-busy', 10)
+        deadline = time.monotonic() + 10
+        while not (pid.exists() and pid.read_text().strip().isdigit()):
+            if time.monotonic() > deadline:
+                raise RuntimeError('the filter did not start')
+            time.sleep(0.1)
+        filter_pid = int(pid.read_text())
+        self.snap('4-restore-stuck-in-a-filter')
+        self.check('a restore stuck in a filter changes no file', self.files() == before)
+        self.click('restore-dialog-cancel')
+        self.wait('restore-dialog-confirm', 10, present=False)
+        self.frame()
+        time.sleep(0.5)
+        try:
+            os.kill(filter_pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        self.check('Cancel stops the filter', not alive, filter_pid)
+        self.check('a cancelled restore changes no file', self.files() == before)
+        self.check('a cancelled restore leaves nothing in .git', self.leftovers() == [], self.leftovers())
+        git(self.repo, 'config', '--unset', 'filter.slow.smudge')
+        (self.repo / '.git/info/attributes').unlink()
+        pid.unlink()
+        self.snap('5-restore-cancelled')
+
+    def failing_filter(self):
+        git(self.repo, 'config', 'filter.broken.clean', 'cat')
+        git(self.repo, 'config', 'filter.broken.smudge', 'false')
+        git(self.repo, 'config', 'filter.broken.required', 'true')
+        (self.repo / '.git/info/attributes').write_text('edited.txt filter=broken\n')
+        before = self.files()
+        self.confirm_turn_one()
+        self.wait('restore-error', 15)
+        self.snap('6-restore-failing-filter')
+        self.check('a failing filter changes no file', self.files() == before)
+        self.check('a failed restore leaves nothing in .git', self.leftovers() == [], self.leftovers())
+        self.key('Escape')
+        self.wait('restore-dialog-confirm', 5, present=False)
+        git(self.repo, 'config', '--remove-section', 'filter.broken')
+        (self.repo / '.git/info/attributes').unlink()
+
+    def fork_cannot_open(self):
+        before, sessions = self.files(), len(self.sessions())
+        holder = sqlite3.connect(self.database, isolation_level=None, timeout=10)
+        try:
+            holder.execute('BEGIN EXCLUSIVE')
+            self.confirm_turn_one()
+            self.wait('restore-error', 20)
+            self.snap('7-restore-fork-cannot-open')
+            self.check('a fork that cannot open changes no file', self.files() == before)
+        finally:
+            holder.execute('ROLLBACK')
+            holder.close()
+        self.check('no fork was made', len(self.sessions()) == sessions, len(self.sessions()))
+        self.check('nothing left in .git after the fork failed', self.leftovers() == [], self.leftovers())
+        self.key('Escape')
+        self.wait('restore-dialog-confirm', 5, present=False)
 
     def journey(self):
         if self.plain:
@@ -223,6 +328,7 @@ class Journey(screen_walk.Walk):
         self.frame()
         session = self.sessions()[0]['id']
         self.until(lambda ids: len(self.refs()) == 1 or None, 'turn one checkpoint', 15)
+        self.check('a save expires refs older than 30 days in every store', self.aged() == ['2/1'], self.aged())
         after_one = self.files()
         self.check('turn one changed the files', (self.repo / 'one.txt').exists()
                    and (self.repo / 'edited.txt').read_text() == 'turn one\n'
@@ -265,6 +371,9 @@ class Journey(screen_walk.Walk):
         (self.repo / '.fake-claude-delay-ms').unlink()
 
         self.until(lambda ids: len(self.restores()) >= 2 or None, 'Restore controls after the stop', 10)
+        self.cancel_stuck_restore()
+        self.failing_filter()
+        self.fork_cannot_open()
         before_restore = self.files()
         self.click(self.restores()[0][1])
         self.wait('restore-dialog-confirm', 5)
@@ -273,7 +382,7 @@ class Journey(screen_walk.Walk):
         self.until(lambda ids: len(self.sessions()) == 2 or None, 'the fork', 15)
         self.wait('restore-dialog-confirm', 10, present=False)
         time.sleep(1)
-        self.snap('4-restored-fork-open')
+        self.snap('8-restored-fork-open')
         restored = self.files()
         self.check('files hash as checkpoint 1', restored == self.checkpoint(self.ref(f'{session}/1')),
                    {'restored': restored, 'checkpoint': self.checkpoint(self.ref(f'{session}/1'))})
@@ -306,7 +415,7 @@ class Journey(screen_walk.Walk):
         print('git for-each-ref refs/keystone (keep 3, after turn four):\n  ' + '\n  '.join(pruned), flush=True)
         self.check('retention prunes the oldest',
                    pruned == [f'{session}/{n}' for n in (2, 3, 4, 'before-restore')], pruned)
-        self.snap('5-source-after-turn-four')
+        self.snap('9-source-after-turn-four')
         return session
 
 
@@ -318,8 +427,10 @@ def main():
     parser.add_argument('--driver')
     parser.add_argument('--outside-git', action='store_true',
                         help='use a folder outside any repository and check what Restore says there')
+    parser.add_argument('--theme', choices=screen_walk.THEMES)
+    parser.add_argument('--record', action='store_true', help='save the run as DIR/journey.mp4')
     args = parser.parse_args()
-    journey = Journey(args.width, args.height, args.out, args.driver, args.outside_git)
+    journey = Journey(args.width, args.height, args.out, args.driver, args.outside_git, args.theme, args.record)
     journey.run()
     failed = [c['check'] for c in journey.checks if not c['ok']]
     print(f'{len(journey.checks) - len(failed)} of {len(journey.checks)} checks passed')

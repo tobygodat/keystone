@@ -69,7 +69,8 @@ impl DialogFocus {
 /// everything else, menus included, and a scrim takes every press outside the card.
 ///
 /// Cancel, Escape, and a press on the scrim call `on_cancel`; only Confirm calls
-/// `on_confirm`. Tab and Shift+Tab cycle the stops of [`DialogFocus`], and Enter or
+/// `on_confirm`. While [`ConfirmDialog::working`], Confirm is off and a press on the
+/// scrim does nothing, so only Cancel and Escape stop the work. Tab and Shift+Tab cycle the stops of [`DialogFocus`], and Enter or
 /// Space presses the focused button. The card's key context is
 /// [`ConfirmDialog::KEY_CONTEXT`], so app shortcuts bound with `!Dialog` stay off
 /// while it is open.
@@ -88,6 +89,7 @@ pub struct ConfirmDialog {
     tone: Color,
     on_cancel: Option<Handler>,
     on_confirm: Option<Handler>,
+    working: bool,
 }
 
 impl ConfirmDialog {
@@ -110,6 +112,7 @@ impl ConfirmDialog {
             tone: Color::Danger,
             on_cancel: None,
             on_confirm: None,
+            working: false,
         }
     }
 
@@ -135,6 +138,12 @@ impl ConfirmDialog {
     /// The confirm button's text. "Confirm" by default.
     pub fn confirm_label(mut self, label: impl Into<SharedString>) -> Self {
         self.confirm_label = label.into();
+        self
+    }
+
+    /// Whether what Confirm started is still running.
+    pub fn working(mut self, working: bool) -> Self {
+        self.working = working;
         self
     }
 
@@ -223,6 +232,7 @@ impl RenderOnce for ConfirmDialog {
                         .color(self.tone)
                         .track_focus(&focus.confirm)
                         .debug_selector(|| format!("{id}-confirm"))
+                        .disabled(self.working)
                         .on_click(move |_, window, cx| on_confirm(window, cx)),
                     ),
             );
@@ -237,7 +247,9 @@ impl RenderOnce for ConfirmDialog {
             .items_center()
             .justify_center()
             .p(spacing::XL)
-            .on_click(move |_, window, cx| on_cancel(window, cx))
+            .when(!self.working, |scrim| {
+                scrim.on_click(move |_, window, cx| on_cancel(window, cx))
+            })
             .child(card);
         deferred(
             anchored()

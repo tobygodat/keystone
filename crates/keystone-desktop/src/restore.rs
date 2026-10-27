@@ -1,16 +1,19 @@
 //! Restore to here: after asking, puts the session's repository's files back the way a
 //! turn's checkpoint saved them, then continues the conversation from that turn in a
-//! fork, so the source session is not changed.
+//! fork, so the source session is not changed. The files are kept only once the fork
+//! opens; a cancel, or a fork that can't open, puts every file back.
 
 use crate::Keystone;
-use crate::app_state::checkpoints::{State, UNAVAILABLE};
+use crate::app_state::checkpoints::{Placed, Restoring, State, UNAVAILABLE};
 use crate::view_state::ViewKey;
 use gpui::{Context, IntoElement, ParentElement, Task, Window, div};
+use keystone_agent::checkpoint::{self, Restored};
+use keystone_agent::git::Cancel;
 use keystone_ui::prelude::*;
 
 gpui::actions!(restore, [RestoreToHere]);
 
-/// The open Restore to here question. A restore in flight keeps its task here.
+/// The open Restore to here question, and the restore it started, while one runs.
 pub(crate) struct RestoreDialog {
     key: ViewKey,
     /// The reply row the conversation forks from once the files are back.
@@ -18,12 +21,12 @@ pub(crate) struct RestoreDialog {
     turn: u64,
     focus: DialogFocus,
     error: Option<String>,
-    task: Option<Task<()>>,
+    running: Option<(Cancel, Task<()>)>,
 }
 
 impl RestoreDialog {
     pub(crate) fn busy(&self) -> bool {
-        self.task.is_some()
+        self.running.is_some()
     }
 }
 
@@ -38,17 +41,19 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) {
         let state = self.state.read(cx);
-        if let Some(State::Unavailable) = state.checkpoints(key.session) {
-            return self.state.update(cx, |state, cx| {
-                state.checkpoint_notice(key.session, UNAVAILABLE, cx)
+        let turn = if let Some(State::Unavailable) = state.checkpoints(key.session) {
+            None
+        } else {
+            state
+                .conversations()
+                .get(&key.session)
+                .and_then(|conversation| conversation.checkpoint_at(index))
+        };
+        let Some(turn) = turn else {
+            self.error = Some(match state.checkpoints(key.session) {
+                Some(State::Unavailable) => UNAVAILABLE.into(),
+                _ => "Choose a turn's last reply.".into(),
             });
-        }
-        let Some(turn) = state
-            .conversations()
-            .get(&key.session)
-            .and_then(|conversation| conversation.checkpoint_at(index))
-        else {
-            self.error = Some("Choose a turn's last reply.".into());
             return self.refresh(cx);
         };
         self.restore_dialog = Some(RestoreDialog {
@@ -57,7 +62,7 @@ impl Keystone {
             turn,
             focus: DialogFocus::new(window, cx),
             error: None,
-            task: None,
+            running: None,
         });
         self.refresh(cx);
     }
@@ -85,14 +90,14 @@ impl Keystone {
         }
     }
 
-    /// A restore cannot be stopped once it runs, so the dialog stays until it ends.
+    /// Closes the question; while a restore runs, cancels it instead, and the dialog
+    /// closes once every file is back.
     fn close_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .restore_dialog
-            .as_ref()
-            .is_some_and(RestoreDialog::busy)
-        {
+        let Some(dialog) = &self.restore_dialog else {
             return;
+        };
+        if let Some((cancel, _)) = &dialog.running {
+            return cancel.cancel();
         }
         self.restore_dialog = None;
         self.focus_composer(window, cx);
@@ -112,61 +117,103 @@ impl Keystone {
         };
         match restoring {
             Err(error) => dialog.error = Some(error),
-            Ok(restored) => {
+            Ok(Restoring {
+                cancel,
+                placed,
+                done,
+            }) => {
                 dialog.error = None;
-                dialog.task = Some(cx.spawn_in(window, async move |this, cx| {
-                    let restored = restored
+                let stopped = cancel.clone();
+                let task = cx.spawn_in(window, async move |this, cx| {
+                    let mut fork = None;
+                    if let Ok(placed) = placed.await {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            fork =
+                                this.keep_restore(key, index, turn, placed, &stopped, window, cx);
+                        });
+                    }
+                    let done = done
                         .await
-                        .unwrap_or_else(|_| Err("Keystone stopped before restoring.".into()));
-                    let _ = this.update_in(cx, |this, window, cx| match restored {
-                        Ok(restored) => {
-                            this.restore_dialog = None;
-                            // Rows may have moved while the files were restored.
-                            let index = this
-                                .state
-                                .read(cx)
-                                .conversations()
-                                .get(&key.session)
-                                .and_then(|conversation| conversation.checkpoint_row(turn))
-                                .unwrap_or(index);
-                            this.fork_from(key, index, window, cx);
-                            let skipped: Vec<String> = restored
-                                .skipped
-                                .iter()
-                                .take(3)
-                                .map(|path| path.display().to_string())
-                                .collect();
-                            let notice = match restored.skipped.len() {
-                                0 => None,
-                                1..=3 => Some(format!("Not restored: {}.", skipped.join(", "))),
-                                count => Some(format!(
-                                    "Not restored: {} and {} more.",
-                                    skipped.join(", "),
-                                    count - 3
-                                )),
-                            };
-                            // Said in the fork the restore opened.
-                            let fork = this.selected(cx);
-                            this.state.update(cx, |state, cx| {
-                                if let (Some(notice), Some(fork)) = (notice, fork) {
-                                    state.checkpoint_notice(fork, &notice, cx);
-                                }
-                                state.restore_finished(cx);
-                            });
-                            this.refresh(cx);
-                        }
-                        Err(error) => {
-                            this.state
-                                .update(cx, |state, cx| state.restore_finished(cx));
-                            if let Some(dialog) = &mut this.restore_dialog {
-                                dialog.error = Some(error);
-                                dialog.task = None;
-                            }
-                            this.refresh(cx);
-                        }
+                        .unwrap_or_else(|_| Err(checkpoint::Error::Cancelled));
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.restore_ended(fork, done, window, cx)
                     });
-                }));
+                });
+                dialog.running = Some((cancel, task));
             }
+        }
+        self.refresh(cx);
+    }
+
+    /// Every file is in place: opens the fork, keeping the files when it opens. Returns
+    /// the fork or why it didn't open, or `None` when cancelled.
+    #[allow(clippy::too_many_arguments)]
+    fn keep_restore(
+        &mut self,
+        key: ViewKey,
+        index: usize,
+        turn: u64,
+        placed: Placed,
+        cancel: &Cancel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<u64, String>> {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        // Rows may have moved while the files were restored.
+        let index = self
+            .state
+            .read(cx)
+            .conversations()
+            .get(&key.session)
+            .and_then(|conversation| conversation.checkpoint_row(turn))
+            .unwrap_or(index);
+        let fork = self.fork(key, index, window, cx);
+        if fork.is_ok() {
+            placed.keep();
+        }
+        Some(fork)
+    }
+
+    fn restore_ended(
+        &mut self,
+        fork: Option<Result<u64, String>>,
+        done: checkpoint::Result<Restored>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let error = match (fork, done) {
+            // The fork's reason says more than the cancel its failure caused.
+            (Some(Err(reason)), Err(checkpoint::Error::NotPutBack { kept, .. })) => {
+                checkpoint::Error::NotPutBack {
+                    cause: Box::new(checkpoint::Error::Io(std::io::Error::other(reason))),
+                    kept,
+                }
+                .to_string()
+            }
+            (Some(Ok(fork)), Ok(restored)) => {
+                self.restore_dialog = None;
+                if let Some(notice) = not_restored(&restored) {
+                    self.state
+                        .update(cx, |state, cx| state.checkpoint_notice(fork, &notice, cx));
+                }
+                return self.refresh(cx);
+            }
+            (_, Err(error @ checkpoint::Error::NotPutBack { .. })) => error.to_string(),
+            (Some(Err(reason)), _) => reason,
+            (_, Err(checkpoint::Error::Cancelled)) | (_, Ok(_)) => {
+                self.restore_dialog = None;
+                self.focus_composer(window, cx);
+                return self.refresh(cx);
+            }
+            (_, Err(error)) => error.to_string(),
+        };
+        if let Some(dialog) = &mut self.restore_dialog {
+            // Git's last line says what failed; the lines before it repeat it.
+            let last = error.lines().rev().find(|line| !line.trim().is_empty());
+            dialog.error = Some(last.unwrap_or_default().to_owned());
+            dialog.running = None;
         }
         self.refresh(cx);
     }
@@ -202,9 +249,29 @@ impl Keystone {
             .icon(IconName::Restore)
             .tone(Color::Warning)
             .confirm_label("Restore")
+            .working(dialog.busy())
             .body(v_flex().children(status))
             .on_cancel(move |window, cx| cancel(&(), window, cx))
             .on_confirm(move |window, cx| confirm(&(), window, cx)),
         )
+    }
+}
+
+/// What the fork says about the paths a restore left as they were.
+fn not_restored(restored: &Restored) -> Option<String> {
+    let first: Vec<String> = restored
+        .skipped
+        .iter()
+        .take(3)
+        .map(|path| path.display().to_string())
+        .collect();
+    match restored.skipped.len() {
+        0 => None,
+        1..=3 => Some(format!("Not restored: {}.", first.join(", "))),
+        count => Some(format!(
+            "Not restored: {} and {} more.",
+            first.join(", "),
+            count - 3
+        )),
     }
 }

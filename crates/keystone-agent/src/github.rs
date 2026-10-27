@@ -87,6 +87,9 @@ fn failed(error: git::Error) -> Error {
             Error::SignedOut { output }
         }
         git::Error::Failed { output, .. } => Error::Failed { output },
+        error @ git::Error::Cancelled => Error::Failed {
+            output: error.to_string(),
+        },
     }
 }
 
@@ -157,7 +160,13 @@ const ANSWER: Duration = Duration::from_secs(60);
 fn run(program: &Path, root: &Path, args: &[&str]) -> Result<Vec<u8>, Error> {
     let mut command = gh(program, root);
     command.args(args);
-    git::run_within(command, None, Output::Separate, Some(ANSWER)).map_err(failed)
+    git::run_until(
+        command,
+        None,
+        Output::Separate,
+        git::Until::Deadline(ANSWER),
+    )
+    .map_err(failed)
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(output: &[u8]) -> Result<T, Error> {
