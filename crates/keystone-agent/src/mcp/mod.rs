@@ -168,7 +168,8 @@ fn accept_loop(listener: TcpListener, authority: String, state: Arc<State>, hand
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
-        if !peer.ip().is_loopback() {
+        // macOS hands out an accepted socket nonblocking, like the listener; Linux never does.
+        if !peer.ip().is_loopback() || stream.set_nonblocking(false).is_err() {
             continue;
         }
         let id = next.fetch_add(1, Ordering::Relaxed);
@@ -179,12 +180,17 @@ fn accept_loop(listener: TcpListener, authority: String, state: Arc<State>, hand
             }
             if clients.len() >= MAX_CLIENTS {
                 drop(clients);
-                let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
-                http::respond(
-                    &mut stream,
-                    503,
-                    protocol::error(Value::Null, -32000, "Server busy"),
-                );
+                let _ = thread::Builder::new()
+                    .name("keystone-mcp-busy".into())
+                    .spawn(move || {
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+                        http::respond(
+                            &mut stream,
+                            503,
+                            protocol::error(Value::Null, -32000, "Server busy"),
+                        );
+                        http::close_early(&mut stream);
+                    });
                 continue;
             }
             let Ok(copy) = stream.try_clone() else {

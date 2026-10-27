@@ -45,7 +45,7 @@ fn hand_off_opens_a_linked_session_with_the_context_in_its_composer(
     cx.run_until_parked();
     assert!(cx.debug_bounds("handoff-from").is_none());
 
-    activity_keys(cx, "ctrl-shift-h");
+    activity_keys(cx, "secondary-shift-h");
 
     let source = view.read_with(cx, |v, cx| {
         let workspace = v.state.read(cx).store().workspace();

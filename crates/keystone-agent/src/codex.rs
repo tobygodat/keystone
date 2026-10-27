@@ -1047,7 +1047,8 @@ impl CodexDriver {
                         };
                         let message = if fork {
                             format!(
-                                "Could not fork this Codex conversation: {reason}. Hand off (Ctrl+Shift+H) to continue it."
+                                "Could not fork this Codex conversation: {reason}. Hand off ({}) to continue it.",
+                                crate::HAND_OFF_KEYS
                             )
                         } else if resume {
                             format!(

@@ -8,7 +8,7 @@ Browse the selected session's project folder in a Files view of the project layo
 - `files-strip` is the tab strip above a Files view, or above any tab group. Each tab has a close button on hover, and **+** opens the "Open a surface" menu listing what the layout still allows: **Files** when none is open, and **Conversation**. A lone conversation keeps its plain chrome and has no strip.
 - `files-root` shows the selected session's recorded folder as the top row. A session without one falls back to the current project; with neither, the list explains why.
 - `files-expand` lists one folder level at a time, folders first, without hidden files or anything the repository's `.gitignore` excludes. Expanding a folder again re-reads it.
-- `files-open` opens a file with `$VISUAL`, then `$EDITOR`, then `xdg-open`. Terminal editors (vi, vim, nvim, nano, helix, `emacs -nw`, and others) are skipped because a detached editor has no terminal.
+- `files-open` opens a file with `$VISUAL`, then `$EDITOR`, then `xdg-open` (`open` on macOS). Terminal editors (vi, vim, nvim, nano, helix, `emacs -nw`, and others) are skipped because a detached editor has no terminal.
 - `files-copy-path` copies a row's absolute path.
 - `files-mention` puts an `@` mention of a file row's path in the composer ([File mentions](mentions.md)).
 - `files-error` shows a red row at the top of the tree when the editor cannot start or a folder cannot be read. The app stays up.

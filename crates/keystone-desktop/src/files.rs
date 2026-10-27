@@ -21,8 +21,8 @@ const CONTEXT: &str = "FileTree";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("ctrl-shift-c", CopyPath, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-m", MentionInComposer, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-c", CopyPath, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-m", MentionInComposer, Some(CONTEXT)),
     ]);
 }
 
@@ -456,7 +456,7 @@ impl Render for FileBrowser {
                                         .aria_label("Mention in composer")
                                         .tooltip(Tooltip::with_key(
                                             "Mention in composer",
-                                            "Ctrl+Shift+M",
+                                            keystone_ui::shortcut_text("secondary-shift-m"),
                                         ))
                                         .on_click(
                                             move |_, window, cx| {
@@ -757,7 +757,7 @@ mod ui_tests {
     }
 
     fn toggle_files(cx: &mut gpui::VisualTestContext) {
-        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.simulate_keystrokes("secondary-shift-e");
         cx.run_until_parked();
     }
 
@@ -891,7 +891,7 @@ mod ui_tests {
             rows(&view, cx),
             [name.as_str(), "src", "main.rs", "README.md"]
         );
-        cx.simulate_keystrokes("down ctrl-shift-c");
+        cx.simulate_keystrokes("down secondary-shift-c");
         let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         let main_rs = WorkingDirectory::new(root)
             .unwrap()

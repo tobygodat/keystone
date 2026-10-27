@@ -99,6 +99,8 @@ impl LaunchProfile {
     }
 
     pub(crate) fn apply(&self, command: &mut Command) {
+        // A provider must not drive Keystone's own window through its debug inbox.
+        command.env_remove("KEYSTONE_AUTOMATION_INBOX");
         for (name, value) in &self.env {
             match value {
                 Some(value) => command.env(name, value),

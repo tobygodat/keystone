@@ -21,7 +21,9 @@ fn git(path: &Path, args: &[&str]) -> String {
 }
 
 fn repository() -> TempDir {
-    let dir = tempdir().unwrap();
+    // Canonical, like the folders Keystone records: macOS's temporary folder sits
+    // behind a symlink.
+    let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     git(dir.path(), &["init", "--initial-branch=main"]);
     let config = dir.path().join(".git/config");
     let mut settings = fs::read_to_string(&config).unwrap();

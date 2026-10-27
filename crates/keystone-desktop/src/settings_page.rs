@@ -856,7 +856,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         let track = cx.debug_bounds("settings-text-size").unwrap();
         cx.simulate_click(
             point(track.center().x, track.bottom() + px(50.)),
@@ -877,7 +877,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         let writer = crate::tests::lock_database(&path);
         click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
@@ -928,11 +928,13 @@ mod tests {
 
     #[gpui::test]
     fn settings_accounts_add_copy_rename_and_remove_without_credentials(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
+        // Canonical, like the folders Keystone records: macOS's temporary folder sits
+        // behind a symlink.
+        let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         click(cx, "settings-section-accounts");
         assert!(shown(cx, "settings-accounts"));
         assert!(shown(cx, "account-row-claude-default"));
@@ -975,7 +977,7 @@ mod tests {
         );
 
         click(cx, "account-rename-claude-work");
-        keys(cx, "ctrl-a");
+        keys(cx, "secondary-a");
         cx.simulate_input("Max two");
         keys(cx, "enter");
         assert_eq!(accounts(&path)[0].1, "Max two");
@@ -1074,7 +1076,7 @@ mod tests {
         let (_view, cx) = open_window(&path, cx);
         for width in [1280., 900., 640., 480.] {
             cx.simulate_resize(gpui::size(px(width), px(900.)));
-            keys(cx, "ctrl-,");
+            keys(cx, "secondary-,");
             click(cx, "settings-section-accounts");
             let bounds = |cx: &mut VisualTestContext, id: &'static str| {
                 cx.debug_bounds(id)
@@ -1210,7 +1212,7 @@ mod tests {
                 .preferences()
                 .notifications()
         };
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         click(cx, "settings-section-notifications");
         assert!(
             !shown(cx, "settings-theme"),
@@ -1249,7 +1251,7 @@ mod tests {
         let row = height(cx, "session-1");
         assert!(!shown(cx, "settings-page"));
 
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         assert!(shown(cx, "settings-page"), "Ctrl+Comma opens");
         assert!(!shown(cx, "session-1"), "the page replaces the workspace");
 
@@ -1292,7 +1294,7 @@ mod tests {
             "compact density shrinks sidebar rows"
         );
 
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         let track = cx.debug_bounds("settings-text-size").unwrap();
         cx.simulate_click(
             point(track.right() - px(1.), track.center().y),
@@ -1319,7 +1321,7 @@ mod tests {
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
 
-        keys(cx, "ctrl-, down");
+        keys(cx, "secondary-, down");
         assert!(shown(cx, "settings-ui-font"), "Down shows Fonts");
         keys(cx, "up");
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
@@ -1332,7 +1334,7 @@ mod tests {
         keys(cx, "right");
         assert_eq!(saved(&path).density, Density::Default);
 
-        keys(cx, "ctrl-k");
+        keys(cx, "secondary-k");
         assert!(
             shown(cx, "settings-page"),
             "the palette opens over the page"
@@ -1359,7 +1361,7 @@ mod tests {
         let (view, cx) = open_window(&path, cx);
         // Fonts' row holds focus; Notifications', Sounds', Accounts', Integrations' and Prompts'
         // rows come before the first font menu.
-        keys(cx, "ctrl-, down tab tab tab tab tab tab down");
+        keys(cx, "secondary-, down tab tab tab tab tab tab down");
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");
@@ -1392,13 +1394,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let (_view, cx) = open_window(&path, cx);
-        for close in ["escape", "ctrl-,", "ctrl-l"] {
-            keys(cx, "ctrl-,");
+        for close in ["escape", "secondary-,", "secondary-l"] {
+            keys(cx, "secondary-,");
             assert!(shown(cx, "settings-page"), "Ctrl+Comma opens");
             keys(cx, close);
             assert!(!shown(cx, "settings-page"), "{close} closes");
         }
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         assert!(shown(cx, "settings-page"), "Ctrl+Comma opens after Ctrl+L");
     }
 
@@ -1438,7 +1440,7 @@ mod tests {
 
     /// Escape and Ctrl+Comma still reach the window once the page has gone.
     fn settings_shortcuts_work(cx: &mut VisualTestContext) {
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         assert!(shown(cx, "settings-page"), "Ctrl+Comma opens again");
         keys(cx, "escape");
         assert!(!shown(cx, "settings-page"), "Escape closes again");
@@ -1451,17 +1453,17 @@ mod tests {
         seeded(&path);
         let (_view, cx) = open_window(&path, cx);
         for palette in [false, true] {
-            keys(cx, "ctrl-,");
+            keys(cx, "secondary-,");
             if palette {
-                keys(cx, "ctrl-k");
+                keys(cx, "secondary-k");
                 cx.simulate_input("Toggle files");
                 keys(cx, "enter");
             } else {
-                keys(cx, "ctrl-shift-e");
+                keys(cx, "secondary-shift-e");
             }
             assert!(!shown(cx, "settings-page"), "Files leaves Settings");
             assert!(shown(cx, "files-tab-0"), "the Files surface is visible");
-            keys(cx, "ctrl-shift-e");
+            keys(cx, "secondary-shift-e");
             assert!(!shown(cx, "files-tab-0"), "focused Files closes");
             settings_shortcuts_work(cx);
         }
@@ -1474,17 +1476,17 @@ mod tests {
         seeded(&path);
         let (_view, cx) = open_window(&path, cx);
         for palette in [false, true] {
-            keys(cx, "ctrl-,");
+            keys(cx, "secondary-,");
             if palette {
-                keys(cx, "ctrl-k");
+                keys(cx, "secondary-k");
                 cx.simulate_input("Toggle notes");
                 keys(cx, "enter");
             } else {
-                keys(cx, "ctrl-shift-j");
+                keys(cx, "secondary-shift-j");
             }
             assert!(!shown(cx, "settings-page"), "Notes leaves Settings");
             assert!(shown(cx, "notes-editor"), "the Notes surface is visible");
-            keys(cx, "ctrl-shift-j");
+            keys(cx, "secondary-shift-j");
             assert!(!shown(cx, "notes-editor"), "focused Notes closes");
             settings_shortcuts_work(cx);
         }
@@ -1497,12 +1499,12 @@ mod tests {
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
         cx.simulate_resize(gpui::size(px(1200.), px(900.)));
-        keys(cx, "ctrl-shift-e");
+        keys(cx, "secondary-shift-e");
         for width in [400., 1200.] {
-            keys(cx, "ctrl-,");
+            keys(cx, "secondary-,");
             cx.simulate_resize(gpui::size(px(width), px(900.)));
             cx.run_until_parked();
-            keys(cx, "ctrl-shift-e");
+            keys(cx, "secondary-shift-e");
             assert!(!shown(cx, "settings-page"));
             assert!(
                 shown(cx, "files-tree-row-0"),
@@ -1532,7 +1534,7 @@ mod tests {
         click(cx, "select-component-0");
         click(cx, "component-remove");
         assert!(!shown(cx, "conversation"));
-        keys(cx, "ctrl-, ctrl-shift-e");
+        keys(cx, "secondary-, secondary-shift-e");
         assert!(!shown(cx, "settings-page"));
         assert!(
             shown(cx, "files-tree-row-0"),
@@ -1551,10 +1553,10 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-shift-e");
+        keys(cx, "secondary-shift-e");
         click(cx, "surface-add");
         assert!(shown(cx, "surface-add-conversation"));
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         assert!(shown(cx, "settings-page"));
         view.read_with(cx, |view, _cx| {
             assert!(view.presentation.current.arrangement.surface_menu.is_none());
@@ -1569,7 +1571,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-, ctrl-n");
+        keys(cx, "secondary-, secondary-n");
         assert!(!shown(cx, "settings-page"), "Ctrl+N leaves settings");
         assert_eq!(session_count(&path), 2);
         assert!(shown(cx, "session-2"), "the new session is on screen");
@@ -1587,7 +1589,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-, ctrl-k");
+        keys(cx, "secondary-, secondary-k");
         cx.simulate_input("New Claude session");
         keys(cx, "enter");
         assert!(!shown(cx, "settings-page"));
@@ -1602,7 +1604,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-, ctrl-f");
+        keys(cx, "secondary-, secondary-f");
         assert!(!shown(cx, "settings-page"));
         cx.update(|window, cx| assert!(view.read(cx).search.focus_handle(cx).is_focused(window)));
         settings_shortcuts_work(cx);
@@ -1614,7 +1616,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-, f2");
+        keys(cx, "secondary-, f2");
         assert!(!shown(cx, "settings-page"));
         view.read_with(cx, |view, _cx| assert!(view.renaming.is_some()));
         keys(cx, "escape");
@@ -1629,7 +1631,7 @@ mod tests {
         seeded(&path);
         let (_view, cx) = open_window(&path, cx);
         assert!(shown(cx, "session-1"));
-        keys(cx, "ctrl-, ctrl-b");
+        keys(cx, "secondary-, secondary-b");
         assert!(!shown(cx, "settings-page"));
         assert!(!shown(cx, "session-1"), "the sidebar is hidden");
         settings_shortcuts_work(cx);
@@ -1641,7 +1643,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (_view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         click(cx, "sidebar-toggle");
         assert!(!shown(cx, "settings-page"));
         assert!(!shown(cx, "session-1"), "the sidebar is hidden");
@@ -1656,7 +1658,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (_view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-, ctrl-shift-l");
+        keys(cx, "secondary-, secondary-shift-l");
         assert!(!shown(cx, "settings-page"));
         assert!(shown(cx, "customize-panel"));
         keys(cx, "escape");
@@ -1670,7 +1672,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-, ctrl-enter");
+        keys(cx, "secondary-, secondary-enter");
         assert!(shown(cx, "settings-page"), "the page stays");
         view.read_with(cx, |view, cx| {
             assert_eq!(view.composer.read(cx).value(), DRAFT);
@@ -1689,7 +1691,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (_view, cx) = open_window(&path, cx);
-        keys(cx, "ctrl-,");
+        keys(cx, "secondary-,");
         let mut samples = Vec::new();
         for iteration in 0..50 {
             let selector = if iteration % 2 == 0 {

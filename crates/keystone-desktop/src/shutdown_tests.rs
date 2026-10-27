@@ -93,8 +93,7 @@ fn tracked_provider(dir: &Path, provider: Provider, starting: bool) -> PathBuf {
 }
 
 fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .is_ok_and(|s| !s.split_once(") ").unwrap().1.starts_with('Z'))
+    !matches!(keystone_agent::host::process_state(pid), None | Some('Z'))
 }
 
 fn pids(dir: &Path, provider: Provider) -> Vec<u32> {
@@ -214,7 +213,7 @@ fn workspace_failure_keeps_settings_window_and_live_providers_then_retries(
     draft(&view, cx, "Keep the exact failed-Quit draft");
     view.update_in(cx, |v, window, cx| v.toggle_settings(window, cx));
     std::fs::rename(&state_dir, dir.path().join("backup")).unwrap();
-    cx.simulate_keystrokes("ctrl-q");
+    cx.simulate_keystrokes("secondary-q");
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Running);
     assert!(cx.debug_bounds("shutdown-error").is_some());
@@ -239,7 +238,7 @@ fn workspace_failure_keeps_settings_window_and_live_providers_then_retries(
         assert!(v.save_draft(cx));
     });
     assert!(state.read_with(cx, |s, _| s.shutdown_error.is_some()));
-    cx.simulate_keystrokes("ctrl-q");
+    cx.simulate_keystrokes("secondary-q");
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Exiting);
     wait(cx, |_| {
@@ -444,7 +443,7 @@ fn terminal_budget_loss_stays_visible_but_repaired_pending_writes_allow_quit(
     });
     draft(&view, cx, "exact draft despite terminal loss");
     view.update_in(cx, |view, window, cx| view.toggle_settings(window, cx));
-    cx.simulate_keystrokes("ctrl-q");
+    cx.simulate_keystrokes("secondary-q");
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Running);
     assert!(state.read_with(cx, |state, _| {
@@ -460,7 +459,7 @@ fn terminal_budget_loss_stays_visible_but_repaired_pending_writes_allow_quit(
         );
     });
     drop(writer);
-    cx.simulate_keystrokes("ctrl-q");
+    cx.simulate_keystrokes("secondary-q");
     cx.run_until_parked();
     assert_eq!(
         phase(&state, cx),
@@ -652,7 +651,7 @@ fn global_quit_reaches_palette_focus(cx: &mut TestAppContext) {
     let (view, state, cx) = open(dir.path(), cx);
     draft(&view, cx, "palette-owned focus draft");
     view.update_in(cx, |v, window, cx| v.toggle_palette(window, cx));
-    cx.simulate_keystrokes("ctrl-q");
+    cx.simulate_keystrokes("secondary-q");
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Exiting);
     assert_eq!(
@@ -676,7 +675,7 @@ fn global_quit_reaches_a_focused_transcript_copy_action(cx: &mut TestAppContext)
         s.publish(cx);
     });
     draft(&view, cx, "action-owned focus draft");
-    cx.simulate_keystrokes("ctrl-shift-t home tab");
+    cx.simulate_keystrokes("secondary-shift-t home tab");
     view.update_in(cx, |v, window, _| {
         assert!(
             v.presentation
@@ -691,7 +690,7 @@ fn global_quit_reaches_a_focused_transcript_copy_action(cx: &mut TestAppContext)
                 .is_focused(window)
         );
     });
-    cx.simulate_keystrokes("ctrl-q");
+    cx.simulate_keystrokes("secondary-q");
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Exiting);
     assert_eq!(
@@ -714,7 +713,7 @@ fn global_quit_reaches_root_with_an_open_menu(cx: &mut TestAppContext) {
         v.focus.focus(window, cx);
         cx.notify();
     });
-    cx.simulate_keystrokes("ctrl-q");
+    cx.simulate_keystrokes("secondary-q");
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Exiting);
     assert_eq!(
@@ -821,5 +820,28 @@ fn runtime_notifications_reach_two_independent_window_presentations(cx: &mut Tes
     assert_eq!(
         first.read_with(one, |v, _| v.state.entity_id()),
         second.read_with(two, |v, _| v.state.entity_id())
+    );
+}
+
+/// macOS ends Keystone from the Dock, a logout or a shutdown without asking it first:
+/// what Quit saves is saved then too.
+#[gpui::test]
+fn a_system_quit_saves_the_draft(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, state, cx) = open(dir.path(), cx);
+    view.update(cx, |view, cx| {
+        view.composer.update(cx, |input, cx| {
+            input.set_value("Saved as macOS quits".into(), cx)
+        });
+    });
+    cx.update(|_, cx| save_on_system_quit(cx));
+    assert_eq!(phase(&state, cx), Phase::Exiting);
+    assert_eq!(
+        Store::open(dir.path().join("workspace.json"))
+            .unwrap()
+            .workspace()
+            .sessions()[0]
+            .draft(),
+        "Saved as macOS quits"
     );
 }

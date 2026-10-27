@@ -272,7 +272,7 @@ fn the_pull_request_tab_follows_checks_and_reviews_and_merges_only_once_confirme
     let cx = visual(handle, app);
     let attention_before = attention(&view, cx);
 
-    cx.simulate_keystrokes("ctrl-alt-p");
+    cx.simulate_keystrokes("secondary-alt-p");
     until(cx, "the branch's pull request is found", |cx| {
         idle(&view, cx) && shown(cx, "pull-request-title")
     });
@@ -454,7 +454,7 @@ fn a_missing_login_shows_the_command_to_run(app: &mut TestAppContext) {
     let path = seeded(&root);
     let (view, handle) = launch(&path, app);
     let cx = visual(handle, app);
-    cx.simulate_keystrokes("ctrl-alt-p");
+    cx.simulate_keystrokes("secondary-alt-p");
     until(cx, "gh answers", |cx| {
         idle(&view, cx) && shown(cx, "pull-request-hint-gh-signed-out")
     });
@@ -718,7 +718,7 @@ fn repair_and_send_put_the_check_and_comment_in_the_composer_and_send_nothing(
     let path = seeded(&root);
     let (view, handle) = launch(&path, app);
     let cx = visual(handle, app);
-    cx.simulate_keystrokes("ctrl-alt-p");
+    cx.simulate_keystrokes("secondary-alt-p");
     until(cx, "the failed check shows", |cx| {
         idle(&view, cx) && shown(cx, "pull-request-repair-0")
     });
@@ -801,7 +801,7 @@ fn a_log_that_arrives_after_switching_sessions_goes_to_its_own_draft(app: &mut T
     let path = seeded(&root);
     let (view, handle) = launch(&path, app);
     let cx = visual(handle, app);
-    cx.simulate_keystrokes("ctrl-alt-p");
+    cx.simulate_keystrokes("secondary-alt-p");
     until(cx, "the failed check shows", |cx| {
         idle(&view, cx) && shown(cx, "pull-request-repair-0")
     });
@@ -829,7 +829,7 @@ fn a_log_gh_cannot_read_leaves_the_check_link_and_says_why(app: &mut TestAppCont
     let path = seeded(&root);
     let (view, handle) = launch(&path, app);
     let cx = visual(handle, app);
-    cx.simulate_keystrokes("ctrl-alt-p");
+    cx.simulate_keystrokes("secondary-alt-p");
     until(cx, "the failed check shows", |cx| {
         idle(&view, cx) && shown(cx, "pull-request-repair-0")
     });
@@ -857,7 +857,7 @@ fn a_prefill_keeps_the_selection_and_goes_on_lines_of_its_own(app: &mut TestAppC
     let path = seeded(&root);
     let (view, handle) = launch(&path, app);
     let cx = visual(handle, app);
-    cx.simulate_keystrokes("ctrl-alt-p");
+    cx.simulate_keystrokes("secondary-alt-p");
     until(cx, "the comment shows", |cx| {
         idle(&view, cx) && shown(cx, "pull-request-send-0")
     });
@@ -902,7 +902,7 @@ fn a_log_for_a_session_another_window_shows_lands_in_that_windows_composer(
         .find(|w| *w != view)
         .unwrap();
     let cx = visual(handle, app);
-    cx.simulate_keystrokes("ctrl-alt-p");
+    cx.simulate_keystrokes("secondary-alt-p");
     until(cx, "the failed check shows", |cx| {
         idle(&view, cx) && shown(cx, "pull-request-repair-0")
     });

@@ -452,10 +452,7 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
 }
 
 fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-    })
+    !matches!(keystone_agent::host::process_state(pid), None | Some('Z'))
 }
 
 #[track_caller]

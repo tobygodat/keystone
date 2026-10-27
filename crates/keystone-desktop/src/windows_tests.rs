@@ -639,7 +639,7 @@ fn move_from_palette(view: &Entity<Keystone>, row: &str, cx: &mut TestAppContext
     let window = handle(view, cx);
     let vcx = &mut VisualTestContext::from_window(window, cx);
     view.update_in(vcx, |this, window, cx| this.focus.focus(window, cx));
-    vcx.simulate_keystrokes("ctrl-alt-m");
+    vcx.simulate_keystrokes("secondary-alt-m");
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("palette").is_some(), "the palette opens");
     vcx.simulate_input(row);
@@ -702,7 +702,7 @@ fn a_tab_from_a_later_window_drops_into_an_earlier_one(cx: &mut TestAppContext) 
             this.select(3, cx);
         });
         vcx.run_until_parked();
-        vcx.simulate_keystrokes("ctrl-t");
+        vcx.simulate_keystrokes("secondary-t");
         vcx.run_until_parked();
     }
     let before = shown(&second, cx);
@@ -740,7 +740,7 @@ fn a_tab_from_a_later_window_drops_into_an_earlier_one(cx: &mut TestAppContext) 
 fn drag_tab_out(view: &Entity<Keystone>, vcx: &mut VisualTestContext) -> u64 {
     vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
     view.update_in(vcx, |this, window, cx| this.focus.focus(window, cx));
-    vcx.simulate_keystrokes("ctrl-t");
+    vcx.simulate_keystrokes("secondary-t");
     vcx.run_until_parked();
     let (bar, last) = view.read_with(vcx, |this, _| {
         let (bar, views) = this
@@ -959,7 +959,7 @@ fn a_tab_moving_to_where_its_session_has_a_hidden_tab_brings_it_forward_in_one_w
         let vcx = &mut VisualTestContext::from_window(window, cx);
         vcx.simulate_resize(gpui::size(px(1280.), px(800.)));
         second.update_in(vcx, |this, window, cx| this.focus.focus(window, cx));
-        vcx.simulate_keystrokes("ctrl-t");
+        vcx.simulate_keystrokes("secondary-t");
         vcx.run_until_parked();
     }
     assert_ne!(selected(&second, cx), Some(2), "session 2's tab is behind");

@@ -22,8 +22,15 @@ shlex = "2.0.1"
 tempfile = "3"
 unicode-segmentation = "1"
 
+# Without font-kit GPUI's macOS text system draws no text. With runtime shaders Metal
+# compiles the shaders when the app starts, so a Mac with only the Command Line Tools,
+# which have no `metal` compiler, can build Keystone.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0", features = ["font-kit", "runtime_shaders"] }
+
 [dev-dependencies]
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 
 [features]
 ui-tests = ["gpui/test-support", "gpui_platform/test-support", "keystone-ui/ui-tests", "keystone-core/test-support"]
+capture = ["keystone-ui/capture", "gpui_platform/test-support"]

@@ -50,42 +50,42 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         id: "new-codex",
         label: "New Codex session",
-        keys: &["ctrl-shift-n"],
+        keys: &["secondary-shift-n"],
         context: Some(APP),
         action: || Box::new(NewCodex),
     },
     Command {
         id: "new-claude",
         label: "New Claude session",
-        keys: &["ctrl-n"],
+        keys: &["secondary-n"],
         context: Some(APP),
         action: || Box::new(NewClaude),
     },
     Command {
         id: "toggle-sidebar",
         label: "Toggle sidebar",
-        keys: &["ctrl-b"],
+        keys: &["secondary-b"],
         context: Some(APP),
         action: || Box::new(ToggleSidebar),
     },
     Command {
         id: "toggle-files",
         label: "Toggle files",
-        keys: &["ctrl-shift-e"],
+        keys: &["secondary-shift-e"],
         context: Some(APP),
         action: || Box::new(ToggleFiles),
     },
     Command {
         id: "toggle-notes",
         label: "Toggle notes",
-        keys: &["ctrl-shift-j"],
+        keys: &["secondary-shift-j"],
         context: Some(APP),
         action: || Box::new(ToggleNotes),
     },
     Command {
         id: "toggle-changes",
         label: "Toggle changes",
-        keys: &["ctrl-shift-g"],
+        keys: &["secondary-shift-g"],
         context: Some(APP),
         action: || Box::new(ToggleChanges),
     },
@@ -99,42 +99,42 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         id: "copy-pull-request-link",
         label: "Copy pull request link",
-        keys: &["ctrl-alt-c"],
+        keys: &["secondary-alt-c"],
         context: Some(APP),
         action: || Box::new(CopyPullRequestLink),
     },
     Command {
         id: "focus-search",
         label: "Focus search",
-        keys: &["ctrl-f"],
+        keys: &["secondary-f"],
         context: Some(APP),
         action: || Box::new(FocusSearch),
     },
     Command {
         id: "focus-composer",
         label: "Focus composer",
-        keys: &["ctrl-l"],
+        keys: &["secondary-l"],
         context: Some(APP),
         action: || Box::new(FocusComposer),
     },
     Command {
         id: "attach-files",
         label: "Attach files…",
-        keys: &["ctrl-shift-u"],
+        keys: &["secondary-shift-u"],
         context: Some(APP),
         action: || Box::new(AttachFiles),
     },
     Command {
         id: "import-sessions",
         label: "Import sessions…",
-        keys: &["ctrl-alt-i"],
+        keys: &["secondary-alt-i"],
         context: Some(APP),
         action: || Box::new(ImportSessions),
     },
     Command {
         id: "capture-screenshot",
         label: "Capture screenshot",
-        keys: &["ctrl-alt-s"],
+        keys: &["secondary-alt-s"],
         context: Some(APP),
         action: || Box::new(CaptureScreenshot),
     },
@@ -148,70 +148,70 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         id: "hand-off",
         label: "Hand off…",
-        keys: &["ctrl-shift-h"],
+        keys: &["secondary-shift-h"],
         context: Some(APP),
         action: || Box::new(HandOff),
     },
     Command {
         id: "second-opinion",
         label: "Second opinion…",
-        keys: &["ctrl-alt-o"],
+        keys: &["secondary-alt-o"],
         context: Some(APP),
         action: || Box::new(AskSecondOpinion),
     },
     Command {
         id: "settle-session",
         label: "Settle session",
-        keys: &["ctrl-shift-s"],
+        keys: &["secondary-shift-s"],
         context: Some(APP),
         action: || Box::new(ToggleSettle),
     },
     Command {
         id: "continue-recovery",
         label: "Use recovered history",
-        keys: &["ctrl-shift-enter"],
+        keys: &["secondary-shift-enter"],
         context: Some(APP),
         action: || Box::new(ContinueRecovery),
     },
     Command {
         id: "retry-recovery",
         label: "Retry recovery",
-        keys: &["ctrl-shift-r"],
+        keys: &["secondary-shift-r"],
         context: Some(APP),
         action: || Box::new(RetryRecovery),
     },
     Command {
         id: "insert-prompt",
         label: "Insert prompt…",
-        keys: &["ctrl-shift-i"],
+        keys: &["secondary-shift-i"],
         context: Some(APP),
         action: || Box::new(InsertPrompt),
     },
     Command {
         id: "open-settings",
         label: "Open settings",
-        keys: &["ctrl-,"],
+        keys: &["secondary-,"],
         context: Some(APP),
         action: || Box::new(OpenSettings),
     },
     Command {
         id: "customize-layout",
         label: "Customize layout",
-        keys: &["ctrl-shift-l"],
+        keys: &["secondary-shift-l"],
         context: Some("Keystone && !Dialog && !CommandPalette"),
         action: || Box::new(OpenCustomize),
     },
     Command {
         id: "quit",
         label: "Quit",
-        keys: &["ctrl-q"],
+        keys: &["secondary-q"],
         context: None,
         action: || Box::new(Quit),
     },
     Command {
         id: "focus-transcript",
         label: "Focus transcript",
-        keys: &["ctrl-shift-t"],
+        keys: &["secondary-shift-t"],
         context: Some(APP),
         action: || Box::new(FocusTranscript),
     },
@@ -232,14 +232,14 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         id: "new-tab",
         label: "New tab",
-        keys: &["ctrl-t"],
+        keys: &["secondary-t"],
         context: Some(APP),
         action: || Box::new(NewTab),
     },
     Command {
         id: "close-tab",
         label: "Close tab",
-        keys: &["ctrl-w"],
+        keys: &["secondary-w"],
         context: Some(APP),
         action: || Box::new(CloseTab),
     },
@@ -260,77 +260,77 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         id: "split-right",
         label: "Split right",
-        keys: &["ctrl-\\"],
+        keys: &["secondary-\\"],
         context: Some(APP),
         action: || Box::new(SplitRight),
     },
     Command {
         id: "switch-project",
         label: "Switch project",
-        keys: &["ctrl-o"],
+        keys: &["secondary-o"],
         context: Some(APP),
         action: || Box::new(SwitchProject),
     },
     Command {
         id: "open-project",
         label: "Open folder as project",
-        keys: &["ctrl-shift-o"],
+        keys: &["secondary-shift-o"],
         context: Some(APP),
         action: || Box::new(OpenProject),
     },
     Command {
         id: "change-project-color",
         label: "Change project color…",
-        keys: &["ctrl-alt-k"],
+        keys: &["secondary-alt-k"],
         context: Some(APP),
         action: || Box::new(ChangeProjectColor),
     },
     Command {
         id: "new-worktree-session",
         label: "New session in worktree…",
-        keys: &["ctrl-alt-g"],
+        keys: &["secondary-alt-g"],
         context: Some(APP),
         action: || Box::new(NewWorktreeSession),
     },
     Command {
         id: "remove-worktree",
         label: "Remove worktree…",
-        keys: &["ctrl-alt-shift-g"],
+        keys: &["secondary-alt-shift-g"],
         context: Some(APP),
         action: || Box::new(RemoveWorktree),
     },
     Command {
         id: "new-window",
         label: "New window",
-        keys: &["ctrl-alt-n"],
+        keys: &["secondary-alt-n"],
         context: Some(APP),
         action: || Box::new(NewWindow),
     },
     Command {
         id: "quick-composer",
         label: "Quick composer",
-        keys: &["ctrl-alt-space"],
+        keys: &["secondary-alt-space"],
         context: Some(APP),
         action: || Box::new(OpenQuickComposer),
     },
     Command {
         id: "close-window",
         label: "Close window",
-        keys: &["ctrl-shift-w"],
+        keys: &["secondary-shift-w"],
         context: Some(APP),
         action: || Box::new(CloseWindow),
     },
     Command {
         id: "open-in-new-window",
         label: "Open session in new window",
-        keys: &["ctrl-alt-shift-n"],
+        keys: &["secondary-alt-shift-n"],
         context: Some(APP),
         action: || Box::new(OpenInNewWindow),
     },
     Command {
         id: "move-tab-to-window",
         label: "Move tab to window…",
-        keys: &["ctrl-alt-m"],
+        keys: &["secondary-alt-m"],
         context: Some(APP),
         action: || Box::new(MoveTabToWindow),
     },
@@ -379,21 +379,21 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         id: "transcript-copy",
         label: "Transcript: copy focused content",
-        keys: &["ctrl-shift-c"],
+        keys: &["secondary-shift-c"],
         context: Some(TRANSCRIPT),
         action: || Box::new(CopyTranscript),
     },
     Command {
         id: "fork-from-here",
         label: "Transcript: fork from row",
-        keys: &["ctrl-shift-f"],
+        keys: &["secondary-shift-f"],
         context: Some(TRANSCRIPT),
         action: || Box::new(ForkFromHere),
     },
     Command {
         id: "restore-to-here",
         label: "Transcript: restore to the focused turn",
-        keys: &["ctrl-shift-z"],
+        keys: &["secondary-shift-z"],
         context: Some(TRANSCRIPT),
         action: || Box::new(RestoreToHere),
     },
@@ -441,7 +441,7 @@ pub(crate) fn palette_items() -> Vec<PaletteItem> {
         .map(|command| {
             let item = PaletteItem::new(command.id, command.label);
             match command.keys.first() {
-                Some(keys) => item.kbd(kbd_text(keys)),
+                Some(keys) => item.kbd(keystone_ui::shortcut_text(keys)),
                 None => item,
             }
         })
@@ -453,35 +453,6 @@ pub(crate) fn action(id: &str) -> Option<Box<dyn Action>> {
         .iter()
         .find(|command| command.id == id)
         .map(|command| (command.action)())
-}
-
-/// `ctrl-shift-n` as `Ctrl+Shift+N`. Chords separated by spaces stay separated.
-fn kbd_text(keys: &str) -> String {
-    keys.split_whitespace()
-        .map(|stroke| {
-            stroke
-                .split('-')
-                .map(|part| {
-                    // GPUI's secondary modifier is Cmd on macOS and Ctrl elsewhere.
-                    if part == "secondary" {
-                        return if cfg!(target_os = "macos") {
-                            "Cmd"
-                        } else {
-                            "Ctrl"
-                        }
-                        .into();
-                    }
-                    let mut chars = part.chars();
-                    match chars.next() {
-                        Some(first) => first.to_uppercase().chain(chars).collect(),
-                        None => String::new(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("+")
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// The open palette and the focus it returns to when it closes.
@@ -688,22 +659,10 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ");
             assert_eq!(item.id.as_ref(), command.id);
-            assert_eq!(item.kbd.as_deref(), Some(kbd_text(&keys).as_str()));
-        }
-    }
-
-    #[test]
-    fn kbd_text_names_each_key() {
-        for (keys, text) in [
-            ("ctrl-shift-n", "Ctrl+Shift+N"),
-            ("ctrl-b", "Ctrl+B"),
-            ("f2", "F2"),
-            ("alt-enter", "Alt+Enter"),
-            ("ctrl-k ctrl-s", "Ctrl+K Ctrl+S"),
-            #[cfg(not(target_os = "macos"))]
-            ("secondary-alt-p", "Ctrl+Alt+P"),
-        ] {
-            assert_eq!(kbd_text(keys), text);
+            assert_eq!(
+                item.kbd.as_deref(),
+                Some(keystone_ui::shortcut_text(&keys).as_str())
+            );
         }
     }
 }

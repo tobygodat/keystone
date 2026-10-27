@@ -114,7 +114,7 @@ fn saved_projects(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> Vec<Pr
 }
 
 fn switch_by_keyboard(query: &str, cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     assert!(
         cx.debug_bounds("projects").is_some(),
         "Ctrl+O opens the list"
@@ -341,7 +341,7 @@ fn removing_a_project_from_the_list_keeps_its_folder_and_sessions(cx: &mut TestA
     launch(&path, cx);
     let (view, handle) = first(cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     cx.simulate_keystrokes("shift-delete");
     assert_eq!(listed(&view, cx).len(), 3, "the current project stays");
     cx.simulate_keystrokes("down");
@@ -379,7 +379,7 @@ fn a_project_whose_folder_is_missing_stays_listed_and_readable(cx: &mut TestAppC
     launch(&path, cx);
     let (view, handle) = first(cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     let items = listed(&view, cx);
     assert!(items[1].1.starts_with("Folder missing · "), "{items:?}");
     cx.simulate_keystrokes("down enter");
@@ -421,7 +421,7 @@ fn folders_of_sessions_from_before_projects_are_offered_too(cx: &mut TestAppCont
     launch(&path, cx);
     let (view, handle) = first(cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     let items = listed(&view, cx);
     let names: Vec<&str> = items.iter().map(|i| i.0.as_str()).collect();
     assert_eq!(names, vec!["alpha", "gamma", "beta", "Open folder…"]);
@@ -544,12 +544,12 @@ fn a_removed_project_with_sessions_stays_off_the_list(cx: &mut TestAppContext) {
     launch(&path, cx);
     let (view, handle) = first(cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     cx.simulate_keystrokes("down shift-delete");
     cx.run_until_parked();
     assert_eq!(saved_projects(&view, cx), vec![folders.alpha.clone()]);
     cx.simulate_keystrokes("escape");
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     let items = listed(&view, cx);
     assert!(
         !items.iter().any(|i| i.0 == "beta"),
@@ -577,7 +577,7 @@ fn split_right_opens_a_session_of_the_windows_project(cx: &mut TestAppContext) {
     launch(&path, cx);
     let (view, handle) = first(cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-\\");
+    cx.simulate_keystrokes("secondary-\\");
     cx.run_until_parked();
     let tabs = view.read_with(cx, |this, cx| this.session_tabs(cx));
     assert!(
@@ -599,10 +599,10 @@ fn the_palette_opened_from_the_project_list_returns_focus_to_the_composer(cx: &m
     let composer = |view: &Entity<Keystone>, cx: &mut VisualTestContext| {
         cx.update(|window, cx| view.read(cx).composer.focus_handle(cx).is_focused(window))
     };
-    cx.simulate_keystrokes("ctrl-l");
+    cx.simulate_keystrokes("secondary-l");
     assert!(composer(&view, cx));
-    cx.simulate_keystrokes("ctrl-o");
-    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_keystrokes("secondary-o");
+    cx.simulate_keystrokes("secondary-k");
     assert!(view.read_with(cx, |this, _| this.palette.is_some()
         && this.projects.is_none()));
     cx.simulate_keystrokes("escape");
@@ -686,7 +686,7 @@ fn a_session_folder_inside_another_is_offered_as_the_outer_one(cx: &mut TestAppC
     launch(&path, cx);
     let (view, handle) = first(cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     let items = listed(&view, cx);
     let names: Vec<&str> = items.iter().map(|i| i.0.as_str()).collect();
     assert_eq!(names, vec!["alpha", "gamma", "beta", "Open folder…"]);
@@ -792,7 +792,7 @@ fn a_right_click_on_the_project_changes_its_color_and_automatic_restores_it(
     assert_eq!(saved_color(&path, &folders.alpha), Some(chosen));
     assert_eq!(saved_color(&path, &folders.beta), None);
 
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     let tiles: Vec<_> = view.read_with(cx, |this, cx| {
         this.projects
             .as_ref()
@@ -816,7 +816,7 @@ fn a_right_click_on_the_project_changes_its_color_and_automatic_restores_it(
     );
     cx.simulate_keystrokes("escape");
 
-    cx.simulate_keystrokes("ctrl-alt-k");
+    cx.simulate_keystrokes("secondary-alt-k");
     cx.run_until_parked();
     let rows = palette_rows(&view, cx);
     assert_eq!(rows[0].1, "");
@@ -846,7 +846,7 @@ fn a_color_chosen_in_one_window_repaints_another_on_the_project(cx: &mut TestApp
     });
     let cx = visual(handle, cx);
     assert_eq!(project(&second, cx), folders.alpha);
-    cx.simulate_keystrokes("ctrl-alt-k");
+    cx.simulate_keystrokes("secondary-alt-k");
     cx.run_until_parked();
     cx.simulate_input("Teal");
     repaints.set(0);

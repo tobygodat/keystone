@@ -102,7 +102,7 @@ fn the_library_adds_edits_reorders_and_deletes_prompts(cx: &mut TestAppContext) 
     let dir = tempfile::tempdir().unwrap();
     let path = seeded(dir.path(), "");
     let (view, cx) = open_window(&path, cx);
-    keys(cx, "ctrl-,");
+    keys(cx, "secondary-,");
     click(cx, "settings-section-prompts");
     assert!(shown(cx, "settings-prompts"));
 
@@ -164,7 +164,7 @@ fn the_library_adds_edits_reorders_and_deletes_prompts(cx: &mut TestAppContext) 
     assert_eq!(saved(&path)[0].0, "Review");
 
     click(cx, &format!("prompt-edit-{review}"));
-    keys(cx, "ctrl-a");
+    keys(cx, "secondary-a");
     cx.simulate_input("Review closely");
     keys(cx, "enter");
     assert_eq!(
@@ -211,7 +211,7 @@ fn the_library_shows_when_a_command_wins_over_a_shortcut(cx: &mut TestAppContext
         .unwrap()
         .value;
     let (_view, cx) = open_window(&path, cx);
-    keys(cx, "ctrl-,");
+    keys(cx, "secondary-,");
     click(cx, "settings-section-prompts");
     assert!(shown(cx, &format!("prompt-conflict-{id}")));
 }
@@ -251,7 +251,7 @@ fn saving_an_edit_never_overwrites_a_change_from_another_window(cx: &mut TestApp
     let path = seeded(dir.path(), "");
     let (view, cx) = open_window(&path, cx);
     let id = add(&view, cx, "Original", "Body.", None);
-    keys(cx, "ctrl-,");
+    keys(cx, "secondary-,");
     click(cx, "settings-section-prompts");
     click(cx, &format!("prompt-edit-{id}"));
     let elsewhere = |view: &Entity<Keystone>, cx: &mut VisualTestContext, title: &str| {
@@ -327,7 +327,7 @@ fn insert_prompt_opens_the_library_on_the_welcome_screen(cx: &mut TestAppContext
     add(&view, cx, "Greeting", "Hello there.", None);
     cx.run_until_parked();
     view.update_in(cx, |view, window, cx| view.focus.focus(window, cx));
-    keys(cx, "ctrl-shift-i");
+    keys(cx, "secondary-shift-i");
     assert!(!shown(cx, "prompts"));
     assert!(shown(cx, "settings-prompts"));
     keys(cx, "escape");
@@ -349,7 +349,7 @@ fn the_prompt_list_takes_escape_and_skips_a_prompt_no_longer_offered(cx: &mut Te
     cx.simulate_input("/gre");
     cx.run_until_parked();
     assert!(shown(cx, "slash-menu"));
-    keys(cx, "ctrl-shift-i");
+    keys(cx, "secondary-shift-i");
     assert!(shown(cx, "prompts"));
     assert!(!shown(cx, "slash-menu"), "the list hides the menu under it");
     keys(cx, "escape");
@@ -357,8 +357,8 @@ fn the_prompt_list_takes_escape_and_skips_a_prompt_no_longer_offered(cx: &mut Te
     assert!(shown(cx, "slash-menu"), "the menu is back");
     assert_eq!(draft(&view, cx), "/gre");
 
-    keys(cx, "ctrl-a backspace");
-    keys(cx, "ctrl-shift-i");
+    keys(cx, "secondary-a backspace");
+    keys(cx, "secondary-shift-i");
     let other = dir.path().join("other");
     std::fs::create_dir_all(&other).unwrap();
     view.update(cx, |view, cx| {
@@ -402,7 +402,7 @@ fn the_palette_inserts_a_prompt_at_the_caret(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = seeded(dir.path(), "");
     let (view, cx) = open_window(&path, cx);
-    keys(cx, "ctrl-k");
+    keys(cx, "secondary-k");
     cx.simulate_input("Insert prompt");
     keys(cx, "enter");
     assert!(
@@ -438,7 +438,7 @@ fn the_palette_inserts_a_prompt_at_the_caret(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     cx.simulate_input("Draft: ");
-    keys(cx, "ctrl-shift-i");
+    keys(cx, "secondary-shift-i");
     assert!(shown(cx, "prompts"));
     let rows = view.read_with(cx, |view, cx| {
         view.prompt_list
@@ -470,7 +470,7 @@ fn the_palette_inserts_a_prompt_at_the_caret(cx: &mut TestAppContext) {
     );
 
     // Again, from the palette's own row.
-    keys(cx, "ctrl-k");
+    keys(cx, "secondary-k");
     cx.simulate_input("Insert prompt");
     keys(cx, "enter");
     assert!(shown(cx, "prompts"));

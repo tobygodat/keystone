@@ -208,7 +208,7 @@ fn a_mention_is_chosen_as_one_token_and_sent_as_typed(cx: &mut TestAppContext) {
     rows(&view, cx);
     cx.simulate_keystrokes("tab");
     cx.simulate_input("please");
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     let messages = dir.path().join("project/.fake-claude-messages");
     wait(cx, &view, |_, _| {
         std::fs::read_to_string(&messages).is_ok_and(|m| !m.is_empty())
@@ -333,7 +333,7 @@ fn the_palette_hides_the_picker_and_takes_escape(cx: &mut TestAppContext) {
     let (_dir, view, cx) = open("", cx);
     cx.simulate_input("@sr");
     rows(&view, cx);
-    cx.simulate_keystrokes("ctrl-shift-p");
+    cx.simulate_keystrokes("secondary-shift-p");
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.palette.is_some()));
     assert!(cx.debug_bounds("mention-menu").is_none());
@@ -382,7 +382,7 @@ fn files_offers_no_mention_for_a_path_with_a_quote(cx: &mut TestAppContext) {
     let folder = dir.path().join("project");
     write(&folder.join("q\"dir/plain.rs"), "");
     let (view, cx) = open_in(dir.path(), &folder, "", cx);
-    cx.simulate_keystrokes("ctrl-shift-e");
+    cx.simulate_keystrokes("secondary-shift-e");
     cx.run_until_parked();
     // Rows: the folder, q"dir, then plain.rs once expanded.
     cx.simulate_keystrokes("down right down");
@@ -392,7 +392,7 @@ fn files_offers_no_mention_for_a_path_with_a_quote(cx: &mut TestAppContext) {
         "a file row is highlighted"
     );
     assert!(cx.debug_bounds("mention-file").is_none());
-    cx.simulate_keystrokes("ctrl-shift-m");
+    cx.simulate_keystrokes("secondary-shift-m");
     cx.run_until_parked();
     assert_eq!(draft(&view, cx), (String::new(), vec![]));
 }
@@ -403,7 +403,7 @@ fn files_offers_no_mention_for_a_path_with_a_quote(cx: &mut TestAppContext) {
 fn files_rows_mention_their_file_in_the_composer(cx: &mut TestAppContext) {
     let (dir, view, cx) = open("", cx);
     cx.simulate_input("Compare");
-    cx.simulate_keystrokes("ctrl-shift-e");
+    cx.simulate_keystrokes("secondary-shift-e");
     cx.run_until_parked();
     // Rows: the folder, "my notes", "src", README.md.
     cx.simulate_keystrokes("down down down");
@@ -412,7 +412,7 @@ fn files_rows_mention_their_file_in_the_composer(cx: &mut TestAppContext) {
         cx.debug_bounds("mention-file").is_some(),
         "a highlighted file shows the button"
     );
-    cx.simulate_keystrokes("ctrl-shift-m");
+    cx.simulate_keystrokes("secondary-shift-m");
     cx.run_until_parked();
     assert_eq!(
         draft(&view, cx),
@@ -422,7 +422,7 @@ fn files_rows_mention_their_file_in_the_composer(cx: &mut TestAppContext) {
     assert_eq!(saved(&dir), "Compare @README.md ");
 
     cx.simulate_input("with");
-    cx.simulate_keystrokes("ctrl-shift-e");
+    cx.simulate_keystrokes("secondary-shift-e");
     cx.run_until_parked();
     cx.simulate_keystrokes("up right");
     cx.run_until_parked();

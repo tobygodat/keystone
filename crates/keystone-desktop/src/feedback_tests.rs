@@ -201,8 +201,21 @@ fn successful_send_clears_stale_view_error_and_persists_the_empty_composer(
     finish(&state, &gate, cx);
 }
 
+#[cfg(target_os = "linux")]
 fn directory_path(directory: &std::fs::File) -> std::io::Result<PathBuf> {
     std::fs::read_link(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+}
+
+#[cfg(target_os = "macos")]
+fn directory_path(directory: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes a NUL-terminated path of at most PATH_MAX bytes.
+    if unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
 }
 
 fn fail_empty_draft_sync(directory: &std::fs::File) -> std::io::Result<()> {

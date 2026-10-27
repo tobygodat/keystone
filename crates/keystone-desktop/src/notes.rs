@@ -256,9 +256,9 @@ impl Keystone {
                             .disabled(!sendable)
                             .debug_selector(|| "notes-send".into())
                             .tooltip(Tooltip::text(if sendable {
-                                "Ctrl+Enter"
+                                keystone_ui::shortcut_text("secondary-enter")
                             } else {
-                                "Select a session"
+                                "Select a session".into()
                             }))
                             .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                                 this.send_note(window, cx)

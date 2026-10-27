@@ -232,7 +232,7 @@ fn the_keyboard_forks_the_focused_message(cx: &mut gpui::TestAppContext) {
     });
     assert_eq!(row, 0);
     // The first row, then its actions: Copy message, then Fork from here.
-    activity_keys(cx, "ctrl-shift-t home tab tab");
+    activity_keys(cx, "secondary-shift-t home tab tab");
     view.read_with(cx, |v, _| {
         let key = v.presentation.current.views.keyboard_state(MAIN_1).unwrap();
         assert_eq!(key.row, Some(0));
@@ -248,7 +248,7 @@ fn the_keyboard_forks_the_focused_message(cx: &mut gpui::TestAppContext) {
 
     view.update(cx, |v, cx| v.select(1, cx));
     cx.run_until_parked();
-    activity_keys(cx, "ctrl-shift-t end ctrl-shift-f");
+    activity_keys(cx, "secondary-shift-t end secondary-shift-f");
     view.read_with(cx, |v, cx| {
         let workspace = v.state.read(cx).store().workspace();
         assert_eq!(workspace.sessions().len(), 3, "{:?}", v.error);

@@ -43,6 +43,11 @@ struct ClaudeCapabilityFrame {
 #[doc(hidden)]
 pub type StartHook = Arc<dyn Fn(u64) + Send + Sync>;
 
+/// Runs once a provider process has started, with its session and PID, which a test
+/// needs when the process is ended before it can report itself.
+#[doc(hidden)]
+pub type SpawnHook = Arc<dyn Fn(u64, u32) + Send + Sync>;
+
 /// What the UI needs from any provider. Commands run on the connection's worker in the
 /// order they were given, and a provider that cannot start reports [`Event::Failed`]
 /// for the session that needed it.
@@ -1041,6 +1046,7 @@ struct ClaudeShared {
     /// Set when the connection is dropped, so queued commands start nothing.
     closed: bool,
     before_start: Option<StartHook>,
+    after_spawn: Option<SpawnHook>,
     /// [`MODE_TIMEOUT`], shorter in tests.
     mode_timeout: Option<Duration>,
     launch: Launch,
@@ -1480,6 +1486,11 @@ impl ClaudeConnection {
     #[doc(hidden)]
     pub fn hold_starts(&self, hook: StartHook) {
         self.starter.shared.lock().unwrap().before_start = Some(hook);
+    }
+
+    #[doc(hidden)]
+    pub fn on_spawn(&self, hook: SpawnHook) {
+        self.starter.shared.lock().unwrap().after_spawn = Some(hook);
     }
 
     /// Shortens how long Claude may take to start or confirm a permission mode.
@@ -2150,8 +2161,13 @@ impl ClaudeStarter {
                 wake();
             }
         };
-        Process::spawn(&program, &args, cwd, &self.profile, on_line, on_exit)
-            .map_err(|e| format!("Could not start Claude Code at {}. {e}", program.display()))
+        let process = Process::spawn(&program, &args, cwd, &self.profile, on_line, on_exit)
+            .map_err(|e| format!("Could not start Claude Code at {}. {e}", program.display()))?;
+        let hook = self.shared.lock().unwrap().after_spawn.clone();
+        if let Some(hook) = hook {
+            hook(session, process.pid());
+        }
+        Ok(process)
     }
 
     /// The `claude` to run: `program` when given, else the one found on first use.

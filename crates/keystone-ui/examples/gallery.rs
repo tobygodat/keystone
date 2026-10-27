@@ -535,7 +535,7 @@ impl Render for Gallery {
                         window.focus_next(cx);
                     }
                     cx.stop_propagation();
-                } else if event.keystroke.key == "q" && event.keystroke.modifiers.control {
+                } else if event.keystroke.key == "q" && event.keystroke.modifiers.secondary() {
                     cx.quit();
                 }
             })

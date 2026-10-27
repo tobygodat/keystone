@@ -394,7 +394,7 @@ fn files_in_front_hides_the_selected_conversation_and_its_notification_brings_it
     conversation_and_files(&first, cx);
     let mut window = VisualTestContext::from_window(handle(&first, cx), cx);
     assert!(window.debug_bounds("conversation").is_some());
-    window.simulate_keystrokes("ctrl-shift-e");
+    window.simulate_keystrokes("secondary-shift-e");
     window.run_until_parked();
     assert!(
         window.debug_bounds("conversation").is_none(),
@@ -537,7 +537,7 @@ fn a_narrow_window_with_its_sidebar_over_the_conversation_does_not_show_it(
     let dir = tempfile::tempdir().unwrap();
     let state = launch(&seeded(dir.path(), |_| {}), cx);
     let first = view(WindowId::FIRST, cx);
-    let mut window = VisualTestContext::from_window(handle(&first, cx), cx);
+    let window = &mut VisualTestContext::from_window(handle(&first, cx), cx);
     window.simulate_resize(gpui::size(gpui::px(500.), gpui::px(800.)));
     window.run_until_parked();
     first.update(cx, |this, cx| {
@@ -735,4 +735,29 @@ fn a_pull_request_alert_never_replaces_an_approval_and_opens_its_session(cx: &mu
     });
     cx.run_until_parked();
     assert_eq!(selected(&first, cx), Some(3));
+}
+
+#[gpui::test]
+fn a_dock_click_after_the_last_window_closed_reopens_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view(WindowId::FIRST, cx);
+    state.update(cx, |state, cx| {
+        state.test_conversation(2).running = true;
+        state.publish(cx);
+    });
+    let root: WeakEntity<Keystone> = first.downgrade();
+    handle(&first, cx)
+        .update(cx, |_, window, cx| {
+            assert!(close_window(&root, window, cx));
+            window.remove_window();
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert!(cx.update(|cx| open_windows(cx)).is_empty());
+
+    cx.update(crate::reopen_from_dock);
+    cx.run_until_parked();
+    view(WindowId::FIRST, cx);
+    assert!(!cx.read(|cx| state.read(cx).quit_when_idle));
 }

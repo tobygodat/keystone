@@ -101,7 +101,7 @@ fn click(cx: &mut VisualTestContext, id: &'static str) {
 }
 
 fn switch_project(query: &str, cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("ctrl-o");
+    cx.simulate_keystrokes("secondary-o");
     cx.simulate_input(query);
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -112,7 +112,7 @@ fn a_note_autosaves_on_the_draft_timer_and_quit_saves_the_rest(cx: &mut TestAppC
     let (folders, path) = seeded(Some(1));
     let (view, handle) = launch(&path, cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-shift-j");
+    cx.simulate_keystrokes("secondary-shift-j");
     assert!(cx.debug_bounds("notes-editor").is_some(), "Notes opens");
     assert!(
         cx.debug_bounds("conversation").is_some(),
@@ -152,7 +152,7 @@ fn a_relaunch_restores_the_notes_view_and_its_text(app: &mut TestAppContext) {
     let (view, handle) = launch(&path, app);
     {
         let cx = visual(handle, app);
-        cx.simulate_keystrokes("ctrl-shift-j");
+        cx.simulate_keystrokes("secondary-shift-j");
         cx.simulate_input("Before quitting");
         cx.update(|_, cx| request_quit(cx));
         cx.run_until_parked();
@@ -171,7 +171,7 @@ fn a_relaunch_restores_the_notes_view_and_its_text(app: &mut TestAppContext) {
     );
     assert_eq!(note_text(&view, cx), "Before quitting");
     view.update_in(cx, |this, window, cx| this.focus_notes(window, cx));
-    cx.simulate_keystrokes("ctrl-end");
+    cx.simulate_keystrokes("secondary-end");
     cx.simulate_input(" again");
     assert_eq!(
         note_text(&view, cx),
@@ -185,7 +185,7 @@ fn switching_project_shows_that_projects_note(cx: &mut TestAppContext) {
     let (folders, path) = seeded(Some(1));
     let (view, handle) = launch(&path, cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-shift-j");
+    cx.simulate_keystrokes("secondary-shift-j");
     cx.simulate_input("Alpha note");
 
     switch_project("beta", cx);
@@ -193,7 +193,7 @@ fn switching_project_shows_that_projects_note(cx: &mut TestAppContext) {
         view.read_with(cx, |this, _| this.presentation.project.clone().unwrap()),
         folders.beta
     );
-    cx.simulate_keystrokes("ctrl-shift-j");
+    cx.simulate_keystrokes("secondary-shift-j");
     assert_eq!(note_text(&view, cx), "", "beta has its own, empty note");
     cx.simulate_input("Beta note");
     cx.executor().advance_clock(Duration::from_millis(250));
@@ -214,10 +214,10 @@ fn send_to_agent_puts_the_selection_or_the_whole_note_in_the_composer(cx: &mut T
     let (_folders, path) = seeded(Some(1));
     let (view, handle) = launch(&path, cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-shift-j");
+    cx.simulate_keystrokes("secondary-shift-j");
     cx.simulate_input("Fix the build");
     cx.simulate_keystrokes("shift-left shift-left shift-left shift-left shift-left");
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     let composer = |view: &Entity<Keystone>, cx: &mut VisualTestContext| {
         view.read_with(cx, |this, cx| this.composer.read(cx).value().to_owned())
     };
@@ -250,9 +250,9 @@ fn send_to_agent_is_disabled_without_a_session(cx: &mut TestAppContext) {
     let (_folders, path) = seeded(None);
     let (view, handle) = launch(&path, cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-shift-j");
+    cx.simulate_keystrokes("secondary-shift-j");
     cx.simulate_input("Keep this");
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     click(cx, "notes-send");
     assert_eq!(
         view.read_with(cx, |this, cx| this.composer.read(cx).value().to_owned()),
@@ -266,7 +266,7 @@ fn the_surface_menu_opens_notes_as_a_tab_and_toggle_closes_it(cx: &mut TestAppCo
     let (folders, path) = seeded(Some(1));
     let (view, handle) = launch(&path, cx);
     let cx = visual(handle, cx);
-    cx.simulate_keystrokes("ctrl-shift-e");
+    cx.simulate_keystrokes("secondary-shift-e");
     click(cx, "surface-add");
     click(cx, "surface-add-notes");
     assert!(cx.debug_bounds("notes-editor").is_some(), "Notes opens");
@@ -288,7 +288,7 @@ fn the_surface_menu_opens_notes_as_a_tab_and_toggle_closes_it(cx: &mut TestAppCo
 
     view.update_in(cx, |this, window, cx| this.focus_notes(window, cx));
     cx.simulate_input("Tabbed");
-    cx.simulate_keystrokes("ctrl-shift-j");
+    cx.simulate_keystrokes("secondary-shift-j");
     assert!(
         cx.debug_bounds("notes-editor").is_none(),
         "with the editor focused, the shortcut closes Notes"
@@ -296,7 +296,7 @@ fn the_surface_menu_opens_notes_as_a_tab_and_toggle_closes_it(cx: &mut TestAppCo
     cx.executor().advance_clock(Duration::from_millis(250));
     cx.run_until_parked();
     assert_eq!(saved(&view, &folders.alpha, cx), "Tabbed");
-    cx.simulate_keystrokes("ctrl-shift-j");
+    cx.simulate_keystrokes("secondary-shift-j");
     assert_eq!(note_text(&view, cx), "Tabbed", "reopening keeps the note");
 }
 
@@ -313,7 +313,7 @@ fn opening_notes_that_makes_the_window_fit_its_views_as_tabs_shows_it_in_front(
         cx.debug_bounds("fitted-tabs").is_none(),
         "the layout fits before Notes opens"
     );
-    cx.simulate_keystrokes("ctrl-shift-j");
+    cx.simulate_keystrokes("secondary-shift-j");
     assert!(
         cx.debug_bounds("fitted-tabs").is_some(),
         "Notes makes it fit as tabs"
@@ -343,12 +343,12 @@ fn two_windows_on_one_project_share_its_note_and_closing_one_saves_it(cx: &mut T
     let second_handle = cx.read(|cx| second.read(cx).handle);
     {
         let cx = visual(second_handle, cx);
-        cx.simulate_keystrokes("ctrl-shift-j");
+        cx.simulate_keystrokes("secondary-shift-j");
         assert_eq!(note_text(&second, cx), "");
     }
     {
         let cx = visual(first_handle, cx);
-        cx.simulate_keystrokes("ctrl-shift-j");
+        cx.simulate_keystrokes("secondary-shift-j");
         cx.simulate_input("Shared");
         assert_eq!(saved(&first, &folders.alpha, cx), "", "not saved yet");
     }

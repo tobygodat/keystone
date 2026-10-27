@@ -441,7 +441,7 @@ impl Keystone {
         }))
         .child(
             MenuItem::new("attach-files", "Attach files…")
-                .kbd("Ctrl+Shift+U")
+                .kbd(keystone_ui::shortcut_text("secondary-shift-u"))
                 .debug_selector(|| "attach-files".into())
                 .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                     this.choose_attachments(window, cx)
@@ -449,7 +449,7 @@ impl Keystone {
         )
         .child(
             MenuItem::new("capture-screenshot", "Capture screenshot")
-                .kbd("Ctrl+Alt+S")
+                .kbd(keystone_ui::shortcut_text("secondary-alt-s"))
                 .debug_selector(|| "capture-screenshot".into())
                 .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                     this.capture_screenshot(window, cx)

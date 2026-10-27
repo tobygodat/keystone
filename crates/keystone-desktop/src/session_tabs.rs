@@ -761,7 +761,10 @@ impl Keystone {
             IconButton::new("split-right", IconName::Split)
                 .size(ButtonSize::Compact)
                 .debug_selector(|| "split-right".into())
-                .tooltip(Tooltip::with_key("Split right", "Ctrl+\\"))
+                .tooltip(Tooltip::with_key(
+                    "Split right",
+                    keystone_ui::shortcut_text("secondary-\\"),
+                ))
                 .on_click(
                     self.scoped_listener(cx, |this, _, window, cx| this.split_right(window, cx)),
                 ),

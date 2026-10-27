@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -11,6 +11,8 @@ pub(super) const MAX_HEADER: usize = 16 * 1024;
 pub(super) const MAX_BODY: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a response waits for the rest of a request it answered early.
+const LINGER: Duration = Duration::from_millis(100);
 
 struct Request {
     headers: BTreeMap<String, String>,
@@ -27,6 +29,7 @@ pub(super) fn serve(mut stream: TcpStream, authority: &str, state: &State, handl
                 status,
                 protocol::error(Value::Null, -32600, message),
             );
+            close_early(&mut stream);
             return;
         }
     };
@@ -240,4 +243,24 @@ pub(super) fn respond(stream: &mut TcpStream, mut status: u16, value: Value) {
     let _ = stream
         .write_all(head.as_bytes())
         .and_then(|_| stream.write_all(&body));
+}
+
+/// Closes a connection answered before its request was read in full. Closing a socket
+/// with input still unread resets it, and macOS then discards the part of the response
+/// the client has not read yet. So send the end of the response first, and read what
+/// the client still sends for a moment.
+pub(super) fn close_early(stream: &mut TcpStream) {
+    let _ = stream.shutdown(Shutdown::Write);
+    let deadline = Instant::now() + LINGER;
+    let mut unread = [0; 4096];
+    while let Some(left) = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+    {
+        if stream.set_read_timeout(Some(left)).is_err()
+            || !matches!(stream.read(&mut unread), Ok(1..))
+        {
+            break;
+        }
+    }
 }

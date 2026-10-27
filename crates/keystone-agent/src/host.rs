@@ -5,7 +5,8 @@
 //! signalled only while unreaped. Its process group is signalled only while its ID is
 //! reserved: a sentinel child of Keystone sits in the group, unreaped, until teardown
 //! ends, so the kernel cannot hand that ID to anyone else. Descendants in other groups
-//! are signalled through pidfds, each re-checked as it is found.
+//! are signalled through pidfds on Linux, each re-checked as it is found. macOS has no
+//! pidfd: there each one is re-checked by start time just before every signal.
 
 use crate::profile::LaunchProfile;
 use std::collections::VecDeque;
@@ -201,20 +202,42 @@ impl Drop for Process {
 }
 
 /// Forks a child of Keystone into `group` that waits for a signal and holds nothing
-/// open. Linux only; elsewhere the group is signalled only while the leader lives.
-#[cfg(target_os = "linux")]
+/// open, and that dies with Keystone.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn spawn_sentinel(group: u32) -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    // SAFETY: getpid and sysconf only read.
+    let (keystone, open_max) = unsafe {
+        (
+            libc::getpid(),
+            libc::sysconf(libc::_SC_OPEN_MAX).clamp(0, 1 << 16) as libc::c_int,
+        )
+    };
     // SAFETY: after fork the child calls only async-signal-safe functions: prctl,
-    // close_range, and pause.
+    // close_range and pause on Linux; close, getppid, sleep and _exit on macOS.
     unsafe {
         let pid = libc::fork();
         if pid == 0 {
-            // Die with Keystone, and keep none of its descriptors, such as the provider's
-            // stdin or the workspace lock.
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
-            loop {
-                libc::pause();
+            // Keep none of Keystone's descriptors, such as the provider's stdin or the
+            // workspace lock.
+            #[cfg(target_os = "linux")]
+            {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+                loop {
+                    libc::pause();
+                }
+            }
+            // macOS has no parent-death signal, so the sentinel looks each second.
+            #[cfg(target_os = "macos")]
+            {
+                for fd in 3..open_max {
+                    libc::close(fd);
+                }
+                while libc::getppid() == keystone {
+                    libc::sleep(1);
+                }
+                libc::_exit(0);
             }
         }
         if pid < 0 {
@@ -230,7 +253,7 @@ fn spawn_sentinel(group: u32) -> Option<i32> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn spawn_sentinel(_group: u32) -> Option<i32> {
     None
 }
@@ -279,7 +302,61 @@ fn keep_tail(stderr: impl Read, tail: &Mutex<VecDeque<u8>>) {
 }
 
 /// Blocks until the process exits, leaving it unreaped so its PID stays reserved.
-#[cfg(unix)]
+/// macOS's waitid also returns at once for a stopped process, however often it is
+/// asked, so there kqueue reports the exit instead.
+#[cfg(target_os = "macos")]
+fn wait_without_reaping(pid: u32) {
+    // SAFETY: kevent reads one change and writes at most one event into zeroed
+    // structs that outlive the call; the queue is closed once.
+    let reported = unsafe {
+        let queue = libc::kqueue();
+        queue >= 0 && {
+            let mut change: libc::kevent = std::mem::zeroed();
+            change.ident = pid as libc::uintptr_t;
+            change.filter = libc::EVFILT_PROC;
+            change.flags = libc::EV_ADD | libc::EV_ONESHOT;
+            change.fflags = libc::NOTE_EXIT;
+            let mut event: libc::kevent = std::mem::zeroed();
+            let reported = loop {
+                match libc::kevent(queue, &change, 1, &mut event, 1, std::ptr::null()) {
+                    // An exited, unreaped process gives an ESRCH error event.
+                    1 => {
+                        break event.flags & libc::EV_ERROR == 0
+                            || event.data == libc::ESRCH as libc::intptr_t;
+                    }
+                    -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+                    _ => break false,
+                }
+            };
+            libc::close(queue);
+            reported
+        }
+    };
+    // Without kqueue, ask waitid until it reports an exit rather than a stop.
+    while !reported && !exited_unreaped(pid) {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether child `pid` has exited, leaving it unreaped. Also true once it is no child.
+#[cfg(target_os = "macos")]
+fn exited_unreaped(pid: u32) -> bool {
+    // SAFETY: waitid writes only into the zeroed siginfo it is given.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
+        if libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) < 0 {
+            return io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+        }
+        info.si_pid != 0
+            && matches!(
+                info.si_code,
+                libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+            )
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn wait_without_reaping(pid: u32) {
     loop {
         // SAFETY: waitid writes only into the zeroed siginfo it is given.
@@ -340,28 +417,28 @@ enum Signal {
     Kill,
 }
 
-/// Descendants found when teardown began, each pinned by a pidfd.
+/// Descendants found when teardown began, each pinned so a reused PID is never signalled.
 struct Targets {
-    #[cfg(target_os = "linux")]
-    descendants: Vec<pidfd::Pidfd>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    descendants: Vec<os::Pin>,
 }
 
 impl Targets {
     fn collect(life: &Life) -> Self {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             // Holding the lock keeps the leader and the sentinel from being reaped
             // during the scan, so the PID and group ID it relies on stay reserved.
             let _guard = life.lock.lock().unwrap();
             Self {
-                descendants: pidfd::descendants(
+                descendants: os::descendants(
                     life.pid,
                     !life.reaped.load(Ordering::SeqCst),
                     life.group_reserved(),
                 ),
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = life;
             Self {}
@@ -385,7 +462,7 @@ impl Targets {
                 // SAFETY: the leader is unreaped, so its PID is still its own.
                 unsafe { libc::kill(life.pid as libc::pid_t, number) };
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             for descendant in &self.descendants {
                 descendant.signal(number);
             }
@@ -395,15 +472,15 @@ impl Targets {
     }
 
     fn has_foreign(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        return self.descendants.iter().any(pidfd::Pidfd::is_foreign);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return self.descendants.iter().any(os::Pin::is_foreign);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         false
     }
 
     /// Adds the processes `found` has that these lack. Returns whether there were any.
     fn absorb(&mut self, found: Targets) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let before = self.descendants.len();
             for pin in found.descendants {
@@ -413,7 +490,7 @@ impl Targets {
             }
             self.descendants.len() > before
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = found;
             false
@@ -421,21 +498,21 @@ impl Targets {
     }
 
     /// Waits until the leader and every process found satisfy `done`, reading each
-    /// one's state as `/proc` reports it.
+    /// one's state as the kernel reports it.
     fn wait_until(&self, life: &Life, done: fn(Option<char>) -> bool) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         loop {
             let leader = {
                 // While unreaped, the leader's PID is still its own.
                 let _guard = life.lock.lock().unwrap();
-                life.reaped.load(Ordering::SeqCst) || done(pidfd::state(life.pid))
+                life.reaped.load(Ordering::SeqCst) || done(os::state(life.pid))
             };
             if leader && self.descendants.iter().all(|pin| pin.is(done)) {
                 return;
             }
             thread::sleep(Duration::from_millis(2));
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = (life, done);
     }
 
@@ -453,140 +530,37 @@ impl Targets {
     }
 }
 
+#[cfg(target_os = "macos")]
+use libproc as os;
 #[cfg(target_os = "linux")]
-mod pidfd {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use pidfd as os;
 
-    /// A handle to one specific process. Signals sent through it never reach a later
-    /// process that reuses the same PID.
-    pub struct Pidfd {
-        fd: OwnedFd,
-        pub pid: u32,
-    }
+/// The state letter of process `pid` as Linux's `/proc` writes it (`R`, `S`, `T`,
+/// `Z` and so on), or `None` once nothing holds that PID.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn process_state(pid: u32) -> Option<char> {
+    os::state(pid)
+}
 
-    /// The state letter `/proc` reports for `pid`, `None` once nothing holds that PID.
-    pub fn state(pid: u32) -> Option<char> {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        text.rsplit_once(')')?
-            .1
-            .split_whitespace()
-            .next()?
-            .chars()
-            .next()
-    }
+/// The parent of process `pid`, or `None` once nothing holds that PID.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn process_parent(pid: u32) -> Option<u32> {
+    os::stat(pid).map(|stat| stat.ppid)
+}
 
-    impl Pidfd {
-        fn open(pid: u32) -> Option<Self> {
-            // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor.
-            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
-            // SAFETY: a non-negative result is a descriptor this call now owns.
-            (fd >= 0).then(|| Self {
-                fd: unsafe { OwnedFd::from_raw_fd(fd as i32) },
-                pid,
-            })
-        }
-
-        /// Whether the pinned process's state satisfies `check`. The state is read by
-        /// PID, so it counts only if the pinned process still holds that PID after the
-        /// read; once the process is reaped its state is `None`.
-        pub fn is(&self, check: fn(Option<char>) -> bool) -> bool {
-            let state = state(self.pid);
-            if self.is_alive() {
-                check(state)
-            } else {
-                check(None)
-            }
-        }
-
-        /// Whether the pinned process is still running. Signal 0 checks without sending.
-        pub fn is_alive(&self) -> bool {
-            // SAFETY: the descriptor is valid for the lifetime of `self`.
-            unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    self.fd.as_raw_fd(),
-                    0,
-                    std::ptr::null::<libc::siginfo_t>(),
-                    0u32,
-                ) == 0
-            }
-        }
-
-        /// Whether Keystone may not signal the pinned process, such as one running as
-        /// another user.
-        pub fn is_foreign(&self) -> bool {
-            // SAFETY: the descriptor is valid for the lifetime of `self`.
-            let refused = unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    self.fd.as_raw_fd(),
-                    0,
-                    std::ptr::null::<libc::siginfo_t>(),
-                    0u32,
-                ) != 0
-            };
-            refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-        }
-
-        pub fn signal(&self, signal: libc::c_int) {
-            // SAFETY: the descriptor is valid for the lifetime of `self`.
-            unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    self.fd.as_raw_fd(),
-                    signal,
-                    std::ptr::null::<libc::siginfo_t>(),
-                    0u32,
-                );
-            }
-        }
-    }
-
+/// Choosing which processes belong to a provider's tree, from a scan of every process.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod tree {
     #[derive(Clone, Copy, Debug, PartialEq)]
-    pub(super) struct Stat {
-        pid: u32,
-        ppid: u32,
-        group: u32,
-        start: u64,
+    pub struct Stat {
+        pub pid: u32,
+        pub ppid: u32,
+        pub group: u32,
+        /// When the process started, in the platform's own units.
+        pub start: u64,
     }
 
-    fn stat(pid: u32) -> Option<Stat> {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        // The command name can contain spaces, so parse after its closing paren.
-        let fields: Vec<&str> = text.rsplit_once(')')?.1.split_whitespace().collect();
-        Some(Stat {
-            pid,
-            ppid: fields.get(1)?.parse().ok()?,
-            group: fields.get(2)?.parse().ok()?,
-            start: fields.get(19)?.parse().ok()?,
-        })
-    }
-
-    /// The live processes to signal for `root`'s tree, each pinned by a pidfd.
-    pub fn descendants(root: u32, root_unreaped: bool, group_reserved: bool) -> Vec<Pidfd> {
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return Vec::new();
-        };
-        let all: Vec<Stat> = entries
-            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
-            .filter_map(stat)
-            .collect();
-        select(
-            root,
-            root_unreaped,
-            group_reserved,
-            &all,
-            |seen| {
-                let fd = Pidfd::open(seen.pid)?;
-                // The pidfd now pins whatever holds this PID. Keep it only if that is
-                // still the process the scan found.
-                (stat(seen.pid)? == *seen).then_some(fd)
-            },
-            Pidfd::is_alive,
-        )
-    }
-
-    /// Chooses targets from a non-atomic `/proc` scan without trusting a PID that may
+    /// Chooses targets from a non-atomic process scan without trusting a PID that may
     /// have been reused during it.
     ///
     /// `open` pins a scanned process and returns `None` unless it is still exactly as
@@ -598,7 +572,7 @@ mod pidfd {
     /// - A child counts only if, after it is pinned and re-checked, its parent is still
     ///   alive through its own pin. Then the parent's PID meant that parent the whole
     ///   time, and the child is really its child.
-    pub(super) fn select<F>(
+    pub fn select<F>(
         root: u32,
         root_unreaped: bool,
         group_reserved: bool,
@@ -718,7 +692,260 @@ mod pidfd {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
+mod pidfd {
+    use super::tree::{Stat, select};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    pub use Pidfd as Pin;
+
+    /// A handle to one specific process. Signals sent through it never reach a later
+    /// process that reuses the same PID.
+    pub struct Pidfd {
+        fd: OwnedFd,
+        pub pid: u32,
+    }
+
+    /// The state letter `/proc` reports for `pid`, `None` once nothing holds that PID.
+    pub fn state(pid: u32) -> Option<char> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        text.rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .next()?
+            .chars()
+            .next()
+    }
+
+    impl Pidfd {
+        fn open(pid: u32) -> Option<Self> {
+            // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor.
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+            // SAFETY: a non-negative result is a descriptor this call now owns.
+            (fd >= 0).then(|| Self {
+                fd: unsafe { OwnedFd::from_raw_fd(fd as i32) },
+                pid,
+            })
+        }
+
+        /// Whether the pinned process's state satisfies `check`. The state is read by
+        /// PID, so it counts only if the pinned process still holds that PID after the
+        /// read; once the process is reaped its state is `None`.
+        pub fn is(&self, check: fn(Option<char>) -> bool) -> bool {
+            let state = state(self.pid);
+            if self.is_alive() {
+                check(state)
+            } else {
+                check(None)
+            }
+        }
+
+        /// Whether the pinned process is still running. Signal 0 checks without sending.
+        pub fn is_alive(&self) -> bool {
+            // SAFETY: the descriptor is valid for the lifetime of `self`.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.fd.as_raw_fd(),
+                    0,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                ) == 0
+            }
+        }
+
+        /// Whether Keystone may not signal the pinned process, such as one running as
+        /// another user.
+        pub fn is_foreign(&self) -> bool {
+            // SAFETY: the descriptor is valid for the lifetime of `self`.
+            let refused = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.fd.as_raw_fd(),
+                    0,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                ) != 0
+            };
+            refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+
+        pub fn signal(&self, signal: libc::c_int) {
+            // SAFETY: the descriptor is valid for the lifetime of `self`.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.fd.as_raw_fd(),
+                    signal,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                );
+            }
+        }
+    }
+
+    pub fn stat(pid: u32) -> Option<Stat> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The command name can contain spaces, so parse after its closing paren.
+        let fields: Vec<&str> = text.rsplit_once(')')?.1.split_whitespace().collect();
+        Some(Stat {
+            pid,
+            ppid: fields.get(1)?.parse().ok()?,
+            group: fields.get(2)?.parse().ok()?,
+            start: fields.get(19)?.parse().ok()?,
+        })
+    }
+
+    /// Every process `/proc` lists.
+    pub fn all() -> Vec<Stat> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+            .filter_map(stat)
+            .collect()
+    }
+
+    /// The live processes to signal for `root`'s tree, each pinned by a pidfd.
+    pub fn descendants(root: u32, root_unreaped: bool, group_reserved: bool) -> Vec<Pidfd> {
+        let all = all();
+        select(
+            root,
+            root_unreaped,
+            group_reserved,
+            &all,
+            |seen| {
+                let fd = Pidfd::open(seen.pid)?;
+                // The pidfd now pins whatever holds this PID. Keep it only if that is
+                // still the process the scan found.
+                (stat(seen.pid)? == *seen).then_some(fd)
+            },
+            Pidfd::is_alive,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod libproc {
+    use super::tree::{Stat, select};
+
+    /// A process as one scan saw it. macOS has no pidfd, so each use re-reads the
+    /// process and acts only if the PID still holds a process with the same start
+    /// time. A PID reused between that check and the signal could still be reached;
+    /// the window is one system call.
+    pub struct Pin {
+        pub pid: u32,
+        seen: Stat,
+    }
+
+    fn info(pid: u32) -> Option<libc::proc_bsdinfo> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut info).cast(),
+                size,
+            )
+        };
+        (written == size).then_some(info)
+    }
+
+    pub fn stat(pid: u32) -> Option<Stat> {
+        let info = info(pid)?;
+        Some(Stat {
+            pid,
+            ppid: info.pbi_ppid,
+            group: info.pbi_pgid,
+            start: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        })
+    }
+
+    /// `pid`'s state in `/proc`'s letters, `None` once nothing holds that PID.
+    pub fn state(pid: u32) -> Option<char> {
+        Some(match info(pid)?.pbi_status {
+            libc::SSTOP => 'T',
+            libc::SZOMB => 'Z',
+            libc::SSLEEP => 'S',
+            _ => 'R',
+        })
+    }
+
+    impl Pin {
+        fn open(seen: &Stat) -> Option<Self> {
+            (stat(seen.pid)? == *seen).then_some(Self {
+                pid: seen.pid,
+                seen: *seen,
+            })
+        }
+
+        /// Whether the PID still holds the process the scan saw, not yet exited.
+        pub fn is_alive(&self) -> bool {
+            stat(self.seen.pid).is_some_and(|now| now.start == self.seen.start)
+                && state(self.seen.pid) != Some('Z')
+        }
+
+        pub fn is(&self, check: fn(Option<char>) -> bool) -> bool {
+            let state = state(self.seen.pid);
+            if self.is_alive() {
+                check(state)
+            } else {
+                check(None)
+            }
+        }
+
+        /// Whether Keystone may not signal the process, such as one running as
+        /// another user.
+        pub fn is_foreign(&self) -> bool {
+            // SAFETY: signal 0 only checks permission.
+            let refused = unsafe { libc::kill(self.seen.pid as libc::pid_t, 0) } != 0;
+            refused
+                && self.is_alive()
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+
+        pub fn signal(&self, signal: libc::c_int) {
+            if self.is_alive() {
+                // SAFETY: the PID held this process at the check just made.
+                unsafe { libc::kill(self.seen.pid as libc::pid_t, signal) };
+            }
+        }
+    }
+
+    /// Every process the kernel lists.
+    pub fn all() -> Vec<Stat> {
+        // SAFETY: with no buffer, proc_listallpids returns how many PIDs there are.
+        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        let mut pids = vec![0 as libc::pid_t; count.max(0) as usize + 256];
+        let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        // SAFETY: the buffer holds `bytes` bytes, and the call writes at most that.
+        let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        pids.truncate(found.max(0) as usize);
+        pids.into_iter()
+            .filter(|pid| *pid > 0)
+            .filter_map(|pid| stat(pid as u32))
+            .collect()
+    }
+
+    /// The live processes to signal for `root`'s tree, each pinned.
+    pub fn descendants(root: u32, root_unreaped: bool, group_reserved: bool) -> Vec<Pin> {
+        let all = all();
+        select(
+            root,
+            root_unreaped,
+            group_reserved,
+            &all,
+            Pin::open,
+            Pin::is_alive,
+        )
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
@@ -726,23 +953,14 @@ mod tests {
 
     fn alive(pid: u32) -> bool {
         // Zombies count as gone.
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-            s.rsplit_once(')')
-                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-        })
+        !matches!(process_state(pid), None | Some('Z'))
     }
 
     fn children_of(pid: u32) -> Vec<u32> {
-        std::fs::read_dir("/proc")
-            .unwrap()
-            .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
-            .filter(|p| {
-                std::fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|s| {
-                    s.rsplit_once(')')
-                        .and_then(|(_, r)| r.split_whitespace().nth(1)?.parse::<u32>().ok())
-                        == Some(pid)
-                })
-            })
+        os::all()
+            .into_iter()
+            .filter(|stat| stat.ppid == pid)
+            .map(|stat| stat.pid)
             .collect()
     }
 
@@ -965,8 +1183,12 @@ while True:
         let process = Process::spawn(
             Path::new("/bin/sh"),
             // The inner shell stays in the group; setsid moves the sleep into a session
-            // and group of its own, as agents do with the shells they start.
-            &["-c", "sh -c 'setsid sleep 30 & echo $!; wait' & wait"],
+            // and group of its own, as agents do with the shells they start. macOS has
+            // no setsid command, so Python calls it.
+            &[
+                "-c",
+                "sh -c '/usr/bin/python3 -c \"import os, time; os.setsid(); time.sleep(30)\" & echo $!; wait' & wait",
+            ],
             Path::new("/"),
             &LaunchProfile::default(),
             move |line| {

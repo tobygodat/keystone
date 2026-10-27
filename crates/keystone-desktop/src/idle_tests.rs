@@ -106,10 +106,7 @@ fn pid(state: &Entity<AppState>, cx: &mut gpui::TestAppContext) -> Option<u32> {
 }
 
 fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-        s.rsplit_once(')')
-            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-    })
+    !matches!(keystone_agent::host::process_state(pid), None | Some('Z'))
 }
 
 /// Chat launches, without the version checks.

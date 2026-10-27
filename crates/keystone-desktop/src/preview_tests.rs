@@ -134,7 +134,7 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
 fn reply_images_are_thumbnails_that_open_a_preview(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx);
     cx.simulate_input("show me");
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     wait(cx, |cx| {
         view.read_with(cx, |view, cx| {
             let conversation = &view.state.read(cx).conversations()[&1];
@@ -201,7 +201,7 @@ fn escape_closes_the_preview_and_restores_focus(cx: &mut TestAppContext) {
     let shot = dir.path().join("project/shot.png");
     view.update_in(cx, |this, window, cx| this.open_preview(shot, window, cx));
     cx.run_until_parked();
-    for keys in ["tab", "ctrl-l", "ctrl-k", "ctrl-enter"] {
+    for keys in ["tab", "secondary-l", "secondary-k", "secondary-enter"] {
         cx.simulate_keystrokes(keys);
         cx.run_until_parked();
         view.update_in(cx, |this, window, cx| {

@@ -3,6 +3,9 @@
 //! reports its window-relative bounds each frame. Frames that change the set
 //! rewrite that file as JSON, so a driver can click by name instead of guessing
 //! coordinates from a screenshot. Unset, this adds nothing to the element tree.
+//!
+//! Where no private desktop can inject input, as on macOS, `KEYSTONE_AUTOMATION_INBOX`
+//! names a folder of commands the app runs on itself; see [`serve_inbox`].
 
 use gpui::{Bounds, InteractiveElement, IntoElement, ParentElement, Pixels, Styled, canvas};
 use std::{cell::RefCell, collections::BTreeMap, fmt::Write, path::PathBuf, sync::OnceLock};
@@ -17,6 +20,12 @@ fn output() -> Option<&'static PathBuf> {
         }
     })
     .as_ref()
+}
+
+fn inbox() -> Option<PathBuf> {
+    cfg!(debug_assertions)
+        .then(|| std::env::var_os("KEYSTONE_AUTOMATION_INBOX").map(PathBuf::from))
+        .flatten()
 }
 
 /// Whether this process reports element geometry. Fixed for the process lifetime.
@@ -249,6 +258,149 @@ fn push_string(out: &mut String, s: &str) {
         }
     }
     out.push('"');
+}
+
+/// Runs each command file a driver writes to the inbox folder, in name order, on the
+/// active window (else the first), and answers in `<name>.done`: `ok`, or `error:` and
+/// why. A command file is one of
+///
+/// - `key secondary-n escape`: keystrokes, as GPUI parses them;
+/// - `type Some text`: everything after `type `, one key per character;
+/// - `click 120 48`: a left click at window coordinates, in logical pixels;
+/// - `capture /path/shot.png`: the window's latest frame, rendered by GPUI's own
+///   renderer, in a build with the `capture` feature.
+///
+/// Input enters through [`gpui::Window::dispatch_event`] and
+/// [`gpui::Window::dispatch_keystroke`], the calls the platform makes for real input,
+/// so key bindings, focus and hit-testing run as they do for a person. What it skips
+/// is the OS: its event translation, input methods and window focus.
+pub fn serve_inbox(cx: &mut gpui::App) {
+    let Some(dir) = inbox() else { return };
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(50))
+                .await;
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut commands: Vec<PathBuf> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|e| e == "cmd"))
+                .collect();
+            commands.sort();
+            for path in commands {
+                let Ok(command) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let answer = match cx.update(|cx| run(&command, cx)) {
+                    Ok(()) => "ok".to_owned(),
+                    Err(error) => format!("error: {error}"),
+                };
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::write(path.with_extension("done"), answer);
+            }
+        }
+    })
+    .detach();
+}
+
+fn run(command: &str, cx: &mut gpui::App) -> Result<(), String> {
+    use gpui::{
+        Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+        PlatformInput, point, px,
+    };
+    let (verb, rest) = command.split_once(' ').unwrap_or((command, ""));
+    let window = cx
+        .active_window()
+        .or_else(|| cx.windows().first().copied())
+        .ok_or("no window is open")?;
+    let rest = rest.to_owned();
+    let verb = verb.trim().to_owned();
+    window
+        .update(cx, move |_, window, cx| match verb.as_str() {
+            "key" => {
+                for stroke in rest.split_whitespace() {
+                    let stroke = Keystroke::parse(stroke).map_err(|e| e.to_string())?;
+                    window.dispatch_keystroke(stroke, cx);
+                }
+                Ok(())
+            }
+            "type" => {
+                for c in rest.chars() {
+                    let key = match c {
+                        ' ' => "space".to_owned(),
+                        '\n' => "enter".to_owned(),
+                        c => c.to_lowercase().collect(),
+                    };
+                    let modifiers = Modifiers {
+                        shift: c.is_uppercase(),
+                        ..Modifiers::default()
+                    };
+                    let key_char = Some(c.to_string());
+                    window.dispatch_keystroke(
+                        Keystroke {
+                            modifiers,
+                            key,
+                            key_char,
+                        },
+                        cx,
+                    );
+                }
+                Ok(())
+            }
+            "click" => {
+                let mut numbers = rest.split_whitespace().map(str::parse::<f32>);
+                let (Some(Ok(x)), Some(Ok(y))) = (numbers.next(), numbers.next()) else {
+                    return Err(format!("click needs x and y, not {rest:?}"));
+                };
+                let position = point(px(x), px(y));
+                let modifiers = Modifiers::default();
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers,
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers,
+                        click_count: 1,
+                        first_mouse: false,
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers,
+                        click_count: 1,
+                    }),
+                    cx,
+                );
+                Ok(())
+            }
+            "capture" => capture(window, rest.trim()),
+            other => Err(format!("unknown command {other:?}")),
+        })
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "capture")]
+fn capture(window: &mut gpui::Window, path: &str) -> Result<(), String> {
+    let image = window.render_to_image().map_err(|e| e.to_string())?;
+    image.save(path).map_err(|e| e.to_string())
+}
+
+#[cfg(not(feature = "capture"))]
+fn capture(_: &mut gpui::Window, _: &str) -> Result<(), String> {
+    Err("this build has no capture feature".into())
 }
 
 #[cfg(test)]

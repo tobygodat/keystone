@@ -124,7 +124,7 @@ fn a_worktree_session_is_created_shown_refused_while_dirty_and_removed_when_clea
 ) {
     let (_dir, view, cx) = launch(cx);
     let repo = view.read_with(cx, |this, _| this.presentation.project.clone().unwrap());
-    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_keystrokes("secondary-k");
     cx.simulate_input("session in worktree");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -176,7 +176,7 @@ fn a_worktree_session_is_created_shown_refused_while_dirty_and_removed_when_clea
         "work in progress\n",
     )
     .unwrap();
-    cx.simulate_keystrokes("ctrl-alt-shift-g");
+    cx.simulate_keystrokes("secondary-alt-shift-g");
     cx.run_until_parked();
     let confirm = cx.debug_bounds("remove-worktree-dialog-confirm").unwrap();
     cx.simulate_click(confirm.center(), gpui::Modifiers::none());

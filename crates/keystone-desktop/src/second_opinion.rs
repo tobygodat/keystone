@@ -137,7 +137,10 @@ impl Progress {
 pub(crate) fn button() -> impl IntoElement {
     IconButton::new("second-opinion", IconName::Chat)
         .debug_selector(|| "second-opinion".into())
-        .tooltip(Tooltip::with_key("Second opinion…", "Ctrl+Alt+O"))
+        .tooltip(Tooltip::with_key(
+            "Second opinion…",
+            keystone_ui::shortcut_text("secondary-alt-o"),
+        ))
         .on_click(|_, window, cx| window.dispatch_action(Box::new(AskAboutConversation), cx))
 }
 

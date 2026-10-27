@@ -157,7 +157,7 @@ fn split_right_shows_two_sessions_side_by_side_and_saves_them_together(cx: &mut 
         store.record_message(2, "recent", 50).unwrap();
     });
     let (view, cx) = open(&path, cx);
-    keys(cx, "ctrl-\\");
+    keys(cx, "secondary-\\");
     let shown = panes(&view, cx);
     assert_eq!(shown.len(), 2);
     assert_eq!(shown[0], (ViewId::MAIN, Some(1)));
@@ -259,13 +259,13 @@ fn the_keyboard_cycles_closes_and_collapses_tabs(cx: &mut TestAppContext) {
     keys(cx, "ctrl-shift-tab");
     assert_eq!(active(&view, cx), Some((ViewId(4), Some(3))));
 
-    keys(cx, "ctrl-w");
+    keys(cx, "secondary-w");
     assert_eq!(
         panes(&view, cx),
         [(ViewId::MAIN, Some(1)), (ViewId(3), Some(2))]
     );
     assert_eq!(active(&view, cx), Some((ViewId(3), Some(2))));
-    keys(cx, "ctrl-w");
+    keys(cx, "secondary-w");
     assert_eq!(panes(&view, cx), [(ViewId::MAIN, Some(1))]);
     assert_eq!(selected(&view, cx), Some(1));
     view.read_with(cx, |this, cx| {
@@ -275,7 +275,7 @@ fn the_keyboard_cycles_closes_and_collapses_tabs(cx: &mut TestAppContext) {
             "the split collapses"
         )
     });
-    keys(cx, "ctrl-w");
+    keys(cx, "secondary-w");
     assert_eq!(
         panes(&view, cx),
         [(ViewId::MAIN, Some(1))],
@@ -301,7 +301,7 @@ fn new_tab_starts_a_session_beside_the_active_one(cx: &mut TestAppContext) {
     let (view, cx) = open(&path, cx);
     click(cx, "conversation");
     let writes = view.read_with(cx, |this, cx| this.state.read(cx).store().writes());
-    keys(cx, "ctrl-t");
+    keys(cx, "secondary-t");
     assert_eq!(
         view.read_with(cx, |this, cx| this.state.read(cx).store().writes()),
         writes + 1,
@@ -711,13 +711,13 @@ fn tab_shortcuts_leave_settings_first(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = seeded(dir.path(), split_layout);
     let (view, cx) = open(&path, cx);
-    keys(cx, "ctrl-,");
+    keys(cx, "secondary-,");
     assert!(view.read_with(cx, |this, _| this.settings.is_some()));
     keys(cx, "ctrl-tab");
     assert!(view.read_with(cx, |this, _| this.settings.is_none()));
     assert_eq!(active(&view, cx), Some((ViewId::MAIN, Some(1))));
-    keys(cx, "ctrl-,");
-    keys(cx, "ctrl-t");
+    keys(cx, "secondary-,");
+    keys(cx, "secondary-t");
     assert!(view.read_with(cx, |this, _| this.settings.is_none()));
     assert!(view.update_in(cx, |this, window, cx| {
         this.composer.focus_handle(cx).is_focused(window)
@@ -842,7 +842,7 @@ fn a_sidebar_select_and_closing_the_active_tab_each_save_in_one_write(cx: &mut T
     );
 
     let before = writes(&view, cx);
-    keys(cx, "ctrl-w");
+    keys(cx, "secondary-w");
     assert_eq!(writes(&view, cx), before + 1);
     assert_eq!(active(&view, cx), Some((ViewId(3), Some(2))));
     let store = Store::open(&path).unwrap();
@@ -868,7 +868,7 @@ fn closing_a_tab_by_keyboard_does_nothing_in_customize(cx: &mut TestAppContext) 
     });
     cx.run_until_parked();
     let before = view.read_with(cx, |this, cx| this.shown_composition(cx));
-    keys(cx, "ctrl-w");
+    keys(cx, "secondary-w");
     assert_eq!(
         view.read_with(cx, |this, cx| this.shown_composition(cx)),
         before
@@ -964,7 +964,7 @@ fn a_sidebar_select_made_in_customize_shows_once_it_closes(cx: &mut TestAppConte
 
 #[gpui::test]
 fn opening_a_tab_or_a_pane_withdraws_customize_undo(cx: &mut TestAppContext) {
-    for shortcut in ["ctrl-t", "ctrl-\\"] {
+    for shortcut in ["secondary-t", "secondary-\\"] {
         let dir = tempfile::tempdir().unwrap();
         let path = seeded(dir.path(), split_layout);
         let (view, cx) = open(&path, cx);
@@ -1035,7 +1035,7 @@ fn new_tab_still_starts_a_session_when_saved_tabs_cannot_be_changed(cx: &mut Tes
         })
     };
     assert_eq!(sessions(&view, cx), 2);
-    keys(cx, "ctrl-t");
+    keys(cx, "secondary-t");
     assert_eq!(sessions(&view, cx), 3);
     assert_eq!(selected(&view, cx), Some(3));
     let error = view.read_with(cx, |this, _| this.error.clone());
@@ -1062,7 +1062,7 @@ fn a_handoff_opens_in_a_tab_beside_its_source(cx: &mut TestAppContext) {
     let source = source.unwrap();
     let before = panes(&view, cx);
     let writes = view.read_with(cx, |this, cx| this.state.read(cx).store().writes());
-    keys(cx, "ctrl-shift-h");
+    keys(cx, "secondary-shift-h");
     assert_eq!(
         view.read_with(cx, |this, cx| this.state.read(cx).store().writes()),
         writes + 1,

@@ -3521,7 +3521,6 @@ mod tests {
 
     #[test]
     fn project_ids_are_canonical_utf8_directories() {
-        use std::os::unix::ffi::OsStrExt;
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
         std::fs::create_dir(&project).unwrap();
@@ -3537,12 +3536,17 @@ mod tests {
         std::fs::write(directory.path().join("file"), "").unwrap();
         let file = ProjectId::new(&directory.path().join("file")).unwrap_err();
         assert_eq!(file.kind(), io::ErrorKind::NotADirectory);
-        let lossy = directory
-            .path()
-            .join(std::ffi::OsStr::from_bytes(b"not-utf8-\xff"));
-        std::fs::create_dir(&lossy).unwrap();
-        let lossy = ProjectId::new(&lossy).unwrap_err();
-        assert_eq!(lossy.kind(), io::ErrorKind::InvalidData);
+        // macOS file systems refuse a name that is not UTF-8, so no such folder exists there.
+        #[cfg(not(target_os = "macos"))]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let lossy = directory
+                .path()
+                .join(std::ffi::OsStr::from_bytes(b"not-utf8-\xff"));
+            std::fs::create_dir(&lossy).unwrap();
+            let lossy = ProjectId::new(&lossy).unwrap_err();
+            assert_eq!(lossy.kind(), io::ErrorKind::InvalidData);
+        }
     }
 
     #[test]

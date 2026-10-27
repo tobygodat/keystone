@@ -16,7 +16,9 @@ fn open(
     cx: &mut TestAppContext,
     contexts: bool,
 ) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
-    let dir = tempfile::tempdir().unwrap();
+    // Canonical, like the folders Keystone records: macOS's temporary folder sits
+    // behind a symlink.
+    let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     std::fs::create_dir(dir.path().join("a")).unwrap();
     std::fs::create_dir(dir.path().join("b")).unwrap();
     std::fs::create_dir(dir.path().join("state")).unwrap();
@@ -77,9 +79,9 @@ fn project_switch_releases_a_transcript_copy_action_and_restores_its_row(cx: &mu
         });
         cx.notify();
     });
-    cx.simulate_keystrokes("ctrl-l");
+    cx.simulate_keystrokes("secondary-l");
     cx.simulate_input("draft kept across the switch");
-    cx.simulate_keystrokes("ctrl-shift-t home tab");
+    cx.simulate_keystrokes("secondary-shift-t home tab");
     let old_focus = view.update_in(cx, |this, window, _| {
         let focus = this
             .presentation
@@ -99,7 +101,7 @@ fn project_switch_releases_a_transcript_copy_action_and_restores_its_row(cx: &mu
         assert_eq!(this.composer.read(cx).value(), "");
     });
     pick(&view, cx, &dir.path().join("a"));
-    cx.simulate_keystrokes("ctrl-shift-t ctrl-shift-c");
+    cx.simulate_keystrokes("secondary-shift-t secondary-shift-c");
     let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
     assert_eq!(text.as_deref(), Some("project-local keyboard row"));
     view.read_with(cx, |this, cx| {
@@ -750,6 +752,15 @@ fn first_send_lock_waits_for_the_send_barrier_when_its_sync_is_pending(cx: &mut 
     });
 }
 
+fn fake_codex() -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    exe.parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("keystone-fake-codex")
+}
+
 fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let exe = std::env::current_exe().unwrap();
@@ -866,8 +877,16 @@ fn a_late_catalog_notice_cannot_cross_provider_selection(cx: &mut TestAppContext
         "#!/bin/sh\nexport KEYSTONE_FAKE_CLAUDE_VERSION=development-build",
     );
     std::fs::write(&claude, body).unwrap();
+    // The scripted Codex, since a Codex installed on the machine may earn a notice of its own.
     view.update_in(cx, |this, window, cx| {
         claude_from(this, claude, cx);
+        this.state.update(cx, |state, _| {
+            state.test_set_codex(Some(keystone_agent::CodexConnection::new(
+                Some(fake_codex()),
+                "test",
+                state.test_wake().clone(),
+            )));
+        });
         this.request_catalog(2, Provider::Claude, cx);
         this.choose_provider(2, Provider::Codex, window, cx);
     });

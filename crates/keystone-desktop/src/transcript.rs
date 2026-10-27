@@ -326,7 +326,7 @@ pub fn row(
                                                 )
                                                 .tooltip(Tooltip::with_key(
                                                     "Second opinion…",
-                                                    "Ctrl+Alt+O",
+                                                    keystone_ui::shortcut_text("secondary-alt-o"),
                                                 ))
                                                 .debug_selector(move || selector)
                                                 .on_click(move |event, window, cx| {

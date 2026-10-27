@@ -52,7 +52,9 @@ fn open(
     provider: Provider,
     cx: &mut TestAppContext,
 ) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
-    let dir = tempfile::tempdir().unwrap();
+    // Canonical, like the folders Keystone records: macOS's temporary folder sits
+    // behind a symlink.
+    let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let root = dir.path();
     let (home, folder) = (root.join("home"), root.join("project"));
     std::fs::create_dir_all(&home).unwrap();
@@ -166,7 +168,7 @@ fn a_pasted_image_is_saved_with_the_draft_and_reaches_claude_as_an_image_block(
             PNG.to_vec(),
         )))
     });
-    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("secondary-v");
     wait(cx, &view, |view, cx| view.draft_attachments(cx).len() == 1);
     let image = attached(&view, cx).remove(0);
     assert_eq!(image.name, "Image.png");
@@ -190,10 +192,10 @@ fn a_pasted_image_is_saved_with_the_draft_and_reaches_claude_as_an_image_block(
     assert!(cx.debug_bounds("attachment-remove-0").is_some());
 
     cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("Describe it".into())));
-    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("secondary-v");
     assert_eq!(draft(&view, cx), "Describe it");
 
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     wait(cx, &view, |view, cx| reply(view, cx).is_some());
     let reply = view.read_with(cx, |view, cx| reply(view, cx).unwrap());
     assert!(
@@ -264,7 +266,7 @@ fn picked_files_attach_images_and_mention_others_and_codex_reads_the_copy(cx: &m
     std::fs::remove_file(&shot).unwrap();
 
     cx.simulate_input("what is in it?");
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     wait(cx, &view, |view, cx| reply(view, cx).is_some());
     let receipt = receipt(dir.path());
     assert_eq!(receipt.len(), 1);
@@ -316,7 +318,7 @@ fn a_captured_screenshot_is_attached_and_a_cancelled_one_changes_nothing(cx: &mu
     assert_eq!(draft(&view, cx), "Look");
 
     capture_with("echo 'no screen' >&2; exit 1", &view, cx);
-    cx.simulate_keystrokes("ctrl-alt-s");
+    cx.simulate_keystrokes("secondary-alt-s");
     wait(cx, &view, idle);
     assert!(attached(&view, cx).is_empty());
     assert_eq!(
@@ -348,7 +350,7 @@ fn a_captured_screenshot_is_attached_and_a_cancelled_one_changes_nothing(cx: &mu
         "one run per capture"
     );
     view.update(cx, |view, _| view.attach.capturing = true);
-    cx.simulate_keystrokes("ctrl-alt-s");
+    cx.simulate_keystrokes("secondary-alt-s");
     view.update(cx, |view, _| view.attach.capturing = false);
     assert_eq!(
         std::fs::read_to_string(&runs).unwrap(),
@@ -356,7 +358,7 @@ fn a_captured_screenshot_is_attached_and_a_cancelled_one_changes_nothing(cx: &mu
         "no capture starts while one is being picked"
     );
 
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     wait(cx, &view, |view, cx| reply(view, cx).is_some());
     let receipt = receipt(dir.path());
     assert_eq!(receipt.len(), 1);
@@ -439,7 +441,7 @@ fn a_missing_copy_keeps_the_draft_with_a_reason(cx: &mut TestAppContext) {
     wait(cx, &view, |view, cx| view.draft_attachments(cx).len() == 1);
     std::fs::remove_dir_all(dir.path().join("data/attachments")).unwrap();
     cx.simulate_input("still there?");
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     cx.run_until_parked();
     view.read_with(cx, |view, cx| {
         let error = view.state.read(cx).conversations()[&1]
@@ -471,7 +473,7 @@ fn send_waits_for_an_image_still_being_attached(cx: &mut TestAppContext) {
     });
     wait(cx, &view, |view, cx| view.draft_attachments(cx).len() == 1);
     assert!(receipt(dir.path()).is_empty());
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     wait(cx, &view, |view, cx| reply(view, cx).is_some());
     assert_eq!(receipt(dir.path()).len(), 1);
     assert!(attached(&view, cx).is_empty());

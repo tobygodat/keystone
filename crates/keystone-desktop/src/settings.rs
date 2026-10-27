@@ -26,7 +26,7 @@ const FONT_CANDIDATES: [&str; 8] = [
 
 /// Monospace fonts for code, in order of preference. The first installed one is used, so
 /// code stays monospace when the default is missing; a proportional fallback misaligns it.
-const MONO_CANDIDATES: [&str; 7] = [
+const MONO_CANDIDATES: [&str; 8] = [
     "GeistMono Nerd Font Mono",
     "JetBrainsMono Nerd Font",
     "JetBrains Mono",
@@ -34,6 +34,8 @@ const MONO_CANDIDATES: [&str; 7] = [
     "Noto Sans Mono",
     "Liberation Mono",
     "Adwaita Mono",
+    // Every Mac has it.
+    "Menlo",
 ];
 
 pub fn theme_for(saved: &SavedAppearance, window: &Window, cx: &App) -> Theme {

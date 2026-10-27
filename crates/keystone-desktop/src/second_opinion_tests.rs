@@ -94,7 +94,7 @@ fn a_second_opinion_opens_read_only_beside_its_source_and_its_reply_waits_there(
         v.state.read(cx).store().workspace().sessions()[0].clone()
     });
 
-    activity_keys(cx, "ctrl-alt-o");
+    activity_keys(cx, "secondary-alt-o");
 
     view.read_with(cx, |v, cx| {
         let workspace = v.state.read(cx).store().workspace();
@@ -227,7 +227,7 @@ fn the_shortcut_asks_about_the_reply_focused_in_the_transcript(cx: &mut gpui::Te
         v.presentation.current.views.focus(key, cx).focus(window, cx);
     });
     cx.run_until_parked();
-    activity_keys(cx, "ctrl-alt-o");
+    activity_keys(cx, "secondary-alt-o");
     view.read_with(cx, |v, cx| {
         let workspace = v.state.read(cx).store().workspace();
         assert_eq!(workspace.selected(), Some(2), "{:?}", v.error);
@@ -285,7 +285,7 @@ fn a_second_opinion_is_refused_until_there_is_something_to_ask_about(
 /// Session 2, a sent second opinion on [`opinion_source`]'s session 1 whose first turn
 /// answered "First answer.", shown beside it with the source selected.
 fn answered_opinion(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) {
-    activity_keys(cx, "ctrl-alt-o");
+    activity_keys(cx, "secondary-alt-o");
     cx.simulate_keystrokes("escape");
     loaded(view, cx, 2);
     view.update(cx, |v, cx| {

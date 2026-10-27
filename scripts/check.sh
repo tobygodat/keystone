@@ -12,8 +12,18 @@ if grep -rnP '\b(rgba?|hsla|black|white|transparent_black|transparent_white|red|
   echo 'Colors belong in crates/keystone-ui/src/theme.rs. Use a theme token or Color.' >&2
   exit 1
 fi
+# A Ctrl shortcut is Cmd on macOS, and GPUI's secondary- modifier is both.
+if grep -rnP '"(?:[^"\n]*[ -])?ctrl-(?!(?:shift-)?tab\b)' crates --include='*.rs'; then
+  echo 'Spell shortcuts secondary-… (Cmd on macOS, Ctrl elsewhere). Only ctrl-tab and ctrl-shift-tab stay ctrl-.' >&2
+  exit 1
+fi
 python3 scripts/test_ui_strings.py
 python3 scripts/ui-strings.py --check
+# A shortcut hint written out as Ctrl+… reads wrong on macOS.
+if awk '/^crates\// { file = $0 } /Ctrl[+ ]/ && file != "crates/keystone-agent/src/lib.rs" && file != "crates/keystone-ui/src/kbd.rs" { print file ": " $0; found = 1 } END { exit !found }' docs/ui-strings.txt; then
+  echo 'Write shortcut hints with keystone_ui::shortcut_text("secondary-…"), which shows Ctrl+… on Linux and ⌘ on macOS.' >&2
+  exit 1
+fi
 case "${1:-core}" in
   core) cargo test -p keystone-core -p keystone-agent --locked ;;
   core-fast)
@@ -31,5 +41,6 @@ case "${1:-core}" in
     cargo build -p keystone-desktop --locked
     cargo build -p keystone-ui --example gallery --locked
     ;;
-  *) echo 'Usage: bash scripts/check.sh [core|core-fast|ui|build]' >&2; exit 2 ;;
+  apple) bash scripts/apple-check.sh ;;
+  *) echo 'Usage: bash scripts/check.sh [core|core-fast|ui|build|apple]' >&2; exit 2 ;;
 esac

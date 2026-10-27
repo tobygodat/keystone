@@ -26,8 +26,16 @@ pub mod surface;
 mod version;
 pub mod worker;
 
+/// Hand off's shortcut, which a failed fork names. The desktop binds it as
+/// `secondary-shift-h`.
+pub const HAND_OFF_KEYS: &str = if cfg!(target_os = "macos") {
+    "⇧⌘H"
+} else {
+    "Ctrl+Shift+H"
+};
+
 pub use commands::{CommandSource, Commands, SlashCommand, terminal_only};
-pub use connection::{ClaudeConnection, CodexConnection, Connection, StartHook, Wake};
+pub use connection::{ClaudeConnection, CodexConnection, Connection, SpawnHook, StartHook, Wake};
 pub use driver::{ApprovalState, Command, Image, Outputs};
 pub use item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, OUTPUT_CAP, RequestId,

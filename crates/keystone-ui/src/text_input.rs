@@ -368,25 +368,35 @@ impl TextInput {
             KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
             KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
             KeyBinding::new("cmd-a", SelectAll, Some("TextInput")),
-            KeyBinding::new("ctrl-a", SelectAll, Some("TextInput")),
+            KeyBinding::new("secondary-a", SelectAll, Some("TextInput")),
             KeyBinding::new("cmd-v", Paste, Some("TextInput")),
-            KeyBinding::new("ctrl-v", Paste, Some("TextInput")),
+            KeyBinding::new("secondary-v", Paste, Some("TextInput")),
             KeyBinding::new("cmd-c", Copy, Some("TextInput")),
-            KeyBinding::new("ctrl-c", Copy, Some("TextInput")),
+            KeyBinding::new("secondary-c", Copy, Some("TextInput")),
             KeyBinding::new("cmd-x", Cut, Some("TextInput")),
-            KeyBinding::new("ctrl-x", Cut, Some("TextInput")),
+            KeyBinding::new("secondary-x", Cut, Some("TextInput")),
             KeyBinding::new("home", Home, Some("TextInput")),
             KeyBinding::new("end", End, Some("TextInput")),
             KeyBinding::new("shift-home", SelectHome, Some("TextInput")),
             KeyBinding::new("shift-end", SelectEnd, Some("TextInput")),
-            KeyBinding::new("ctrl-home", DocumentHome, Some("TextInput")),
-            KeyBinding::new("ctrl-end", DocumentEnd, Some("TextInput")),
+            KeyBinding::new("secondary-home", DocumentHome, Some("TextInput")),
+            KeyBinding::new("secondary-end", DocumentEnd, Some("TextInput")),
             KeyBinding::new("enter", Newline, Some("TextInput")),
             KeyBinding::new("shift-enter", Newline, Some("TextInput")),
             KeyBinding::new("up", Up, Some("TextInput")),
             KeyBinding::new("down", Down, Some("TextInput")),
             KeyBinding::new("shift-up", SelectUp, Some("TextInput")),
             KeyBinding::new("shift-down", SelectDown, Some("TextInput")),
+        ]);
+        // Mac keyboards have no Home or End key; Command and an arrow stand in for them.
+        #[cfg(target_os = "macos")]
+        cx.bind_keys([
+            KeyBinding::new("cmd-left", Home, Some("TextInput")),
+            KeyBinding::new("cmd-right", End, Some("TextInput")),
+            KeyBinding::new("cmd-shift-left", SelectHome, Some("TextInput")),
+            KeyBinding::new("cmd-shift-right", SelectEnd, Some("TextInput")),
+            KeyBinding::new("cmd-up", DocumentHome, Some("TextInput")),
+            KeyBinding::new("cmd-down", DocumentEnd, Some("TextInput")),
         ]);
     }
 
@@ -1344,7 +1354,7 @@ mod tests {
         cx.update(|_, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string("\r\nlast\rtail".into()))
         });
-        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("secondary-v");
         cx.run_until_parked();
         input.read_with(cx, |input, _| {
             assert_eq!(input.value(), "first 😀\n第三\nlast\ntail")
@@ -1473,9 +1483,9 @@ mod tests {
             input
         });
         cx.simulate_input("query");
-        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_keystrokes("secondary-a");
         cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("one\r\ntwo".into())));
-        cx.simulate_keystrokes("ctrl-v enter");
+        cx.simulate_keystrokes("secondary-v enter");
         input.read_with(cx, |input, _| {
             assert_eq!(input.value(), "query");
             assert_eq!(input.selected_range, 0..5);

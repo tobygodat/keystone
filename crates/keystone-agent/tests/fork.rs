@@ -98,7 +98,9 @@ fn uuids(records: &[Value]) -> Vec<String> {
 
 #[test]
 fn a_claude_fork_resumes_the_source_at_the_turn_s_last_record_and_leaves_it_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
+    // Canonical, like the folders Keystone records: macOS's temporary folder sits
+    // behind a symlink.
+    let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let config = dir.path().join("claude-home");
     let cwd = dir.path().join("work");
     std::fs::create_dir_all(&config).unwrap();

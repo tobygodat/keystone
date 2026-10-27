@@ -41,7 +41,7 @@ const DRAFT_DELAY: Duration = Duration::from_millis(250);
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("space", ToggleStaged, Some(LIST_CONTEXT)),
-        KeyBinding::new("ctrl-shift-c", CopyChangePath, Some(LIST_CONTEXT)),
+        KeyBinding::new("secondary-shift-c", CopyChangePath, Some(LIST_CONTEXT)),
     ]);
 }
 
@@ -987,7 +987,9 @@ impl ChangesPanel {
                                 .style(ButtonStyle::Filled)
                                 .disabled(form.busy.is_some())
                                 .debug_selector(|| "changes-pr-create".into())
-                                .tooltip(Tooltip::text("Ctrl+Enter"))
+                                .tooltip(Tooltip::text(keystone_ui::shortcut_text(
+                                    "secondary-enter",
+                                )))
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.create_pull_request(cx)),
                                 ),
@@ -1083,7 +1085,7 @@ impl ChangesPanel {
                     .style(ButtonStyle::Filled)
                     .disabled(!ready || self.committing.is_some())
                     .debug_selector(|| "changes-commit".into())
-                    .tooltip(Tooltip::text("Ctrl+Enter"))
+                    .tooltip(Tooltip::text(keystone_ui::shortcut_text("secondary-enter")))
                     .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
             )
     }
@@ -1875,7 +1877,7 @@ mod ui_tests {
         fixture(repo);
         let (view, cx) = open_keystone(repo, state.path(), cx);
 
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled(&view, cx));
         assert!(
             cx.debug_bounds("changes-tab-0").is_some(),
@@ -1932,7 +1934,7 @@ mod ui_tests {
         cx.run_until_parked();
         assert_eq!(draft(&view, cx), "verify commit");
 
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         until(cx, "committed", |cx| settled(&view, cx));
         assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "verify commit\n");
         assert_eq!(
@@ -2007,9 +2009,9 @@ mod ui_tests {
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
         let (view, cx) = open_keystone(repo, state.path(), cx);
 
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled(&view, cx));
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         assert_eq!(
             notice(&view, cx),
             None,
@@ -2017,7 +2019,7 @@ mod ui_tests {
         );
         click(cx, "changes-stage-unstaged-edited.txt");
         until(cx, "staged", |cx| settled(&view, cx));
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         assert_eq!(
             notice(&view, cx),
             None,
@@ -2026,7 +2028,7 @@ mod ui_tests {
         assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "first\n");
         click(cx, "changes-message");
         cx.simulate_input("verify commit");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         until(cx, "commit failed", |cx| settled(&view, cx));
         assert_eq!(
             notice(&view, cx),
@@ -2054,7 +2056,7 @@ mod ui_tests {
         fixture(repo);
         {
             let (view, cx) = open_keystone(repo, state.path(), cx);
-            cx.simulate_keystrokes("ctrl-shift-g");
+            cx.simulate_keystrokes("secondary-shift-g");
             until(cx, "first status", |cx| settled(&view, cx));
             click(cx, "changes-stage-unstaged-edited.txt");
             until(cx, "staged", |cx| settled(&view, cx));
@@ -2064,7 +2066,7 @@ mod ui_tests {
                 .unwrap();
 
             fs::set_permissions(state.path(), fs::Permissions::from_mode(0o555)).unwrap();
-            cx.simulate_keystrokes("ctrl-enter");
+            cx.simulate_keystrokes("secondary-enter");
             until(cx, "committed", |cx| settled(&view, cx));
             assert_eq!(
                 git(repo, &["log", "-1", "--format=%s"]),
@@ -2100,7 +2102,7 @@ mod ui_tests {
         fixture(repo);
         {
             let (view, cx) = open_keystone(repo, state.path(), cx);
-            cx.simulate_keystrokes("ctrl-shift-g");
+            cx.simulate_keystrokes("secondary-shift-g");
             until(cx, "first status", |cx| settled(&view, cx));
             cx.simulate_input("half written");
             view.update(cx, |view, cx| view.changes.save_drafts(cx))
@@ -2153,7 +2155,7 @@ mod ui_tests {
         let (project, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         fixture(project.path());
         let (view, cx) = open_keystone(project.path(), state.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.simulate_keystrokes("secondary-shift-e");
         cx.run_until_parked();
         click(cx, "surface-add");
         click(cx, "surface-add-changes");
@@ -2174,19 +2176,19 @@ mod ui_tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("changes-message").is_some(),
             "unfocused, the shortcut focuses Changes"
         );
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("changes-message").is_none(),
             "with its message box focused, the shortcut closes Changes"
         );
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         cx.simulate_input("toggle changes");
         cx.simulate_keystrokes("enter");
@@ -2209,7 +2211,7 @@ mod ui_tests {
         fs::write(&hook, "#!/bin/sh\nsleep 0.5\n").unwrap();
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
         let (view, cx) = open_keystone(repo, state.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled(&view, cx));
 
         let list = panel(&view, cx).read_with(cx, |panel, cx| panel.list.read(cx).focus_handle(cx));
@@ -2219,7 +2221,7 @@ mod ui_tests {
             panel(&view, cx).read_with(cx, |panel, cx| panel.highlighted_file(cx).map(|f| f.shown)),
             Some("edited.txt".into())
         );
-        cx.simulate_keystrokes("ctrl-shift-c");
+        cx.simulate_keystrokes("secondary-shift-c");
         let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         let edited = WorkingDirectory::new(repo)
             .unwrap()
@@ -2241,7 +2243,7 @@ mod ui_tests {
 
         click(cx, "changes-message");
         cx.simulate_input("verify commit");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         cx.run_until_parked();
         cx.simulate_input(" and more");
         until(cx, "committed", |cx| settled(&view, cx));
@@ -2260,7 +2262,7 @@ mod ui_tests {
         fixture(repo);
         let (first, cx) = open_keystone(repo, state_dir.path(), cx);
         let app_state = first.read_with(cx, |view, _| view.state.clone());
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled(&first, cx));
         click(cx, "changes-message");
         cx.simulate_input("shared");
@@ -2318,7 +2320,7 @@ mod ui_tests {
         click(cx, "changes-stage-unstaged-edited.txt");
         until(cx, "staged", |cx| settled(&first, cx));
         click(cx, "changes-message");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         until(cx, "committed", |cx| settled(&first, cx));
         assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "shared message\n");
         other.run_until_parked();
@@ -2349,7 +2351,7 @@ mod ui_tests {
             .unwrap();
         assert!(!merge.status.success());
         let (view, cx) = open_keystone(repo, state.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled(&view, cx));
         assert_eq!(shown(&view, cx), ["Conflicts · 1", "! kept.txt"]);
 
@@ -2472,7 +2474,7 @@ mod ui_tests {
         let repo = project.path();
         let remote = with_remote(repo);
         let (view, cx) = open_keystone(repo, state.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled_all(&view, cx));
         assert_eq!(upstream(&view, cx), None);
         click(cx, "changes-create-pr");
@@ -2511,12 +2513,12 @@ mod ui_tests {
             Some("main"),
             "the base starts as the remote's default branch"
         );
-        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("Push from Changes");
         click(cx, "changes-pr-body");
         cx.simulate_input("Adds a push button.");
         click(cx, "changes-pr-draft");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         until(cx, "created", |cx| {
             settled_all(&view, cx)
                 && panel(&view, cx).read_with(cx, |panel, _| panel.form.is_none())
@@ -2527,7 +2529,11 @@ mod ui_tests {
         assert!(
             argv[create.len()..]
                 .split_terminator("---\n")
-                .all(|call| call.starts_with("pr\nview\nhttps://github.com/owner/repo/pull/12\n")),
+                .all(|call| {
+                    // A report reads the pull request, then its line comments.
+                    call.starts_with("pr\nview\nhttps://github.com/owner/repo/pull/12\n")
+                        || call.starts_with("api\n--hostname\ngithub.com\n--paginate\nrepos/owner/repo/pulls/12/comments")
+                }),
             "then gh is only asked about the new pull request: {argv}"
         );
         let created = PullRequest {
@@ -2541,7 +2547,7 @@ mod ui_tests {
             "the top bar shows the session's pull request"
         );
         view.update_in(cx, |this, window, cx| this.focus.focus(window, cx));
-        cx.simulate_keystrokes("ctrl-alt-c");
+        cx.simulate_keystrokes("secondary-alt-c");
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text())),
             Some(created.url),
@@ -2584,7 +2590,7 @@ mod ui_tests {
         let repo = project.path();
         fixture(repo);
         let (view, cx) = open_keystone(repo, state.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled_all(&view, cx));
         click(cx, "changes-push");
         until(cx, "no remote", |cx| settled_all(&view, cx));
@@ -2723,7 +2729,7 @@ mod ui_tests {
         );
         let (view, cx) = open_keystone(repo, state.path(), cx);
         view.update(cx, |view, cx| view.select(1, cx));
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled_all(&view, cx));
         click(cx, "changes-create-pr");
         until(cx, "gh checked", |cx| settled_all(&view, cx));
@@ -2772,7 +2778,7 @@ mod ui_tests {
     fn a_folder_outside_git_says_so(cx: &mut gpui::TestAppContext) {
         let (project, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let (view, cx) = open_keystone(project.path(), state.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-g");
+        cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled(&view, cx));
         assert!(cx.debug_bounds("changes-unavailable").is_some());
     }

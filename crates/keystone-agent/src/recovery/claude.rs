@@ -205,15 +205,30 @@ fn open_inside(path: &Path, projects: &Path) -> std::io::Result<fs::File> {
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("it is not a regular file"));
     }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let opened = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
-        if !opened.starts_with(projects) {
-            return Err(std::io::Error::other("it is outside Claude Code's folder"));
-        }
+    if !opened_path(&file)?.starts_with(projects) {
+        return Err(std::io::Error::other("it is outside Claude Code's folder"));
     }
     Ok(file)
+}
+
+/// The path the kernel resolved for the open `file`, symlinks followed.
+#[cfg(target_os = "linux")]
+fn opened_path(file: &fs::File) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
+#[cfg(target_os = "macos")]
+fn opened_path(file: &fs::File) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes a NUL-terminated path of at most PATH_MAX bytes.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
 }
 
 fn read_file(path: &Path, projects: &Path, cwd: &Path) -> std::io::Result<Snapshot> {
@@ -496,7 +511,7 @@ fn complete_tool(turns: &mut [SnapshotTurn], part: &Value) {
     item.text = cap_output(&text);
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
 

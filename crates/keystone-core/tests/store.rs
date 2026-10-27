@@ -356,10 +356,15 @@ fn working_directory_rejects_files_missing_paths_and_lossy_utf8() {
     assert!(WorkingDirectory::new(&dir.path().join("missing")).is_err());
     #[cfg(unix)]
     {
-        use std::os::unix::{ffi::OsStringExt, fs::symlink};
-        let bad = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
-        fs::create_dir(&bad).unwrap();
-        assert!(WorkingDirectory::new(&bad).is_err());
+        use std::os::unix::fs::symlink;
+        // macOS file systems refuse a name that is not UTF-8, so no such folder exists there.
+        #[cfg(not(target_os = "macos"))]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let bad = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
+            fs::create_dir(&bad).unwrap();
+            assert!(WorkingDirectory::new(&bad).is_err());
+        }
         let alias = dir.path().join("alias");
         symlink(dir.path(), &alias).unwrap();
         assert_eq!(

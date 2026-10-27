@@ -1046,7 +1046,7 @@ fn single_line_input_rejects_newline(cx: &mut TestAppContext) {
     cx.simulate_input("query");
     cx.simulate_keystrokes("enter");
     cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("one\ntwo".into())));
-    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("secondary-v");
     input.read_with(cx, |input, _| assert_eq!(input.value(), "query"));
     assert!(rejected.get() > 0, "newline rejection is reported");
 }

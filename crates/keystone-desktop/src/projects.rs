@@ -349,7 +349,10 @@ impl Keystone {
                 }
             })
             .collect();
-        items.push(PaletteItem::new(OPEN_FOLDER, "Open folder…").kbd("Ctrl+Shift+O"));
+        items.push(
+            PaletteItem::new(OPEN_FOLDER, "Open folder…")
+                .kbd(keystone_ui::shortcut_text("secondary-shift-o")),
+        );
         items
     }
 
@@ -521,7 +524,9 @@ impl Keystone {
             .when(self.projects.is_some(), |d| d.bg(colors.element_hover))
             .hover(|d| d.bg(colors.element_hover))
             .when(self.projects.is_none() && self.palette.is_none(), |d| {
-                d.tooltip(Tooltip::with_key(tooltip, "Ctrl+O").builder())
+                d.tooltip(
+                    Tooltip::with_key(tooltip, keystone_ui::shortcut_text("secondary-o")).builder(),
+                )
             })
             .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                 this.open_projects(None, window, cx)

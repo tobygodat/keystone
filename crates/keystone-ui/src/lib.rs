@@ -34,7 +34,7 @@ pub use color::Color;
 pub use command_palette::{CommandPalette, CommandPaletteState, PaletteItem};
 pub use dialog::{ConfirmDialog, DialogFocus};
 pub use icon::{Icon, IconName, Icons};
-pub use kbd::Kbd;
+pub use kbd::{Kbd, shortcut_text};
 pub use label::Label;
 pub use list_item::ListItem;
 pub use markdown::Markdown;

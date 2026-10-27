@@ -293,7 +293,7 @@ fn open_settings<'a>(
     if player {
         cx.update(|_, cx| give_player(cx));
     }
-    cx.simulate_keystrokes("ctrl-,");
+    cx.simulate_keystrokes("secondary-,");
     cx.run_until_parked();
     click(cx, "settings-section-sounds");
     (view, cx)

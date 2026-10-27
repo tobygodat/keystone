@@ -20,7 +20,8 @@ fn exchange(credentials: &Credentials, request: &str) -> (u16, Vec<u8>) {
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     stream.write_all(request.as_bytes()).unwrap();
-    stream.shutdown(Shutdown::Write).unwrap();
+    // macOS fails this once the server has closed, which a busy server may do first.
+    let _ = stream.shutdown(Shutdown::Write);
     let mut bytes = Vec::new();
     if let Err(error) = stream.read_to_end(&mut bytes) {
         assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
@@ -434,9 +435,8 @@ fn bounded_connections_and_shutdown_close_partial_requests() {
     drop(server);
     assert!(start.elapsed() < Duration::from_secs(1));
     for mut client in clients {
-        client
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
+        // macOS refuses socket options on a connection the server has already reset.
+        let _ = client.set_read_timeout(Some(Duration::from_secs(1)));
         let mut bytes = Vec::new();
         let _ = client.read_to_end(&mut bytes);
     }

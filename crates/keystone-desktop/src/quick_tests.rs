@@ -114,7 +114,7 @@ fn ctrl_alt_space_opens_the_quick_composer_from_a_window(cx: &mut TestAppContext
     let view = first_view(cx);
     let window = cx.read(|cx| view.read(cx).handle);
     let vcx = &mut VisualTestContext::from_window(window, cx);
-    vcx.simulate_keystrokes("ctrl-alt-space");
+    vcx.simulate_keystrokes("secondary-alt-space");
     vcx.run_until_parked();
     assert!(quick_window(cx).is_some());
 }

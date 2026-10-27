@@ -38,7 +38,7 @@ crates/keystone-agent/src/claude.rs
 	Claude Code sent activity Keystone could not read or attribute
 	Claude Code {version}
 	Claude Code {} a message
-	Could not fork this Claude Code conversation: {}. Hand off (Ctrl+Shift+H) to continue it.
+	Could not fork this Claude Code conversation: {}. Hand off ({}) to continue it.
 	Could not resume this Claude Code conversation: {}. Start a new Claude session to continue.
 	Could not stop the turn
 	Edit
@@ -107,7 +107,7 @@ crates/keystone-agent/src/codex.rs
 	Codex listed no skills.
 	Codex returned more than {CATALOG_PAGES} pages of models
 	Codex sent no history in its reply
-	Could not fork this Codex conversation: {reason}. Hand off (Ctrl+Shift+H) to continue it.
+	Could not fork this Codex conversation: {reason}. Hand off ({}) to continue it.
 	Could not read your Codex approval settings. Choose an approval mode.
 	Could not resume this Codex conversation: {reason}. Start a new Codex session to continue.
 	Could not steer the running turn: {}
@@ -238,6 +238,10 @@ crates/keystone-agent/src/import.rs
 
 crates/keystone-agent/src/item.rs
 	{}\n… {} bytes omitted …\n{}
+
+crates/keystone-agent/src/lib.rs
+	Ctrl+Shift+H
+	⇧⌘H
 
 crates/keystone-agent/src/log.rs
 	1 entry was
@@ -589,7 +593,7 @@ crates/keystone-desktop/src/arrangement.rs
 	Layout not changed. {problem}
 	New session
 	Open a surface
-	Split right · Ctrl+\\
+	Split right · {}
 	Stop
 	Tabs
 	What should we work on?
@@ -609,8 +613,6 @@ crates/keystone-desktop/src/attachments.rs
 	Attach files…
 	Attachment not saved. {error}
 	Capture screenshot
-	Ctrl+Alt+S
-	Ctrl+Shift+U
 	Image.{}
 	Path to a file
 	Remove
@@ -644,7 +646,6 @@ crates/keystone-desktop/src/changes.rs
 	Create pull request
 	Created, but not saved on the session.
 	Creating…
-	Ctrl+Enter
 	Description
 	Detached
 	Detached at {}
@@ -698,10 +699,8 @@ crates/keystone-desktop/src/commands.rs
 	Change project color…
 	Close tab
 	Close window
-	Cmd
 	Color
 	Copy pull request link
-	Ctrl
 	Customize layout
 	Focus composer
 	Focus next transcript
@@ -774,7 +773,6 @@ crates/keystone-desktop/src/customization.rs
 	Close
 	Composer
 	Conversation
-	Ctrl+Shift+L
 	Customize
 	Discard
 	Duplicate conversation
@@ -838,7 +836,6 @@ crates/keystone-desktop/src/files.rs
 	Copy path
 	Couldn't read {}: {error}
 	Couldn't run {command}: {error}
-	Ctrl+Shift+M
 	Mention in composer
 	No project folder to browse. {error}
 
@@ -862,7 +859,6 @@ crates/keystone-desktop/src/handoff.rs
 	Continued in
 	Continuing from
 	Could not read the history. Restart Keystone.
-	Ctrl+Shift+H
 	Forked from
 	Forked in
 	Hand off…
@@ -982,14 +978,6 @@ crates/keystone-desktop/src/main.rs
 	Codex
 	Commit message not saved. {error}
 	Could not check the provider's record: {reason}.
-	Ctrl+Alt+G
-	Ctrl+Alt+I
-	Ctrl+Enter
-	Ctrl+N
-	Ctrl+Shift+Enter
-	Ctrl+Shift+N
-	Ctrl+Shift+R
-	Ctrl+Shift+W
 	Deny
 	Draft not saved. {error}
 	F2
@@ -1025,7 +1013,6 @@ crates/keystone-desktop/src/main.rs
 	Send
 	Sending paused.
 	Session title
-	Set KEYSTONE_STATE_PATH or HOME to select a state location
 	Settings
 	Settings not saved. {error}
 	Settle
@@ -1073,7 +1060,6 @@ crates/keystone-desktop/src/model_selector.rs
 
 crates/keystone-desktop/src/notes.rs
 	Add to draft
-	Ctrl+Enter
 	Note not saved. {error}
 	Select a session
 
@@ -1085,6 +1071,21 @@ crates/keystone-desktop/src/notifications.rs
 	Turn failed
 	Turn finished
 	session-{session}{PULL_REQUEST_TAG}
+
+crates/keystone-desktop/src/platform.rs
+	Hide Keystone
+	Hide Others
+	Keystone
+	Library/Application Support/Keystone
+	Minimize
+	Quit Keystone
+	Services
+	Set KEYSTONE_STATE_PATH or HOME to select a state location
+	Settings…
+	Show All
+	Window
+	Zoom
+	printf '%s' {ENV_START}; /usr/bin/env -0; printf '%s' {ENV_END}
 
 crates/keystone-desktop/src/presentation.rs
 	Choose conversation folder
@@ -1115,8 +1116,6 @@ crates/keystone-desktop/src/projects.rs
 	Automatic
 	Blue
 	Color not saved. {error}
-	Ctrl+O
-	Ctrl+Shift+O
 	Current
 	Folder missing
 	Green
@@ -1230,7 +1229,6 @@ crates/keystone-desktop/src/screenshot.rs
 	could not create image
 
 crates/keystone-desktop/src/second_opinion.rs
-	Ctrl+Alt+O
 	For a second opinion on
 	Give a second opinion on {about}. Read only: change nothing. Where do you agree, where do you disagree and why, and what would you do instead?
 	No finished reply yet.
@@ -1245,7 +1243,6 @@ crates/keystone-desktop/src/second_opinion.rs
 	{provider}'s reply #{at}
 
 crates/keystone-desktop/src/session_tabs.rs
-	Ctrl+\\
 	Layout not changed. Cannot save this project's layout. {error}
 	Layout not changed. It is read-only.
 	Layout not changed. {error}
@@ -1265,6 +1262,7 @@ crates/keystone-desktop/src/settings.rs
 	JetBrainsMono Nerd Font
 	Liberation Mono
 	Liberation Sans
+	Menlo
 	Noto Sans
 	Noto Sans Mono
 	Roboto
@@ -1380,7 +1378,6 @@ crates/keystone-desktop/src/transcript.rs
 	Copy output
 	Copy reply
 	Copy result
-	Ctrl+Alt+O
 	Declined
 	Denied: {action}
 	Exit {code}
@@ -1488,7 +1485,6 @@ crates/keystone-desktop/src/worktrees.rs
 	Checking…
 	Create
 	Creating…
-	Ctrl+Alt+G
 	Folder missing
 	In worktree
 	New session in worktree
@@ -1519,6 +1515,9 @@ crates/keystone-ui/src/diagram.rs
 crates/keystone-ui/src/dialog.rs
 	Cancel
 	Confirm
+
+crates/keystone-ui/src/kbd.rs
+	Ctrl
 
 crates/keystone-ui/src/label.rs
 	{kept}…

@@ -45,9 +45,9 @@ fn bind_keys(cx: &mut App) {
     }
     cx.set_global(Bindings);
     cx.bind_keys([
-        KeyBinding::new("ctrl-c", Copy, Some("MarkdownText && selection")),
+        KeyBinding::new("secondary-c", Copy, Some("MarkdownText && selection")),
         KeyBinding::new("cmd-c", Copy, Some("MarkdownText && selection")),
-        KeyBinding::new("ctrl-a", SelectAll, Some("MarkdownText")),
+        KeyBinding::new("secondary-a", SelectAll, Some("MarkdownText")),
         KeyBinding::new("cmd-a", SelectAll, Some("MarkdownText")),
         KeyBinding::new("escape", Clear, Some("MarkdownText && selection")),
         KeyBinding::new("left", Left, Some("MarkdownText && selection")),
@@ -62,10 +62,22 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, Some("MarkdownText && selection")),
         KeyBinding::new("shift-home", SelectHome, Some("MarkdownText")),
         KeyBinding::new("shift-end", SelectEnd, Some("MarkdownText")),
-        KeyBinding::new("ctrl-home", First, Some("MarkdownText && selection")),
-        KeyBinding::new("ctrl-end", Last, Some("MarkdownText && selection")),
-        KeyBinding::new("ctrl-shift-home", SelectFirst, Some("MarkdownText")),
-        KeyBinding::new("ctrl-shift-end", SelectLast, Some("MarkdownText")),
+        KeyBinding::new("secondary-home", First, Some("MarkdownText && selection")),
+        KeyBinding::new("secondary-end", Last, Some("MarkdownText && selection")),
+        KeyBinding::new("secondary-shift-home", SelectFirst, Some("MarkdownText")),
+        KeyBinding::new("secondary-shift-end", SelectLast, Some("MarkdownText")),
+    ]);
+    // Mac keyboards have no Home or End key; Command and an arrow stand in for them.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-left", Home, Some("MarkdownText && selection")),
+        KeyBinding::new("cmd-right", End, Some("MarkdownText && selection")),
+        KeyBinding::new("cmd-shift-left", SelectHome, Some("MarkdownText")),
+        KeyBinding::new("cmd-shift-right", SelectEnd, Some("MarkdownText")),
+        KeyBinding::new("cmd-up", First, Some("MarkdownText && selection")),
+        KeyBinding::new("cmd-down", Last, Some("MarkdownText && selection")),
+        KeyBinding::new("cmd-shift-up", SelectFirst, Some("MarkdownText")),
+        KeyBinding::new("cmd-shift-down", SelectLast, Some("MarkdownText")),
     ]);
 }
 
@@ -1003,16 +1015,16 @@ mod tests {
         let (_view, cx) = reply(cx, &"alpha **bold** beta ".repeat(12));
         let start = cx.debug_bounds("reply-bounds").unwrap().origin + point(px(0.), px(8.));
         cx.simulate_click(start, Modifiers::none());
-        cx.simulate_keystrokes("shift-end ctrl-c");
+        cx.simulate_keystrokes("shift-end secondary-c");
         let first = clipboard(cx).unwrap();
-        cx.simulate_keystrokes("shift-home ctrl-c");
+        cx.simulate_keystrokes("shift-home secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
-        cx.simulate_keystrokes("shift-down shift-end ctrl-c");
+        cx.simulate_keystrokes("shift-down shift-end secondary-c");
         let second = clipboard(cx).unwrap();
         assert!(second.len() > first.len());
-        cx.simulate_keystrokes("shift-home ctrl-c");
+        cx.simulate_keystrokes("shift-home secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some(first.as_str()));
-        cx.simulate_keystrokes("shift-down ctrl-c");
+        cx.simulate_keystrokes("shift-down secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some(second.as_str()));
     }
 
@@ -1021,12 +1033,12 @@ mod tests {
         let (_view, cx) = reply(cx, "| left | right |\n| -- | -- |\n| next | other |");
         let bounds = cx.debug_bounds("reply-bounds").unwrap();
         cx.simulate_click(bounds.origin + point(px(14.), px(12.)), Modifiers::none());
-        cx.simulate_keystrokes("shift-down ctrl-c");
+        cx.simulate_keystrokes("shift-down secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("left\nright\n"));
-        cx.simulate_keystrokes("shift-up ctrl-c");
+        cx.simulate_keystrokes("shift-up secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
         cx.simulate_click(bounds.origin + point(px(174.), px(12.)), Modifiers::none());
-        cx.simulate_keystrokes("shift-down ctrl-c");
+        cx.simulate_keystrokes("shift-down secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("right\nnext\n"));
     }
 
@@ -1090,17 +1102,17 @@ mod tests {
         );
         let start = cx.debug_bounds("reply-bounds").unwrap().origin + point(px(0.), px(8.));
         cx.simulate_click(start, Modifiers::none());
-        cx.simulate_keystrokes("shift-down ctrl-c");
+        cx.simulate_keystrokes("shift-down secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("para one\n"));
-        cx.simulate_keystrokes("shift-down ctrl-c");
+        cx.simulate_keystrokes("shift-down secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("para one\ncode line\n"));
-        cx.simulate_keystrokes("shift-end ctrl-c");
+        cx.simulate_keystrokes("shift-end secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("para one\ncode line\ntail"));
-        cx.simulate_keystrokes("right shift-home ctrl-c");
+        cx.simulate_keystrokes("right shift-home secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("tail"));
-        cx.simulate_keystrokes("shift-up ctrl-c");
+        cx.simulate_keystrokes("shift-up secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("code line\ntail"));
-        cx.simulate_keystrokes("shift-up ctrl-c");
+        cx.simulate_keystrokes("shift-up secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("para one\ncode line\ntail"));
     }
 
@@ -1156,7 +1168,7 @@ mod tests {
         cx.update(|cx| {
             crate::init(cx);
             cx.bind_keys([
-                KeyBinding::new("ctrl-c", CopyRow, Some("SelectionTestTranscript")),
+                KeyBinding::new("secondary-c", CopyRow, Some("SelectionTestTranscript")),
                 KeyBinding::new("home", NavigateRow, Some("SelectionTestTranscript")),
                 KeyBinding::new("end", NavigateRow, Some("SelectionTestTranscript")),
                 KeyBinding::new("up", NavigateRow, Some("SelectionTestTranscript")),
@@ -1193,7 +1205,7 @@ mod tests {
         cx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(end, gpui::MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
-        cx.simulate_keystrokes("ctrl-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("alpha bold italic code."));
     }
 
@@ -1202,11 +1214,11 @@ mod tests {
         let (_view, cx) = reply(cx, "**alpha** `beta`");
         let bounds = cx.debug_bounds("reply-bounds").unwrap();
         cx.simulate_click(bounds.origin + point(px(1.), px(8.)), Modifiers::none());
-        cx.simulate_keystrokes("ctrl-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
-        cx.simulate_keystrokes("home shift-right shift-right shift-right ctrl-c");
+        cx.simulate_keystrokes("home shift-right shift-right shift-right secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("alp"));
-        cx.simulate_keystrokes("escape ctrl-c");
+        cx.simulate_keystrokes("escape secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
     }
 
@@ -1237,21 +1249,21 @@ mod tests {
         let (view, cx) = reply(cx, "e\u{301}👩‍💻**界** tail");
         let start = cx.debug_bounds("reply-bounds").unwrap().origin + point(px(0.), px(8.));
         cx.simulate_click(start, Modifiers::none());
-        cx.simulate_keystrokes("shift-right shift-right ctrl-c");
+        cx.simulate_keystrokes("shift-right shift-right secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("e\u{301}👩‍💻"));
         view.update(cx, |view, cx| {
             view.source.push_str(" appended\n\nnext block");
             cx.notify();
         });
-        cx.simulate_keystrokes("ctrl-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("e\u{301}👩‍💻"));
-        cx.simulate_keystrokes("right shift-left ctrl-c");
+        cx.simulate_keystrokes("right shift-left secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("👩‍💻"));
         view.update(cx, |view, cx| {
             view.source = "replacement".into();
             cx.notify();
         });
-        cx.simulate_keystrokes("ctrl-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
     }
 
@@ -1263,7 +1275,7 @@ mod tests {
         );
         let start = cx.debug_bounds("reply-bounds").unwrap().origin + point(px(0.), px(8.));
         cx.simulate_click(start, Modifiers::none());
-        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        cx.simulate_keystrokes("secondary-a secondary-c");
         assert_eq!(
             clipboard(cx).as_deref(),
             Some("Title\na bold\né\nH\nJ\nx\ny\nlet x = 1;")
@@ -1282,9 +1294,9 @@ mod tests {
         cx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(end, gpui::MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
-        cx.simulate_keystrokes("ctrl-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("alpha bold italic code."));
-        cx.simulate_keystrokes("right shift-home ctrl-c");
+        cx.simulate_keystrokes("right shift-home secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("alpha bold italic code."));
     }
 
@@ -1318,7 +1330,7 @@ mod tests {
             point(bounds.right() - px(15.), bounds.top() + px(12.)),
             Modifiers::none(),
         );
-        cx.simulate_keystrokes("shift-right ctrl-c");
+        cx.simulate_keystrokes("shift-right secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("c"));
     }
 
@@ -1331,7 +1343,7 @@ mod tests {
         view.read_with(cx, |view, _| assert_eq!(view.navigations, 6));
         cx.simulate_keystrokes("shift-right right");
         view.read_with(cx, |view, _| assert_eq!(view.navigations, 6));
-        cx.simulate_keystrokes("down ctrl-c");
+        cx.simulate_keystrokes("down secondary-c");
         view.read_with(cx, |view, _| assert_eq!(view.navigations, 7));
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
     }
@@ -1350,14 +1362,14 @@ mod tests {
         cx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_move(end, gpui::MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
-        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        cx.simulate_keystrokes("secondary-a secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
         cx.update(|window, cx| assert!(view.read(cx).focus.is_focused(window)));
         cx.update(|window, cx| {
             let focus = view.read(cx).text_focus.clone();
             focus.focus(window, cx);
         });
-        cx.simulate_keystrokes("ctrl-shift-end ctrl-c");
+        cx.simulate_keystrokes("secondary-shift-end secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("alpha beta"));
     }
 
@@ -1367,14 +1379,14 @@ mod tests {
         let (_view, cx) = reply(cx, &source);
         let start = cx.debug_bounds("reply-bounds").unwrap().origin + point(px(0.), px(8.));
         cx.simulate_click(start, Modifiers::none());
-        cx.simulate_keystrokes("shift-down ctrl-c");
+        cx.simulate_keystrokes("shift-down secondary-c");
         let copied = clipboard(cx).unwrap();
         assert!("alpha bold beta ".repeat(12).starts_with(&copied));
         assert!(copied.len() > "alpha bold beta ".len());
         assert!(copied.len() < "alpha bold beta ".repeat(12).len());
-        cx.simulate_keystrokes("shift-up ctrl-c");
+        cx.simulate_keystrokes("shift-up secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
-        cx.simulate_keystrokes("ctrl-shift-end ctrl-c");
+        cx.simulate_keystrokes("secondary-shift-end secondary-c");
         assert_eq!(
             clipboard(cx).as_deref(),
             Some("alpha bold beta ".repeat(12).trim_end())
@@ -1386,15 +1398,15 @@ mod tests {
         let (view, cx) = reply(cx, "e");
         let start = cx.debug_bounds("reply-bounds").unwrap().origin + point(px(0.), px(8.));
         cx.simulate_click(start, Modifiers::none());
-        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        cx.simulate_keystrokes("secondary-a secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("e"));
         view.update(cx, |view, cx| {
             view.source.push('\u{301}');
             cx.notify();
         });
-        cx.simulate_keystrokes("ctrl-c");
+        cx.simulate_keystrokes("secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("whole row"));
-        cx.simulate_keystrokes("shift-right ctrl-c");
+        cx.simulate_keystrokes("shift-right secondary-c");
         assert_eq!(clipboard(cx).as_deref(), Some("e\u{301}"));
     }
 }

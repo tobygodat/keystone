@@ -46,7 +46,9 @@ fn open(
     provider: Provider,
     cx: &mut TestAppContext,
 ) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
-    let dir = tempfile::tempdir().unwrap();
+    // Canonical, like the folders Keystone records: macOS's temporary folder sits
+    // behind a symlink.
+    let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     let root = dir.path();
     let home = root.join("home");
     let folder = root.join("project");
@@ -191,7 +193,7 @@ fn a_claude_command_is_listed_before_the_first_send_inserted_and_sent_as_typed(
     });
 
     cx.simulate_input("src/lib.rs");
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     let messages = dir.path().join("project/.fake-claude-messages");
     wait(cx, &view, |_, _| {
         std::fs::read_to_string(&messages).is_ok_and(|m| !m.is_empty())
@@ -292,7 +294,7 @@ fn a_terminal_only_command_offers_the_terminal_and_is_never_sent(cx: &mut TestAp
         cx.debug_bounds("slash-terminal").is_none(),
         "an edit hides it"
     );
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     cx.run_until_parked();
     assert_eq!(draft(&view, cx), "/login now", "the draft stays");
     assert!(cx.debug_bounds("slash-terminal").is_some());
@@ -458,10 +460,10 @@ fn an_account_command_named_like_a_terminal_only_one_sends_once_listed(cx: &mut 
             .update(cx, |input, cx| input.set_value("/status now".into(), cx))
     });
     cx.run_until_parked();
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     wait(cx, &view, listed);
     assert_eq!(draft(&view, cx), "/status now", "the first Send waits");
-    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_keystrokes("secondary-enter");
     wait(cx, &view, |view, cx| {
         view.state.read(cx).session(1).unwrap().started()
     });
@@ -533,7 +535,7 @@ fn saved_prompts_join_the_menu_and_a_command_of_the_same_name_wins(cx: &mut Test
         "the command comes first"
     );
 
-    cx.simulate_keystrokes("ctrl-a");
+    cx.simulate_keystrokes("secondary-a");
     cx.simulate_input("/rev");
     assert_eq!(shown(&view, cx)[0], ("/rev".into(), "Saved"));
     cx.simulate_keystrokes("enter");
@@ -554,7 +556,7 @@ fn saved_prompts_join_the_menu_and_a_command_of_the_same_name_wins(cx: &mut Test
 
     // The library says so too, once the account has listed its commands.
     let shadowed = saved.workspace().prompts()[3].id();
-    cx.simulate_keystrokes("ctrl-,");
+    cx.simulate_keystrokes("secondary-,");
     cx.run_until_parked();
     let section = cx.debug_bounds("settings-section-prompts").unwrap();
     cx.simulate_click(section.center(), gpui::Modifiers::none());
@@ -591,7 +593,7 @@ fn the_library_asks_for_commands_to_flag_a_shortcut_one_shares(cx: &mut TestAppC
                 .value
         })
     });
-    cx.simulate_keystrokes("ctrl-,");
+    cx.simulate_keystrokes("secondary-,");
     cx.run_until_parked();
     let section = cx.debug_bounds("settings-section-prompts").unwrap();
     cx.simulate_click(section.center(), gpui::Modifiers::none());
@@ -671,7 +673,7 @@ fn enter_waits_for_the_command_list_before_inserting_a_shortcut_prompt(cx: &mut 
     assert_eq!(draft(&view, cx), "Mine.", "a click chooses it");
 
     // `/log` waits behind `/login` here; Enter acts on neither until the list is in.
-    cx.simulate_keystrokes("ctrl-a backspace");
+    cx.simulate_keystrokes("secondary-a backspace");
     cx.simulate_input("/log");
     cx.run_until_parked();
     assert_eq!(shown(&view, cx)[0].0, "/login");

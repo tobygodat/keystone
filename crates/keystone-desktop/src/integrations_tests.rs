@@ -228,7 +228,7 @@ fn integrations_list_each_accounts_items_and_the_status_sessions_report(
 ) {
     let fixture = fixture();
     let (view, vcx) = open(&fixture, cx);
-    vcx.simulate_keystrokes("ctrl-,");
+    vcx.simulate_keystrokes("secondary-,");
     vcx.run_until_parked();
     click(vcx, "settings-section-integrations");
     assert!(vcx.debug_bounds("settings-integrations").is_some());
@@ -298,7 +298,7 @@ fn integrations_list_each_accounts_items_and_the_status_sessions_report(
         })
     });
     assert_eq!(health(&view, vcx, Provider::Claude, "fixture-broken"), None);
-    vcx.simulate_keystrokes("ctrl-,");
+    vcx.simulate_keystrokes("secondary-,");
     vcx.run_until_parked();
     click(vcx, "settings-section-integrations");
     for row in ROWS {
@@ -330,7 +330,7 @@ fn without_known_folders_nothing_is_read(cx: &mut gpui::TestAppContext) {
         view.state
             .update(cx, |state, _| state.config_env = ConfigEnv::default())
     });
-    vcx.simulate_keystrokes("ctrl-,");
+    vcx.simulate_keystrokes("secondary-,");
     vcx.run_until_parked();
     click(vcx, "settings-section-integrations");
     assert!(vcx.debug_bounds("integrations-problems").is_some());
@@ -385,7 +385,7 @@ fn reports_stay_with_their_project_and_skip_overridden_servers(cx: &mut gpui::Te
             .mcp_status(Provider::Claude, None, project)
             .is_empty()
     }));
-    vcx.simulate_keystrokes("ctrl-,");
+    vcx.simulate_keystrokes("secondary-,");
     vcx.run_until_parked();
     click(vcx, "settings-section-integrations");
     assert!(
@@ -440,7 +440,7 @@ fn open_for_changes<'a>(
         view.state
             .update(cx, |state, _| state.test_programs = Some((codex, claude)))
     });
-    vcx.simulate_keystrokes("ctrl-,");
+    vcx.simulate_keystrokes("secondary-,");
     vcx.run_until_parked();
     click(vcx, "settings-section-integrations");
     (view, vcx, receipt)
@@ -529,7 +529,7 @@ fn switching_a_codex_server_off_writes_only_its_table_and_tells_running_sessions
     vcx.dispatch_action(NewCodex);
     vcx.run_until_parked();
     send(&view, vcx, 1, "hello codex");
-    vcx.simulate_keystrokes("ctrl-,");
+    vcx.simulate_keystrokes("secondary-,");
     vcx.run_until_parked();
     click(vcx, "settings-section-integrations");
     settle(&view, vcx);

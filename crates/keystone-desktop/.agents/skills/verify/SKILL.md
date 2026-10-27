@@ -5,7 +5,7 @@ description: Drive Keystone's native Rust GPUI desktop on Linux with a private h
 
 # Verify Keystone
 
-Read [the feature map](features/README.md) before choosing a journey. This skill lives with the desktop crate. Run all shell commands from the workspace root, two directories above that crate. The core crate has no separate user interface.
+Read [the feature map](features/README.md) before choosing a journey. On a Mac, where no private Sway desktop exists, run `python3 scripts/macos-smoke.py` instead; see [Keystone on macOS](../../../../../docs/macos.md). This skill lives with the desktop crate. Run all shell commands from the workspace root, two directories above that crate. The core crate has no separate user interface.
 
 ## Launch
 

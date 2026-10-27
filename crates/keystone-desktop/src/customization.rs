@@ -58,7 +58,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
             Some("Customize && !Dialog && !CommandPalette"),
         ),
         gpui::KeyBinding::new(
-            "ctrl-s",
+            "secondary-s",
             ApplyLayout,
             Some("Customize && !Dialog && !CommandPalette"),
         ),
@@ -262,7 +262,9 @@ impl Keystone {
             .size(ButtonSize::Compact)
             .selected(open)
             .debug_selector(|| "customize-toggle".into())
-            .tooltip(Tooltip::text("Ctrl+Shift+L"))
+            .tooltip(Tooltip::text(keystone_ui::shortcut_text(
+                "secondary-shift-l",
+            )))
             .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                 this.customize(if open { Action::Close } else { Action::Open }, window, cx)
             }))
@@ -852,7 +854,7 @@ mod tests {
         let (view, cx) = open(&path, cx);
         click(cx, "welcome-codex");
         cx.simulate_input("keep this draft");
-        cx.simulate_keystrokes("ctrl-shift-l");
+        cx.simulate_keystrokes("secondary-shift-l");
         cx.run_until_parked();
         assert!(cx.debug_bounds("customize-panel").is_some());
         click(cx, "component-duplicate");
@@ -870,7 +872,7 @@ mod tests {
             assert_eq!(this.composer.read(cx).value(), "keep this draft");
             assert!(this.saved_layout(cx).is_none());
         });
-        cx.simulate_keystrokes("ctrl-s");
+        cx.simulate_keystrokes("secondary-s");
         cx.run_until_parked();
         view.read_with(cx, |this, cx| {
             assert_eq!(
@@ -903,7 +905,7 @@ mod tests {
         click(cx, "component-duplicate");
         click(cx, "customize-apply");
         click(cx, "customize-close");
-        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.simulate_keystrokes("secondary-shift-e");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("files-tab-0").is_some(),

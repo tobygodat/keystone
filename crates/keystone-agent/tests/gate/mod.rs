@@ -70,12 +70,7 @@ impl Gate {
 pub fn gone(pid: u32) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-        let exited = state.is_empty()
-            || state
-                .rsplit_once(')')
-                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
-        if exited {
+        if matches!(keystone_agent::host::process_state(pid), None | Some('Z')) {
             return;
         }
         assert!(Instant::now() < deadline, "process {pid} still running");

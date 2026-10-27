@@ -281,7 +281,10 @@ pub(crate) fn build_as(
 pub(crate) fn button() -> impl IntoElement {
     IconButton::new("hand-off", IconName::Handoff)
         .debug_selector(|| "hand-off".into())
-        .tooltip(Tooltip::with_key("Hand off…", "Ctrl+Shift+H"))
+        .tooltip(Tooltip::with_key(
+            "Hand off…",
+            keystone_ui::shortcut_text("secondary-shift-h"),
+        ))
         .on_click(|_, window, cx| window.dispatch_action(Box::new(HandOff), cx))
 }
 

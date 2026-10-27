@@ -2136,8 +2136,9 @@ impl ClaudeDriver {
         if self.conversation.is_none() && failed {
             let message = if self.forking {
                 format!(
-                    "Could not fork this Claude Code conversation: {}. Hand off (Ctrl+Shift+H) to continue it.",
-                    reason()
+                    "Could not fork this Claude Code conversation: {}. Hand off ({}) to continue it.",
+                    reason(),
+                    crate::HAND_OFF_KEYS
                 )
             } else if self.resume {
                 format!(

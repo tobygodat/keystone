@@ -260,7 +260,7 @@ fn header_only_conversation_does_not_observe_until_transcript_is_visible(cx: &mu
     unread(&view, cx);
     let transcript = cx.debug_bounds("conversation").unwrap();
     assert_eq!(transcript.size.height, px(0.));
-    cx.simulate_keystrokes("ctrl-shift-t");
+    cx.simulate_keystrokes("secondary-shift-t");
     cx.run_until_parked();
     assert!(view.update_in(cx, |this, window, cx| {
         this.view_contains_focus(ViewId::MAIN, window, cx)
@@ -384,7 +384,7 @@ fn use_layout(view: &Entity<Keystone>, cx: &mut VisualTestContext, layout: Compo
 }
 
 fn toggle_files(cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("ctrl-shift-e");
+    cx.simulate_keystrokes("secondary-shift-e");
     cx.run_until_parked();
 }
 
@@ -562,7 +562,7 @@ fn keyboard_actions_follow_occurrences_and_release_hidden_focus(cx: &mut TestApp
     click(cx, "customize-apply");
     click(cx, "customize-close");
     click(cx, "conversation");
-    cx.simulate_keystrokes("ctrl-shift-t home down tab");
+    cx.simulate_keystrokes("secondary-shift-t home down tab");
     let first = ViewKey {
         view: ViewId::MAIN,
         session: 1,
@@ -618,7 +618,7 @@ fn keyboard_actions_follow_occurrences_and_release_hidden_focus(cx: &mut TestApp
         )
     });
     use_layout(&view, cx, tabbed(0));
-    cx.simulate_keystrokes("ctrl-shift-t home tab");
+    cx.simulate_keystrokes("secondary-shift-t home tab");
     click(cx, "surface-tabs-0-tab-1");
     view.update_in(cx, |v, window, cx| {
         assert!(
@@ -643,13 +643,13 @@ fn keyboard_actions_follow_occurrences_and_release_hidden_focus(cx: &mut TestApp
     click(cx, "fitted-tab-0");
     cx.simulate_resize(gpui::size(px(1200.), px(900.)));
     cx.run_until_parked();
-    cx.simulate_keystrokes("ctrl-, ctrl-shift-t home ctrl-shift-c");
+    cx.simulate_keystrokes("secondary-, secondary-shift-t home secondary-shift-c");
     assert!(cx.debug_bounds("settings-page").is_none());
     let text = cx
         .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
         .unwrap();
     assert!(text.starts_with("Reply 0."));
-    cx.simulate_keystrokes("ctrl-l");
+    cx.simulate_keystrokes("secondary-l");
     cx.simulate_input("still a draft");
     view.read_with(cx, |v, cx| {
         assert_eq!(v.composer.read(cx).value(), "still a draft")

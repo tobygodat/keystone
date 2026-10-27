@@ -170,13 +170,7 @@ impl Rig {
 }
 
 fn parent(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+    keystone_agent::host::process_parent(pid)
 }
 
 impl Rig {
@@ -212,10 +206,7 @@ fn wait_for(done: impl Fn() -> bool, what: &str) {
 }
 
 fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-        s.rsplit_once(')')
-            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-    })
+    !matches!(keystone_agent::host::process_state(pid), None | Some('Z'))
 }
 
 fn lines(dir: &Path, file: &str) -> Vec<String> {

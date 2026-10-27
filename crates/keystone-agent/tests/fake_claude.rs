@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod gate;
@@ -188,12 +188,7 @@ fn each_session_has_its_own_process_and_dropping_ends_them() {
     for pid in [a, b] {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-            let gone = state.is_empty()
-                || state
-                    .rsplit_once(')')
-                    .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
-            if gone {
+            if matches!(keystone_agent::host::process_state(pid), None | Some('Z')) {
                 break;
             }
             assert!(Instant::now() < deadline, "claude {pid} still running");
@@ -560,6 +555,20 @@ fn started_in(dir: &std::path::Path) -> Vec<u32> {
         .collect()
 }
 
+/// Records the PID of each process the connection starts for `session`. A process
+/// ended at once may die before it can write its own PID, as on macOS, where starting
+/// takes longer.
+fn spawned(conn: &ClaudeConnection, session: u64) -> Arc<Mutex<Vec<u32>>> {
+    let pids = Arc::new(Mutex::new(Vec::new()));
+    let recorded = pids.clone();
+    conn.on_spawn(Arc::new(move |started, pid| {
+        if started == session {
+            recorded.lock().unwrap().push(pid);
+        }
+    }));
+    pids
+}
+
 /// A directory, with a pid file, that only one test starts Claude in.
 fn pid_dir(name: &str) -> PathBuf {
     let dir =
@@ -577,6 +586,7 @@ fn dropping_gives_up_on_a_stuck_start_and_ends_what_it_starts() {
     let (conn, wake) = connect();
     let gate = Gate::new(Some(&[2]));
     conn.hold_starts(gate.hook());
+    let pids = spawned(&conn, 2);
     conn.send(1, "/tmp", None, None, NO_MODE, "hello".into())
         .unwrap();
     session_until(&conn, &wake, 1, Duration::from_secs(5), completed);
@@ -590,12 +600,12 @@ fn dropping_gives_up_on_a_stuck_start_and_ends_what_it_starts() {
     let took = started.elapsed();
     assert!(took < Duration::from_secs(3), "drop took {took:?}");
     gate::gone(running);
-    assert_eq!(started_in(&dir), Vec::<u32>::new());
+    assert_eq!(*pids.lock().unwrap(), Vec::<u32>::new());
 
     gate.release(2);
     let deadline = Instant::now() + Duration::from_secs(5);
     let late = loop {
-        if let [pid] = started_in(&dir)[..] {
+        if let [pid] = pids.lock().unwrap()[..] {
             break pid;
         }
         assert!(Instant::now() < deadline, "the held start never ran");
@@ -612,6 +622,7 @@ fn dropping_waits_briefly_for_a_start_and_ends_its_process() {
     let (conn, _wake) = connect();
     let gate = Gate::new(Some(&[2]));
     conn.hold_starts(gate.hook());
+    let pids = spawned(&conn, 2);
     conn.send(2, dir.to_str().unwrap(), None, None, NO_MODE, "two".into())
         .unwrap();
     gate.reached(2);
@@ -627,8 +638,8 @@ fn dropping_waits_briefly_for_a_start_and_ends_its_process() {
     let took = started.elapsed();
     releaser.join().unwrap();
     assert!(took < Duration::from_secs(3), "drop took {took:?}");
-    let [late] = started_in(&dir)[..] else {
-        panic!("expected one process, got {:?}", started_in(&dir));
+    let [late] = pids.lock().unwrap()[..] else {
+        panic!("expected one process, got {:?}", pids.lock().unwrap());
     };
     gate::gone(late);
 }
@@ -958,6 +969,7 @@ fn a_mode_chosen_while_claude_starts_is_the_one_the_message_runs_in() {
     let (conn, wake) = connect();
     let gate = Gate::new(Some(&[1]));
     conn.hold_starts(gate.hook());
+    let pids = spawned(&conn, 1);
     conn.send(1, &dir, None, None, mode(FullAccess), "spawn race".into())
         .unwrap();
     gate.reached(1);
@@ -970,7 +982,7 @@ fn a_mode_chosen_while_claude_starts_is_the_one_the_message_runs_in() {
         1,
         "one turn, carried to the new process"
     );
-    assert_eq!(started_in(std::path::Path::new(&dir)).len(), 2);
+    assert_eq!(pids.lock().unwrap().len(), 2);
 }
 
 /// Claude keeps plan mode across a `--resume` with no mode given. A mode Keystone

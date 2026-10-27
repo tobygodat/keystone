@@ -18,6 +18,7 @@ mod mentions;
 mod model_selector;
 mod notes;
 mod notifications;
+mod platform;
 mod presentation;
 mod preview;
 mod projects;
@@ -373,61 +374,102 @@ fn request_quit(cx: &mut App) {
         return;
     }
     cx.defer(move |cx| {
-        if let Err(error) = quick::keep_open(cx) {
+        if save_and_teardown(&state, true, cx) {
+            cx.quit();
+        }
+    });
+}
+
+/// Saves what Quit saves when the system ends Keystone without asking it, as macOS
+/// does for Quit in the Dock, logging out or shutting down. Such a quit cannot be
+/// cancelled, so a failed save is only reported.
+fn save_on_system_quit(cx: &mut App) {
+    let Some(app) = cx.try_global::<DesktopApp>() else {
+        return;
+    };
+    let state = app.state.clone();
+    if state.update(cx, |state, _| state.reserve_quit()) {
+        save_and_teardown(&state, false, cx);
+    }
+}
+
+/// Saves every window's drafts, notes and placement, then stops the providers.
+/// Returns whether Keystone may exit. When `can_cancel`, a failed save keeps
+/// Keystone open with the error showing, so Quit can be retried.
+fn save_and_teardown(state: &Entity<AppState>, can_cancel: bool, cx: &mut App) -> bool {
+    if let Err(error) = quick::keep_open(cx) {
+        if can_cancel {
             state.update(cx, |state, cx| state.quit_failed(error, cx));
-            return;
+            return false;
         }
-        let windows = open_windows(cx);
-        let mut drafts = Vec::new();
-        let mut notes = Vec::new();
-        let mut saved = Vec::new();
-        let mut unsaved = None;
-        for view in &windows {
-            let handle = view.read(cx).handle;
-            let id = view.read(cx).window_id;
-            let draft = view.update(cx, |view, cx| {
-                view.draft_save_task = None;
-                view.composer_draft(cx)
-            });
-            if let Err(error) = view.update(cx, |view, cx| view.changes.save_drafts(cx)) {
-                unsaved.get_or_insert(error);
-            }
-            drafts.extend(draft.filter(|d| {
-                drafts
-                    .iter()
-                    .all(|o: &ComposerDraft| o.session != d.session)
-            }));
-            for note in view.read(cx).unsaved_notes(cx) {
-                if notes.iter().all(|(project, _)| project != &note.0) {
-                    notes.push(note);
-                }
-            }
-            let project = view.read(cx).presentation.project.clone().ok();
-            if let Ok(placement) = handle.update(cx, |_, window, _| placement(window)) {
-                saved.push((id, placement, project));
+        eprintln!("{error}");
+    }
+    let windows = open_windows(cx);
+    let mut drafts = Vec::new();
+    let mut notes = Vec::new();
+    let mut saved = Vec::new();
+    let mut unsaved = None;
+    for view in &windows {
+        let handle = view.read(cx).handle;
+        let id = view.read(cx).window_id;
+        let draft = view.update(cx, |view, cx| {
+            view.draft_save_task = None;
+            view.composer_draft(cx)
+        });
+        if let Err(error) = view.update(cx, |view, cx| view.changes.save_drafts(cx)) {
+            unsaved.get_or_insert(error);
+        }
+        drafts.extend(draft.filter(|d| {
+            drafts
+                .iter()
+                .all(|o: &ComposerDraft| o.session != d.session)
+        }));
+        for note in view.read(cx).unsaved_notes(cx) {
+            if notes.iter().all(|(project, _)| project != &note.0) {
+                notes.push(note);
             }
         }
-        if state
-            .update(cx, |state, cx| state.save(drafts, notes, saved, cx))
-            .is_err()
-        {
+        let project = view.read(cx).presentation.project.clone().ok();
+        if let Ok(placement) = handle.update(cx, |_, window, _| placement(window)) {
+            saved.push((id, placement, project));
+        }
+    }
+    if let Err(error) = state.update(cx, |state, cx| state.save(drafts, notes, saved, cx)) {
+        if can_cancel {
             if windows.is_empty() {
-                windows::reopen(state, cx);
+                windows::reopen(state.clone(), cx);
             }
-            return;
+            return false;
         }
-        if let Some(error) = unsaved {
+        eprintln!("Could not save before quitting. {error}");
+    }
+    if let Some(error) = unsaved {
+        if can_cancel {
             state.update(cx, |state, cx| {
                 state.quit_failed(format!("Commit message not saved. {error}"), cx)
             });
-            return;
+            return false;
         }
-        state.update(cx, |state, cx| state.teardown(cx));
-        for view in windows {
-            view.update(cx, |view, _| view.customize_agent = None);
-        }
-        cx.quit();
-    });
+        eprintln!("Commit message not saved. {error}");
+    }
+    state.update(cx, |state, cx| state.teardown(cx));
+    for view in windows {
+        view.update(cx, |view, _| view.customize_agent = None);
+    }
+    true
+}
+
+/// Clicking Keystone in the Dock while no window is open shows the saved windows
+/// again, as a notification click does.
+fn reopen_from_dock(cx: &mut App) {
+    let Some(state) = cx.try_global::<DesktopApp>().map(|app| app.state.clone()) else {
+        return;
+    };
+    if state.read(cx).phase != app_state::Phase::Running || !open_windows(cx).is_empty() {
+        return;
+    }
+    state.update(cx, |state, _| state.quit_when_idle = false);
+    windows::reopen(state, cx);
 }
 
 struct Keystone {
@@ -1453,7 +1495,10 @@ impl Keystone {
                         .child(
                             IconButton::new("close", IconName::Close)
                                 .debug_selector(|| "close".into())
-                                .tooltip(Tooltip::with_key("Close window", "Ctrl+Shift+W"))
+                                .tooltip(Tooltip::with_key(
+                                    "Close window",
+                                    keystone_ui::shortcut_text("secondary-shift-w"),
+                                ))
                                 .on_click({
                                     let root = cx.weak_entity();
                                     move |_, window, cx| {
@@ -1707,7 +1752,7 @@ impl Keystone {
         }))
         .child(
             MenuItem::new("new-claude", "Claude Code")
-                .kbd("Ctrl+N")
+                .kbd(keystone_ui::shortcut_text("secondary-n"))
                 .debug_selector(|| "new-claude".into())
                 .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                     this.start(Provider::Claude, window, cx)
@@ -1715,7 +1760,7 @@ impl Keystone {
         )
         .child(
             MenuItem::new("new-codex", "Codex")
-                .kbd("Ctrl+Shift+N")
+                .kbd(keystone_ui::shortcut_text("secondary-shift-n"))
                 .debug_selector(|| "new-codex".into())
                 .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                     this.start(Provider::Codex, window, cx)
@@ -1723,7 +1768,7 @@ impl Keystone {
         )
         .child(
             MenuItem::new("new-worktree", "In worktree…")
-                .kbd("Ctrl+Alt+G")
+                .kbd(keystone_ui::shortcut_text("secondary-alt-g"))
                 .debug_selector(|| "new-worktree".into())
                 .on_click(
                     self.scoped_listener(cx, |this, _, window, cx| {
@@ -1733,7 +1778,7 @@ impl Keystone {
         )
         .child(
             MenuItem::new("import-sessions", "Import…")
-                .kbd("Ctrl+Alt+I")
+                .kbd(keystone_ui::shortcut_text("secondary-alt-i"))
                 .debug_selector(|| "import-sessions".into())
                 .on_click(
                     self.scoped_listener(cx, |this, _, window, cx| this.open_import(window, cx)),
@@ -1863,7 +1908,7 @@ impl Keystone {
                                     can_send,
                                     Tooltip::with_key(
                                         if running { "Steer" } else { "Send" },
-                                        "Ctrl+Enter",
+                                        keystone_ui::shortcut_text("secondary-enter"),
                                     ),
                                     cx,
                                 )
@@ -1955,8 +2000,11 @@ impl Keystone {
     fn welcome_pill(&self, provider: Provider, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let (id, key) = match provider {
-            Provider::Claude => ("welcome-claude", "Ctrl+N"),
-            Provider::Codex => ("welcome-codex", "Ctrl+Shift+N"),
+            Provider::Claude => ("welcome-claude", keystone_ui::shortcut_text("secondary-n")),
+            Provider::Codex => (
+                "welcome-codex",
+                keystone_ui::shortcut_text("secondary-shift-n"),
+            ),
         };
         h_flex()
             .id(id)
@@ -2914,7 +2962,9 @@ impl Keystone {
                                     "Use recovered history",
                                 )
                                 .style(ButtonStyle::Primary)
-                                .tooltip(Tooltip::text("Ctrl+Shift+Enter"))
+                                .tooltip(Tooltip::text(keystone_ui::shortcut_text(
+                                    "secondary-shift-enter",
+                                )))
                                 .when(keyboard, |b| b.track_focus(&continue_focus))
                                 .debug_selector(move || {
                                     arrangement::selector("recovery-continue", key.view).to_string()
@@ -2933,7 +2983,9 @@ impl Keystone {
                                     "Retry",
                                 )
                                 .style(ButtonStyle::Subtle)
-                                .tooltip(Tooltip::text("Ctrl+Shift+R"))
+                                .tooltip(Tooltip::text(keystone_ui::shortcut_text(
+                                    "secondary-shift-r",
+                                )))
                                 .when(keyboard, |b| b.track_focus(&retry_focus))
                                 .debug_selector(move || {
                                     arrangement::selector("recovery-retry", key.view).to_string()
@@ -3231,7 +3283,7 @@ impl SessionSidebar {
                     if !this.presentation.matches(activation) {
                         return;
                     }
-                    if event.modifiers().control {
+                    if event.modifiers().secondary() {
                         this.open_in_new_tab(id, cx);
                     } else {
                         this.select(id, cx);
@@ -4005,7 +4057,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(1000.), px(500.)));
         for pointer in [true, false] {
-            activity_keys(cx, "ctrl-shift-t home");
+            activity_keys(cx, "secondary-shift-t home");
             if pointer {
                 let bounds = cx.debug_bounds("reply-0-selection-surface").unwrap();
                 let from = bounds.origin + point(px(1.), px(8.));
@@ -4014,7 +4066,7 @@ mod tests {
                 cx.simulate_mouse_move(to, MouseButton::Left, gpui::Modifiers::none());
                 cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::none());
             } else {
-                activity_keys(cx, "tab tab ctrl-a left shift-end");
+                activity_keys(cx, "tab tab secondary-a left shift-end");
             }
             cx.update(|_, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()))
@@ -4026,7 +4078,7 @@ mod tests {
                 ..Default::default()
             });
             cx.run_until_parked();
-            activity_keys(cx, "ctrl-c");
+            activity_keys(cx, "secondary-c");
             assert_eq!(
                 cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
                     .as_deref(),
@@ -4046,11 +4098,11 @@ mod tests {
                     None
                 );
             });
-            activity_keys(cx, "ctrl-shift-t home tab tab");
+            activity_keys(cx, "secondary-shift-t home tab tab");
             cx.update(|_, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()))
             });
-            activity_keys(cx, "ctrl-c");
+            activity_keys(cx, "secondary-c");
             assert_eq!(
                 cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
                     .as_deref(),
@@ -4154,7 +4206,10 @@ mod tests {
             v.commit(1, cx);
             cx.notify();
         });
-        activity_keys(cx, "ctrl-shift-t end tab tab ctrl-a ctrl-c ctrl-shift-n");
+        activity_keys(
+            cx,
+            "secondary-shift-t end tab tab secondary-a secondary-c secondary-shift-n",
+        );
         wait_until(cx, &view, |v, cx| {
             v.state.read(cx).store().workspace().selected() == Some(2)
                 && v.state
@@ -4175,17 +4230,17 @@ mod tests {
             v.commit(2, cx);
             cx.notify();
         });
-        activity_keys(cx, "ctrl-shift-t end tab tab");
+        activity_keys(cx, "secondary-shift-t end tab tab");
         cx.update(|_, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()))
         });
-        activity_keys(cx, "ctrl-c");
+        activity_keys(cx, "secondary-c");
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
                 .as_deref(),
             Some("sentinel")
         );
-        activity_keys(cx, "ctrl-a ctrl-c");
+        activity_keys(cx, "secondary-a secondary-c");
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
                 .as_deref(),
@@ -4231,9 +4286,9 @@ mod tests {
             cx.notify();
         });
         cx.simulate_resize(size(px(1000.), px(500.)));
-        activity_keys(cx, "ctrl-shift-t end tab tab");
+        activity_keys(cx, "secondary-shift-t end tab tab");
         let before = view.read_with(cx, |v, _| keyboard_scroll_top(v));
-        activity_keys(cx, "tab ctrl-a");
+        activity_keys(cx, "tab secondary-a");
         view.read_with(cx, |v, _| {
             assert_eq!(
                 keyboard_scroll_top(v),
@@ -4241,7 +4296,7 @@ mod tests {
                 "selection entry and Select All retain the viewport"
             )
         });
-        activity_keys(cx, "left shift-end ctrl-c");
+        activity_keys(cx, "left shift-end secondary-c");
         let surface = cx.debug_bounds("reply-0-selection-surface").unwrap();
         let viewport = cx.debug_bounds("conversation").unwrap();
         assert!(
@@ -4284,7 +4339,7 @@ mod tests {
         cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::none());
         cx.simulate_mouse_move(to, MouseButton::Left, gpui::Modifiers::none());
         cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::none());
-        activity_keys(cx, "ctrl-c");
+        activity_keys(cx, "secondary-c");
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
                 .as_deref(),
@@ -4323,13 +4378,13 @@ mod tests {
             v.commit(1, cx);
             cx.notify();
         });
-        activity_keys(cx, "ctrl-shift-t end tab tab ctrl-a ctrl-c");
+        activity_keys(cx, "secondary-shift-t end tab tab secondary-a secondary-c");
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
                 .as_deref(),
             Some("Plain bold and link é.\nNext code.")
         );
-        activity_keys(cx, "ctrl-a left shift-right shift-right ctrl-c");
+        activity_keys(cx, "secondary-a left shift-right shift-right secondary-c");
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
                 .as_deref(),
@@ -4347,7 +4402,7 @@ mod tests {
                 Some(0)
             )
         });
-        activity_keys(cx, "ctrl-l");
+        activity_keys(cx, "secondary-l");
         cx.simulate_input("composer still owns text");
         view.read_with(cx, |v, cx| {
             assert_eq!(v.composer.read(cx).value(), "composer still owns text")
@@ -4378,7 +4433,7 @@ mod tests {
             cx.notify();
         });
         cx.simulate_resize(size(px(1000.), px(500.)));
-        activity_keys(cx, "ctrl-shift-t home");
+        activity_keys(cx, "secondary-shift-t home");
         cx.run_until_parked();
         let before = cx.debug_bounds("activity-expanded-0").unwrap().top();
         click(cx, "activity-expanded-0");
@@ -4489,7 +4544,7 @@ mod tests {
             "reasoning needs a named disclosure"
         );
         assert!(cx.debug_bounds("activity-body-0").is_some());
-        activity_keys(cx, "ctrl-shift-t home tab enter");
+        activity_keys(cx, "secondary-shift-t home tab enter");
         cx.run_until_parked();
         assert!(cx.debug_bounds("activity-collapsed-0").is_some());
         assert!(cx.debug_bounds("activity-body-0").is_none());
@@ -4526,7 +4581,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("activity-collapsed-2").is_some());
-        cx.simulate_keystrokes("ctrl-shift-c");
+        cx.simulate_keystrokes("secondary-shift-c");
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
                 .as_deref(),
@@ -4638,9 +4693,9 @@ mod tests {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
         };
         view.update_in(cx, |v, window, cx| v.focus.focus(window, cx));
-        keys(cx, "ctrl-shift-t");
+        keys(cx, "secondary-shift-t");
         keys(cx, "home");
-        keys(cx, "ctrl-shift-c");
+        keys(cx, "secondary-shift-c");
         assert_eq!(clipboard(cx).as_deref(), Some("Question 0"));
         assert!(cx.debug_bounds("transcript-row-0").is_some());
         assert!(cx.debug_bounds("transcript-row-599").is_none());
@@ -4657,19 +4712,19 @@ mod tests {
         assert_eq!(clipboard(cx).as_deref(), Some("let value = 7;"));
         keys(cx, "tab enter");
         assert_eq!(clipboard(cx).as_deref(), Some("nested"));
-        keys(cx, "shift-tab ctrl-shift-c");
+        keys(cx, "shift-tab secondary-shift-c");
         assert_eq!(clipboard(cx).as_deref(), Some("let value = 7;"));
         keys(cx, "up tab enter");
         assert_eq!(clipboard(cx).as_deref(), Some("printf test"));
-        keys(cx, "ctrl-l");
+        keys(cx, "secondary-l");
         cx.simulate_input("draft stays");
-        keys(cx, "ctrl-shift-c");
+        keys(cx, "secondary-shift-c");
         view.read_with(cx, |v, cx| {
             assert_eq!(v.composer.read(cx).value(), "draft stays");
             assert!(!v.state.read(cx).conversations()[&1].running);
             assert_eq!(v.state.read(cx).conversations()[&1].rows.len(), 602);
         });
-        keys(cx, "ctrl-shift-t home alt-end enter");
+        keys(cx, "secondary-shift-t home alt-end enter");
         cx.run_until_parked();
         assert!(cx.debug_bounds("jump-to-latest").is_none());
         assert!(cx.debug_bounds("transcript-row-601").is_some());
@@ -4721,14 +4776,14 @@ mod tests {
         let clipboard = |cx: &mut gpui::VisualTestContext| {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
         };
-        keys(cx, "ctrl-shift-t end tab enter");
+        keys(cx, "secondary-shift-t end tab enter");
         assert_eq!(clipboard(cx).as_deref(), Some(reply));
         keys(cx, "tab space");
         assert_eq!(clipboard(cx).as_deref(), Some("before"));
         image(cx, "reply-0-diagram-2-image");
         keys(cx, "tab space");
         assert!(cx.debug_bounds("reply-0-diagram-2-source").is_some());
-        keys(cx, "ctrl-shift-c");
+        keys(cx, "secondary-shift-c");
         assert_eq!(clipboard(cx).as_deref(), Some("flowchart TD\nA-->B\n"));
         keys(cx, "enter");
         assert!(cx.debug_bounds("reply-0-diagram-2-source").is_none());
@@ -4743,7 +4798,7 @@ mod tests {
         assert_eq!(clipboard(cx).as_deref(), Some("pie\n\"A\" : 1\n"));
         keys(cx, "shift-tab space");
         assert!(cx.debug_bounds("reply-0-diagram-4-source").is_none());
-        keys(cx, "tab ctrl-shift-c");
+        keys(cx, "tab secondary-shift-c");
         assert_eq!(clipboard(cx).as_deref(), Some("pie\n\"A\" : 1\n"));
         view.read_with(cx, |v, cx| {
             assert!(!v.state.read(cx).conversations()[&1].running);
@@ -4785,7 +4840,7 @@ mod tests {
         let clipboard = |cx: &mut gpui::VisualTestContext| {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
         };
-        keys(cx, "ctrl-shift-t end tab enter");
+        keys(cx, "secondary-shift-t end tab enter");
         assert_eq!(clipboard(cx).as_deref(), Some(source));
         assert!(cx.debug_bounds("reply-0-diagram-1-toggle").is_none());
         view.update(cx, |v, cx| {
@@ -4800,7 +4855,7 @@ mod tests {
             v.commit(1, cx);
             cx.notify();
         });
-        keys(cx, "space ctrl-shift-c");
+        keys(cx, "space secondary-shift-c");
         assert_eq!(clipboard(cx).as_deref(), Some(source));
         keys(cx, "tab enter");
         assert_eq!(clipboard(cx).as_deref(), Some("after"));
@@ -4862,7 +4917,7 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-l f6 escape");
+        cx.simulate_keystrokes("secondary-shift-l f6 escape");
         view.read_with(cx, |v, _cx| {
             assert!(!v.presentation.current.customization.is_open())
         });
@@ -4887,9 +4942,9 @@ mod tests {
         wait_until(cx, &view, |v, cx| {
             v.state.read(cx).conversations()[&1].rows.len() == 120
         });
-        cx.simulate_keystrokes("ctrl-shift-t home");
+        cx.simulate_keystrokes("secondary-shift-t home");
         click(cx, "conversation");
-        cx.simulate_keystrokes("ctrl-shift-c");
+        cx.simulate_keystrokes("secondary-shift-c");
         let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert_eq!(text.as_deref(), Some("Question 0"));
         cx.simulate_keystrokes("escape");
@@ -4897,7 +4952,7 @@ mod tests {
         view.read_with(cx, |v, cx| {
             assert_eq!(v.composer.read(cx).value(), "exit kept the draft")
         });
-        cx.simulate_keystrokes("ctrl-shift-t home");
+        cx.simulate_keystrokes("secondary-shift-t home");
         let over = cx.debug_bounds("conversation").unwrap().center();
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: over,
@@ -4929,7 +4984,7 @@ mod tests {
             v.state.read(cx).conversations()[&1].rows.len() == 30
         });
         cx.simulate_resize(size(px(1000.), px(500.)));
-        cx.simulate_keystrokes("ctrl-shift-t home down");
+        cx.simulate_keystrokes("secondary-shift-t home down");
         let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v));
         cx.simulate_keystrokes("down");
         view.read_with(cx, |v, _cx| assert_ne!(keyboard_scroll_top(v), top));
@@ -4959,7 +5014,7 @@ mod tests {
         });
         cx.run_until_parked();
         let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v));
-        cx.simulate_keystrokes("ctrl-shift-t");
+        cx.simulate_keystrokes("secondary-shift-t");
         view.read_with(cx, |v, _cx| assert_eq!(keyboard_scroll_top(v), top));
         assert!(cx.debug_bounds("jump-to-latest").is_none());
         cx.simulate_keystrokes("home");
@@ -4977,14 +5032,14 @@ mod tests {
         wait_until(cx, &view, |v, cx| {
             v.state.read(cx).conversations()[&1].rows.len() == 120
         });
-        cx.simulate_keystrokes("ctrl-shift-t home down ctrl-l");
+        cx.simulate_keystrokes("secondary-shift-t home down secondary-l");
         send_text(&view, cx, "hello");
         wait_until(cx, &view, |v, cx| {
             !v.state.read(cx).conversations()[&1].running
                 && reply_with(v, "You wrote: hello", cx).is_some()
         });
         let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v));
-        cx.simulate_keystrokes("ctrl-shift-t");
+        cx.simulate_keystrokes("secondary-shift-t");
         view.read_with(cx, |v, _cx| {
             assert!(!v.presentation.current.views.scrolled_up(MAIN_1));
             assert_eq!(keyboard_scroll_top(v), top);
@@ -5015,7 +5070,7 @@ mod tests {
             v.commit(1, cx);
             cx.notify();
         });
-        cx.simulate_keystrokes("ctrl-shift-t end");
+        cx.simulate_keystrokes("secondary-shift-t end");
         assert!(cx.debug_bounds("transcript-keyboard-row-1").is_some());
         view.update(cx, |v, cx| {
             v.state.update(cx, |state, _| {
@@ -5031,7 +5086,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("transcript-keyboard-row-0").is_some());
-        cx.simulate_keystrokes("ctrl-shift-t ctrl-shift-c");
+        cx.simulate_keystrokes("secondary-shift-t secondary-shift-c");
         let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert_eq!(text.as_deref(), Some("visible user row"));
     }
@@ -6350,7 +6405,7 @@ mod tests {
         assert_eq!(second(cx), first_row);
 
         cx.update(|_, cx| TextInput::bind_keys(cx));
-        cx.simulate_keystrokes("ctrl-a backspace");
+        cx.simulate_keystrokes("secondary-a backspace");
         cx.run_until_parked();
         assert_eq!(second(cx), second_row);
 
@@ -6646,7 +6701,7 @@ mod tests {
             );
         });
         drop(writer);
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         assert_eq!(
             setting_of_reply(&view, cx, "You wrote: hello"),
             "never / dangerFullAccess"
@@ -6914,7 +6969,7 @@ mod tests {
             view.composer
                 .update(cx, |input, cx| input.set_value("blocked".into(), cx))
         });
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         view.read_with(cx, |view, cx| {
             assert_eq!(view.composer.read(cx).value(), "blocked", "not sent");
         });
@@ -6938,7 +6993,7 @@ mod tests {
                 })
             );
         });
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         assert_eq!(
             setting_of_reply(&view, cx, "You wrote: blocked"),
             "never / dangerFullAccess"
@@ -7354,13 +7409,13 @@ mod tests {
                 .update(cx, |input, cx| input.set_value("hello".into(), cx));
             view.composer.focus_handle(cx).focus(window, cx);
         });
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         cx.run_until_parked();
         assert!(saved_session(&path).started(), "the message went");
         assert_eq!(view.read_with(cx, |view, _cx| view.model_menu), None);
         assert!(cx.debug_bounds("provider-claude").is_none());
 
-        cx.simulate_keystrokes("ctrl-shift-n");
+        cx.simulate_keystrokes("secondary-shift-n");
         cx.run_until_parked();
         assert_eq!(
             view.read_with(cx, |view, cx| view
@@ -7572,7 +7627,7 @@ mod tests {
 
         // The shortcut sends too. A command waits for approval.
         cx.simulate_input("please run it");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         wait_until(cx, &view, |view, cx| {
             !view.state.read(cx).conversations()[&1].approvals.is_empty()
         });
@@ -7687,7 +7742,7 @@ mod tests {
 
         // A command waits for approval.
         cx.simulate_input("please run it");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         wait_until(cx, &view, |view, cx| {
             !view.state.read(cx).conversations()[&1].approvals.is_empty()
         });
@@ -7704,7 +7759,7 @@ mod tests {
 
         // Stop ends a long reply and keeps what streamed.
         cx.simulate_input("a long one");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         wait_until(cx, &view, |view, cx| {
             view.state.read(cx).conversations()[&1]
                 .rows
@@ -7791,7 +7846,7 @@ mod tests {
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         cx.simulate_input("hello");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         // The failure arrives from the connection's worker, after the send returned.
         wait_until(cx, &view, |view, cx| {
             view.state
@@ -7867,7 +7922,7 @@ mod tests {
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         cx.simulate_input("a long one");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         wait_until(cx, &view, |view, cx| {
             view.state.read(cx).conversations()[&1]
                 .rows
@@ -7878,7 +7933,7 @@ mod tests {
                 })
         });
         cx.simulate_input("change course");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-enter");
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(300));
         cx.run_until_parked();
@@ -8413,7 +8468,7 @@ mod tests {
         click(cx, "sidebar-toggle");
         assert_eq!(toggle_x(cx), px(8.));
 
-        cx.simulate_keystrokes("ctrl-f");
+        cx.simulate_keystrokes("secondary-f");
         assert_eq!(toggle_x(cx), px(8.));
         assert!(cx.debug_bounds("search-field").is_some());
         view.update_in(cx, |this, window, cx| {
@@ -9595,7 +9650,7 @@ mod tests {
                 "first line\nsecond line".into(),
             ));
         });
-        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("secondary-v");
         cx.run_until_parked();
         let bounds = cx.debug_bounds("session-2").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -9645,7 +9700,7 @@ mod tests {
     }
 
     fn run_from_palette(cx: &mut gpui::VisualTestContext, query: &str) {
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         assert!(cx.debug_bounds("palette").is_some(), "the palette opens");
         cx.simulate_input(query);
@@ -9684,12 +9739,12 @@ mod tests {
     fn palette_escape_restores_focus(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        cx.simulate_keystrokes("ctrl-l");
+        cx.simulate_keystrokes("secondary-l");
         cx.simulate_input("half a thought");
         cx.run_until_parked();
         assert!(composer_focused(&view, cx));
 
-        for open in ["ctrl-k", "ctrl-shift-p"] {
+        for open in ["secondary-k", "secondary-shift-p"] {
             cx.simulate_keystrokes(open);
             cx.run_until_parked();
             assert!(palette_open(&view, cx), "{open} opens the palette");
@@ -9721,10 +9776,10 @@ mod tests {
                 view.presentation.current.customization.is_open()
             })
         };
-        cx.simulate_keystrokes("ctrl-shift-l");
+        cx.simulate_keystrokes("secondary-shift-l");
         cx.run_until_parked();
         assert!(customizing(&view, cx));
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         assert!(palette_open(&view, cx));
         cx.simulate_keystrokes("escape");
@@ -9740,7 +9795,7 @@ mod tests {
         cx.simulate_keystrokes("f2");
         cx.run_until_parked();
         assert!(view.read_with(cx, |view, _cx| view.renaming.is_some()));
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         assert!(
             !palette_open(&view, cx),
@@ -9751,7 +9806,7 @@ mod tests {
 
         pick_mode(cx, ApprovalMode::FullAccess);
         assert!(asking(&view, cx));
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         assert!(
             !palette_open(&view, cx),
@@ -9767,7 +9822,7 @@ mod tests {
         run_from_palette(cx, "toggle sidebar");
         assert!(!palette_open(&view, cx));
         assert!(cx.debug_bounds("session-1").is_none(), "the sidebar hides");
-        cx.simulate_keystrokes("ctrl-b");
+        cx.simulate_keystrokes("secondary-b");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("session-1").is_some(),
@@ -9799,7 +9854,7 @@ mod tests {
         );
         assert!(cx.debug_bounds("conversation").is_some());
         assert_eq!(saved_files_views(&view, cx), Some(1), "the layout is saved");
-        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.simulate_keystrokes("secondary-shift-e");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("files-tree-row-1").is_none(),
@@ -9813,7 +9868,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "").unwrap();
         let (_view, cx) = open_with_session(dir.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-e");
+        cx.simulate_keystrokes("secondary-shift-e");
         cx.run_until_parked();
         assert!(cx.debug_bounds("files-tab-0").is_some(), "a lone Files tab");
         assert!(cx.debug_bounds("surface-add-files").is_none());
@@ -9869,14 +9924,14 @@ mod tests {
     fn palette_keeps_app_shortcuts_inert(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        cx.simulate_keystrokes("ctrl-l");
+        cx.simulate_keystrokes("secondary-l");
         cx.simulate_input("half a thought");
         cx.run_until_parked();
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
-        cx.simulate_keystrokes("ctrl-n");
-        cx.simulate_keystrokes("ctrl-l");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes("secondary-n");
+        cx.simulate_keystrokes("secondary-l");
+        cx.simulate_keystrokes("secondary-enter");
         cx.simulate_input("tog");
         cx.run_until_parked();
         assert!(palette_open(&view, cx));
@@ -9896,7 +9951,7 @@ mod tests {
     fn palette_tab_moves_the_highlight(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
         let highlighted = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
             view.read_with(cx, |view, cx| {
@@ -9926,11 +9981,11 @@ mod tests {
     fn palette_keeps_customize_shortcuts_inert(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
-        cx.simulate_keystrokes("ctrl-shift-l");
+        cx.simulate_keystrokes("secondary-shift-l");
         cx.run_until_parked();
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.run_until_parked();
-        cx.simulate_keystrokes("ctrl-s");
+        cx.simulate_keystrokes("secondary-s");
         cx.run_until_parked();
         assert!(palette_open(&view, cx));
         assert!(
@@ -9979,7 +10034,7 @@ mod tests {
                 state.test_conversations_mut().insert(1, live)
             });
         });
-        cx.simulate_keystrokes("ctrl-shift-s");
+        cx.simulate_keystrokes("secondary-shift-s");
         cx.run_until_parked();
         assert_eq!(settled(&view, cx), (false, false));
     }
@@ -10015,7 +10070,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (view, cx) = open_with_session(dir.path(), cx);
         await_approval(&view, cx);
-        cx.simulate_keystrokes("ctrl-shift-s");
+        cx.simulate_keystrokes("secondary-shift-s");
         cx.run_until_parked();
         assert_eq!(settled(&view, cx), (false, false));
         assert!(view.read_with(cx, |view, _cx| view.error.is_some()));
@@ -10030,7 +10085,7 @@ mod tests {
                     .clear()
             })
         });
-        cx.simulate_keystrokes("ctrl-shift-s");
+        cx.simulate_keystrokes("secondary-shift-s");
         cx.run_until_parked();
         assert_eq!(
             settled(&view, cx),
@@ -10211,7 +10266,7 @@ mod tests {
             )
         });
         view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));
-        cx.simulate_keystrokes("ctrl-shift-enter");
+        cx.simulate_keystrokes("secondary-shift-enter");
         cx.run_until_parked();
         assert!(composer_focused(&view, cx));
         view.read_with(cx, |view, cx| {
@@ -10291,12 +10346,12 @@ fn bind_keys(cx: &mut App) {
             Some("Recovery && !Dialog && !CommandPalette"),
         ),
         gpui::KeyBinding::new(
-            "ctrl-enter",
+            "secondary-enter",
             SendMessage,
             Some("!Dialog && !CommandPalette"),
         ),
-        gpui::KeyBinding::new("ctrl-k", OpenPalette, Some("!Dialog")),
-        gpui::KeyBinding::new("ctrl-shift-p", OpenPalette, Some("!Dialog")),
+        gpui::KeyBinding::new("secondary-k", OpenPalette, Some("!Dialog")),
+        gpui::KeyBinding::new("secondary-shift-p", OpenPalette, Some("!Dialog")),
         // Tab would otherwise type into the palette's single-line query.
         gpui::KeyBinding::new("tab", keystone_ui::text_input::Down, Some("CommandPalette")),
         gpui::KeyBinding::new(
@@ -10313,14 +10368,12 @@ fn state_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("KEYSTONE_STATE_PATH") {
         return Ok(path.into());
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .ok_or("Set KEYSTONE_STATE_PATH or HOME to select a state location")?;
-    Ok(base.join("keystone/workspace.json"))
+    Ok(platform::data_dir()?.join("workspace.json"))
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    platform::adopt_login_environment();
     let path = state_path().unwrap_or_else(|error| {
         eprintln!("Cannot locate Keystone workspace: {error}");
         std::process::exit(1);
@@ -10371,32 +10424,40 @@ fn main() {
             std::process::exit(1);
         }
     };
-    gpui_platform::application()
+    let application = gpui_platform::application()
         .with_quit_mode(gpui::QuitMode::Explicit)
-        .with_assets(keystone_ui::Icons)
-        .run(move |cx: &mut App| {
-            keystone_ui::init(cx);
-            bind_keys(cx);
-            let state = install_app_state(store, cx);
-            let fixture = std::env::var_os("KEYSTONE_VISUAL_FIXTURE").is_some();
-            let saved = state.read(cx).store().workspace().preferences().windows();
-            let mut opened = 0;
-            for (id, placement) in saved {
-                match windows::open(state.clone(), id, placement, true, fixture, cx) {
-                    Ok(()) => opened += 1,
-                    Err(error) => eprintln!("Could not open a Keystone window: {error}"),
-                }
+        .with_assets(keystone_ui::Icons);
+    application.on_reopen(reopen_from_dock);
+    application.run(move |cx: &mut App| {
+        keystone_ui::init(cx);
+        bind_keys(cx);
+        platform::install_menus(cx);
+        let state = install_app_state(store, cx);
+        cx.on_app_quit(|cx| {
+            save_on_system_quit(cx);
+            async {}
+        })
+        .detach();
+        let fixture = std::env::var_os("KEYSTONE_VISUAL_FIXTURE").is_some();
+        let saved = state.read(cx).store().workspace().preferences().windows();
+        let mut opened = 0;
+        for (id, placement) in saved {
+            match windows::open(state.clone(), id, placement, true, fixture, cx) {
+                Ok(()) => opened += 1,
+                Err(error) => eprintln!("Could not open a Keystone window: {error}"),
             }
-            if opened == 0 {
-                eprintln!("Cannot open any Keystone window");
-                std::process::exit(1);
-            }
-            if let Err(error) = quick::listen(&socket, cx) {
-                eprintln!("{} will not reach this app: {error}", quick::FLAG);
-            }
-            if quick {
-                quick::open(cx);
-            }
-            cx.activate(true);
-        });
+        }
+        if opened == 0 {
+            eprintln!("Cannot open any Keystone window");
+            std::process::exit(1);
+        }
+        if let Err(error) = quick::listen(&socket, cx) {
+            eprintln!("{} will not reach this app: {error}", quick::FLAG);
+        }
+        if quick {
+            quick::open(cx);
+        }
+        keystone_ui::automation::serve_inbox(cx);
+        cx.activate(true);
+    });
 }

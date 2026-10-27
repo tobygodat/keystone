@@ -19,6 +19,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 
 [features]
 ui-tests = ["gpui/test-support"]
+# Lets the automation inbox save a window's rendered frame, for verification on macOS.
+capture = ["gpui/test-support"]
 
 [[test]]
 name = "components"
@@ -27,6 +29,11 @@ required-features = ["ui-tests"]
 [[test]]
 name = "diagrams"
 required-features = ["ui-tests"]
+
+# The gallery draws text and builds on macOS for the reasons keystone-desktop's
+# manifest gives.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0", features = ["font-kit", "runtime_shaders"] }
 
 [dev-dependencies]
 resvg = "0.46"
