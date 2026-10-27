@@ -13,6 +13,7 @@ use crate::projects::{ChangeProjectColor, OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
 use crate::pull_request::TogglePullRequest;
 use crate::quick::OpenQuickComposer;
+use crate::screenshot::CaptureScreenshot;
 use crate::second_opinion::AskSecondOpinion;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
 use crate::transcript_keyboard::*;
@@ -128,6 +129,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-alt-i"],
         context: Some(APP),
         action: || Box::new(ImportSessions),
+    },
+    Command {
+        id: "capture-screenshot",
+        label: "Capture screenshot",
+        keys: &["ctrl-alt-s"],
+        context: Some(APP),
+        action: || Box::new(CaptureScreenshot),
     },
     Command {
         id: "rename-session",
@@ -495,6 +503,7 @@ impl Keystone {
         self.new_menu = false;
         self.filter_menu = false;
         self.approval_menu = false;
+        self.attach.menu = false;
         self.model_menu = None;
         self.open_palette(palette_items(), Listing::Commands, window, cx);
     }

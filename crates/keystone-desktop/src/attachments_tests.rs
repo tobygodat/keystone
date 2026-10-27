@@ -239,7 +239,9 @@ fn picked_files_attach_images_and_mention_others_and_codex_reads_the_copy(cx: &m
     std::fs::write(&notes, "notes").unwrap();
     std::fs::write(dir.path().join("other.png"), PNG).unwrap();
     click(cx, "attach");
+    click(cx, "attach-files");
     assert!(cx.did_prompt_for_paths());
+    assert!(cx.debug_bounds("attach-files").is_none(), "the menu closed");
     let picked = vec![shot.clone(), notes, dir.path().join("other.png")];
     cx.simulate_path_prompt_response(|options| {
         assert!(options.files && options.multiple && !options.directories);
@@ -272,6 +274,94 @@ fn picked_files_attach_images_and_mention_others_and_codex_reads_the_copy(cx: &m
     assert_eq!(receipt[0]["path"], copy.to_str().unwrap());
     assert_eq!(receipt[0]["exists"], true);
     assert_eq!(receipt[0]["sha256"], sha256(JPEG));
+}
+
+/// The attach menu's Capture screenshot runs the capture tool and attaches what it
+/// wrote like a pasted image, which Claude receives. A failed capture says so under
+/// the draft and a cancelled one leaves the draft as it was.
+#[gpui::test]
+fn a_captured_screenshot_is_attached_and_a_cancelled_one_changes_nothing(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(Provider::Claude, cx);
+    let (fixture, runs) = (dir.path().join("shot.png"), dir.path().join("runs"));
+    std::fs::write(&fixture, PNG).unwrap();
+    let script = dir.path().join("capture");
+    let capture_with = |body: &str, view: &Entity<Keystone>, cx: &mut VisualTestContext| {
+        std::fs::write(
+            &script,
+            format!("echo run >> '{}'\n{body}\n", runs.display()),
+        )
+        .unwrap();
+        let command = vec!["/bin/sh".into(), script.to_str().unwrap().to_owned()];
+        view.update(cx, |view, _| view.attach.screenshot_command = Some(command));
+    };
+    let idle =
+        |view: &Keystone, _: &App| !view.attach.capturing && view.attach.importing.is_empty();
+    let capture_from_menu = |cx: &mut VisualTestContext| {
+        click(cx, "attach");
+        click(cx, "capture-screenshot");
+        assert!(
+            cx.debug_bounds("capture-screenshot").is_none(),
+            "the menu closed"
+        );
+    };
+
+    cx.simulate_input("Look");
+    click(cx, "attach");
+    assert!(cx.debug_bounds("capture-screenshot").is_some());
+    cx.simulate_keystrokes("escape");
+    assert!(
+        cx.debug_bounds("capture-screenshot").is_none(),
+        "Escape closes the menu"
+    );
+    assert_eq!(draft(&view, cx), "Look");
+
+    capture_with("echo 'no screen' >&2; exit 1", &view, cx);
+    cx.simulate_keystrokes("ctrl-alt-s");
+    wait(cx, &view, idle);
+    assert!(attached(&view, cx).is_empty());
+    assert_eq!(
+        notice(&view, cx).as_deref(),
+        Some("Screenshot failed. no screen")
+    );
+    assert!(cx.debug_bounds("attachment-notice").is_some());
+
+    capture_with(&format!("cp '{}' \"$1\"", fixture.display()), &view, cx);
+    capture_from_menu(cx);
+    wait(cx, &view, |view, cx| view.draft_attachments(cx).len() == 1);
+    let image = attached(&view, cx).remove(0);
+    assert_eq!(image.name, "Screenshot.png");
+    assert_eq!(image.sha256, sha256(PNG));
+    assert_eq!(saved(&view, cx), std::slice::from_ref(&image));
+    assert_eq!(notice(&view, cx), None);
+    assert!(cx.debug_bounds("attachment-0").is_some());
+
+    capture_with("exit 0", &view, cx);
+    capture_from_menu(cx);
+    wait(cx, &view, idle);
+    assert_eq!(attached(&view, cx), [image.clone()], "cancelled");
+    assert_eq!(notice(&view, cx), None);
+    assert_eq!(draft(&view, cx), "Look");
+
+    assert_eq!(
+        std::fs::read_to_string(&runs).unwrap(),
+        "run\nrun\nrun\n",
+        "one run per capture"
+    );
+    view.update(cx, |view, _| view.attach.capturing = true);
+    cx.simulate_keystrokes("ctrl-alt-s");
+    view.update(cx, |view, _| view.attach.capturing = false);
+    assert_eq!(
+        std::fs::read_to_string(&runs).unwrap(),
+        "run\nrun\nrun\n",
+        "no capture starts while one is being picked"
+    );
+
+    cx.simulate_keystrokes("ctrl-enter");
+    wait(cx, &view, |view, cx| reply(view, cx).is_some());
+    let receipt = receipt(dir.path());
+    assert_eq!(receipt.len(), 1);
+    assert_eq!(receipt[0]["media_type"], "image/png");
+    assert_eq!(receipt[0]["sha256"], sha256(PNG));
 }
 
 /// Where no picker is available, a typed path attaches the file: relative to the

@@ -112,6 +112,7 @@ impl Keystone {
         self.new_menu = false;
         self.filter_menu = false;
         self.approval_menu = false;
+        self.attach.menu = false;
         self.model_menu = None;
         let workspace = self.state.read(cx).store().workspace();
         let chosen = workspace
@@ -365,6 +366,7 @@ impl Keystone {
         self.new_menu = false;
         self.filter_menu = false;
         self.approval_menu = false;
+        self.attach.menu = false;
         self.model_menu = None;
         let restore = self
             .projects

@@ -26,6 +26,7 @@ mod pull_request;
 mod quick;
 mod relative_time;
 mod reveal;
+mod screenshot;
 mod second_opinion;
 mod session_tabs;
 mod settings;
@@ -1112,6 +1113,7 @@ impl Keystone {
         if self.selected(cx) != previous {
             self.presentation.selection_changed();
             self.approval_menu = false;
+            self.attach.menu = false;
             self.confirm_full_access = None;
         }
         self.new_menu = false;
@@ -1233,6 +1235,7 @@ impl Keystone {
         if self.selected(cx) != previous {
             self.presentation.selection_changed();
             self.approval_menu = false;
+            self.attach.menu = false;
             self.model_menu = None;
             self.confirm_full_access = None;
         }
@@ -1800,17 +1803,7 @@ impl Keystone {
                         h_flex()
                             .flex_none()
                             .gap(px(6.))
-                            .child(
-                                Button::new("attach", "")
-                                    .style(ButtonStyle::Ghost)
-                                    .icon(IconName::Paperclip)
-                                    .aria_label("Attach files")
-                                    .debug_selector(|| "attach".into())
-                                    .tooltip(Tooltip::with_key("Attach files", "Ctrl+Shift+U"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.choose_attachments(window, cx)
-                                    })),
-                            )
+                            .child(self.attach_menu(cx))
                             .when(running, |d| {
                                 d.child(
                                     Button::new("stop", "Stop")
@@ -3558,12 +3551,14 @@ impl Render for Keystone {
                     } else if this.new_menu
                         || this.filter_menu
                         || this.approval_menu
+                        || this.attach.menu
                         || this.model_menu.is_some()
                         || this.presentation.current.arrangement.surface_menu.is_some()
                     {
                         this.new_menu = false;
                         this.filter_menu = false;
                         this.approval_menu = false;
+                        this.attach.menu = false;
                         this.model_menu = None;
                         this.presentation.current.arrangement.surface_menu = None;
                         this.refresh(cx);
@@ -3808,6 +3803,12 @@ impl Render for Keystone {
                 cx,
                 |this, _: &attachments::AttachFiles, window, cx| {
                     this.choose_attachments(window, cx)
+                },
+            ))
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &screenshot::CaptureScreenshot, window, cx| {
+                    this.capture_screenshot(window, cx)
                 },
             ))
             .on_action(

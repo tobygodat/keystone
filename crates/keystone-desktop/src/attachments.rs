@@ -5,9 +5,9 @@
 //! reads it with its own tools. See [`keystone_core::attachment`] for the size limit
 //! and how long copies are kept.
 
-use crate::{Keystone, mentions};
+use crate::{Keystone, mentions, screenshot};
 use gpui::{
-    AnyElement, App, ClipboardEntry, Context, ElementId, Entity, ExternalPaths, Focusable,
+    Anchor, AnyElement, App, ClipboardEntry, Context, ElementId, Entity, ExternalPaths, Focusable,
     SharedString, Window, div, prelude::*, px,
 };
 use keystone_core::Attachment;
@@ -26,6 +26,12 @@ pub(crate) struct Attach {
     /// Attachments still being copied, by session. That session's Send is blocked until
     /// they land, so a message never goes without an image attached just before it.
     pub(crate) importing: std::collections::HashMap<u64, usize>,
+    /// The attach button's menu is open.
+    pub(crate) menu: bool,
+    /// A screenshot is being picked, so another capture waits for it.
+    pub(crate) capturing: bool,
+    /// Run in place of the platform's screenshot tool; see [`screenshot::test_command`].
+    pub(crate) screenshot_command: Option<Vec<String>>,
 }
 
 impl Attach {
@@ -35,6 +41,9 @@ impl Attach {
             path_open: false,
             notice: None,
             importing: Default::default(),
+            menu: false,
+            capturing: false,
+            screenshot_command: screenshot::test_command(),
         }
     }
 }
@@ -66,6 +75,16 @@ impl Keystone {
 
     fn start_import(&mut self, session: u64, cx: &mut Context<Self>) {
         *self.attach.importing.entry(session).or_default() += 1;
+        cx.notify();
+    }
+
+    fn end_import(&mut self, session: u64, cx: &mut Context<Self>) {
+        if let Some(count) = self.attach.importing.get_mut(&session) {
+            *count -= 1;
+            if *count == 0 {
+                self.attach.importing.remove(&session);
+            }
+        }
         cx.notify();
     }
 
@@ -200,12 +219,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(count) = self.attach.importing.get_mut(&session) {
-            *count -= 1;
-            if *count == 0 {
-                self.attach.importing.remove(&session);
-            }
-        }
+        self.end_import(session, cx);
         let root = self.session_root(session, cx);
         let (mut images, mut mentions, mut refused) = (Vec::new(), Vec::new(), Vec::new());
         for attached in attached {
@@ -299,9 +313,44 @@ impl Keystone {
         true
     }
 
+    /// "Capture screenshot": the user picks a region with the platform's tool and it is
+    /// attached to the draft like a pasted image. Cancelling leaves the draft as it was;
+    /// with no tool the notice says what to install.
+    pub(crate) fn capture_screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attach.menu = false;
+        let Some(session) = self.selected(cx) else {
+            return;
+        };
+        if self.attach.capturing {
+            return;
+        }
+        self.attach.capturing = true;
+        let attachments = self.state.read(cx).attachments.clone();
+        let command = self.attach.screenshot_command.clone();
+        self.start_import(session, cx);
+        let task = cx.background_spawn(async move { screenshot::take(&attachments, command) });
+        cx.spawn_in(window, async move |this, cx| {
+            let taken = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.attach.capturing = false;
+                match taken {
+                    None => this.end_import(session, cx),
+                    Some(taken) => this.finish_attach(
+                        session,
+                        vec![taken.map_or_else(Attached::Refused, Attached::Image)],
+                        window,
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The attach button and Ctrl+Shift+U: the platform's file picker, or where it has
     /// none, a field for a typed path.
     pub(crate) fn choose_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attach.menu = false;
         let Some(session) = self.selected(cx) else {
             return;
         };
@@ -370,6 +419,42 @@ impl Keystone {
         self.attach_paths(vec![path], window, cx);
         self.focus_composer(window, cx);
         cx.notify();
+    }
+
+    /// The paperclip and its menu: attach files, or capture a screenshot.
+    pub(crate) fn attach_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        PopoverMenu::new(
+            "attach-menu",
+            Button::new("attach", "")
+                .style(ButtonStyle::Ghost)
+                .icon(IconName::Paperclip)
+                .aria_label("Attach")
+                .selected(self.attach.menu)
+                .debug_selector(|| "attach".into())
+                .tooltip(Tooltip::text("Attach")),
+        )
+        .anchor(Anchor::BottomRight)
+        .open(self.attach.menu)
+        .on_open_change(self.scoped_listener(cx, |this, open: &bool, _, cx| {
+            this.attach.menu = *open;
+            cx.notify();
+        }))
+        .child(
+            MenuItem::new("attach-files", "Attach files…")
+                .kbd("Ctrl+Shift+U")
+                .debug_selector(|| "attach-files".into())
+                .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                    this.choose_attachments(window, cx)
+                })),
+        )
+        .child(
+            MenuItem::new("capture-screenshot", "Capture screenshot")
+                .kbd("Ctrl+Alt+S")
+                .debug_selector(|| "capture-screenshot".into())
+                .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                    this.capture_screenshot(window, cx)
+                })),
+        )
     }
 
     /// The chips, the typed-path field and any refusal, under the draft.

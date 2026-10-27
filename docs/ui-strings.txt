@@ -574,7 +574,11 @@ crates/keystone-desktop/src/arrangement_editor.rs
 
 crates/keystone-desktop/src/attachments.rs
 	Attach
+	Attach files…
 	Attachment not saved. {error}
+	Capture screenshot
+	Ctrl+Alt+S
+	Ctrl+Shift+U
 	Image.{}
 	Path to a file
 	Remove
@@ -650,6 +654,7 @@ crates/keystone-desktop/src/changes.rs
 
 crates/keystone-desktop/src/commands.rs
 	Attach files…
+	Capture screenshot
 	Change project color…
 	Close tab
 	Close window
@@ -925,7 +930,6 @@ crates/keystone-desktop/src/main.rs
 	Approval mode
 	Approval mode not saved. {error}
 	Approval mode · {}
-	Attach files
 	Cannot save this project's layout. {error}
 	Checking…
 	Claude Code
@@ -940,7 +944,6 @@ crates/keystone-desktop/src/main.rs
 	Ctrl+Shift+Enter
 	Ctrl+Shift+N
 	Ctrl+Shift+R
-	Ctrl+Shift+U
 	Ctrl+Shift+W
 	Deny
 	Draft not saved. {error}
@@ -1154,6 +1157,14 @@ crates/keystone-desktop/src/relative_time.rs
 	Wed
 	{} {day}
 	{} {time}
+
+crates/keystone-desktop/src/screenshot.rs
+	Check Keystone's Screen Recording permission in System Settings.
+	Install grim and slurp.
+	Screenshot failed.
+	Screenshot failed. {detail}
+	Screenshots need a compositor like Sway or Hyprland.
+	could not create image
 
 crates/keystone-desktop/src/second_opinion.rs
 	Ctrl+Alt+O

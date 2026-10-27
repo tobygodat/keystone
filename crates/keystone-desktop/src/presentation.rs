@@ -354,6 +354,7 @@ impl Keystone {
         self.settings = None;
         self.drop_import(cx);
         self.approval_menu = false;
+        self.attach.menu = false;
         self.confirm_full_access = None;
         if !self
             .worktree_dialog

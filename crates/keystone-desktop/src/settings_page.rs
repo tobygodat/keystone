@@ -172,6 +172,7 @@ impl Keystone {
         self.new_menu = false;
         self.filter_menu = false;
         self.approval_menu = false;
+        self.attach.menu = false;
         self.model_menu = None;
         self.presentation.current.arrangement.surface_menu = None;
         let page = SettingsPage::new(cx);
