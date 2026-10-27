@@ -11,6 +11,7 @@ mod customization_agent;
 mod files;
 mod fork;
 mod handoff;
+mod import;
 mod integrations;
 mod limit;
 mod mentions;
@@ -322,7 +323,10 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
     if others == 0 {
         state.update(cx, |state, _| state.quit_when_idle = true);
     }
-    view.update(cx, |view, _| view.customize_agent = None);
+    view.update(cx, |view, cx| {
+        view.customize_agent = None;
+        view.drop_import(cx);
+    });
     cx.global_mut::<DesktopApp>()
         .windows
         .retain(|w| w.upgrade().is_some_and(|w| w != view));
@@ -471,6 +475,7 @@ struct Keystone {
     /// The open project list.
     projects: Option<projects::ProjectList>,
     prompt_list: Option<prompts::PromptList>,
+    import_list: Option<import::ImportList>,
     files: files::Files,
     changes: changes::Changes,
     notes: notes::Notes,
@@ -512,6 +517,14 @@ impl Keystone {
                     }
                 }
             }
+        }
+        if self.import_list.is_some() {
+            let (handle, this) = (self.handle, cx.weak_entity());
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = this.update(cx, |this, cx| this.poll_import(window, cx));
+                });
+            });
         }
         self.agent_changed_files(&changed.files, cx);
         for (folder, text) in &changed.commit_drafts {
@@ -851,6 +864,7 @@ impl Keystone {
             palette: None,
             projects: None,
             prompt_list: None,
+            import_list: None,
             files: files::Files::default(),
             changes: changes::Changes::default(),
             notes: notes::Notes::default(),
@@ -1668,6 +1682,14 @@ impl Keystone {
                     self.scoped_listener(cx, |this, _, window, cx| {
                         this.open_new_worktree(window, cx)
                     }),
+                ),
+        )
+        .child(
+            MenuItem::new("import-sessions", "Import…")
+                .kbd("Ctrl+Alt+I")
+                .debug_selector(|| "import-sessions".into())
+                .on_click(
+                    self.scoped_listener(cx, |this, _, window, cx| this.open_import(window, cx)),
                 ),
         )
     }
@@ -3793,6 +3815,11 @@ impl Render for Keystone {
                 }),
             )
             .on_action(
+                self.scoped_listener(cx, |this, _: &import::ImportSessions, window, cx| {
+                    this.open_import(window, cx)
+                }),
+            )
+            .on_action(
                 self.scoped_listener(cx, |this, _: &prompts::InsertPrompt, window, cx| {
                     this.open_prompt_list(window, cx)
                 }),
@@ -3864,6 +3891,7 @@ impl Render for Keystone {
             .children(self.palette_overlay(cx))
             .children(self.projects_overlay(cx))
             .children(self.prompt_list_overlay(cx))
+            .children(self.import_overlay(cx))
             .children(self.context_menu_overlay(cx))
             .children(self.preview.as_ref().map(preview::Open::overlay));
         let root = self.settings_yields_to_workspace(root, cx);
@@ -9523,6 +9551,11 @@ mod tests {
     mod second_opinion {
         use super::*;
         include!("second_opinion_tests.rs");
+    }
+
+    mod import {
+        use super::*;
+        include!("import_tests.rs");
     }
 
     fn open_with_session<'a>(

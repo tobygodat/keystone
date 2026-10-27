@@ -156,6 +156,12 @@ pub enum Event {
         ticket: u64,
         result: Result<crate::recovery::Snapshot, String>,
     },
+    /// The conversations a Codex account has for a folder, asked for by `ticket`
+    /// ([`crate::CodexConnection::list_threads`]). Never a live event.
+    ThreadsListed {
+        ticket: u64,
+        result: Result<Vec<crate::import::Listed>, String>,
+    },
     /// The provider process exited during a turn, so its store may hold more than
     /// streamed. Arrives in the same batch as the turn's end; act on it once the
     /// whole batch is applied.

@@ -474,6 +474,14 @@ pub fn row(
             .size(TextSize::Ui)
             .color(Color::Muted)
             .into_any_element(),
+        Row::OlderNotImported => div()
+            .automation_id(format!("older-not-imported-{index}"))
+            .child(
+                Label::new("Older messages weren't imported.")
+                    .size(TextSize::Ui)
+                    .color(Color::Muted),
+            )
+            .into_any_element(),
     }
 }
 

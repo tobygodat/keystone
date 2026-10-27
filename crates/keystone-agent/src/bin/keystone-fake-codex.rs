@@ -35,8 +35,15 @@
 //! it starts, each completed item, and its end. `KEYSTONE_FAKE_CODEX_NO_TURNS_LIST=1`
 //! answers `thread/turns/list` as an unknown method, like an older Codex: -32600, which
 //! is what the real app-server sends for a method it does not know.
+//! `thread/list` lists the stored threads whose file also holds a `thread` record
+//! (`name`, `preview`, `cwd`, `createdAt`, `updatedAt`) whose `cwd` the filter names.
+//! `thread/turns/list` with `itemsView: "notLoaded"` leaves each turn's items out, and
+//! names a `nextCursor` when turns are left past `limit`.
 //! `KEYSTONE_FAKE_CODEX_METHOD_LOG` names a file that gets every method received, one
-//! per line. A prompt containing "crash" records its whole reply as completed after
+//! per line.
+//! `KEYSTONE_FAKE_CODEX_THREAD_LOG` names a file that gets each request naming a
+//! `threadId` as `<method> <threadId>`, one per line. A prompt containing "crash"
+//! records its whole reply as completed after
 //! the first streamed word, then exits, as a Codex that dies mid-stream after saving.
 //!
 //! A thread started with a `show_ui` entry in `dynamicTools` calls it through
@@ -221,6 +228,38 @@ fn stored_turns(thread: &str) -> Option<Vec<Value>> {
     stored["turns"].as_array().cloned()
 }
 
+/// The stored threads `thread/list` returns: those whose file has a `thread` record
+/// whose `cwd` the `cwd` filter names, most recently updated first, up to `limit`.
+fn listed_threads(params: &Value) -> Vec<Value> {
+    let Some(dir) = thread_file("x").and_then(|file| file.parent().map(ToOwned::to_owned)) else {
+        return Vec::new();
+    };
+    let cwds: Vec<&str> = match &params["cwd"] {
+        Value::String(cwd) => vec![cwd.as_str()],
+        Value::Array(cwds) => cwds.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    let mut threads: Vec<Value> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let stored: Value = serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
+            let id = entry.path().file_stem()?.to_str()?.to_owned();
+            let thread = &stored["thread"];
+            let cwd = thread["cwd"].as_str()?;
+            (cwds.is_empty() || cwds.contains(&cwd)).then(|| {
+                json!({"id": id, "name": thread["name"], "preview": thread["preview"],
+                    "cwd": cwd, "createdAt": thread["createdAt"], "updatedAt": thread["updatedAt"],
+                    "turns": []})
+            })
+        })
+        .collect();
+    threads.sort_by_key(|thread| std::cmp::Reverse(thread["updatedAt"].as_i64()));
+    threads.truncate(params["limit"].as_u64().unwrap_or(50) as usize);
+    threads
+}
+
 /// Records a turn's start, a completed item, or the turn's end in its thread's store.
 fn record(method: &str, params: &Value) {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -376,6 +415,15 @@ fn main() {
         {
             let _ = writeln!(log, "{method}");
         }
+        if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CODEX_THREAD_LOG")
+            && let Some(thread) = params["threadId"].as_str()
+            && let Ok(mut log) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+        {
+            let _ = writeln!(log, "{method} {thread}");
+        }
         let reply = |result: Value| emit(&out, json!({"id": id, "result": result}));
         match method {
             "thread/turns/list"
@@ -419,11 +467,22 @@ fn main() {
                     }
                     Some(mut turns) => {
                         turns.reverse();
-                        turns.truncate(params["limit"].as_u64().unwrap_or(50) as usize);
-                        reply(json!({"data": turns, "nextCursor": null, "backwardsCursor": null}))
+                        let limit = params["limit"].as_u64().unwrap_or(50) as usize;
+                        let more = turns.len() > limit;
+                        turns.truncate(limit);
+                        if params["itemsView"] == "notLoaded" {
+                            for turn in &mut turns {
+                                turn["items"] = json!([]);
+                                turn["itemsView"] = json!("notLoaded");
+                            }
+                        }
+                        reply(json!({"data": turns, "nextCursor": more.then_some("older"),
+                            "backwardsCursor": null}))
                     }
                 }
             }
+            "thread/list" => reply(json!({"data": listed_threads(&params),
+                "nextCursor": null, "backwardsCursor": null})),
             "initialize" => {
                 if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CODEX_INITIALIZE_LOG") {
                     let _ = std::fs::write(path, params.to_string());

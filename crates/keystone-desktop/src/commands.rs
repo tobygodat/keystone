@@ -7,6 +7,7 @@ use crate::customization::OpenCustomize;
 use crate::files::ToggleFiles;
 use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
+use crate::import::ImportSessions;
 use crate::notes::ToggleNotes;
 use crate::projects::{ChangeProjectColor, OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
@@ -120,6 +121,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-u"],
         context: Some(APP),
         action: || Box::new(AttachFiles),
+    },
+    Command {
+        id: "import-sessions",
+        label: "Import sessions…",
+        keys: &["ctrl-alt-i"],
+        context: Some(APP),
+        action: || Box::new(ImportSessions),
     },
     Command {
         id: "rename-session",

@@ -43,6 +43,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Saved prompts](prompts.md) covers the prompt library in Settings → Prompts, global and project scope, inserting from the / menu and the palette's Insert prompt…, shortcuts that a provider command shares, and restart.
 - [Quick composer](quick.md) covers `keystone-desktop --quick` handing off to the running app or starting it, Ctrl+Alt+Space and the palette, the provider, account and model button, the project picker, Enter sending to a new session, Escape keeping the draft, and the draft after Quit.
 - [Notes](notes.md) covers the Notes surface: opening it from the palette, Ctrl+Shift+J and the + menu, one note per project kept in Keystone's database, autosave and restart, and Add to draft for a selection or the whole note.
+- [Import sessions](import.md) covers listing an account's own Claude Code or Codex conversations for the project folder with title, time and turn count, importing one as a session that resumes it with its newest 50 turns, the older-history line, the Imported mark that prevents a second copy, and that provider stores stay unchanged.
 - [Command palette](palette.md) covers opening with Ctrl+K or Ctrl+Shift+P, filtering, running a command, dismissing with focus restored, and dialog blocking.
 
 ## Coverage rules

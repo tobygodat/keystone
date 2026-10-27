@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const CATALOG_PAGES: u32 = 20;
 
@@ -135,8 +135,28 @@ enum Pending {
         ticket: u64,
         thread: String,
         fallback: bool,
+        /// The most turns kept.
+        turns: u64,
+    },
+    /// `thread/list` for an import listing.
+    Threads {
+        ticket: u64,
+    },
+    /// The turn count of thread `index` in listing `ticket`.
+    TurnCount {
+        ticket: u64,
+        index: usize,
     },
     Ignore,
+}
+
+/// The most turns counted for one conversation in an import listing.
+const TURN_COUNT_LIMIT: u64 = 1000;
+
+/// An import listing whose turn counts are still arriving.
+struct Listing {
+    threads: Vec<crate::import::Listed>,
+    waiting: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -211,6 +231,8 @@ pub struct CodexDriver {
     injected: HashSet<u64>,
     /// Whether new threads get the `show_ui` dynamic tool. Off once Codex refuses it.
     widgets: bool,
+    /// Import listings waiting for their turn counts, by ticket.
+    listings: HashMap<u64, Listing>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -243,6 +265,7 @@ impl CodexDriver {
             mcp_status: HashMap::new(),
             injected: HashSet::new(),
             widgets,
+            listings: HashMap::new(),
             unknown: 0,
         };
         let line = driver.request("initialize", params, Pending::Initialize);
@@ -487,6 +510,19 @@ impl CodexDriver {
     /// Reads the stored history of `thread` without resuming it or opening it for
     /// `session`. The answer arrives as [`Event::HistoryRead`] with `ticket`.
     pub fn read_history(&mut self, session: u64, thread: String, ticket: u64, out: &mut Outputs) {
+        self.read_turns(session, thread, ticket, crate::recovery::codex::TURNS, out);
+    }
+
+    /// Reads the newest `turns` turns of `thread` as [`CodexDriver::read_history`]
+    /// does.
+    pub fn read_turns(
+        &mut self,
+        session: u64,
+        thread: String,
+        ticket: u64,
+        turns: u64,
+        out: &mut Outputs,
+    ) {
         if let Some(message) = &self.initialization_error {
             out.event(
                 session,
@@ -497,7 +533,7 @@ impl CodexDriver {
             );
             return;
         }
-        let params = json!({"threadId": thread, "limit": crate::recovery::codex::TURNS,
+        let params = json!({"threadId": thread, "limit": turns,
             "sortDirection": "desc", "itemsView": "full"});
         let line = self.request(
             "thread/turns/list",
@@ -507,9 +543,33 @@ impl CodexDriver {
                 ticket,
                 thread,
                 fallback: false,
+                turns,
             },
         );
         self.write(line, out);
+    }
+
+    /// Lists the newest [`crate::import::LISTED`] conversations that ran in `cwd`,
+    /// each with its turn count. Nothing is resumed or opened. The answer arrives as
+    /// [`Event::ThreadsListed`] with `ticket`, for session 0.
+    pub fn list_threads(&mut self, cwd: &str, ticket: u64, out: &mut Outputs) {
+        if let Some(message) = &self.initialization_error {
+            let result = Err(message.clone());
+            out.event(0, Event::ThreadsListed { ticket, result });
+            return;
+        }
+        // Codex repairs its own index while it scans unless told to read only that.
+        let params = json!({"cwd": cwd, "limit": crate::import::LISTED,
+            "sortKey": "updated_at", "sortDirection": "desc", "useStateDbOnly": true,
+            "sourceKinds": ["cli", "vscode", "exec", "appServer"]});
+        let line = self.request("thread/list", params, Pending::Threads { ticket });
+        self.write(line, out);
+    }
+
+    fn listing_failed(&mut self, ticket: u64, message: String, out: &mut Outputs) {
+        self.listings.remove(&ticket);
+        let result = Err(format!("Codex could not list its conversations: {message}"));
+        out.event(0, Event::ThreadsListed { ticket, result });
     }
 
     fn request_catalog_page(
@@ -540,6 +600,7 @@ impl CodexDriver {
     /// again in a new process, every reported model is gone with the process, and an
     /// unanswered catalog request fails.
     pub fn on_exit(&mut self, reason: &str, out: &mut Outputs) {
+        let mut listings = BTreeSet::new();
         for pending in self.pending.values() {
             match pending {
                 Pending::Catalog { session, .. } => {
@@ -558,8 +619,14 @@ impl CodexDriver {
                         result: Err(reason.to_owned()),
                     },
                 ),
+                Pending::Threads { ticket } | Pending::TurnCount { ticket, .. } => {
+                    listings.insert(*ticket);
+                }
                 _ => {}
             }
+        }
+        for ticket in listings {
+            self.listing_failed(ticket, reason.to_owned(), out);
         }
         for (&session, state) in &mut self.sessions {
             if std::mem::take(&mut state.turn) != Turn::Idle {
@@ -1086,6 +1153,7 @@ impl CodexDriver {
                 ticket,
                 thread,
                 fallback,
+                turns,
             } => {
                 if error.is_some() && !fallback {
                     // An app-server without turn pagination, or one that will not list
@@ -1100,6 +1168,7 @@ impl CodexDriver {
                             ticket,
                             thread,
                             fallback: true,
+                            turns,
                         },
                     );
                     return self.write(line, out);
@@ -1117,11 +1186,69 @@ impl CodexDriver {
                             if fallback {
                                 crate::recovery::codex::decode_items(&result)
                             } else {
-                                crate::recovery::codex::decode(&result)
+                                crate::recovery::codex::decode(&result, turns as usize)
                             }
                         }),
                 };
                 out.event(session, Event::HistoryRead { ticket, result });
+            }
+            Pending::Threads { ticket } => {
+                let listed = match error {
+                    Some(error) => Err(error.message),
+                    None => serde_json::from_slice::<Response<Value>>(line)
+                        .ok()
+                        .and_then(|r| r.result)
+                        .ok_or_else(|| "it sent no list".to_owned())
+                        .and_then(|result| crate::import::codex_threads(&result)),
+                };
+                let threads = match listed {
+                    Ok(threads) => threads,
+                    Err(message) => return self.listing_failed(ticket, message, out),
+                };
+                if threads.is_empty() {
+                    let result = Ok(threads);
+                    return out.event(0, Event::ThreadsListed { ticket, result });
+                }
+                for (index, thread) in threads.iter().enumerate() {
+                    let params = json!({"threadId": thread.id, "limit": TURN_COUNT_LIMIT,
+                        "sortDirection": "desc", "itemsView": "notLoaded"});
+                    let line = self.request(
+                        "thread/turns/list",
+                        params,
+                        Pending::TurnCount { ticket, index },
+                    );
+                    self.write(line, out);
+                }
+                let waiting = threads.len();
+                self.listings.insert(ticket, Listing { threads, waiting });
+            }
+            Pending::TurnCount { ticket, index } => {
+                // A thread Codex cannot count, such as on an app-server without turn
+                // pagination, is listed without its count.
+                let page = error
+                    .is_none()
+                    .then(|| serde_json::from_slice::<Response<Value>>(line).ok())
+                    .flatten()
+                    .and_then(|r| r.result)
+                    .filter(|result| result["data"].is_array());
+                let Some(listing) = self.listings.get_mut(&ticket) else {
+                    return;
+                };
+                if let (Some(thread), Some(page)) = (listing.threads.get_mut(index), page) {
+                    thread.turns = page["data"].as_array().map(Vec::len);
+                    thread.more = !page["nextCursor"].is_null();
+                }
+                listing.waiting -= 1;
+                if listing.waiting == 0 {
+                    let mut threads = self
+                        .listings
+                        .remove(&ticket)
+                        .expect("checked above")
+                        .threads;
+                    threads.retain(|thread| thread.turns != Some(0));
+                    let result = Ok(threads);
+                    out.event(0, Event::ThreadsListed { ticket, result });
+                }
             }
             Pending::Ignore => {}
         }

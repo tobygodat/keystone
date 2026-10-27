@@ -39,6 +39,8 @@ pub enum Row {
     Surface(Surface),
     /// The images sent with the user message in the row before it.
     Attachments(Vec<keystone_core::Attachment>),
+    /// The session was imported without the provider's older turns.
+    OlderNotImported,
 }
 
 /// The rows of one turn the provider can fork the conversation through, and where.
@@ -304,7 +306,8 @@ impl Conversation {
                 | Entry::Recovery { .. }
                 | Entry::ProviderExited
                 | Entry::ForkPoint { .. }
-                | Entry::ForkPointsLost => (None, None),
+                | Entry::ForkPointsLost
+                | Entry::OlderNotImported => (None, None),
                 Entry::Item { seq, run, .. }
                 | Entry::Approval { seq, run, .. }
                 | Entry::TurnEnded { seq, run, .. }
@@ -361,7 +364,10 @@ impl Conversation {
                     last_local = item.id.starts_with(LOCAL) && item.kind == ItemKind::UserMessage;
                 }
                 Entry::TurnEnded { .. } => last_local = false,
-                Entry::Approval { .. } | Entry::Surface { .. } | Entry::Attachments { .. } => {}
+                Entry::Approval { .. }
+                | Entry::Surface { .. }
+                | Entry::Attachments { .. }
+                | Entry::OlderNotImported => {}
             }
             if entry_run.is_some() && entry_run != run {
                 // A new run starts after every row before it, and never replaces them.
@@ -394,6 +400,7 @@ impl Conversation {
                 Entry::Approval {
                     action, allowed, ..
                 } => Some(Row::Decision { action, allowed }),
+                Entry::OlderNotImported => Some(Row::OlderNotImported),
                 Entry::Attachments { attachments, .. } => Some(Row::Attachments(attachments)),
                 Entry::Surface { mut surface, .. } => {
                     // The tool call that waited for it ended with the run that showed it.
@@ -641,6 +648,7 @@ impl Conversation {
                     seq,
                     run,
                 },
+                Row::OlderNotImported => Entry::OlderNotImported,
                 Row::Recovery(_) => continue,
             };
             writes.push(Write { entry, sync: false });
@@ -1001,6 +1009,7 @@ impl Conversation {
             Event::RecoveryNeeded => self.provider_exited(),
             // An undelivered widget action is the app's to send.
             Event::HistoryRead { .. }
+            | Event::ThreadsListed { .. }
             | Event::IdleCandidate(_)
             | Event::ActionUndelivered { .. } => {}
         }

@@ -473,3 +473,180 @@ fn a_provider_that_exits_mid_turn_asks_for_recovery_and_its_store_is_ahead() {
     assert!(stored.text.contains("You wrote: please crash"));
     drop(connection);
 }
+
+/// Import reads Codex's own list and history through the account's app-server: the
+/// folder's threads with their turn counts, then a thread's newest turns. Nothing is
+/// resumed, started or written.
+#[test]
+fn codex_import_lists_the_folders_threads_and_reads_the_newest_turns_without_resuming() {
+    let home = tempfile::tempdir().unwrap();
+    let threads = home.path().join("keystone-fake-threads");
+    std::fs::create_dir_all(&threads).unwrap();
+    let turn = |n: usize| {
+        json!({"id": format!("turn-{n}"), "status": "completed", "itemsView": "full", "items": [
+            {"type": "userMessage", "id": format!("u{n}"), "content": [{"type": "text", "text": format!("ask {n}")}]},
+            {"type": "agentMessage", "id": format!("a{n}"), "text": format!("answer {n}")}
+        ]})
+    };
+    let store = |id: &str, cwd: &str, updated: u64, name: Value, count: usize| {
+        let thread = json!({"name": name, "preview": format!("first of {id}"), "cwd": cwd,
+            "createdAt": 1_700_000_000, "updatedAt": updated});
+        let turns: Vec<Value> = (0..count).map(turn).collect();
+        std::fs::write(
+            threads.join(format!("{id}.json")),
+            json!({"thread": thread, "turns": turns}).to_string(),
+        )
+        .unwrap();
+    };
+    store("thread-old", CWD, 1_700_000_100, json!("Named thread"), 2);
+    store("thread-long", CWD, 1_700_000_200, Value::Null, 60);
+    store("thread-elsewhere", "/other", 1_700_000_300, Value::Null, 1);
+    store("thread-empty", CWD, 1_700_000_400, json!("Nothing yet"), 0);
+    let before = hash_tree(home.path());
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("methods");
+    let program = wrapper(
+        dir.path(),
+        &[("KEYSTONE_FAKE_CODEX_METHOD_LOG", log.display().to_string())],
+    );
+    let (wake, rx) = wake();
+    let codex = CodexConnection::with_profile(
+        Some(program),
+        "0.0.0-test",
+        LaunchProfile::account(Provider::Codex, "Work", home.path()),
+        wake,
+    );
+    codex.list_threads(CWD, 9);
+    let events = until(
+        || codex.drain(),
+        &rx,
+        |e| matches!(e, Event::ThreadsListed { .. }),
+    );
+    let listed = events
+        .into_iter()
+        .find_map(|e| match e {
+            Event::ThreadsListed { ticket: 9, result } => Some(result),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
+    let shown: Vec<_> = listed
+        .iter()
+        .map(|l| (l.id.as_str(), l.title.as_str(), l.turns, l.updated))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                "thread-long",
+                "first of thread-long",
+                Some(60),
+                Some(1_700_000_200_000)
+            ),
+            (
+                "thread-old",
+                "Named thread",
+                Some(2),
+                Some(1_700_000_100_000)
+            ),
+        ]
+    );
+
+    codex.read_import("thread-long".into(), 10);
+    let events = until(
+        || codex.drain(),
+        &rx,
+        |e| matches!(e, Event::HistoryRead { .. }),
+    );
+    let snapshot = events
+        .into_iter()
+        .find_map(|e| match e {
+            Event::HistoryRead { ticket: 10, result } => Some(result),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
+    drop(codex);
+    assert_eq!(snapshot.turns.len(), keystone_agent::import::TURNS);
+    assert_eq!(snapshot.turns[0].items[0].text, "ask 10");
+    assert!(snapshot.limits.contains(&Limit::OlderNotRead));
+    assert_eq!(hash_tree(home.path()), before, "importing never writes");
+    let methods = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        methods
+            .lines()
+            .all(|m| !["thread/resume", "thread/start", "turn/start"].contains(&m)),
+        "{methods}"
+    );
+    assert!(methods.lines().any(|m| m == "thread/list"), "{methods}");
+}
+
+/// A Codex without turn pagination still lists the folder's threads, without their
+/// counts, and an import reads its newest items instead.
+#[test]
+fn codex_import_without_turn_pagination_lists_threads_uncounted_and_reads_their_items() {
+    let home = tempfile::tempdir().unwrap();
+    let threads = home.path().join("keystone-fake-threads");
+    std::fs::create_dir_all(&threads).unwrap();
+    let stored = json!({
+        "thread": {"name": "Older Codex", "preview": "ask", "cwd": CWD,
+            "createdAt": 1_700_000_000, "updatedAt": 1_700_000_000},
+        "turns": [{"id": "turn-1", "status": "completed", "itemsView": "full", "items": [
+            {"type": "userMessage", "id": "u1", "content": [{"type": "text", "text": "ask"}]},
+            {"type": "agentMessage", "id": "a1", "text": "answer"}
+        ]}]
+    });
+    std::fs::write(threads.join("thread-1.json"), stored.to_string()).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let program = wrapper(
+        dir.path(),
+        &[("KEYSTONE_FAKE_CODEX_NO_TURNS_LIST", "1".to_owned())],
+    );
+    let (wake, rx) = wake();
+    let codex = CodexConnection::with_profile(
+        Some(program),
+        "0.0.0-test",
+        LaunchProfile::account(Provider::Codex, "Work", home.path()),
+        wake,
+    );
+    codex.list_threads(CWD, 1);
+    let listed = until(
+        || codex.drain(),
+        &rx,
+        |e| matches!(e, Event::ThreadsListed { .. }),
+    )
+    .into_iter()
+    .find_map(|e| match e {
+        Event::ThreadsListed { ticket: 1, result } => Some(result),
+        _ => None,
+    })
+    .unwrap()
+    .unwrap();
+    let shown: Vec<_> = listed.iter().map(|l| (l.id.as_str(), l.turns)).collect();
+    assert_eq!(shown, [("thread-1", None)]);
+
+    codex.read_import("thread-1".into(), 2);
+    let snapshot = until(
+        || codex.drain(),
+        &rx,
+        |e| matches!(e, Event::HistoryRead { .. }),
+    )
+    .into_iter()
+    .find_map(|e| match e {
+        Event::HistoryRead { ticket: 2, result } => Some(result),
+        _ => None,
+    })
+    .unwrap()
+    .unwrap();
+    drop(codex);
+    let texts: Vec<&str> = snapshot
+        .turns
+        .iter()
+        .flat_map(|turn| &turn.items)
+        .map(|item| item.text.as_str())
+        .collect();
+    assert_eq!(texts, ["ask", "answer"]);
+    assert!(keystone_agent::import::log(&snapshot).is_ok());
+}

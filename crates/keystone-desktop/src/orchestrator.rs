@@ -706,6 +706,9 @@ impl AppState {
                         Row::Recovery(report) => {
                             json!({"position":index,"recovery":report,"truncated":false})
                         }
+                        Row::OlderNotImported => {
+                            json!({"position":index,"older_not_imported":true,"truncated":false})
+                        }
                         Row::Attachments(attachments) => json!({"position":index,
                             "attachments":attachments.iter().map(|a| json!({
                                 "name":a.name,"media_type":a.media_type,"sha256":a.sha256

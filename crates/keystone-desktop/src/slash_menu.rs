@@ -244,6 +244,7 @@ impl Keystone {
             || self.slash_notice(cx).is_some()
             || self.palette.is_some()
             || self.prompt_list.is_some()
+            || self.import_list.is_some()
             || self.projects.is_some()
         {
             return None;
@@ -301,6 +302,7 @@ impl Keystone {
             || (self.slash_notice(cx).is_some()
                 && self.palette.is_none()
                 && self.prompt_list.is_none()
+                && self.import_list.is_none()
                 && self.projects.is_none());
         if open && let Some(session) = self.selected_session(cx) {
             let draft = self.composer.read(cx).value().to_owned();

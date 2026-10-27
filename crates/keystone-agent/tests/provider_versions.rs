@@ -442,3 +442,48 @@ fn a_claude_version_timeout_does_not_prevent_the_handshake_and_turn() {
         }
     )));
 }
+
+/// An import listing runs on the app-server for no session, so a version notice
+/// waits for the first session that can show it.
+#[test]
+fn a_version_notice_is_kept_for_the_first_session_after_an_import_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("provider");
+    script(
+        &program,
+        &format!(
+            "if [ \"$1\" = --version ]; then echo 'development build' >&2; exit 0; fi\nexport KEYSTONE_FAKE_CODEX_DELAY_MS=1 CODEX_HOME='{}'\nexec '{}' \"$@\"",
+            dir.path().display(),
+            env!("CARGO_BIN_EXE_keystone-fake-codex")
+        ),
+    );
+    let (tx, rx) = channel();
+    let conn = CodexConnection::new(
+        Some(program),
+        "test",
+        Arc::new(move || {
+            let _ = tx.send(());
+        }),
+    );
+    conn.list_threads(dir.path().to_str().unwrap(), 1);
+    let listed = collect(&conn, &rx, |e| matches!(e, Event::ThreadsListed { .. }));
+    assert!(
+        !listed
+            .iter()
+            .any(|(_, e)| matches!(e, Event::ProviderNotice { .. }))
+    );
+    Connection::send(
+        &conn,
+        1,
+        dir.path().to_str().unwrap(),
+        None,
+        None,
+        ApprovalState::default(),
+        "hello".into(),
+        Vec::new(),
+    )
+    .unwrap();
+    let events = collect(&conn, &rx, |e| matches!(e, Event::TurnCompleted { .. }));
+    assert!(events.iter().any(|(session, e)| *session == 1
+        && matches!(e, Event::ProviderNotice { message: Some(message) } if message.contains("could not be verified"))));
+}

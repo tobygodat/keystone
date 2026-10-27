@@ -97,7 +97,7 @@ fn entry(row: &Row, position: usize, provider: Provider) -> Option<(bool, String
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
-        Row::Recovery(_) => None,
+        Row::Recovery(_) | Row::OlderNotImported => None,
     }
 }
 

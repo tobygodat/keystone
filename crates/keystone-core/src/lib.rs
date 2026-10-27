@@ -695,6 +695,13 @@ impl Workspace {
         &self.accounts
     }
 
+    /// The session that continues `provider`'s conversation `thread`, if any.
+    pub fn imported(&self, provider: Provider, thread: &str) -> Option<&Session> {
+        self.sessions
+            .iter()
+            .find(|s| s.provider == provider && s.provider_thread.as_deref() == Some(thread))
+    }
+
     pub fn account(&self, id: &AccountId) -> Option<&Account> {
         self.accounts.iter().find(|account| account.id() == id)
     }
@@ -1042,6 +1049,39 @@ impl Store {
         fork.fork_point = point;
         fork.draft = draft;
         self.add_session(|id| Session { id, ..fork }, Opening::Window(window, show))
+    }
+
+    /// Adds a session selected in `window` that continues `thread`, a conversation
+    /// `provider` already keeps under `account`, in `directory`. Its next message
+    /// resumes that conversation, so it counts as started. `title` is the provider's
+    /// title or first message. Refused when a session already continues `thread`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import(
+        &mut self,
+        provider: Provider,
+        account: Option<AccountId>,
+        directory: &WorkingDirectory,
+        thread: String,
+        title: &str,
+        now: u64,
+        window: WindowId,
+    ) -> StoreResult<Applied<u64>> {
+        let account = self.provider_account(provider, account)?;
+        if self.workspace.imported(provider, &thread).is_some() {
+            return Err(invalid("this conversation is already in Keystone").into());
+        }
+        let mut session = Session::new(0, provider, directory, now);
+        if let Some(title) = message_title(title) {
+            session.title = title;
+            session.title_source = TitleSource::FirstMessage;
+        }
+        session.provider_thread = Some(thread);
+        session.account = account;
+        session.model_locked = Some(true);
+        self.add_session(
+            |id| Session { id, ..session },
+            Opening::Window(window, None),
+        )
     }
 
     /// Adds the session `make` builds with the next ID, selecting it in `window` and
@@ -3603,6 +3643,91 @@ mod tests {
             store.workspace().sessions().last().unwrap().title(),
             "Pick this up"
         );
+    }
+
+    #[test]
+    fn an_import_continues_the_provider_s_conversation_once_on_its_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        let folder = working_directory();
+        let work = store
+            .add_account(
+                Provider::Codex,
+                "Work",
+                directory.path().join("codex-work"),
+                &[],
+            )
+            .unwrap()
+            .value;
+
+        let imported = store
+            .import(
+                Provider::Codex,
+                Some(work.clone()),
+                &folder,
+                "thread-1".into(),
+                "  Fix the\nlogin bug ",
+                4,
+                WindowId::FIRST,
+            )
+            .unwrap()
+            .value;
+
+        assert_eq!(store.workspace().selected(), Some(imported));
+        let reopened = Store::open(&path).unwrap();
+        let session = reopened.workspace().sessions().last().unwrap();
+        assert_eq!(session.id(), imported);
+        assert_eq!(session.provider(), Provider::Codex);
+        assert_eq!(session.account(), Some(&work));
+        assert_eq!(session.provider_thread(), Some("thread-1"));
+        assert!(session.started());
+        assert_eq!(session.model(), None);
+        assert_eq!(session.title(), "Fix the login bug");
+        assert!(matches!(
+            session.context(),
+            SessionContext::Recorded { directory, .. } if *directory == folder
+        ));
+        assert_eq!(
+            reopened
+                .workspace()
+                .imported(Provider::Codex, "thread-1")
+                .map(Session::id),
+            Some(imported)
+        );
+        assert!(
+            reopened
+                .workspace()
+                .imported(Provider::Claude, "thread-1")
+                .is_none()
+        );
+
+        // The same conversation is never imported twice, whatever account names it.
+        let count = store.workspace().sessions().len();
+        for account in [Some(work.clone()), None] {
+            let again = store.import(
+                Provider::Codex,
+                account,
+                &folder,
+                "thread-1".into(),
+                "again",
+                5,
+                WindowId::FIRST,
+            );
+            assert!(again.is_err());
+        }
+        // An account of another provider is refused.
+        let wrong = store.import(
+            Provider::Claude,
+            Some(work),
+            &folder,
+            "session-1".into(),
+            "",
+            5,
+            WindowId::FIRST,
+        );
+        assert!(wrong.is_err());
+        assert_eq!(store.workspace().sessions().len(), count);
     }
 
     #[test]

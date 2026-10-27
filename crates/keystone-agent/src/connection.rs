@@ -480,6 +480,37 @@ impl CodexConnection {
         );
     }
 
+    /// Lists the conversations that ran in `cwd` for an import, starting the
+    /// app-server first if it is not running. Nothing is resumed or opened. The answer,
+    /// a failure to start included, arrives as [`Event::ThreadsListed`] with `ticket`.
+    pub fn list_threads(&self, cwd: &str, ticket: u64) {
+        let cwd = cwd.to_owned();
+        self.with_driver(
+            0,
+            move |message| Event::ThreadsListed {
+                ticket,
+                result: Err(message),
+            },
+            move |driver, _, out| driver.list_threads(&cwd, ticket, out),
+        );
+    }
+
+    /// Reads the newest [`crate::import::TURNS`] turns of `thread` for an import, as
+    /// [`CodexConnection::read_history`] reads for recovery. The answer arrives as
+    /// [`Event::HistoryRead`] with `ticket`, for session 0.
+    pub fn read_import(&self, thread: String, ticket: u64) {
+        self.with_driver(
+            0,
+            move |message| Event::HistoryRead {
+                ticket,
+                result: Err(message),
+            },
+            move |driver, _, out| {
+                driver.read_turns(0, thread, ticket, crate::import::TURNS as u64, out)
+            },
+        );
+    }
+
     /// Changes the session's approval state at once; see [`Connection::set_approval`].
     pub fn set_approval(&self, session: u64, approval: ApprovalState) {
         self.shared.lock().unwrap().set_approval(session, approval);
@@ -593,7 +624,11 @@ impl Starter {
         }
         let mut out = Outputs::default();
         let notice = shared.notice.clone();
-        if let Some(message) = shared.notices.update(session, notice) {
+        // A request for no session, such as an import listing, leaves the notice for
+        // the first session that can show it.
+        if session != 0
+            && let Some(message) = shared.notices.update(session, notice)
+        {
             out.event(session, Event::ProviderNotice { message });
         }
         let mut driver = shared

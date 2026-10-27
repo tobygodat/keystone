@@ -92,6 +92,9 @@ pub enum Entry {
     },
     /// The provider can no longer fork at the points saved before this one.
     ForkPointsLost,
+    /// The session was imported from the provider's own history without its older
+    /// turns; the rows after it are the newest. Builds before import skip it.
+    OlderNotImported,
     /// An agent-built widget, whole, saved each time it changes. The latest entry for
     /// a `call` replaces earlier ones; `seq` and `run` place its row as for an item.
     Surface {

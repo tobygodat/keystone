@@ -141,6 +141,12 @@ impl CommandPaletteState {
         self.rescore(cx);
     }
 
+    /// Replaces the items, filtering them by the current query.
+    pub fn set_items(&mut self, items: Vec<PaletteItem>, cx: &mut Context<Self>) {
+        self.items = items;
+        self.rescore(cx);
+    }
+
     /// Drops the item `id` names, keeping the query and the highlight's place.
     pub fn remove_item(&mut self, id: &str, cx: &mut Context<Self>) {
         let row = self.list.read(cx).highlighted();

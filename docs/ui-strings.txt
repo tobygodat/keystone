@@ -89,6 +89,7 @@ crates/keystone-agent/src/codex.rs
 	Authorization
 	Bearer {token}
 	Codex could not initialize: {}. Check the CLI version, then restart Keystone.
+	Codex could not list its conversations: {message}
 	Codex could not list its skills: {}
 	Codex could not read this conversation's history: {}
 	Codex did not start a conversation: {reason}
@@ -114,6 +115,7 @@ crates/keystone-agent/src/codex.rs
 	busy: Codex cannot steer this turn immediately
 	busy: Codex has no running turn to steer
 	busy: The target is not running
+	it sent no list
 	no models in the reply
 	no thread in the reply
 	{id} {duration}
@@ -218,6 +220,10 @@ crates/keystone-agent/src/github.rs
 	squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed
 	title,state,isDraft,baseRefName,headRefName,headRefOid,reviewDecision,mergeStateStatus,statusCheckRollup,reviews
 	{} is not a pull request link.
+
+crates/keystone-agent/src/import.rs
+	It changed since it was listed.
+	its answer is in a form Keystone does not recognize
 
 crates/keystone-agent/src/item.rs
 	{}\n… {} bytes omitted …\n{}
@@ -409,6 +415,7 @@ crates/keystone-core/src/lib.rs
 	session ID space exhausted
 	session execution directory cannot be replaced
 	the provider, account and model are fixed once a session has sent
+	this conversation is already in Keystone
 	unknown account {account}
 	unknown account {id}
 	unknown prompt {id}
@@ -503,6 +510,7 @@ crates/keystone-desktop/src/app_state.rs
 	Keystone is shutting down
 	Keystone kept it: the conversation could not be saved: {error}
 	Keystone kept it: {reason}
+	Not imported. {error}
 	Not kept: {error}.
 	Not sent. Choose a conversation folder using the folder button beside the model.
 	Not sent. Could not finish saving changes. {error}
@@ -656,6 +664,7 @@ crates/keystone-desktop/src/commands.rs
 	Focus search
 	Focus transcript
 	Hand off…
+	Import sessions…
 	Insert prompt…
 	Leave transcript for composer
 	Move tab to window…
@@ -833,6 +842,17 @@ crates/keystone-desktop/src/handoff.rs
 	{} · {account}
 	· {status}
 
+crates/keystone-desktop/src/import.rs
+	1 turn
+	Import from
+	Imported
+	Loading…
+	No matches
+	No sessions in this folder.
+	Not imported. {error}
+	{n}{plus} turns
+	{} · {account}
+
 crates/keystone-desktop/src/integrations.rs
 	 · env {}
 	 · headers {}
@@ -914,6 +934,7 @@ crates/keystone-desktop/src/main.rs
 	Commit message not saved. {error}
 	Could not check the provider's record: {reason}.
 	Ctrl+Alt+G
+	Ctrl+Alt+I
 	Ctrl+Enter
 	Ctrl+N
 	Ctrl+Shift+Enter
@@ -927,6 +948,7 @@ crates/keystone-desktop/src/main.rs
 	Filter sessions
 	Folder selected, but not confirmed on disk.
 	Hide sidebar
+	Import…
 	In worktree…
 	Interface preview · sample transcript
 	Jump to latest
@@ -1293,6 +1315,7 @@ crates/keystone-desktop/src/transcript.rs
 	No part of the provider's record matches this transcript, so nothing was added.
 	Not run
 	Nothing more was recovered.
+	Older messages weren't imported.
 	Only part of a long history was checked.
 	Only the newest part of the provider's history was read; it does not reach what is shown here.
 	Partial

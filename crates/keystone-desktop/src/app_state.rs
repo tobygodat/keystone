@@ -66,6 +66,20 @@ pub(crate) struct RowChange {
     pub changed: Vec<Range<usize>>,
     pub replies: Vec<(usize, usize, keystone_agent::ItemStatus)>,
 }
+/// What a provider answered an import request with.
+pub(crate) enum Native {
+    Listed(Result<Vec<keystone_agent::import::Listed>, String>),
+    Read(Result<keystone_agent::recovery::Snapshot, String>),
+}
+
+/// Records `native` as the answer to import request `ticket` if a window still waits
+/// on it.
+fn answer(waiting: &std::sync::Mutex<HashMap<u64, Option<Native>>>, ticket: u64, native: Native) {
+    if let Some(slot) = waiting.lock().unwrap().get_mut(&ticket) {
+        *slot = Some(native);
+    }
+}
+
 pub(crate) struct AppState {
     store: Store,
     /// Worktree folders being removed, which nothing may start in meanwhile.
@@ -97,6 +111,11 @@ pub(crate) struct AppState {
     queued_reads: std::collections::VecDeque<ClaudeRead>,
     /// Reads running now, including any abandoned past their deadline.
     active_reads: Arc<std::sync::atomic::AtomicUsize>,
+    /// Import requests a window waits on, by ticket, each with its answer once it has
+    /// arrived. An answer to a request no window waits on any more is dropped.
+    native: Arc<std::sync::Mutex<HashMap<u64, Option<Native>>>>,
+    /// Codex history reads made for an import rather than a recovery.
+    import_reads: std::collections::HashSet<u64>,
     /// Sessions whose provider exited while their history was loading.
     recover_after_load: std::collections::HashSet<u64>,
     /// Reports still waiting for an acknowledgement while Retry checks again.
@@ -1137,6 +1156,55 @@ impl AppState {
         result
     }
 
+    /// Imports `provider`'s conversation `thread` under `account` as a new session in
+    /// `directory`, selected in `window`, whose log starts with `snapshot`'s newest
+    /// turns. See [`keystone_core::Store::import`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn import(
+        &mut self,
+        provider: Provider,
+        account: Option<AccountId>,
+        directory: &WorkingDirectory,
+        thread: String,
+        title: &str,
+        snapshot: &keystone_agent::recovery::Snapshot,
+        now: u64,
+        window: WindowId,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let entries = keystone_agent::import::log(snapshot)
+            .map_err(|error| std::io::Error::other(format!("Not imported. {error}")))?;
+        let result = self
+            .store
+            .import(provider, account, directory, thread, title, now, window);
+        if let Ok(applied) = &result {
+            let session = applied.value;
+            let mut conversation = Conversation::loading();
+            conversation.restore(Ok(entries.clone()));
+            self.conversations.insert(session, conversation);
+            let last = entries.len().saturating_sub(1);
+            let writes = entries
+                .into_iter()
+                .enumerate()
+                .map(|(n, entry)| keystone_agent::log::Write {
+                    entry,
+                    sync: n == last,
+                })
+                .collect();
+            if self.logs.append(session, writes).is_err() {
+                let lost = self.logs.lost_entries(session);
+                self.record_loss(session, lost);
+            }
+            self.commit(session);
+        }
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
     /// Creates a session that works in `worktree`, saving `show` with it as
     /// [`AppState::create_showing`] does.
     pub(crate) fn create_worktree_showing(
@@ -1434,6 +1502,8 @@ impl AppState {
             next_ticket: 0,
             recovery_reads: Arc::default(),
             queued_reads: Default::default(),
+            native: Arc::default(),
+            import_reads: Default::default(),
             active_reads: Arc::default(),
             recover_after_load: Default::default(),
             widget_saves: Default::default(),
@@ -1766,6 +1836,12 @@ impl AppState {
                     }
                     Event::ProviderNotice { .. }
                         if self.route(session) != Some((provider, account.clone())) => {}
+                    Event::ThreadsListed { ticket, result } => {
+                        answer(&self.native, ticket, Native::Listed(result));
+                    }
+                    Event::HistoryRead { ticket, result } if self.import_reads.remove(&ticket) => {
+                        answer(&self.native, ticket, Native::Read(result));
+                    }
                     event => events.push((session, event)),
                 }
             }
@@ -2409,6 +2485,127 @@ impl AppState {
         .detach();
     }
 
+    /// Asks `provider`'s `account` for the conversations it has that ran in `cwd`, for
+    /// an import. The answer is [`Native::Listed`] under the returned ticket. Read only.
+    pub(crate) fn list_native(
+        &mut self,
+        provider: Provider,
+        account: Option<&AccountId>,
+        cwd: &std::path::Path,
+    ) -> u64 {
+        let ticket = self.ask_native();
+        match provider {
+            Provider::Claude => {
+                let root = self.claude_root(account);
+                let cwd = cwd.to_owned();
+                self.answer_native(
+                    ticket,
+                    move || {
+                        Native::Listed(
+                            root.and_then(|root| {
+                                keystone_agent::import::claude_sessions(&root, &cwd)
+                            }),
+                        )
+                    },
+                    |error| Native::Listed(Err(error)),
+                );
+            }
+            Provider::Codex => match self.codex_for(account) {
+                Ok(codex) => codex.list_threads(&cwd.to_string_lossy(), ticket),
+                Err(error) => {
+                    answer(&self.native, ticket, Native::Listed(Err(error)));
+                }
+            },
+        }
+        ticket
+    }
+
+    /// Reads the newest turns of `provider`'s conversation `thread` under `account`, for
+    /// an import. The answer is [`Native::Read`] under the returned ticket. Read only:
+    /// nothing is resumed or sent.
+    pub(crate) fn read_native(
+        &mut self,
+        provider: Provider,
+        account: Option<&AccountId>,
+        cwd: &std::path::Path,
+        thread: String,
+    ) -> u64 {
+        let ticket = self.ask_native();
+        match provider {
+            Provider::Claude => {
+                let root = self.claude_root(account);
+                let cwd = cwd.to_owned();
+                self.answer_native(
+                    ticket,
+                    move || {
+                        Native::Read(
+                            root.and_then(|root| recovery::claude::read(&root, &thread, &cwd)),
+                        )
+                    },
+                    |error| Native::Read(Err(error)),
+                );
+            }
+            Provider::Codex => match self.codex_for(account) {
+                Ok(codex) => {
+                    codex.read_import(thread, ticket);
+                    self.import_reads.insert(ticket);
+                }
+                Err(error) => {
+                    answer(&self.native, ticket, Native::Read(Err(error)));
+                }
+            },
+        }
+        ticket
+    }
+
+    fn ask_native(&mut self) -> u64 {
+        self.next_ticket += 1;
+        self.native.lock().unwrap().insert(self.next_ticket, None);
+        self.next_ticket
+    }
+
+    /// The answer to import request `ticket`, once it has arrived.
+    pub(crate) fn take_native(&mut self, ticket: u64) -> Option<Native> {
+        let mut native = self.native.lock().unwrap();
+        let answer = native.get_mut(&ticket)?.take()?;
+        native.remove(&ticket);
+        Some(answer)
+    }
+
+    /// Stops waiting on import request `ticket`, dropping its answer now or when it
+    /// arrives.
+    pub(crate) fn abandon_native(&mut self, ticket: u64) {
+        self.native.lock().unwrap().remove(&ticket);
+    }
+
+    /// Answers `ticket` with what `read` returns, on a thread of its own, since it
+    /// reads the provider's store from disk.
+    fn answer_native(
+        &self,
+        ticket: u64,
+        read: impl FnOnce() -> Native + Send + 'static,
+        fail: fn(String) -> Native,
+    ) {
+        let (native, wake) = (self.native.clone(), self.wake.clone());
+        let spawned = std::thread::Builder::new()
+            .name("import-read".into())
+            .spawn(move || {
+                answer(&native, ticket, read());
+                wake();
+            });
+        if let Err(error) = spawned {
+            let error = format!("could not start reading: {error}");
+            answer(&self.native, ticket, fail(error));
+            (self.wake)();
+        }
+    }
+
+    fn codex_for(&mut self, account: Option<&AccountId>) -> Result<&CodexConnection, String> {
+        self.connection(Provider::Codex, account)?;
+        let account = account.cloned();
+        Ok(self.codex.get(&account).expect("started above"))
+    }
+
     /// The config dir of a Claude account: the one Keystone gave it, or for the
     /// default account the one Claude Code itself uses.
     fn claude_root(&self, account: Option<&AccountId>) -> Result<PathBuf, String> {
@@ -2501,10 +2698,21 @@ impl AppState {
             }
         };
         let (neutral, open_turn) = (conversation.neutral_items(), conversation.open_turn());
+        let left_out = matches!(
+            conversation.rows.first(),
+            Some(crate::conversation::Row::OlderNotImported)
+        );
         cx.spawn(async move |this, cx| {
             let batch = cx
                 .background_executor()
-                .spawn(async move { recovery::reconcile(&neutral, open_turn, &snapshot) })
+                .spawn(async move {
+                    let snapshot = if left_out {
+                        keystone_agent::import::imported_part(snapshot, &neutral)
+                    } else {
+                        snapshot
+                    };
+                    recovery::reconcile(&neutral, open_turn, &snapshot)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.apply_reconciled(session, ticket, batch, cx)

@@ -15,6 +15,7 @@ pub mod git;
 pub mod github;
 pub mod host;
 pub mod idle;
+pub mod import;
 mod item;
 pub mod log;
 pub mod mcp;

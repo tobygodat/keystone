@@ -32,12 +32,7 @@ const UNSAFE_ID: &str = "the saved Claude session ID is not one Keystone can loo
 /// Reads session `session` from the config dir `root`. `cwd` is the session's working
 /// directory, which the file must agree with. An error means nothing was read.
 pub fn read(root: &Path, session: &str, cwd: &Path) -> Result<Snapshot, String> {
-    if session.is_empty()
-        || session.len() > 128
-        || !session
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if !safe_id(session) {
         return Err(UNSAFE_ID.into());
     }
     let root = fs::canonicalize(root).map_err(|_| NOT_FOUND.to_owned())?;
@@ -63,6 +58,7 @@ pub fn read(root: &Path, session: &str, cwd: &Path) -> Result<Snapshot, String> 
             found.push(path);
         }
     }
+    let cwd = &resolved(cwd);
     let mut snapshots = Vec::new();
     for path in &found {
         snapshots.push(read_file(path, &projects, cwd).map_err(|error| {
@@ -85,6 +81,96 @@ pub fn read(root: &Path, session: &str, cwd: &Path) -> Result<Snapshot, String> 
             limits: vec![Limit::Branched],
         }),
     }
+}
+
+fn safe_id(session: &str) -> bool {
+    !session.is_empty()
+        && session.len() <= 128
+        && session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Most bytes read from the start of a session file to find the folder it ran in.
+const HEAD_BYTES: u64 = 1024 * 1024;
+
+/// The sessions in the config dir `root` that ran in `cwd`, newest first, each with
+/// when its file last changed. A session ran where the first record [`read`] checks
+/// says it did. A config dir with no sessions lists none.
+pub fn sessions(root: &Path, cwd: &Path) -> Result<Vec<(String, std::time::SystemTime)>, String> {
+    let Some(projects) = fs::canonicalize(root).ok().and_then(|root| {
+        fs::canonicalize(root.join("projects"))
+            .ok()
+            .filter(|projects| projects.starts_with(&root) && projects.is_dir())
+    }) else {
+        return Ok(Vec::new());
+    };
+    let cwd = &resolved(cwd);
+    let entries = fs::read_dir(&projects)
+        .map_err(|error| format!("Claude Code's projects folder could not be read: {error}"))?;
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(folder) = fs::canonicalize(entry.path()) else {
+            continue;
+        };
+        if !folder.starts_with(&projects) || !folder.is_dir() {
+            continue;
+        }
+        for file in fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let path = file.path();
+            let Some(id) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".jsonl"))
+                .filter(|id| safe_id(id))
+            else {
+                continue;
+            };
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_file()
+                && recorded_cwd(&path, &projects).is_some_and(|stored| same_folder(&stored, cwd))
+            {
+                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                found.push((id.to_owned(), modified));
+            }
+        }
+    }
+    found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut seen = HashSet::new();
+    found.retain(|(id, _)| seen.insert(id.clone()));
+    Ok(found)
+}
+
+/// Whether the folder a record names, `stored`, is `cwd`, under any name for it such
+/// as a symlink (macOS's `/tmp` is `/private/tmp`). `cwd` is as [`resolved`] gives it.
+fn same_folder(stored: &str, cwd: &Path) -> bool {
+    Path::new(stored) == cwd || fs::canonicalize(stored).is_ok_and(|stored| stored == cwd)
+}
+
+/// `cwd` with every symlink resolved, or as it is when it cannot be.
+fn resolved(cwd: &Path) -> PathBuf {
+    fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned())
+}
+
+/// The working directory the first main-chain record of the file at `path` names,
+/// read from at most [`HEAD_BYTES`] of its start.
+fn recorded_cwd(path: &Path, projects: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = open_inside(path, projects).ok()?;
+    for line in std::io::BufReader::new(file.take(HEAD_BYTES)).split(b'\n') {
+        let Ok(record) = serde_json::from_slice::<Value>(&line.ok()?) else {
+            continue;
+        };
+        if record["isSidechain"] == true || record["uuid"].as_str().is_none() {
+            continue;
+        }
+        if let Some(cwd) = record["cwd"].as_str() {
+            return Some(cwd.to_owned());
+        }
+    }
+    None
 }
 
 #[derive(PartialEq)]
@@ -162,7 +248,6 @@ fn read_file(path: &Path, projects: &Path, cwd: &Path) -> std::io::Result<Snapsh
         }
         _ => {}
     }
-    let cwd = cwd.to_string_lossy();
     let mut malformed = 0;
     let mut records: Vec<Value> = Vec::new();
     let mut checked_cwd = false;
@@ -201,7 +286,7 @@ fn read_file(path: &Path, projects: &Path, cwd: &Path) -> std::io::Result<Snapsh
         }
         if !checked_cwd && let Some(stored) = record["cwd"].as_str() {
             checked_cwd = true;
-            if stored != cwd {
+            if !same_folder(stored, cwd) {
                 return Ok(Snapshot {
                     turns: Vec::new(),
                     limits: vec![Limit::IdentityMismatch],

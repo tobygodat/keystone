@@ -17,8 +17,8 @@ pub const TURNS: u64 = 20;
 /// How many of the newest items a recovery reads when turns cannot be listed.
 pub const ITEMS: u64 = 200;
 
-/// Decodes a `thread/turns/list` result, newest turn first.
-pub fn decode(result: &Value) -> Result<Snapshot, String> {
+/// Decodes a `thread/turns/list` result, newest turn first, keeping at most `keep`.
+pub fn decode(result: &Value, keep: usize) -> Result<Snapshot, String> {
     let Some(turns) = result["data"].as_array() else {
         return Err("Codex returned history in a form Keystone does not recognize".into());
     };
@@ -27,7 +27,7 @@ pub fn decode(result: &Value) -> Result<Snapshot, String> {
         limits.push(Limit::OlderNotRead);
     }
     let mut snapshot: Vec<SnapshotTurn> = Vec::new();
-    for turn in turns.iter().take(TURNS as usize) {
+    for turn in turns.iter().take(keep) {
         let end = match turn["status"].as_str() {
             Some("completed") => Some(TurnStatus::Completed),
             Some("interrupted") => Some(TurnStatus::Interrupted),
@@ -132,7 +132,7 @@ mod tests {
                 {"type": "agentMessage", "id": "m1", "text": "ONE"}
             ]}
         ], "nextCursor": null});
-        let snapshot = decode(&page).unwrap();
+        let snapshot = decode(&page, TURNS as usize).unwrap();
         assert_eq!(snapshot.turns.len(), 2);
         assert_eq!(snapshot.turns[0].end, Some(TurnStatus::Completed));
         assert_eq!(snapshot.turns[0].items[1].text, "ONE");
@@ -150,8 +150,11 @@ mod tests {
         let summary = json!({"data": [
             {"id": "t1", "status": "completed", "itemsView": "summary", "items": []}
         ], "nextCursor": null});
-        assert_eq!(decode(&summary).unwrap().limits, [Limit::ItemsNotLoaded]);
-        assert!(decode(&json!({"thread": {}})).is_err());
+        assert_eq!(
+            decode(&summary, TURNS as usize).unwrap().limits,
+            [Limit::ItemsNotLoaded]
+        );
+        assert!(decode(&json!({"thread": {}}), TURNS as usize).is_err());
         assert!(decode_items(&json!({"thread": {}})).is_err());
     }
 
@@ -163,12 +166,12 @@ mod tests {
                 "items": [message(n)]})
         };
         let page = json!({"data": (0..25).rev().map(turn).collect::<Vec<_>>(), "nextCursor": "c"});
-        let snapshot = decode(&page).unwrap();
+        let snapshot = decode(&page, TURNS as usize).unwrap();
         assert_eq!(snapshot.turns.len(), TURNS as usize);
         assert_eq!(snapshot.turns[0].items[0].text, "5");
         assert_eq!(snapshot.limits, [Limit::OlderNotRead]);
         let last = json!({"data": [turn(1)], "nextCursor": null});
-        assert!(decode(&last).unwrap().limits.is_empty());
+        assert!(decode(&last, TURNS as usize).unwrap().limits.is_empty());
 
         // Codex 0.163's ThreadItemEntry: the item wrapped with its turn's ID.
         let entry = |n: usize| {

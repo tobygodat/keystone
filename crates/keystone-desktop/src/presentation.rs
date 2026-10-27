@@ -352,6 +352,7 @@ impl Keystone {
         self.new_menu = false;
         self.filter_menu = false;
         self.settings = None;
+        self.drop_import(cx);
         self.approval_menu = false;
         self.confirm_full_access = None;
         if !self

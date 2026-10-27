@@ -1189,3 +1189,41 @@ fn an_account_never_shows_usage_left_under_its_id(cx: &mut gpui::TestAppContext)
         assert!(state.usage_saves.lock().unwrap().0.is_empty());
     });
 }
+
+/// An import read nobody waits on any more leaves nothing behind when it finishes.
+#[gpui::test]
+fn an_abandoned_import_read_keeps_no_answer(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("claude-home");
+    let folder = home.join("projects/p");
+    std::fs::create_dir_all(&folder).unwrap();
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    let record = serde_json::json!({"type": "user", "uuid": "u1", "parentUuid": null,
+        "cwd": cwd, "sessionId": "s", "message": {"role": "user", "content": "hi"}});
+    std::fs::write(folder.join("s.jsonl"), format!("{record}\n")).unwrap();
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| state.test_claude_home = Some(home));
+
+    let (left, kept) = state.update(cx, |state, _| {
+        let left = state.read_native(Provider::Claude, None, &cwd, "s".into());
+        state.abandon_native(left);
+        (
+            left,
+            state.read_native(Provider::Claude, None, &cwd, "s".into()),
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let answer = loop {
+        if let Some(answer) = state.update(cx, |state, _| state.take_native(kept)) {
+            break answer;
+        }
+        assert!(Instant::now() < deadline, "the read answers");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(matches!(answer, Native::Read(Ok(_))));
+    std::thread::sleep(Duration::from_millis(100));
+    state.update(cx, |state, _| {
+        assert!(state.take_native(left).is_none());
+        assert!(state.native.lock().unwrap().is_empty());
+    });
+}
