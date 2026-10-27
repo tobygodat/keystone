@@ -75,7 +75,12 @@ fn bounds(placement: Option<Placement>, cx: &App) -> WindowBounds {
         origin: point(px(p.x), px(p.y)),
         size: size(px(p.width.max(MIN_SIZE)), px(p.height.max(MIN_SIZE))),
     };
-    let bounds = match cx.primary_display() {
+    let displays = cx.displays();
+    let display = cx.primary_display().or_else(|| match displays.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    });
+    let bounds = match display {
         Some(display) => fit(saved, display.visible_bounds()),
         None => saved,
     };
@@ -87,10 +92,11 @@ fn bounds(placement: Option<Placement>, cx: &App) -> WindowBounds {
 }
 
 /// `saved` shrunk and moved as little as it takes to lie within `area`, the visible
-/// part of the primary display a window opens on where the platform has one, as on
-/// macOS and X11, so a window saved on a display that has gone or has shrunk opens
-/// where it can be seen and moved. Wayland has no primary display and places windows
-/// itself, so there the compositor fits them.
+/// part of the display a window opens on, so a window saved on a display that has
+/// gone or has shrunk opens where it can be seen and moved. That is the primary
+/// display where the platform has one, as on macOS and X11. Wayland has none, so
+/// there it is the only output, and with several [`fit_once_shown`] shrinks the
+/// window once it knows its output.
 fn fit(saved: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
     let size = saved.size.min(&area.size);
     let origin = point(
@@ -106,6 +112,36 @@ fn fit(saved: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
             .max(area.top()),
     );
     Bounds { origin, size }
+}
+
+/// Shrinks `window` to the display it is on when it is larger.
+fn fit_to_display(window: &mut Window, cx: &mut App) {
+    if window.is_maximized() || window.is_fullscreen() {
+        return;
+    }
+    let Some(display) = window.display(cx) else {
+        return;
+    };
+    let size = window.bounds().size;
+    let fitted = size.min(&display.visible_bounds().size);
+    if fitted != size {
+        window.resize(fitted);
+    }
+}
+
+/// Shrinks `window` to its output once it shows there, for a window that opens not
+/// knowing its output, as on Wayland with several. It waits for the next frame, so
+/// every output the window entered on showing has been reported, and fits only then,
+/// so a window moved later keeps its size.
+fn fit_once_shown(window: &mut Window) {
+    let mut asked = false;
+    window
+        .observe_window_display(move |window, _| {
+            if !std::mem::replace(&mut asked, true) {
+                window.on_next_frame(fit_to_display);
+            }
+        })
+        .detach();
 }
 
 /// Opens saved window `id` where it was, showing what it saved.
@@ -131,6 +167,9 @@ pub(crate) fn open(
                 view
             });
             register_window(view.downgrade(), window, cx);
+            if cx.primary_display().is_none() && window.display(cx).is_none() {
+                fit_once_shown(window);
+            }
             view
         },
     )?;

@@ -8,8 +8,8 @@ publish.workspace = true
 keystone-agent = { path = "../keystone-agent" }
 keystone-core = { path = "../keystone-core" }
 keystone-ui = { path = "../keystone-ui" }
-gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0" }
-gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0", features = ["wayland", "x11"] }
+gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev = "59c962b4207236d1e99840399be25d1c52a469f7" }
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "59c962b4207236d1e99840399be25d1c52a469f7", features = ["wayland", "x11"] }
 anyhow = "1"
 futures = "0.3"
 ignore = "0.4.33"
@@ -26,7 +26,7 @@ unicode-segmentation = "1"
 # compiles the shaders when the app starts, so a Mac with only the Command Line Tools,
 # which have no `metal` compiler, can build Keystone.
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0", features = ["font-kit", "runtime_shaders"] }
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "59c962b4207236d1e99840399be25d1c52a469f7", features = ["font-kit", "runtime_shaders"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }

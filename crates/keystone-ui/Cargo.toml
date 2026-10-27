@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0" }
+gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev = "59c962b4207236d1e99840399be25d1c52a469f7" }
 anyhow = "1"
 smallvec = "1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
@@ -33,12 +33,12 @@ required-features = ["ui-tests"]
 # The gallery draws text and builds on macOS for the reasons keystone-desktop's
 # manifest gives.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0", features = ["font-kit", "runtime_shaders"] }
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "59c962b4207236d1e99840399be25d1c52a469f7", features = ["font-kit", "runtime_shaders"] }
 
 [dev-dependencies]
 resvg = "0.46"
-gpui_wgpu = { package = "gpui-pre-wgpu", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0" }
-gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "e49af9d056e99d5a047428eccb078791d29ad4e0", features = ["wayland", "x11"] }
+gpui_wgpu = { package = "gpui-pre-wgpu", git = "https://github.com/tobygodat/tGPUI", rev = "59c962b4207236d1e99840399be25d1c52a469f7" }
+gpui_platform = { package = "gpui-pre-platform", git = "https://github.com/tobygodat/tGPUI", rev = "59c962b4207236d1e99840399be25d1c52a469f7", features = ["wayland", "x11"] }
 
 [[test]]
 name = "layout_timing"
