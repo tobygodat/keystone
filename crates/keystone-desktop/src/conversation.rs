@@ -501,21 +501,43 @@ impl Conversation {
         // Stable, so rows with the same place keep their order in the file.
         ordered.sort_by_key(|(place, _, _)| *place);
         // Log gap markers with nothing between them read as one gap, unless a recovery
-        // batch was logged between them: it may have filled the earlier one.
+        // batch logged after the first of them names the later one, or the latest batch
+        // to fill the first expects it as it is: a fill expects the row it saw exactly.
         ordered.dedup_by(|(_, logged, later), (_, first, kept)| {
             let (Row::Item(later), Row::Item(kept)) = (later, kept) else {
                 return false;
             };
-            let (from, to) = (*logged.min(first), *logged.max(first));
-            if batches
-                .iter()
-                .any(|(position, _)| from < *position && *position < to)
-            {
-                return false;
-            }
             let (Some(more), Some(count)) = (lost_count(later), lost_count(kept)) else {
                 return false;
             };
+            fn expected<'a>(batch: &'a RecoveryBatch, id: &str) -> Vec<&'a Item> {
+                batch
+                    .operations
+                    .iter()
+                    .filter_map(|operation| match operation {
+                        Operation::Replace { expected, .. } if expected.id == id => Some(expected),
+                        _ => None,
+                    })
+                    .collect()
+            }
+            let from = *logged.min(first);
+            let after = batches
+                .iter()
+                .filter(|(position, _)| *position > from)
+                .map(|(_, batch)| batch);
+            let named = later.id != kept.id
+                && after.clone().any(|batch| {
+                    batch.report_after.as_deref() == Some(&later.id)
+                        || !expected(batch, &later.id).is_empty()
+                });
+            let filled = after
+                .rev()
+                .map(|batch| expected(batch, &kept.id))
+                .find(|expected| !expected.is_empty())
+                .is_some_and(|expected| expected.contains(&&*kept));
+            if named || filled {
+                return false;
+            }
             // The same marker saved twice, after a write whose outcome was unknown,
             // already counts the earlier copy.
             let total = if later.id == kept.id {
@@ -2081,6 +2103,320 @@ mod tests {
             ["hi", &"A long recovered reply. ".repeat(40)]
         );
         assert!(matches!(restored.rows.last(), Some(Row::Recovery(_))));
+    }
+
+    /// How many entries the restored rows say were lost.
+    fn restored_lost(conversation: &Conversation) -> u64 {
+        conversation
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) => lost_count(item),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// Logs with a small budget whose store cannot be opened until the returned file is
+    /// removed, so what they queue waits in the budget.
+    fn logs_with_a_broken_store() -> (
+        keystone_agent::log::Logs,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let store = keystone_agent::log::path(&sessions, 1);
+        std::fs::write(&store, "not a database").unwrap();
+        let wake: keystone_agent::Wake = std::sync::Arc::new(|| {});
+        let logs = keystone_agent::log::Logs::new(sessions.clone(), wake).with_budget(4096);
+        (logs, sessions, store, dir)
+    }
+
+    fn saved(entry: Entry) -> Write {
+        Write { entry, sync: true }
+    }
+
+    #[test]
+    fn the_live_loss_count_matches_the_restored_markers_after_a_retry_saves_its_batch() {
+        use keystone_agent::recovery::{Outcome, RecoveryReport, TurnEvidence};
+        let (logs, sessions, store, _dir) = logs_with_a_broken_store();
+        let item = |item, seq| {
+            saved(Entry::Item {
+                item,
+                seq: Some(seq),
+                run: Some(1),
+            })
+        };
+        logs.append(1, vec![item(user("u1", "hi"), 0)]).unwrap();
+        let mut seq = 1;
+        while logs
+            .append(
+                1,
+                vec![item(
+                    message(&format!("m{seq}"), &"x".repeat(900), ItemStatus::Completed),
+                    seq,
+                )],
+            )
+            .is_ok()
+        {
+            seq += 1;
+        }
+        let batch = RecoveryBatch {
+            id: "recovery-3".into(),
+            operations: vec![Operation::Insert {
+                after: "u1".into(),
+                item: message(
+                    "r",
+                    &"A recovered reply. ".repeat(40),
+                    ItemStatus::Completed,
+                ),
+            }],
+            report: RecoveryReport {
+                outcome: Outcome::Recovered,
+                messages: 1,
+                tools: 0,
+                extended: 0,
+                turn: TurnEvidence::Unaffected,
+                limits: Vec::new(),
+            },
+            report_after: Some("r".into()),
+            closes_turn: false,
+        };
+        let recovery = || {
+            saved(Entry::Recovery {
+                batch: batch.clone(),
+            })
+        };
+        assert!(logs.append(1, vec![recovery()]).is_err());
+        assert_eq!(logs.lost_entries(1), 1 + 2);
+        std::fs::remove_file(&store).unwrap();
+        logs.flush_pending().unwrap();
+        // Retry, now that saving freed the budget.
+        logs.append(1, vec![recovery()]).unwrap();
+        logs.flush_pending().unwrap();
+        let restored = Log(keystone_agent::log::read(&sessions, 1).unwrap()).restore();
+        assert_eq!(restored_lost(&restored), 1);
+        assert_eq!(logs.lost_entries(1), restored_lost(&restored));
+    }
+
+    #[test]
+    fn the_live_loss_count_matches_the_restored_markers_after_boundaries_collapse() {
+        let (logs, sessions, store, _dir) = logs_with_a_broken_store();
+        for turn in 0..300 {
+            logs.append(1, vec![saved(Entry::TurnStarted)]).unwrap();
+            let _ = logs.append(
+                1,
+                vec![saved(Entry::Item {
+                    item: message(&format!("m{turn}"), &"x".repeat(900), ItemStatus::Completed),
+                    seq: Some(2 * turn),
+                    run: Some(1),
+                })],
+            );
+            logs.append(
+                1,
+                vec![saved(Entry::TurnEnded {
+                    status: TurnStatus::Failed,
+                    error: Some("failed".into()),
+                    limit: None,
+                    seq: Some(2 * turn + 1),
+                    run: Some(1),
+                })],
+            )
+            .unwrap();
+        }
+        logs.flush_pending().unwrap_err();
+        std::fs::remove_file(&store).unwrap();
+        logs.flush_pending().unwrap();
+        let restored = Log(keystone_agent::log::read(&sessions, 1).unwrap()).restore();
+        assert!(restored_lost(&restored) > 300, "boundaries were folded in");
+        assert_eq!(logs.lost_entries(1), restored_lost(&restored));
+    }
+
+    fn report_only(id: &str, operations: Vec<Operation>) -> Entry {
+        use keystone_agent::recovery::{Outcome, RecoveryReport, TurnEvidence};
+        Entry::Recovery {
+            batch: RecoveryBatch {
+                id: id.into(),
+                operations,
+                report: RecoveryReport {
+                    outcome: Outcome::Partial,
+                    messages: 0,
+                    tools: 0,
+                    extended: 0,
+                    turn: TurnEvidence::Unknown,
+                    limits: Vec::new(),
+                },
+                report_after: None,
+                closes_turn: false,
+            },
+        }
+    }
+
+    #[test]
+    fn gap_markers_either_side_of_a_batch_that_filled_neither_restore_as_one() {
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            Entry::Item {
+                item: message("kept", "kept", ItemStatus::Completed),
+                seq: Some(0),
+                run: Some(1),
+            },
+            gap_marker("a", 1, Some(1), Some(1)),
+            report_only("recovery-1", Vec::new()),
+            gap_marker("b", 2, Some(2), Some(1)),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            ["kept", "3 log entries were lost (log budget exceeded)."]
+        );
+    }
+
+    #[test]
+    fn a_gap_marker_a_later_batch_fills_stays_its_own_row() {
+        let Entry::Item { item: first, .. } = gap_marker("a", 1, Some(1), Some(1)) else {
+            unreachable!()
+        };
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            Entry::Item {
+                item: message("kept", "kept", ItemStatus::Completed),
+                seq: Some(0),
+                run: Some(1),
+            },
+            gap_marker("a", 1, Some(1), Some(1)),
+            report_only("recovery-1", Vec::new()),
+            gap_marker("b", 2, Some(2), Some(1)),
+            report_only(
+                "recovery-2",
+                vec![Operation::Replace {
+                    expected: first.clone(),
+                    item: keystone_agent::log::filled(&first),
+                }],
+            ),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            [
+                "kept",
+                "1 log entry was not saved here (log budget exceeded); recovery has added what the provider recorded.",
+                "2 log entries were lost (log budget exceeded).",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_later_marker_a_batch_filled_after_merging_it_with_the_next_stays_apart() {
+        let mut merged = match gap_marker("b", 1, Some(2), Some(1)) {
+            Entry::Item { item, .. } => item,
+            _ => unreachable!(),
+        };
+        with_lost_count(&mut merged, 3);
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            Entry::Item {
+                item: message("kept", "kept", ItemStatus::Completed),
+                seq: Some(0),
+                run: Some(1),
+            },
+            gap_marker("a", 1, Some(1), Some(1)),
+            report_only("recovery-1", Vec::new()),
+            gap_marker("b", 1, Some(2), Some(1)),
+            gap_marker("c", 2, Some(3), Some(1)),
+            report_only(
+                "recovery-2",
+                vec![Operation::Replace {
+                    item: keystone_agent::log::filled(&merged),
+                    expected: merged,
+                }],
+            ),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            [
+                "kept",
+                "1 log entry was lost (log budget exceeded).",
+                "3 log entries were not saved here (log budget exceeded); recovery has added what the provider recorded.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fill_of_a_run_of_merged_gaps_wins_over_an_earlier_fill_of_its_first() {
+        let marker = |id, count| match gap_marker(id, count, Some(1), Some(1)) {
+            Entry::Item { item, .. } => item,
+            _ => unreachable!(),
+        };
+        let fill = |id: &str, marker: Item| {
+            report_only(
+                id,
+                vec![Operation::Replace {
+                    item: keystone_agent::log::filled(&marker),
+                    expected: marker,
+                }],
+            )
+        };
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            Entry::Item {
+                item: message("kept", "kept", ItemStatus::Completed),
+                seq: Some(0),
+                run: Some(1),
+            },
+            gap_marker("a", 1, Some(1), Some(1)),
+            gap_marker("b", 2, Some(2), Some(1)),
+            gap_marker("c", 4, Some(3), Some(1)),
+            fill("recovery-1", marker("a", 1)),
+            fill("recovery-2", marker("a", 7)),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            [
+                "kept",
+                "7 log entries were not saved here (log budget exceeded); recovery has added what the provider recorded.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fill_of_the_merged_gap_wins_over_an_earlier_fill_of_one_marker() {
+        let marker = |id, count, seq| {
+            let Entry::Item { item, .. } = gap_marker(id, count, Some(seq), Some(1)) else {
+                unreachable!()
+            };
+            item
+        };
+        let fill = |id: &str, marker: Item| {
+            report_only(
+                id,
+                vec![Operation::Replace {
+                    item: keystone_agent::log::filled(&marker),
+                    expected: marker,
+                }],
+            )
+        };
+        let mut merged = marker("a", 1, 1);
+        with_lost_count(&mut merged, 3);
+        let mut conversation = Conversation::loading();
+        conversation.restore(Ok(vec![
+            Entry::Item {
+                item: message("kept", "kept", ItemStatus::Completed),
+                seq: Some(0),
+                run: Some(1),
+            },
+            gap_marker("a", 1, Some(1), Some(1)),
+            gap_marker("b", 2, Some(2), Some(1)),
+            fill("recovery-1", marker("a", 1, 1)),
+            fill("recovery-2", merged),
+        ]));
+        assert_eq!(
+            shown(&conversation),
+            [
+                "kept",
+                "3 log entries were not saved here (log budget exceeded); recovery has added what the provider recorded.",
+            ]
+        );
     }
 
     /// A provider that exits while the history loads is logged after the turn it

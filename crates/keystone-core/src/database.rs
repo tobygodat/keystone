@@ -584,6 +584,21 @@ impl Database {
         })
     }
 
+    /// Whether a log entry is saved under each of `keys`.
+    pub fn logs_saved<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> io::Result<bool> {
+        self.connection(true, |connection| {
+            let mut statement = connection
+                .prepare("SELECT 1 FROM events WHERE event_key=?1 AND kind='log.appended'")
+                .map_err(sql_error)?;
+            for key in keys {
+                if !statement.exists([key]).map_err(sql_error)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+    }
+
     pub fn read_logs(&self, session: u64) -> io::Result<Vec<String>> {
         self.connection(true, |connection| {
             let mut statement = connection

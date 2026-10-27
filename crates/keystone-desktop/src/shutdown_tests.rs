@@ -318,6 +318,63 @@ fn saved_texts(sessions: &Path, session: u64) -> Vec<String> {
 }
 
 #[gpui::test]
+fn the_loss_notice_clears_once_a_retry_admits_the_only_rejected_batch(cx: &mut TestAppContext) {
+    use keystone_agent::recovery::{
+        Operation, Outcome, RecoveryBatch, RecoveryReport, TurnEvidence,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (_view, state, cx) = open(dir.path(), cx);
+    state.update(cx, |state, cx| {
+        let logs = Logs::with_database(state.store().database(), state.test_wake().clone())
+            .with_budget(3000);
+        state.test_set_logs(logs);
+        state.ensure_history(1);
+        state.flush_logs(cx).unwrap();
+    });
+    let batch = RecoveryBatch {
+        id: "recovery-retried".into(),
+        operations: vec![Operation::Insert {
+            after: "u1".into(),
+            item: keystone_agent::Item {
+                id: "recovered".into(),
+                kind: ItemKind::AgentMessage,
+                text: "r".repeat(1500),
+                status: keystone_agent::ItemStatus::Completed,
+            },
+        }],
+        report: RecoveryReport {
+            outcome: Outcome::Recovered,
+            messages: 1,
+            tools: 0,
+            extended: 0,
+            turn: TurnEvidence::Unaffected,
+            limits: Vec::new(),
+        },
+        report_after: None,
+        closes_turn: false,
+    };
+    let writer = lock_database(&dir.path().join("workspace.sqlite3"));
+    state.update(cx, |state, _| {
+        state.test_conversation(1).push_local(&"k".repeat(2000));
+        assert!(!state.commit(1));
+        state.test_conversation(1).log_recovery(batch.clone());
+        assert!(state.commit(1));
+        assert_eq!(
+            state.log_losses().cloned().collect::<Vec<_>>(),
+            ["Session 1: 2 log entries were lost (log budget exceeded)."]
+        );
+    });
+    drop(writer);
+    state.update(cx, |state, cx| {
+        state.flush_logs(cx).unwrap();
+        // Retry, now that saving freed the budget.
+        state.test_conversation(1).log_recovery(batch);
+        assert!(!state.commit(1));
+        assert_eq!(state.log_losses().count(), 0);
+    });
+}
+
+#[gpui::test]
 fn log_budget_gap_is_marked_before_quit_so_a_crash_keeps_it_in_its_conversation(
     cx: &mut TestAppContext,
 ) {

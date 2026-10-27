@@ -13,7 +13,7 @@ use crate::item::{Item, ItemKind, ItemStatus, TurnStatus};
 use crate::worker::Worker;
 use keystone_core::{Database, Durability};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -168,6 +168,12 @@ impl SessionLog {
         }
     }
 
+    /// Whether every record is saved, as after an append that committed but failed.
+    fn saved(&self, records: &[(String, String)]) -> io::Result<bool> {
+        self.database
+            .logs_saved(records.iter().map(|(key, _)| key.as_str()))
+    }
+
     pub fn sync(&mut self) -> io::Result<()> {
         #[cfg(test)]
         if matches!(self.faults.front(), Some(Fault::Committed)) {
@@ -247,18 +253,17 @@ pub enum Report {
         session: u64,
         entries: Result<Vec<Entry>, String>,
     },
-    /// `retryable` distinguishes outstanding I/O from terminal admission loss.
-    /// `lost` counts rejected entries, including ones whose gap marker is saved.
+    /// `retryable` distinguishes outstanding I/O from terminal admission loss. Sent
+    /// whenever either changes, or the session's [`Logs::lost_entries`] does.
     Saved {
         session: u64,
         error: Option<String>,
         retryable: bool,
-        lost: u64,
     },
     /// Everything queued for `session` before [`Logs::checkpoint`] with `ticket` is
     /// saved, or `error` says why not.
-    /// `error` names only work a retry can still save; `lost` counts the session's
-    /// rejected entries so far, whose markers are saved like any entry.
+    /// `error` names only work a retry can still save; `lost` is the session's
+    /// [`Logs::lost_entries`], whose markers are saved like any entry.
     Checkpoint {
         session: u64,
         ticket: u64,
@@ -301,6 +306,7 @@ struct Files {
 struct SaveFailure {
     message: String,
     retryable: bool,
+    lost: u64,
 }
 
 /// The default for the serialized bytes retained across the worker mailbox and failed
@@ -320,10 +326,10 @@ struct SaveFailure {
 /// admitted entry between them share one marker, saved again with each new count, even
 /// behind a failing barrier, so a crash never leaves it undercounting, and
 /// a session's queue holds at most one marker more than the entries it holds, plus
-/// one per rejected recovery batch. A
-/// session's strict [`Logs::flush`] stays failed for the lifetime of these Logs;
-/// [`Logs::flush_pending`] reports only retryable work. Queue metadata is additional
-/// memory.
+/// one per rejected recovery batch. A session's strict [`Logs::flush`] stays failed
+/// while it has lost entries, which is for the lifetime of these Logs unless they were
+/// all in recovery batches a Retry has since admitted; [`Logs::flush_pending`]
+/// reports only retryable work. Queue metadata is additional memory.
 pub const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
 pub const LOSS_MARKER_PREFIX: &str = "keystone-log-loss-";
 
@@ -379,11 +385,31 @@ pub fn filled(marker: &Item) -> Item {
 struct Budget {
     bytes: usize,
     limit: usize,
-    /// Entries rejected for each session.
-    rejected: BTreeMap<u64, u64>,
-    /// Recovery batches rejected so far, so a batch rejected again on Retry is counted
-    /// once.
-    batches: BTreeSet<String>,
+    /// Each session's entries that a restore would show as lost: those rejected, and
+    /// boundaries a collapse folded into a gap marker. Never zero.
+    lost: BTreeMap<u64, u64>,
+    /// Recovery batches rejected and not admitted since, with the rows each counts, so
+    /// a batch rejected again on Retry is counted once and one a Retry admits is no
+    /// longer lost: like any admitted entry, it is retained until it saves.
+    batches: BTreeMap<String, u64>,
+}
+
+impl Budget {
+    fn lost(&self, session: u64) -> u64 {
+        self.lost.get(&session).copied().unwrap_or(0)
+    }
+
+    fn count_lost(&mut self, session: u64, more: u64, saved: u64) {
+        let lost = self
+            .lost(session)
+            .saturating_add(more)
+            .saturating_sub(saved);
+        if lost == 0 {
+            self.lost.remove(&session);
+        } else {
+            self.lost.insert(session, lost);
+        }
+    }
 }
 
 fn limit_error(session: u64, entries: u64) -> String {
@@ -563,8 +589,8 @@ impl Logs {
             budget: Arc::new(Mutex::new(Budget {
                 bytes: 0,
                 limit: MAX_PENDING_BYTES,
-                rejected: BTreeMap::new(),
-                batches: BTreeSet::new(),
+                lost: BTreeMap::new(),
+                batches: BTreeMap::new(),
             })),
             dir,
             read,
@@ -635,9 +661,11 @@ impl Logs {
         let mut admission = self.budget.lock().unwrap();
         let mut queued = Vec::new();
         let mut bytes = 0;
-        // Entries refused in this call, and how many of them are newly lost.
+        // Entries refused in this call, how many of them are newly lost, and how many
+        // lost earlier are admitted now.
         let mut rejected = 0;
         let mut newly_lost = 0;
+        let mut saved = 0;
         for write in writes {
             let used = admission.bytes + bytes;
             let room = admission.limit.saturating_sub(used);
@@ -681,6 +709,9 @@ impl Logs {
                 (entry, line)
             };
             if let Some(line) = line {
+                if let Entry::Recovery { batch } = &entry {
+                    saved += admission.batches.remove(&batch.id).unwrap_or(0);
+                }
                 let kind = if spare {
                     Kind::Spare {
                         boundary: std::mem::discriminant(&entry),
@@ -704,7 +735,7 @@ impl Logs {
             };
             if batch
                 .as_ref()
-                .is_none_or(|id| admission.batches.insert(id.clone()))
+                .is_none_or(|id| admission.batches.insert(id.clone(), gap.count).is_none())
             {
                 newly_lost += gap.count;
             }
@@ -720,13 +751,8 @@ impl Logs {
             }
         }
         admission.bytes += bytes;
-        let lost = if rejected > 0 {
-            let lost = admission.rejected.entry(session).or_default();
-            *lost = lost.saturating_add(newly_lost);
-            *lost
-        } else {
-            0
-        };
+        admission.count_lost(session, newly_lost, saved);
+        let lost = admission.lost(session);
         let (files, reports, wake) = (self.files.clone(), self.reports.clone(), self.wake.clone());
         let budget = self.budget.clone();
         self.writer.run(move || {
@@ -738,7 +764,7 @@ impl Logs {
             let report = files.retry(session, &budget).or_else(|| {
                 // The loss is news even while an earlier failure is unchanged.
                 (rejected > 0).then(|| {
-                    let lost = budget.lock().unwrap().rejected[&session];
+                    let lost = budget.lock().unwrap().lost(session);
                     let failure = files
                         .failing
                         .get(&session)
@@ -750,7 +776,6 @@ impl Logs {
                             |failure| failure.message.clone(),
                         )),
                         retryable: failure.is_some(),
-                        lost,
                     }
                 })
             });
@@ -768,14 +793,9 @@ impl Logs {
         }
     }
 
+    /// How many of the session's entries a restore would show as lost now.
     pub fn lost_entries(&self, session: u64) -> u64 {
-        self.budget
-            .lock()
-            .unwrap()
-            .rejected
-            .get(&session)
-            .copied()
-            .unwrap_or(0)
+        self.budget.lock().unwrap().lost(session)
     }
 
     /// Retries pending transactions, then reports every outstanding
@@ -815,7 +835,7 @@ impl Logs {
                 .map(|(session, failure)| (*session, failure.message.clone()))
                 .collect();
             if strict {
-                for (session, lost) in &budget.lock().unwrap().rejected {
+                for (session, lost) in &budget.lock().unwrap().lost {
                     let limit = limit_error(*session, *lost);
                     errors
                         .entry(*session)
@@ -866,13 +886,7 @@ impl Logs {
                 .get(&session)
                 .filter(|failure| failure.retryable)
                 .map(|failure| failure.message.clone());
-            let lost = budget
-                .lock()
-                .unwrap()
-                .rejected
-                .get(&session)
-                .copied()
-                .unwrap_or(0);
+            let lost = budget.lock().unwrap().lost(session);
             drop(files);
             let mut reports = reports.lock().unwrap();
             reports.extend(saved);
@@ -911,23 +925,24 @@ impl Files {
             }
             pending.retry(budget)
         })();
+        let mut budget = budget.lock().unwrap();
         if result.is_err() {
-            self.sessions.get_mut(&session).unwrap().compact();
+            let folded = self.sessions.get_mut(&session).unwrap().compact();
+            budget.count_lost(session, folded, 0);
         }
+        let lost = budget.lost(session);
+        drop(budget);
         let failure = result
             .err()
             .map(|error| format!("Session {session}: {error}"));
-        let lost = budget
-            .lock()
-            .unwrap()
-            .rejected
-            .get(&session)
-            .copied()
-            .unwrap_or(0);
         let retryable = failure.is_some();
         let error = failure
             .or_else(|| (lost > 0).then(|| limit_error(session, lost)))
-            .map(|message| SaveFailure { message, retryable });
+            .map(|message| SaveFailure {
+                message,
+                retryable,
+                lost,
+            });
         match error {
             Some(error) => {
                 if self.failing.get(&session) == Some(&error) {
@@ -938,14 +953,12 @@ impl Files {
                     session,
                     error: Some(error.message),
                     retryable,
-                    lost,
                 })
             }
             None => self.failing.remove(&session).map(|_| Report::Saved {
                 session,
                 error: None,
                 retryable: false,
-                lost: 0,
             }),
         }
     }
@@ -1024,22 +1037,26 @@ impl PendingSession {
 
     /// After a failed save, so a store that works again saves every boundary. Past the
     /// reserve a session keeps one turn of boundaries while the store cannot write.
-    fn compact(&mut self) {
+    /// Returns how many boundaries it folded into a gap marker.
+    fn compact(&mut self) -> u64 {
         let unsent: Vec<_> = self.writes.drain(self.committed..).collect();
+        let mut folded = 0;
         for write in unsent {
             if let Kind::Spare { boundary, .. } = write.kind {
-                self.collapse(boundary);
+                folded += self.collapse(boundary);
             }
             self.writes.push_back(write);
         }
+        folded
     }
 
     /// A boundary past the reserve drops the unsent ones from the last turn start, when
     /// it starts a turn itself, or else from an earlier boundary of its kind since that
     /// start. What it drops joins the gap marker, as entries lost, so only a few
     /// boundaries wait however many turns go by. A rejected recovery batch's marker is
-    /// kept as it is.
-    fn collapse(&mut self, boundary: std::mem::Discriminant<Entry>) {
+    /// kept as it is, after the gap marker, since the boundaries dropped from `from`
+    /// came first. Returns how many boundaries it dropped.
+    fn collapse(&mut self, boundary: std::mem::Discriminant<Entry>) -> u64 {
         let started = std::mem::discriminant(&Entry::TurnStarted);
         let tail = self.writes.len()
             - self
@@ -1059,11 +1076,12 @@ impl PendingSession {
             (turn.unwrap_or(tail)..self.writes.len()).find(|&index| at(index, boundary))
         };
         let Some(from) = from else {
-            return;
+            return 0;
         };
         let mut kept = None;
         let mut batches = Vec::new();
         let mut dropped: Option<Gap> = None;
+        let mut boundaries = 0;
         for write in self.writes.drain(from..).collect::<Vec<_>>() {
             let gap = match write.kind {
                 Kind::Marker { batch: true, .. } => {
@@ -1074,15 +1092,15 @@ impl PendingSession {
                     kept.get_or_insert(id);
                     gap
                 }
-                Kind::Spare { gap, .. } => gap,
+                Kind::Spare { gap, .. } => {
+                    boundaries += gap.count;
+                    gap
+                }
                 Kind::Entry => unreachable!("a collapse never reaches a budgeted entry"),
             };
             dropped = Some(dropped.map_or(gap, |held| held.merge(gap)));
         }
-        self.writes.extend(batches);
-        let Some(gap) = dropped else {
-            return;
-        };
+        let gap = dropped.expect("a collapse starts at a boundary");
         match kept {
             // A dropped marker keeps its ID, so a copy whose append outcome was unknown
             // restores as the same marker.
@@ -1098,6 +1116,8 @@ impl PendingSession {
             }
             _ => self.mark_gap(gap),
         }
+        self.writes.extend(batches);
+        boundaries
     }
 
     fn retry(&mut self, budget: &Mutex<Budget>) -> io::Result<()> {
@@ -1115,7 +1135,17 @@ impl PendingSession {
                     .skip(self.committed)
                     .map(|write| write.record.clone())
                     .collect();
-                let durability = log.append_records(&records)?;
+                let durability = match log.append_records(&records) {
+                    Ok(durability) => durability,
+                    // An append can commit and still fail. Rows the store has are not
+                    // sent again, so a collapse never counts them as lost. When the
+                    // store cannot say, they stay unsent: a restore may then overcount,
+                    // but never undercounts.
+                    Err(error) if log.saved(&records).unwrap_or(false) => {
+                        Durability::DirectorySyncPending(error.to_string())
+                    }
+                    Err(error) => return Err(error),
+                };
                 self.committed = self.writes.len();
                 if let Durability::DirectorySyncPending(error) = durability {
                     // Committed rows are never sent again, so only entries counted in
@@ -1223,6 +1253,7 @@ fn fit(mut entry: Entry, limit: usize) -> Entry {
 mod tests {
     use super::*;
     use crate::item::{ItemKind, ItemStatus};
+    use std::collections::BTreeSet;
     use std::fs;
 
     fn item(id: &str) -> Item {
@@ -1384,6 +1415,29 @@ mod tests {
         write
     }
 
+    /// What a restore shows as lost: each marker once, at its largest count, except
+    /// those of recovery batches saved since.
+    fn shown_lost(entries: &[Entry]) -> u64 {
+        let saved: BTreeSet<String> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Recovery { batch } => Some(format!("{LOSS_MARKER_PREFIX}{}", batch.id)),
+                _ => None,
+            })
+            .collect();
+        let mut counts = BTreeMap::new();
+        for entry in entries {
+            if let Entry::Item { item, .. } = entry
+                && !saved.contains(&item.id)
+                && let Some(count) = lost_count(item)
+            {
+                let held = counts.entry(item.id.clone()).or_insert(0);
+                *held = count.max(*held);
+            }
+        }
+        counts.values().sum()
+    }
+
     /// The marker's text and place, when `entry` is a gap marker.
     fn marker(entry: &Entry) -> Option<(&str, Option<u64>)> {
         match entry {
@@ -1508,7 +1562,6 @@ mod tests {
                 session: 2,
                 error: Some(_),
                 retryable: true,
-                lost: 0,
             }]
         ));
         fs::remove_file(path(&sessions, 0)).unwrap();
@@ -1521,7 +1574,6 @@ mod tests {
                 session: 2,
                 error: None,
                 retryable: false,
-                lost: 0,
             }]
         );
         // Further successes report nothing.
@@ -1555,13 +1607,11 @@ mod tests {
                     session: 1,
                     error: None,
                     retryable: false,
-                    lost: 0,
                 },
                 Report::Saved {
                     session: 2,
                     error: None,
                     retryable: false,
-                    lost: 0,
                 },
             ]
         );
@@ -1639,7 +1689,6 @@ mod tests {
                 session: 1,
                 error: None,
                 retryable: false,
-                lost: 0,
             }]
         );
         assert_eq!(logs.budget.lock().unwrap().bytes, 0);
@@ -2005,7 +2054,7 @@ mod tests {
         );
         logs.writer.flush();
         assert!(
-            matches!(logs.drain().last(), Some(Report::Saved { error: Some(error), retryable: true, lost: 1, .. }) if error.contains(&original))
+            matches!(logs.drain().last(), Some(Report::Saved { error: Some(error), retryable: true, .. }) if error.contains(&original))
         );
         assert!(logs.flush_pending().unwrap_err().contains(&original));
         fs::remove_file(path(&sessions, 0)).unwrap();
@@ -2021,10 +2070,10 @@ mod tests {
             logs.drain().last(),
             Some(Report::Saved {
                 retryable: false,
-                lost: 1,
                 ..
             })
         ));
+        assert_eq!(logs.lost_entries(1), 1);
         assert_eq!(logs.budget.lock().unwrap().bytes, 0);
     }
 
@@ -2380,7 +2429,8 @@ mod tests {
                 ..
             }]
         ));
-        assert_eq!(logs.lost_entries(1), 0);
+        assert_eq!(logs.lost_entries(1), 119 - kept as u64);
+        assert_eq!(shown_lost(&entries), logs.lost_entries(1));
     }
 
     /// Fills the budget, then its reserve with turn starts, and returns how many were
@@ -2469,7 +2519,8 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(logs.lost_entries(1), 1000);
+        assert_eq!(logs.lost_entries(1), 1 + 3 * 999 + 1);
+        assert_eq!(shown_lost(&entries), logs.lost_entries(1));
         assert_eq!(logs.budget.lock().unwrap().bytes, 0);
     }
 
@@ -2675,13 +2726,16 @@ mod tests {
         logs.writer.flush();
         fs::remove_file(path(&sessions, 0)).unwrap();
         logs.flush_pending().unwrap();
-        let copies = read(&sessions, 1)
-            .unwrap()
+        let entries = read(&sessions, 1).unwrap();
+        let copies = entries
             .iter()
             .filter(|entry| matches!(entry, Entry::Item { item, .. } if item.id == format!("{LOSS_MARKER_PREFIX}recovery-x")))
             .count();
         assert_eq!(copies, 1);
-        assert_eq!(logs.lost_entries(1), 21);
+        // The batch's rows and report, and the 49 provider exits each later one stood
+        // in for.
+        assert_eq!(logs.lost_entries(1), 21 + 49);
+        assert_eq!(shown_lost(&entries), logs.lost_entries(1));
     }
 
     #[test]
@@ -2716,6 +2770,125 @@ mod tests {
         }
         assert_eq!(marker(later), Some((loss_text(1).as_str(), Some(5))));
         assert_eq!(logs.lost_entries(1), 5);
+    }
+
+    #[test]
+    fn a_rejected_batch_a_retry_admits_is_no_longer_lost() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        let sessions = dir.path().join("sessions");
+        fs::write(path(&sessions, 0), "not a database").unwrap();
+        let overhead = serde_json::to_vec(&bulky(0, 0).entry).unwrap().len() + 1;
+        logs.append(1, vec![bulky(0, 8192 - overhead)]).unwrap();
+        assert!(logs.append(1, vec![entry(1)]).is_err());
+        let recovery = || Write {
+            entry: Entry::Recovery {
+                batch: batch("recovery-9", 2),
+            },
+            sync: true,
+        };
+        assert!(logs.append(1, vec![recovery()]).is_err());
+        assert_eq!(logs.lost_entries(1), 1 + 3);
+        fs::remove_file(path(&sessions, 0)).unwrap();
+        logs.flush_pending().unwrap();
+        // Retry, now that saving freed the budget.
+        logs.append(1, vec![recovery()]).unwrap();
+        logs.flush_pending().unwrap();
+        let entries = read(&sessions, 1).unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Recovery { .. }))
+        );
+        assert_eq!(logs.lost_entries(1), 1);
+        assert_eq!(shown_lost(&entries), 1);
+        assert!(logs.flush().unwrap_err().contains("1 entry was rejected"));
+    }
+
+    #[test]
+    fn boundaries_an_append_saved_before_failing_are_not_counted_lost() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        inject(&logs, 1, (0..10_000).map(|_| Fault::Transaction).collect());
+        fill_budget_and_reserve(&logs, 8192);
+        logs.writer.flush();
+        let faults = |faults: VecDeque<Fault>| {
+            logs.files
+                .lock()
+                .unwrap()
+                .sessions
+                .get_mut(&1)
+                .unwrap()
+                .log
+                .as_mut()
+                .unwrap()
+                .faults = faults;
+        };
+        // The turn's end commits with everything before it, but the append reports an
+        // error; the next turn's start then fails to save.
+        faults(VecDeque::from([Fault::CommittedThenFailed]));
+        let ended = Write {
+            entry: Entry::TurnEnded {
+                status: TurnStatus::Failed,
+                error: Some("failed".into()),
+                limit: None,
+                seq: Some(5),
+                run: Some(1),
+            },
+            sync: true,
+        };
+        logs.append(1, vec![ended]).unwrap();
+        logs.writer.flush();
+        faults(VecDeque::from([Fault::Transaction]));
+        let started = Write {
+            entry: Entry::TurnStarted,
+            sync: false,
+        };
+        logs.append(1, vec![started]).unwrap();
+        logs.writer.flush();
+        faults(VecDeque::new());
+        logs.flush_pending().unwrap();
+        let entries = read(&dir.path().join("sessions"), 1).unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::TurnEnded { seq: Some(5), .. }))
+        );
+        assert_eq!(entries.iter().filter_map(marker).count(), 0, "{entries:?}");
+        assert_eq!(logs.lost_entries(1), 0);
+    }
+
+    #[test]
+    fn a_collapsed_gap_stays_before_the_batch_rejected_after_it() {
+        let (logs, _, dir) = logs();
+        let logs = logs.with_budget(8192);
+        let sessions = dir.path().join("sessions");
+        fs::write(path(&sessions, 0), "not a database").unwrap();
+        fill_budget_and_reserve(&logs, 8192);
+        assert!(logs.append(1, vec![entry(2)]).is_err());
+        let recovery = Write {
+            entry: Entry::Recovery {
+                batch: batch("recovery-5", 1),
+            },
+            sync: true,
+        };
+        assert!(logs.append(1, vec![recovery]).is_err());
+        spare_turn(&logs, 2);
+        logs.writer.flush();
+        fs::remove_file(path(&sessions, 0)).unwrap();
+        logs.flush_pending().unwrap();
+        let entries = read(&sessions, 1).unwrap();
+        let at = |batch: bool| {
+            entries.iter().position(|entry| {
+                matches!(entry, Entry::Item { item, .. } if lost_count(item).is_some()
+                    && item.id.ends_with("recovery-5") == batch)
+            })
+        };
+        let (Some(gap), Some(batch)) = (at(false), at(true)) else {
+            panic!("{entries:?}");
+        };
+        assert!(gap < batch, "{entries:?}");
+        assert_eq!(shown_lost(&entries), logs.lost_entries(1));
     }
 
     #[test]

@@ -266,19 +266,22 @@ impl AppState {
         self.log_losses.values()
     }
 
-    fn record_loss(&mut self, session: u64, lost: u64) {
-        if lost > 0 {
-            let lost = lost.max(self.logs.lost_entries(session));
-            let entries = if lost == 1 {
-                "1 log entry was".to_owned()
-            } else {
-                format!("{lost} log entries were")
-            };
-            self.log_losses.insert(
-                session,
-                format!("Session {session}: {entries} lost (log budget exceeded)."),
-            );
+    /// Shows what a restore of the session would show as lost now.
+    fn record_loss(&mut self, session: u64) {
+        let lost = self.logs.lost_entries(session);
+        if lost == 0 {
+            self.log_losses.remove(&session);
+            return;
         }
+        let entries = if lost == 1 {
+            "1 log entry was".to_owned()
+        } else {
+            format!("{lost} log entries were")
+        };
+        self.log_losses.insert(
+            session,
+            format!("Session {session}: {entries} lost (log budget exceeded)."),
+        );
     }
     pub(crate) fn conversations(&self) -> &HashMap<u64, Conversation> {
         &self.conversations
@@ -1178,8 +1181,7 @@ impl AppState {
             conversation.restore(Ok(log.iter().map(|write| write.entry.clone()).collect()));
             self.conversations.insert(fork, conversation);
             if self.logs.append(fork, log).is_err() {
-                let lost = self.logs.lost_entries(fork);
-                self.record_loss(fork, lost);
+                self.record_loss(fork);
             }
             self.commit(fork);
         }
@@ -1227,8 +1229,7 @@ impl AppState {
                 })
                 .collect();
             if self.logs.append(session, writes).is_err() {
-                let lost = self.logs.lost_entries(session);
-                self.record_loss(session, lost);
+                self.record_loss(session);
             }
             self.commit(session);
         }
@@ -1811,11 +1812,6 @@ impl AppState {
             .logs
             .append(session, conversation.take_writes())
             .is_err();
-        let lost = if rejected {
-            self.logs.lost_entries(session)
-        } else {
-            0
-        };
         let changed = conversation.take_changes();
         let replies = changed
             .iter()
@@ -1834,7 +1830,7 @@ impl AppState {
             changed,
             replies,
         });
-        self.record_loss(session, lost);
+        self.record_loss(session);
         rejected
     }
 
@@ -1972,14 +1968,13 @@ impl AppState {
                     session,
                     error,
                     retryable,
-                    lost,
                 } => {
                     if let Some(conversation) = self.conversations.get_mut(&session) {
                         conversation.save_error = error
                             .filter(|_| retryable)
                             .map(|error| format!("This conversation is not being saved. {error}"));
                     }
-                    self.record_loss(session, lost);
+                    self.record_loss(session);
                     session
                 }
             };
