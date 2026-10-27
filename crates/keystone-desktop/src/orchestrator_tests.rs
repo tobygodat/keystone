@@ -138,14 +138,19 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
         assert!(state.send_message(
             ComposerDraft {
                 session: 1,
-                text: "long".into(),
+                text: "long until stopped".into(),
                 attachments: Vec::new(),
             },
             cx
         ))
     });
+    // The provider's copy of the message follows its turn start, which is when the
+    // caller counts as running for the orchestrator.
     wait_until(&state, cx, |state| {
         state.started(1).is_some_and(|c| c.is_running(1))
+            && state.conversations[&1].rows.iter().any(|row| {
+                matches!(row, Row::Item(item) if item.text == "long until stopped" && !item.id.starts_with("local:"))
+            })
     });
     state.update(cx, |state, cx| {
         let refusal = state.orchestrate(
@@ -447,7 +452,7 @@ fn a_second_opinion_reads_but_never_launches_steers_or_stops_in_any_mode(
             assert!(state.send_message(
                 ComposerDraft {
                     session,
-                    text: "long".into(),
+                    text: "long until stopped".into(),
                     attachments: Vec::new(),
                 },
                 cx
