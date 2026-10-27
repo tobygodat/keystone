@@ -68,6 +68,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[path = "support/codex_config.rs"]
+mod config_cli;
 #[path = "support/images.rs"]
 mod images;
 #[path = "support/orchestrator.rs"]
@@ -315,6 +317,7 @@ fn main() {
         println!("codex-cli {version}");
         return;
     }
+    config_cli::codex(&std::env::args().skip(1).collect::<Vec<_>>());
     // As codex 0.163.0 does, refuse a CODEX_HOME that does not exist.
     if let Some(home) = std::env::var_os("CODEX_HOME")
         && !std::path::Path::new(&home).is_dir()

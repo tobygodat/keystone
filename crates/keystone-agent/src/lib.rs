@@ -32,6 +32,6 @@ pub use item::{
     TurnStatus, cap_output,
 };
 pub use profile::{
-    ConfigEnv, LaunchProfile, default_home, default_sign_in_command, sign_in_command,
-    terminal_command,
+    ConfigEnv, LaunchProfile, default_home, default_sign_in_command, run_config_cli,
+    sign_in_command, terminal_command,
 };

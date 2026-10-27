@@ -2,7 +2,7 @@
 //! and the scripted providers. The app's own environment is never consulted: tests
 //! start with an empty [`keystone_agent::ConfigEnv`] and name the fixture folders.
 
-use super::{detail, note};
+use super::{Notice, detail, note};
 use crate::*;
 use keystone_agent::{ConfigEnv, ItemStatus};
 use keystone_core::integrations::Health;
@@ -407,4 +407,301 @@ fn reports_stay_with_their_project_and_skip_overridden_servers(cx: &mut gpui::Te
         ),
         "{shown}"
     );
+}
+
+/// Opens Integrations with the scripted CLIs as the ones config changes run, recording
+/// each call in `receipt`.
+fn open_for_changes<'a>(
+    fixture: &Fixture,
+    cx: &'a mut gpui::TestAppContext,
+) -> (Entity<Keystone>, &'a mut gpui::VisualTestContext, PathBuf) {
+    let receipt = fixture.root.join("cli-receipt.jsonl");
+    let env = |variable: &str, home: &Path| {
+        format!(
+            "KEYSTONE_FAKE_ENV_RECEIPT='{}' {variable}='{}'",
+            receipt.display(),
+            home.display()
+        )
+    };
+    let (view, vcx) = open(fixture, cx);
+    // After `open`, whose wrappers have the same names.
+    let claude = fake(
+        &fixture.root,
+        "keystone-fake-claude",
+        &env("CLAUDE_CONFIG_DIR", &fixture.claude),
+    );
+    let codex = fake(
+        &fixture.root,
+        "keystone-fake-codex",
+        &env("CODEX_HOME", &fixture.codex),
+    );
+    view.update(vcx, |view, cx| {
+        view.state
+            .update(cx, |state, _| state.test_programs = Some((codex, claude)))
+    });
+    vcx.simulate_keystrokes("ctrl-,");
+    vcx.run_until_parked();
+    click(vcx, "settings-section-integrations");
+    (view, vcx, receipt)
+}
+
+/// Runs the page until no change or read is under way.
+fn settle(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        cx.run_until_parked();
+        let busy = view.read_with(cx, |view, _| {
+            let page = &view.settings.as_ref().unwrap().integrations;
+            page.applying || page.reading
+        });
+        if !busy {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "the change finished");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn notice(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> Option<Notice> {
+    view.read_with(cx, |view, _| {
+        view.settings.as_ref().unwrap().integrations.notice.clone()
+    })
+}
+
+fn set(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, field: &str, value: &str) {
+    view.update(cx, |view, cx| {
+        let page = &view.settings.as_ref().unwrap().integrations;
+        let input = match field {
+            "name" => &page.name,
+            "target" => &page.target,
+            "args" => &page.args,
+            "env" => &page.env,
+            _ => &page.folder,
+        }
+        .clone();
+        input.update(cx, |input, cx| input.set_value(value.into(), cx));
+    });
+}
+
+fn value(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, field: &str) -> String {
+    view.read_with(cx, |view, cx| {
+        let page = &view.settings.as_ref().unwrap().integrations;
+        match field {
+            "target" => &page.target,
+            "args" => &page.args,
+            _ => &page.env,
+        }
+        .read(cx)
+        .value()
+        .to_owned()
+    })
+}
+
+const CODEX_SWITCH: &str = "integration-codex-default-mcp-user-fixture-codex-switch";
+
+#[gpui::test]
+fn switching_a_codex_server_off_writes_only_its_table_and_tells_running_sessions(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = fixture();
+    let config = fixture.codex.join("config.toml");
+    let before = "# mine\n[mcp_servers.fixture-codex]\n# how it starts\ncommand = \"python3\" # kept\n\n[mcp_servers.fixture-codex.env]\nCODEX_TOKEN = \"fixture-secret-value\"\n";
+    write(&config, before);
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    click(vcx, CODEX_SWITCH);
+    settle(&view, vcx);
+    assert_eq!(
+        notice(&view, vcx),
+        None,
+        "no session runs, so nothing to say"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        before.replace("# kept\n", "# kept\nenabled = false\n")
+    );
+    assert!(
+        vcx.debug_bounds("integration-codex-default-mcp-user-fixture-codex-status-none")
+            .is_some()
+    );
+
+    click(vcx, "settings-back");
+    vcx.dispatch_action(NewCodex);
+    vcx.run_until_parked();
+    send(&view, vcx, 1, "hello codex");
+    vcx.simulate_keystrokes("ctrl-,");
+    vcx.run_until_parked();
+    click(vcx, "settings-section-integrations");
+    settle(&view, vcx);
+    click(vcx, CODEX_SWITCH);
+    settle(&view, vcx);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+    assert_eq!(notice(&view, vcx), Some(Notice::NextStart));
+    assert!(vcx.debug_bounds("integrations-next-start").is_some());
+}
+
+#[gpui::test]
+fn an_outside_edit_shows_the_conflict_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let fixture = fixture();
+    let config = fixture.codex.join("config.toml");
+    let (view, vcx, receipt) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    let edited = format!(
+        "{}# edited elsewhere\n",
+        std::fs::read_to_string(&config).unwrap()
+    );
+    write(&config, &edited);
+    click(vcx, CODEX_SWITCH);
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), Some(Notice::Conflict));
+    assert!(vcx.debug_bounds("integrations-conflict").is_some());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), edited);
+    click(
+        vcx,
+        "integration-codex-default-mcp-user-fixture-codex-remove",
+    );
+    settle(&view, vcx);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), edited);
+    let ran = std::fs::read_to_string(&receipt).unwrap_or_default();
+    assert!(!ran.contains("\"mcp\""), "no CLI ran: {ran}");
+
+    click(vcx, "integrations-review");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    click(vcx, CODEX_SWITCH);
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    assert!(
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("enabled = false")
+    );
+}
+
+#[gpui::test]
+fn adding_a_claude_server_runs_claude_mcp_add_json(cx: &mut gpui::TestAppContext) {
+    let fixture = fixture();
+    let (view, vcx, receipt) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integrations-add-mcp");
+    assert!(vcx.debug_bounds("integrations-server-form").is_some());
+    set(&view, vcx, "name", "added");
+    set(&view, vcx, "target", "npx");
+    set(&view, vcx, "args", "-y 'my server'");
+    set(&view, vcx, "env", "API_KEY=k");
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    assert!(vcx.debug_bounds("integrations-server-form").is_none());
+    assert!(
+        vcx.debug_bounds("integration-claude-default-mcp-user-added")
+            .is_some()
+    );
+    let calls: Vec<serde_json::Value> = std::fs::read_to_string(&receipt)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|call| call["argv"][0] == "mcp")
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0]["argv"],
+        serde_json::json!([
+            "mcp",
+            "add-json",
+            "-s",
+            "user",
+            "added",
+            r#"{"args":["-y","my server"],"command":"npx","env":{"API_KEY":"k"},"type":"stdio"}"#
+        ])
+    );
+    assert_eq!(
+        calls[0]["CLAUDE_CONFIG_DIR"],
+        fixture.claude.to_str().unwrap()
+    );
+
+    // The same name again is the CLI's own refusal.
+    click(vcx, "integrations-add-mcp");
+    set(&view, vcx, "name", "added");
+    set(&view, vcx, "target", "npx");
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(
+        notice(&view, vcx),
+        Some(Notice::Failed(
+            "MCP server added already exists in user config".into()
+        ))
+    );
+    assert!(
+        vcx.debug_bounds("integrations-server-form").is_some(),
+        "the form stays"
+    );
+}
+
+#[gpui::test]
+fn editing_a_server_keeps_values_the_form_hides(cx: &mut gpui::TestAppContext) {
+    let fixture = fixture();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-edit");
+    assert_eq!(value(&view, vcx, "target"), "python3");
+    assert_eq!(
+        value(&view, vcx, "args"),
+        super::KEPT,
+        "arguments can hold a token"
+    );
+    assert_eq!(
+        value(&view, vcx, "env"),
+        format!("FIXTURE_TOKEN={}", super::KEPT)
+    );
+    set(&view, vcx, "args", "server.py --port 9");
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    let global: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture.claude.join(".claude.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        global["mcpServers"]["fixture-ok"],
+        serde_json::json!({"type": "stdio", "command": "python3", "args": ["server.py", "--port", "9"], "env": {"FIXTURE_TOKEN": "fixture-secret-value"}})
+    );
+}
+
+#[gpui::test]
+fn the_default_claude_accounts_switch_is_off_limits_and_a_skill_folder_comes_and_goes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = fixture();
+    let global = fixture.claude.join(".claude.json");
+    let before = std::fs::read_to_string(&global).unwrap();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    assert!(
+        vcx.debug_bounds("integration-claude-default-mcp-user-fixture-ok-switch-claude")
+            .is_some(),
+        "the switch only Claude can change is shown off limits"
+    );
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-switch");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    assert_eq!(std::fs::read_to_string(&global).unwrap(), before);
+
+    let folder = fixture.root.join("new-skill");
+    skill(&fixture.root, "new-skill");
+    click(vcx, "integrations-add-skill");
+    set(&view, vcx, "folder", folder.to_str().unwrap());
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    let row = "integration-claude-default-skill-user-new-skill";
+    assert!(vcx.debug_bounds(row).is_some());
+    assert!(fixture.claude.join("skills/new-skill/SKILL.md").is_file());
+    click(
+        vcx,
+        "integration-claude-default-skill-user-new-skill-remove",
+    );
+    settle(&view, vcx);
+    assert!(vcx.debug_bounds(row).is_none());
+    assert!(!fixture.claude.join("skills/new-skill").exists());
+    assert!(folder.join("SKILL.md").is_file());
 }

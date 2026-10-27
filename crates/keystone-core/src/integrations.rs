@@ -11,11 +11,14 @@
 //! items, as each provider's own `mcp`/`plugin` commands treat them, and the one the
 //! provider does not use names the scope that wins over it. The file layouts were
 //! observed on Claude Code 2.1.301 and Codex 0.163.0; see
-//! `docs/research/integrations-probe.md`.
+//! `docs/research/integrations-probe.md`. [`edit`] changes them.
+
+pub mod edit;
 
 use crate::{AccountId, Provider};
 use serde_json::Value;
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -134,6 +137,54 @@ pub struct Problem {
 pub struct Inventory {
     pub items: Vec<Item>,
     pub problems: Vec<Problem>,
+    /// Every file the read looked at, missing ones included, as it found them. A
+    /// change compares each file it writes with this first.
+    pub files: BTreeMap<PathBuf, Fingerprint>,
+}
+
+/// A file's content as a hash, or `None` when it is missing. Of a `.claude.json`,
+/// which Claude rewrites as it runs, only the parts this module reads count.
+pub type Fingerprint = Option<[u8; 32]>;
+
+/// `text` as `path`'s [`Fingerprint`] for `project`. Of a `.claude.json`, only the
+/// user servers and the entries for `project` and the folders above it up to its git
+/// root count: Claude rewrites the rest as it runs, in any project.
+pub fn fingerprint(path: &Path, text: Option<&str>, project: &Path) -> Fingerprint {
+    let text = text?;
+    let hashed = match serde_json::from_str::<Value>(text) {
+        Ok(global) if path.file_name().is_some_and(|name| name == ".claude.json") => {
+            let roots = project_roots(project);
+            let projects: serde_json::Map<String, Value> = global["projects"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(key, _)| roots.iter().any(|root| same_dir(Path::new(key), root)))
+                .map(|(key, entry)| {
+                    let kept = ["mcpServers", "disabledMcpServers", "disabledMcpjsonServers"]
+                        .map(|name| (name.to_owned(), entry[name].clone()));
+                    (key.clone(), Value::Object(kept.into_iter().collect()))
+                })
+                .collect();
+            edit::canonical(&serde_json::json!([global["mcpServers"], projects]))
+        }
+        _ => text.to_owned(),
+    };
+    Some(Sha256::digest(hashed.as_bytes()).into())
+}
+
+/// `path`'s [`Fingerprint`] now, or the error that kept it from being read. A folder's
+/// covers the name and content of every file in it.
+pub fn fingerprint_now(path: &Path, project: &Path) -> io::Result<Fingerprint> {
+    if path.is_dir() {
+        let mut hasher = Sha256::new();
+        folder_hash(path, Path::new(""), &mut hasher)?;
+        return Ok(Some(hasher.finalize().into()));
+    }
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(fingerprint(path, Some(&text), project)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Where one account's provider keeps its files.
@@ -200,6 +251,7 @@ pub fn read(account: &AccountId, location: &Location, project: &Path) -> Invento
         provider: location.provider(),
         account: account.clone(),
         inventory: Inventory::default(),
+        project: project.to_owned(),
     };
     match location {
         Location::Claude {
@@ -234,10 +286,32 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
+fn folder_hash(root: &Path, at: &Path, hasher: &mut Sha256) -> io::Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(root.join(at))?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for entry in entries {
+        let name = at.join(entry.file_name());
+        hasher.update(name.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            folder_hash(root, &name, hasher)?;
+        } else if kind.is_symlink() {
+            hasher.update(fs::read_link(entry.path())?.to_string_lossy().as_bytes());
+        } else {
+            let bytes = fs::read(entry.path())?;
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+    }
+    Ok(())
+}
+
 struct Reader {
     provider: Provider,
     account: AccountId,
     inventory: Inventory,
+    project: PathBuf,
 }
 
 impl Reader {
@@ -264,8 +338,15 @@ impl Reader {
     /// The file's text, or `None` when it is missing or unreadable.
     fn text(&mut self, path: &Path) -> Option<String> {
         match fs::read_to_string(path) {
-            Ok(text) => Some(text),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Ok(text) => {
+                let print = fingerprint(path, Some(&text), &self.project);
+                self.inventory.files.insert(path.to_owned(), print);
+                Some(text)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.inventory.files.insert(path.to_owned(), None);
+                None
+            }
             Err(error) => {
                 self.problem(path, error.to_string());
                 None
@@ -309,7 +390,11 @@ impl Reader {
             .find(|entry| !entry.is_null())
             .unwrap_or(&Value::Null);
         let disabled = strings(&entry["disabledMcpServers"]);
-        let disabled_json = strings(&entry["disabledMcpjsonServers"]);
+        let mut disabled_json = strings(&entry["disabledMcpjsonServers"]);
+        let local_settings = project.join(".claude/settings.local.json");
+        if let Some(settings) = self.json(&local_settings) {
+            disabled_json.extend(strings(&settings["disabledMcpjsonServers"]));
+        }
         let state = |name: &str, extra: &[String]| {
             if disabled.iter().chain(extra).any(|n| n == name) {
                 State::Off
@@ -640,6 +725,11 @@ impl Reader {
             let Some(text) = self.text(&file) else {
                 continue;
             };
+            if plugin.is_none()
+                && let Ok(print) = fingerprint_now(&folder, &self.project)
+            {
+                self.inventory.files.insert(folder.clone(), print);
+            }
             let folder_name = folder
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())

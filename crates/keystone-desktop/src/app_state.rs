@@ -2060,7 +2060,7 @@ impl AppState {
     /// How `provider`'s CLI is launched for `account`. An account this workspace no
     /// longer has, or one of another provider, is refused rather than run as some
     /// other account.
-    fn profile(
+    pub(crate) fn profile(
         &self,
         provider: Provider,
         account: Option<&AccountId>,
@@ -2108,6 +2108,54 @@ impl AppState {
                 "Not sent. This session's {provider} account \u{201c}{id}\u{201d} is not set up. Add it again in Settings \u{2192} Accounts, or start a new session."
             )),
         }
+    }
+
+    /// The CLI Keystone runs for `provider`: `KEYSTONE_CLAUDE_PATH` or
+    /// `KEYSTONE_CODEX_PATH`, else `None` for the one on `PATH`.
+    pub(crate) fn provider_program(&self, provider: Provider) -> Option<PathBuf> {
+        // A test never runs the CLI it would find on `PATH`.
+        #[cfg(test)]
+        return Some(match &self.test_programs {
+            Some((codex, _)) if provider == Provider::Codex => codex.clone(),
+            Some((_, claude)) if provider == Provider::Claude => claude.clone(),
+            _ => PathBuf::from("/nonexistent/keystone-test-cli"),
+        });
+        #[cfg(not(test))]
+        std::env::var_os(match provider {
+            Provider::Codex => "KEYSTONE_CODEX_PATH",
+            Provider::Claude => "KEYSTONE_CLAUDE_PATH",
+        })
+        .map(PathBuf::from)
+    }
+
+    /// Whether a session of the account, or with `any_account` of any account of the
+    /// provider, has its provider process running.
+    pub(crate) fn has_running_session(
+        &self,
+        provider: Provider,
+        account: Option<&AccountId>,
+        any_account: bool,
+    ) -> bool {
+        self.store
+            .workspace()
+            .sessions()
+            .iter()
+            .filter(|session| {
+                session.provider() == provider && (any_account || session.account() == account)
+            })
+            .any(|session| {
+                let key = session.account().cloned();
+                match provider {
+                    Provider::Codex => self
+                        .codex
+                        .get(&key)
+                        .is_some_and(|c| c.is_open(session.id())),
+                    Provider::Claude => self
+                        .claude
+                        .get(&key)
+                        .is_some_and(|c| c.pid(session.id()).is_some()),
+                }
+            })
     }
 
     /// The account's connection, started on first use.

@@ -69,6 +69,31 @@ raw output keeps them because Claude's `mcp_status` echoes them (see below).
   `runtimeStatus` (`connected`, `failed`). Without a thread ID it starts every configured
   server itself to list their tools and gives no `runtimeStatus`.
 
+## Config commands (TOB-69 probe, 2026-10-25)
+
+Run on desk with the same CLIs, under `unshare -rn` with a fresh `HOME`, fixture
+`CLAUDE_CONFIG_DIR` and `CODEX_HOME`, and a fixture git project as the working directory.
+
+- `claude mcp add-json -s user|local|project <name> <json>` writes the entry as given;
+  `-s local` keys it by the git root. A name already at that scope fails with exit 1,
+  "MCP server <name> already exists in <scope> config", so an edit is `remove` then
+  `add-json`. A definition with neither `command` nor `url` fails "Invalid configuration".
+- `claude mcp remove -s <scope> <name>` prints "Removed MCP server …" and the file it
+  modified; an unknown name exits 1. Without `-s` it removes from whichever scope has it.
+- `claude plugin enable|disable -s user|project|local <plugin>` exists (`--json` too).
+- Claude has no CLI to turn an MCP server off: `/mcp` in a session writes
+  `disabledMcpServers` in `.claude.json`. `disabledMcpjsonServers` in the project's
+  `.claude/settings.local.json` also turns a `.mcp.json` server off: `claude mcp get` then
+  reports it "Rejected (see disabledMcpjsonServers in settings)" and `claude mcp list`
+  leaves it out.
+- `codex mcp add <name> [--env K=V]… -- <command> [args…]` or `--url <url>
+  [--bearer-token-env-var <var>]` replaces any server of that name whole, dropping keys it
+  does not set (such as `startup_timeout_sec` and `env`). It rewrites every
+  `[mcp_servers]` table as it writes: the comments inside them go, and `20` becomes
+  `20.0`; comments above the first table stay. `codex mcp remove <name>` does the same and
+  exits 0 for an unknown name. Neither has a project scope, and there is no `codex mcp`
+  command to turn a server off, nor a `codex plugin` command to switch a plugin.
+
 ## What Keystone does with it
 
 - Settings → Integrations reads the files above per account and project

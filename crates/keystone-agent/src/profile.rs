@@ -236,6 +236,58 @@ impl ConfigEnv {
     }
 }
 
+/// Runs the provider's own CLI for a config change, such as `claude mcp add-json`, as
+/// the account `profile` describes. `program` is the CLI to run, else the one found
+/// on `PATH`. An error is the CLI's last line of output, or why it did not run.
+pub fn run_config_cli(
+    provider: Provider,
+    program: Option<&Path>,
+    profile: &LaunchProfile,
+    cli: &keystone_core::integrations::edit::Cli,
+) -> Result<(), String> {
+    let name = match provider {
+        Provider::Claude => "claude",
+        Provider::Codex => "codex",
+    };
+    let program = match program {
+        Some(program) => program.to_owned(),
+        None => crate::find::program(name).ok_or_else(|| profile.not_installed(provider))?,
+    };
+    let mut command = Command::new(program);
+    profile.apply(&mut command);
+    let mut child = command
+        .args(&cli.args)
+        .current_dir(&cli.cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("{name} did not start: {error}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{name} did not finish in a minute."));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let text = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .map(str::to_owned)
+    };
+    Err(text(&output.stderr)
+        .or_else(|| text(&output.stdout))
+        .unwrap_or_else(|| format!("{name} failed ({})", output.status)))
+}
+
 /// `text` as one shell word.
 fn shell_quote(text: &str) -> String {
     if !text.is_empty()

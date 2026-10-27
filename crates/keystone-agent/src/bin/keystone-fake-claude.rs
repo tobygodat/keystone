@@ -119,6 +119,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/claude_config.rs"]
+mod config_cli;
 #[path = "support/images.rs"]
 mod images;
 #[path = "support/orchestrator.rs"]
@@ -470,6 +472,7 @@ fn main() {
         println!("{version} (Claude Code)");
         return;
     }
+    config_cli::claude(&std::env::args().skip(1).collect::<Vec<_>>());
     let resume = args
         .iter()
         .position(|a| a == "--resume")

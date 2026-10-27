@@ -233,6 +233,9 @@ crates/keystone-agent/src/profile.rs
 	claude auth login
 	codex login
 	env {unset}{}
+	{name} did not finish in a minute.
+	{name} did not start: {error}
+	{name} failed ({})
 	{name} is not installed. Install the {cli} CLI and sign in with `{}`.
 	{name} is not installed. Install the {cli} CLI. {sign_in}.
 	{variable}={} {command}
@@ -316,6 +319,27 @@ crates/keystone-core/src/database.rs
 crates/keystone-core/src/delivery.rs
 	invalid or duplicate delivery
 	session {child} has no delivery
+
+crates/keystone-core/src/integrations/edit.rs
+	A server named {name} is already there.
+	A skill named {name} is already there.
+	Choose a skill folder.
+	Codex has no local scope.
+	Environment variables need a command, not a URL.
+	Give {variable} a value.
+	Skills have no local scope.
+	That folder has no SKILL.md.
+	This skill comes with {plugin}.
+	Use /mcp in Claude.
+	env is not a table
+	expected a list
+	no folder to copy into
+	{error} Putting it back failed too: {undo} The old file is in {}.
+	{error} The old folder is in {}.
+	{key} is not inside an object
+	{name} is no longer there.
+	{} changed while saving.
+	{} is no longer there.
 
 crates/keystone-core/src/integrations.rs
 	Authorization
@@ -788,8 +812,23 @@ crates/keystone-desktop/src/handoff.rs
 crates/keystone-desktop/src/integrations.rs
 	 · env {}
 	 · headers {}
+	A URL takes no arguments.
+	Add
+	Add server
+	Add skill folder
+	Arguments
+	Cancel
+	Close the quote in Arguments.
+	Close the quote in Environment.
+	Command or URL
 	Default
+	Edit
+	Edited outside Keystone
+	Environment, NAME=value
+	Give a command or URL.
 	MCP servers
+	Name
+	Name it with letters, digits, - and _.
 	Not running
 	Off
 	Overridden by {} scope
@@ -797,17 +836,27 @@ crates/keystone-desktop/src/integrations.rs
 	Project not trusted by Codex
 	Reading…
 	Refresh
+	Remove
 	Reported {}
+	Review
+	Running sessions get this at their next start.
+	Save
+	Skill folder
 	Skills
+	Use /mcp in Claude.
 	Version {version}
+	Write each variable as NAME=value.
 	from {plugin}
 	{command} · 1 argument
 	{command} · {args} arguments
+	{name} · {}
+	{name}={KEPT}
 	{url} ({kind})
 	{who} · {} · {source}
 	{who}: could not read {}: {}
 	{who}: folder unknown
 	{} in {}
+	{} is no longer there.
 
 crates/keystone-desktop/src/limit.rs
 	 · continues at {}

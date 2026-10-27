@@ -589,10 +589,9 @@ fn missing_homes_list_nothing_and_report_nothing() {
             user_home: None,
         },
     ] {
-        assert_eq!(
-            read(&AccountId::new("x"), &location, &project),
-            Inventory::default()
-        );
+        let inventory = read(&AccountId::new("x"), &location, &project);
+        assert_eq!((inventory.items, inventory.problems), (vec![], vec![]));
+        assert!(inventory.files.values().all(Option::is_none));
     }
 }
 
