@@ -21,6 +21,7 @@ mod presentation;
 mod preview;
 mod projects;
 mod prompts;
+mod pull_request;
 mod quick;
 mod relative_time;
 mod reveal;
@@ -473,6 +474,10 @@ struct Keystone {
     files: files::Files,
     changes: changes::Changes,
     notes: notes::Notes,
+    pull_request_focus: FocusHandle,
+    /// The session the Pull request surface showed in the frame being built.
+    pull_request_drawn: Option<u64>,
+    merge_confirm: Option<pull_request::MergeConfirm>,
     slash: slash_menu::SlashMenu,
     mentions: mentions::Mentions,
     attach: attachments::Attach,
@@ -849,6 +854,9 @@ impl Keystone {
             files: files::Files::default(),
             changes: changes::Changes::default(),
             notes: notes::Notes::default(),
+            pull_request_focus: cx.focus_handle(),
+            pull_request_drawn: None,
+            merge_confirm: None,
             slash,
             mentions,
             attach: attachments::Attach::new(cx),
@@ -2928,6 +2936,8 @@ struct SessionRow {
     /// The session's worktree branch, and whether its folder is gone.
     branch: Option<(String, bool)>,
     attention: Option<Attention>,
+    /// Its pull request has a failed check or a review the user has not looked at.
+    pull_request_dot: bool,
     /// How long ago the session last changed, or `None` for sessions saved before times.
     time: Option<String>,
 }
@@ -3052,6 +3062,7 @@ impl SessionSidebar {
             selected,
             branch,
             attention,
+            pull_request_dot,
             time,
         } = row;
         let title = Label::new(title).truncate();
@@ -3176,6 +3187,18 @@ impl SessionSidebar {
                                     .gap(px(10.))
                                     .child(mark)
                                     .child(div().flex_1().min_w_0().child(title))
+                                    .when(pull_request_dot, |d| {
+                                        d.child(
+                                            div()
+                                                .flex_none()
+                                                .size(px(6.))
+                                                .rounded_full()
+                                                .bg(cx.theme().colors.accent)
+                                                .automation_id(format!(
+                                                    "session-pull-request-dot-{id}"
+                                                )),
+                                        )
+                                    })
                                     // The Settle button takes this slot while it shows.
                                     .when_some(time.filter(|_| !show_settle), |d, time| {
                                         d.child(
@@ -3332,6 +3355,7 @@ impl SessionSidebar {
                     live.is_some_and(Conversation::awaiting_widget),
                     live.is_some_and(|c| c.running),
                 ),
+                pull_request_dot: this.state.read(cx).pull_request_unseen(session.id()),
                 time: session
                     .updated_at()
                     .map(|then| relative(now, LocalTime::at(then))),
@@ -3429,6 +3453,7 @@ impl Render for Keystone {
         };
         self.activate_focused_view(window, cx);
         self.note_seen(window, cx);
+        self.note_pull_request(window, cx);
         let customizing = self.presentation.current.customization.is_open();
         let root = v_flex()
             .id("keystone-root")
@@ -3548,6 +3573,17 @@ impl Render for Keystone {
                     this.toggle_changes(window, cx)
                 }),
             )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &pull_request::TogglePullRequest, window, cx| {
+                    this.toggle_surface(
+                        keystone_core::Component::PullRequest,
+                        pull_request::PULL_REQUEST_WIDTH,
+                        window,
+                        cx,
+                    )
+                },
+            ))
             .on_action(
                 self.scoped_listener(cx, |this, _: &changes::CopyPullRequestLink, _, cx| {
                     this.copy_pull_request_link(cx)
@@ -3823,6 +3859,7 @@ impl Render for Keystone {
             .children(self.borrow_dialog(cx))
             .children(self.full_access_dialog(cx))
             .children(self.rename_dialog(cx))
+            .children(self.merge_dialog(cx))
             .children(self.worktree_dialog_view(cx))
             .children(self.palette_overlay(cx))
             .children(self.projects_overlay(cx))

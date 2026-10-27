@@ -33,6 +33,8 @@ pub enum TabDot {
     Dirty,
     /// Work in progress, in the accent color.
     Working,
+    /// Something arrived that the user has not looked at, in the accent color.
+    Unseen,
 }
 
 /// One tab of a [`TabBar`]. Its id keeps hover state with the tab when the bar reorders.
@@ -290,9 +292,9 @@ impl RenderOnce for TabBar {
                 .when_some(tab.dot, |d, dot| {
                     let color = match dot {
                         TabDot::Dirty => colors.text_muted,
-                        TabDot::Working => colors.accent,
+                        TabDot::Working | TabDot::Unseen => colors.accent,
                     };
-                    d.child(
+                    d.child(crate::automation::tag(
                         div()
                             .size(px(7.))
                             .rounded_full()
@@ -300,7 +302,8 @@ impl RenderOnce for TabBar {
                             .when(self.on_close.is_some(), |d| {
                                 d.group_hover(group.clone(), |s| s.invisible())
                             }),
-                    )
+                        format!("{selector}-dot"),
+                    ))
                 })
                 .when_some(self.on_close.clone(), |d, close| {
                     d.child(

@@ -142,6 +142,7 @@ pub(crate) struct AppState {
     #[cfg(test)]
     pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
     pub(crate) notifier: crate::notifications::Notifier,
+    pub(crate) pull_requests: crate::pull_request::Monitor,
     /// Where attached images are copied, beside the workspace database.
     pub(crate) attachments: keystone_core::attachment::Attachments,
 }
@@ -382,6 +383,7 @@ impl AppState {
     pub(crate) fn teardown(&mut self, cx: &mut Context<Self>) {
         self.phase = Phase::Exiting;
         drop(self.orchestrator.take());
+        self.pull_requests.stop();
         self.codex.clear();
         self.claude.clear();
         self.publish(cx);
@@ -548,7 +550,47 @@ impl AppState {
             .set_pull_request(session, pull_request)
             .map_err(|error| error.to_string())?;
         self.publish(cx);
+        // Asked about at once, so its first report, whose alerts count as seen, comes
+        // before checks run on a new pull request.
+        self.refresh_pull_request(session, cx);
         Ok(())
+    }
+
+    /// Saves gh's `report` on `link`, linking it to `session` when gh found it by the
+    /// session's branch. A report on another pull request than the one the session
+    /// links now is dropped.
+    pub(crate) fn record_pull_request(
+        &mut self,
+        session: u64,
+        link: keystone_core::PullRequest,
+        report: keystone_core::PullRequestReport,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.phase == Phase::Exiting {
+            return Err("Keystone is exiting.".into());
+        }
+        match self.session(session).map(|s| s.pull_request()) {
+            None => return Ok(()),
+            Some(Some(linked)) if linked.url != link.url => return Ok(()),
+            Some(Some(_)) => {}
+            Some(None) => {
+                self.store
+                    .set_pull_request(session, link.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        self.store
+            .record_pull_request(session, &link.url, report)
+            .map_err(|error| error.to_string())?;
+        self.refresh(cx);
+        Ok(())
+    }
+
+    /// The user has looked at `session`'s pull request, so its dot clears.
+    pub(crate) fn see_pull_request(&mut self, session: u64, cx: &mut Context<Self>) {
+        if self.phase == Phase::Running && self.store.see_pull_request(session).is_ok() {
+            self.refresh(cx);
+        }
     }
 
     pub(crate) fn set_approval_mode(
@@ -1294,6 +1336,7 @@ impl AppState {
             return Err(std::io::Error::other("Keystone is quitting.").into());
         }
         let result = self.store.close_window(window);
+        self.pull_requests.window_closed(window);
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -1430,6 +1473,7 @@ impl AppState {
             #[cfg(test)]
             test_programs: None,
             notifier: Default::default(),
+            pull_requests: Default::default(),
             attachments,
             store,
         };
@@ -1460,7 +1504,7 @@ impl AppState {
         cx.notify();
         self.quit_if_idle(cx);
     }
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.changes.sidebar = true;
         self.publish(cx);
     }

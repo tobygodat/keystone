@@ -190,19 +190,34 @@ crates/keystone-agent/src/git.rs
 	This repository has no remote.
 	This repository has several remotes ({}) and none is set to push to.
 	branch.{branch}.pushRemote
+	no answer after {} seconds
 	refs/remotes/{remote}/HEAD
 	remote.pushDefault
 	status.showUntrackedFiles
 	{command} failed
 
 crates/keystone-agent/src/github.rs
+	Couldn't read gh's answer: {error}
 	Couldn't run gh: {error}
 	GitHub CLI (gh) is not installed.
 	GitHub CLI is not signed in.
+	Install gh (cli.github.com), then run:
+	Merge commit
+	Rebase and merge
+	Sign in to gh:
+	Squash and merge
 	This branch already has pull request #{}.
 	already exists
+	could not determine current branch
 	gh auth login
 	gh did not print the new pull request's link.\n{output}
+	no git remotes found
+	no pull requests found
+	none of the git remotes
+	not a git repository
+	squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed
+	title,state,isDraft,baseRefName,headRefName,headRefOid,reviewDecision,mergeStateStatus,statusCheckRollup,reviews
+	{} is not a pull request link.
 
 crates/keystone-agent/src/item.rs
 	{}\n… {} bytes omitted …\n{}
@@ -425,6 +440,11 @@ crates/keystone-core/src/prompt.rs
 	Add the text.
 	Shortcut: A–Z, a–z, 0–9, - _ : . only.
 
+crates/keystone-core/src/pull_request.rs
+	check {}{}{}{}{}
+	comment {}
+	review {}
+
 crates/keystone-core/src/windows.rs
 	a tab moves between two windows
 	saved windows are from a newer version of Keystone
@@ -586,7 +606,6 @@ crates/keystone-desktop/src/changes.rs
 	Detached at {}
 	Dismiss
 	Draft
-	Install gh (cli.github.com), then run:
 	Into
 	Keystone is closing.
 	Mark resolved
@@ -605,7 +624,6 @@ crates/keystone-desktop/src/changes.rs
 	Refresh
 	Select a session
 	Several remotes ({}). Pick one:
-	Sign in to gh:
 	Stage
 	Stage all
 	Staged
@@ -627,8 +645,10 @@ crates/keystone-desktop/src/commands.rs
 	Change project color…
 	Close tab
 	Close window
+	Cmd
 	Color
 	Copy pull request link
+	Ctrl
 	Customize layout
 	Focus composer
 	Focus next transcript
@@ -662,6 +682,7 @@ crates/keystone-desktop/src/commands.rs
 	Toggle changes
 	Toggle files
 	Toggle notes
+	Toggle pull request
 	Toggle sidebar
 	Transcript: copy focused content
 	Transcript: first row
@@ -716,6 +737,7 @@ crates/keystone-desktop/src/customization.rs
 	Pixels
 	Preview
 	Preview layout
+	Pull request
 	Remove
 	Replace preview
 	Replace this preview?
@@ -987,9 +1009,12 @@ crates/keystone-desktop/src/notes.rs
 
 crates/keystone-desktop/src/notifications.rs
 	Approval requested
+	Check failed
 	Keystone
+	New review
 	Turn failed
 	Turn finished
+	session-{session}{PULL_REQUEST_TAG}
 
 crates/keystone-desktop/src/presentation.rs
 	Choose conversation folder
@@ -1046,6 +1071,35 @@ crates/keystone-desktop/src/projects.rs
 crates/keystone-desktop/src/prompts.rs
 	Prompt no longer available.
 	Search prompts
+
+crates/keystone-desktop/src/pull_request.rs
+	Approved
+	Changes requested
+	Closed
+	Conflicts
+	Copy command
+	Could not merge.
+	Could not read the pull request.
+	Dismissed
+	Draft
+	GitHub is still checking whether it can merge.
+	It is a draft.
+	It is no longer open.
+	Merge
+	Merge #{}?
+	Merged
+	Merging…
+	No pull request.
+	Open
+	Refresh
+	Review required
+	The base branch's rules block it.
+	The branch has conflicts.
+	The branch is behind its base.
+	The repository allows no merge method.
+	{} into {}
+	{}h {}m
+	{}m {}s
 
 crates/keystone-desktop/src/quick.rs
 	Choose a project.
@@ -1156,6 +1210,7 @@ crates/keystone-desktop/src/settings_page.rs
 	Light
 	Notifications
 	Prompts
+	Pull request checks and reviews
 	Settings not saved. {error}
 	Spacious
 	System

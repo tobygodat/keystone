@@ -10,6 +10,7 @@ use crate::handoff::HandOff;
 use crate::notes::ToggleNotes;
 use crate::projects::{ChangeProjectColor, OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
+use crate::pull_request::TogglePullRequest;
 use crate::quick::OpenQuickComposer;
 use crate::second_opinion::AskSecondOpinion;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
@@ -84,6 +85,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-g"],
         context: Some(APP),
         action: || Box::new(ToggleChanges),
+    },
+    Command {
+        id: "toggle-pull-request",
+        label: "Toggle pull request",
+        keys: &["secondary-alt-p"],
+        context: Some(APP),
+        action: || Box::new(TogglePullRequest),
     },
     Command {
         id: "copy-pull-request-link",
@@ -430,6 +438,15 @@ fn kbd_text(keys: &str) -> String {
             stroke
                 .split('-')
                 .map(|part| {
+                    // GPUI's secondary modifier is Cmd on macOS and Ctrl elsewhere.
+                    if part == "secondary" {
+                        return if cfg!(target_os = "macos") {
+                            "Cmd"
+                        } else {
+                            "Ctrl"
+                        }
+                        .into();
+                    }
                     let mut chars = part.chars();
                     match chars.next() {
                         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -658,6 +675,8 @@ mod tests {
             ("f2", "F2"),
             ("alt-enter", "Alt+Enter"),
             ("ctrl-k ctrl-s", "Ctrl+K Ctrl+S"),
+            #[cfg(not(target_os = "macos"))]
+            ("secondary-alt-p", "Ctrl+Alt+P"),
         ] {
             assert_eq!(kbd_text(keys), text);
         }

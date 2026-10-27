@@ -36,6 +36,7 @@ enum Field {
     TurnFinished,
     Approval,
     TurnFailed,
+    PullRequests,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,6 +82,7 @@ const SECTIONS: [(Section, &str, &str, Rows); 6] = [
             ("Turn finished", Field::TurnFinished),
             ("Approval requested", Field::Approval),
             ("Turn failed", Field::TurnFailed),
+            ("Pull request checks and reviews", Field::PullRequests),
         ],
     ),
     (
@@ -209,6 +211,7 @@ impl Keystone {
             .capture_action(self.leave_settings::<ToggleSidebar>(cx))
             .capture_action(self.leave_settings::<crate::files::ToggleFiles>(cx))
             .capture_action(self.leave_settings::<crate::notes::ToggleNotes>(cx))
+            .capture_action(self.leave_settings::<crate::pull_request::TogglePullRequest>(cx))
             .capture_action(self.leave_settings::<crate::changes::ToggleChanges>(cx))
             .capture_action(self.leave_settings::<OpenCustomize>(cx))
             .capture_action(self.leave_settings::<crate::session_tabs::NewTab>(cx))
@@ -483,7 +486,11 @@ impl Keystone {
                     },
                 ))
                 .into_any_element(),
-            Field::Notifications | Field::TurnFinished | Field::Approval | Field::TurnFailed => {
+            Field::Notifications
+            | Field::TurnFinished
+            | Field::Approval
+            | Field::TurnFailed
+            | Field::PullRequests => {
                 let saved = self
                     .state
                     .read(cx)
@@ -503,6 +510,11 @@ impl Keystone {
                     Field::Approval => ("settings-notify-approval", saved.approval, |n, on| {
                         n.approval = on
                     }),
+                    Field::PullRequests => (
+                        "settings-notify-pull-requests",
+                        saved.pull_requests,
+                        |n, on| n.pull_requests = on,
+                    ),
                     _ => ("settings-notify-turn-failed", saved.turn_failed, |n, on| {
                         n.turn_failed = on
                     }),

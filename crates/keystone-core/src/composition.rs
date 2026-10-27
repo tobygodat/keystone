@@ -32,21 +32,26 @@ pub enum Component {
     /// The repository's changed files, with staging and commit.
     Changes,
     Notes,
+    /// The session's pull request, its checks and its reviews.
+    PullRequest,
 }
 
 impl Component {
-    pub const ALL: [Component; 6] = [
+    pub const ALL: [Component; 7] = [
         Component::SessionList,
         Component::Conversation,
         Component::Composer,
         Component::Files,
         Component::Changes,
         Component::Notes,
+        Component::PullRequest,
     ];
 
     pub fn allows(self, count: usize) -> bool {
         match self {
-            Self::SessionList | Self::Files | Self::Changes | Self::Notes => count <= 1,
+            Self::SessionList | Self::Files | Self::Changes | Self::Notes | Self::PullRequest => {
+                count <= 1
+            }
             Self::Conversation => count >= 1,
             Self::Composer => count == 1,
         }
@@ -56,7 +61,7 @@ impl Component {
     pub fn is_surface(self) -> bool {
         matches!(
             self,
-            Self::Conversation | Self::Files | Self::Changes | Self::Notes
+            Self::Conversation | Self::Files | Self::Changes | Self::Notes | Self::PullRequest
         )
     }
 }

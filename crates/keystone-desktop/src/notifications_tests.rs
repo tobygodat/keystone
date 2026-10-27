@@ -709,3 +709,30 @@ fn a_notification_prefers_a_window_on_its_project_to_the_one_used_last(cx: &mut 
     assert_eq!(project(&first, cx), Some(alpha));
     assert_eq!(project(&second, cx), Some(beta));
 }
+
+/// On macOS a notification replaces any earlier one with its tag, so a failed check
+/// must not take the tag an approval waiting on the same session has.
+#[gpui::test]
+fn a_pull_request_alert_never_replaces_an_approval_and_opens_its_session(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view(WindowId::FIRST, cx);
+    receive(&state, vec![(3, approval("r1"))], cx);
+    cx.update(|cx| offer(vec![(3, Alert::CheckFailed)], cx));
+    cx.run_until_parked();
+    let tags: Vec<SharedString> = cx
+        .shown_system_notifications()
+        .into_iter()
+        .map(|n| n.tag)
+        .collect();
+    assert_eq!(tags, ["session-3", "session-3-pull-request"]);
+    assert_eq!(sent(cx)[1].1, "Check failed");
+
+    deactivate(&first, cx);
+    cx.simulate_system_notification_response(SystemNotificationResponse {
+        tag: tags[1].clone(),
+        action_id: None,
+    });
+    cx.run_until_parked();
+    assert_eq!(selected(&first, cx), Some(3));
+}

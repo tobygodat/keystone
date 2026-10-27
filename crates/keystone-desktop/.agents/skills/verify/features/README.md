@@ -22,6 +22,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Settings](settings.md) covers the settings page: opening, sections, theme, fonts, density, text size, and restart.
 - [Files](files.md) covers the sidebar's Sessions and Files toggle, lazy folder listing that respects `.gitignore`, opening files in an external editor, Copy path, and the spawn error row.
 - [Changes](changes.md) covers the Changes surface: the session folder's changed files by group, staging and unstaging per file and per group, committing with the user's hooks and signing, hook output on failure, the saved commit message, its refresh triggers, pushing, and creating a pull request with the user's `gh`.
+- [Pull request](pull-request.md) covers the Pull request surface: the session's pull request or the one gh finds for its branch, checks and reviews from the user's `gh`, polling while open, the unseen dot on the tab and row, notifications, Merge with its confirmation, and restart.
 - [Conversations](conversations.md) covers sending, streaming, approvals, steering, stopping, choosing the provider and model before the first Send, and restoring a conversation.
 - [File mentions](mentions.md) covers the composer's `@` picker over the session folder's files, choosing a path as one token that Backspace removes whole, Escape, sending as typed, Files' Mention in composer, and tokens after a restart.
 - [Attachments](attachments.md) covers attaching images by paste, drop, the attach button or a typed path, their chips, refusals, restoring them with the draft, sending them to each provider in its own image form, and mentioning other files by path.
@@ -46,4 +47,4 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 
 ## Coverage rules
 
-For each run, record the entry points actually exercised. Do not mark an entire feature complete when only a shortcut passed. Record precondition failures rather than removing the failing step. PR viewing remains separate scope, as do model controls beyond the draft's provider and model choice (effort, fast mode, service tier, switching after the first Send). Composition controls have their own native evidence requirements.
+For each run, record the entry points actually exercised. Do not mark an entire feature complete when only a shortcut passed. Record precondition failures rather than removing the failing step. Model controls beyond the draft's provider and model choice (effort, fast mode, service tier, switching after the first Send) remain separate scope. Composition controls have their own native evidence requirements.

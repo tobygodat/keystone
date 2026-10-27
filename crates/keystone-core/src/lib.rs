@@ -24,6 +24,7 @@ mod prompt;
 #[cfg(test)]
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
+mod pull_request;
 mod session_context;
 mod tabs;
 mod usage;
@@ -45,6 +46,10 @@ pub use note::Note;
 pub use project::{Project, ProjectColor, ProjectId};
 use project::{ProjectLayouts, ProjectMap};
 pub use prompt::{Prompt, PromptFields};
+pub use pull_request::{
+    Check, CheckState, MergeState, PullRequestAlert, PullRequestReport, PullRequestState,
+    PullRequestWatch, Review, ReviewComment, ReviewDecision, ReviewState,
+};
 use session_context::SavedSessionContext;
 pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory, WorktreeContext};
 use tabs::SavedTabs;
@@ -220,6 +225,9 @@ pub struct Session {
     /// The pull request last made or found for the session's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pull_request: Option<PullRequest>,
+    /// What gh last reported about [`Session::pull_request`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull_request_watch: Option<PullRequestWatch>,
     /// The session this one was forked from. The fork starts with that session's
     /// conversation up to a point, leaving that one unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,6 +340,7 @@ impl Session {
             handed_off_from: None,
             continue_at: None,
             pull_request: None,
+            pull_request_watch: None,
             forked_from: None,
             fork_point: None,
             second_opinion: false,
@@ -408,6 +417,10 @@ impl Session {
 
     pub fn pull_request(&self) -> Option<&PullRequest> {
         self.pull_request.as_ref()
+    }
+
+    pub fn pull_request_watch(&self) -> Option<&PullRequestWatch> {
+        self.pull_request_watch.as_ref()
     }
 
     /// The session this one was forked from, if any.
@@ -527,6 +540,8 @@ pub struct Notifications {
     pub turn_finished: bool,
     pub approval: bool,
     pub turn_failed: bool,
+    /// A pull request's check failed, or a review of it arrived.
+    pub pull_requests: bool,
 }
 
 impl Default for Notifications {
@@ -536,6 +551,7 @@ impl Default for Notifications {
             turn_finished: true,
             approval: true,
             turn_failed: true,
+            pull_requests: true,
         }
     }
 }
@@ -1620,7 +1636,41 @@ impl Store {
         id: u64,
         pull_request: PullRequest,
     ) -> StoreResult<Applied<()>> {
-        self.update_session(id, |session| session.pull_request = Some(pull_request))
+        self.update_session(id, |session| {
+            if session.pull_request.as_ref() != Some(&pull_request) {
+                session.pull_request_watch = None;
+            }
+            session.pull_request = Some(pull_request);
+        })
+    }
+
+    /// Keeps gh's `report` on session `id`'s pull request at `url`, and what the user
+    /// has seen of the alerts still in it. A report on a pull request the session no
+    /// longer links is dropped.
+    pub fn record_pull_request(
+        &mut self,
+        id: u64,
+        url: &str,
+        report: PullRequestReport,
+    ) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            if session.pull_request.as_ref().is_none_or(|pr| pr.url != url) {
+                return;
+            }
+            match &mut session.pull_request_watch {
+                Some(watch) => watch.replace(report),
+                None => session.pull_request_watch = Some(PullRequestWatch::new(report)),
+            }
+        })
+    }
+
+    /// The user has looked at session `id`'s pull request.
+    pub fn see_pull_request(&mut self, id: u64) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            if let Some(watch) = &mut session.pull_request_watch {
+                watch.see();
+            }
+        })
     }
 
     /// Keeps `text` as `folder`'s unfinished commit message, or forgets it when empty.
@@ -2374,6 +2424,157 @@ mod tests {
                 .unwrap()
                 .get("pull_request")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_pull_request_report_and_what_was_seen_of_it_survive_restarts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let project = WorkingDirectory::new(directory.path()).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Claude, &project, 1).unwrap();
+        let url = "https://github.com/o/r/pull/3";
+        let link = PullRequest {
+            number: 3,
+            url: url.into(),
+        };
+        store.set_pull_request(1, link.clone()).unwrap();
+        let check = |name: &str, state: CheckState, completed_at: Option<u64>| Check {
+            name: name.into(),
+            workflow: "CI".into(),
+            state,
+            summary: String::new(),
+            started_at: Some(10),
+            completed_at,
+            url: String::new(),
+        };
+        let report = |checks: Vec<Check>, comments: Vec<u64>| PullRequestReport {
+            title: "Fix".into(),
+            viewer: "me".into(),
+            state: PullRequestState::Open,
+            base: "main".into(),
+            head: "fix".into(),
+            head_oid: "abc".into(),
+            review_decision: None,
+            merge_state: MergeState::Unknown,
+            checks,
+            reviews: Vec::new(),
+            comments: comments
+                .into_iter()
+                .map(|id| ReviewComment {
+                    id,
+                    author: "ana".into(),
+                    path: "src/lib.rs".into(),
+                    line: Some(4),
+                    body: "Rename this".into(),
+                })
+                .collect(),
+        };
+        let unseen = |store: &Store| -> Vec<PullRequestAlert> {
+            let session = &store.workspace().sessions()[0];
+            session
+                .pull_request_watch()
+                .map(|watch| watch.unseen().into_iter().collect())
+                .unwrap_or_default()
+        };
+
+        let running = report(vec![check("test", CheckState::Pending, None)], vec![]);
+        store
+            .record_pull_request(1, "https://github.com/o/r/pull/9", running.clone())
+            .unwrap();
+        assert!(
+            store.workspace().sessions()[0]
+                .pull_request_watch()
+                .is_none(),
+            "a report on another pull request is dropped"
+        );
+        store.record_pull_request(1, url, running).unwrap();
+        assert!(unseen(&store).is_empty(), "a running check is no alert");
+
+        let failed = report(vec![check("test", CheckState::Failed, Some(20))], vec![]);
+        store.record_pull_request(1, url, failed.clone()).unwrap();
+        assert!(matches!(
+            &unseen(&store)[..],
+            [PullRequestAlert::CheckFailed(_)]
+        ));
+        store.see_pull_request(1).unwrap();
+        assert!(unseen(&store).is_empty());
+        let writes = store.writes();
+        store.record_pull_request(1, url, failed).unwrap();
+        assert_eq!(store.writes(), writes, "the same report writes nothing");
+
+        let commented = report(vec![check("test", CheckState::Failed, Some(20))], vec![7]);
+        store.record_pull_request(1, url, commented).unwrap();
+        assert!(
+            matches!(&unseen(&store)[..], [PullRequestAlert::Review(_)]),
+            "the seen failure stays seen and the comment is new: {:?}",
+            unseen(&store)
+        );
+
+        let reopened = Store::open(&path).unwrap();
+        let session = &reopened.workspace().sessions()[0];
+        assert_eq!(session.pull_request(), Some(&link));
+        assert_eq!(
+            session.pull_request_watch().unwrap().report.comments[0].id,
+            7
+        );
+        assert_eq!(unseen(&reopened).len(), 1, "what was seen is kept");
+
+        let mut store = reopened;
+        let rerun = report(vec![check("test", CheckState::Failed, Some(30))], vec![7]);
+        store.record_pull_request(1, url, rerun).unwrap();
+        assert_eq!(unseen(&store).len(), 2, "a rerun that fails again is new");
+
+        store
+            .set_pull_request(
+                1,
+                PullRequest {
+                    number: 4,
+                    url: "https://github.com/o/r/pull/4".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            store.workspace().sessions()[0]
+                .pull_request_watch()
+                .is_none(),
+            "another pull request starts with no report"
+        );
+        let url = "https://github.com/o/r/pull/4";
+        let mut old = report(vec![check("test", CheckState::Failed, Some(5))], vec![8]);
+        store.record_pull_request(1, url, old.clone()).unwrap();
+        assert!(
+            unseen(&store).is_empty(),
+            "what happened before the first report counts as seen"
+        );
+        old.comments.push(ReviewComment {
+            id: 9,
+            author: "me".into(),
+            path: "a".into(),
+            line: None,
+            body: "Done".into(),
+        });
+        old.reviews.push(Review {
+            id: "R".into(),
+            author: "ana".into(),
+            state: ReviewState::Commented,
+            body: String::new(),
+        });
+        store.record_pull_request(1, url, old.clone()).unwrap();
+        assert!(
+            unseen(&store).is_empty(),
+            "the author's own comment and an empty reply wrapper are no news"
+        );
+        old.comments[1].author = "ana".into();
+        old.comments[1].id = 10;
+        store.record_pull_request(1, url, old.clone()).unwrap();
+        assert_eq!(unseen(&store).len(), 1);
+        old.state = PullRequestState::Merged;
+        store.record_pull_request(1, url, old).unwrap();
+        assert!(
+            unseen(&store).is_empty(),
+            "a merged pull request has no dot"
         );
     }
 

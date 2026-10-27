@@ -2,7 +2,8 @@
 //! (org.freedesktop.Notifications on Linux), for a session the user cannot see: its
 //! turn finished, it asks for approval, or its turn failed. A session is seen while an
 //! active Keystone window shows it, so nothing is sent for it then. Each session sends
-//! each kind once until the user sees it again. Activating one shows its session.
+//! each kind once until the user sees it again. Activating one shows its session. A
+//! failed check or a new review on its pull request notifies the same way.
 //! Notifications only read events: attention and Needs action are unchanged.
 
 use crate::{DesktopApp, Keystone};
@@ -21,6 +22,10 @@ pub(crate) enum Alert {
     TurnFinished,
     Approval,
     TurnFailed,
+    /// A check on the session's pull request failed.
+    CheckFailed,
+    /// A review or review comment on the session's pull request arrived.
+    Review,
 }
 
 impl Alert {
@@ -39,12 +44,17 @@ impl Alert {
         }
     }
 
+    fn pull_request(self) -> bool {
+        matches!(self, Self::CheckFailed | Self::Review)
+    }
+
     fn enabled(self, settings: Notifications) -> bool {
         settings.enabled
             && match self {
                 Self::TurnFinished => settings.turn_finished,
                 Self::Approval => settings.approval,
                 Self::TurnFailed => settings.turn_failed,
+                Self::CheckFailed | Self::Review => settings.pull_requests,
             }
     }
 
@@ -53,6 +63,8 @@ impl Alert {
             Self::TurnFinished => "Turn finished",
             Self::Approval => "Approval requested",
             Self::TurnFailed => "Turn failed",
+            Self::CheckFailed => "Check failed",
+            Self::Review => "New review",
         }
     }
 }
@@ -76,6 +88,14 @@ impl Notifier {
         true
     }
 
+    /// The user saw `session`'s pull request, so its next checks and reviews notify
+    /// again.
+    pub(crate) fn seen_pull_request(&mut self, session: u64) {
+        if let Some(sent) = self.sent.get_mut(&session) {
+            sent.retain(|alert| !alert.pull_request());
+        }
+    }
+
     /// The user sees these sessions, so their next events notify again.
     pub(crate) fn seen(&mut self, sessions: &[u64]) {
         for session in sessions {
@@ -92,9 +112,17 @@ impl Notifier {
     }
 }
 
-fn tag(session: u64) -> String {
-    format!("session-{session}")
+/// The notification's tag. A pull request alert gets its own, so on macOS, where a
+/// notification replaces an earlier one with the same tag, it never hides an approval.
+fn tag(session: u64, alert: Alert) -> String {
+    if alert.pull_request() {
+        format!("session-{session}{PULL_REQUEST_TAG}")
+    } else {
+        format!("session-{session}")
+    }
 }
+
+const PULL_REQUEST_TAG: &str = "-pull-request";
 
 /// Names Keystone to the notification service and opens a session from its
 /// notification.
@@ -115,14 +143,18 @@ pub(crate) fn offer(alerts: Vec<(u64, Alert)>, cx: &mut App) {
         .workspace()
         .preferences()
         .notifications();
-    let seen = cx
+    let active = cx
         .active_window()
         .and_then(|window| window.downcast::<Keystone>())
-        .and_then(|window| window.read(cx).ok())
-        .map(|view| view.on_screen(cx))
-        .unwrap_or_default();
+        .and_then(|window| window.read(cx).ok());
+    let seen = active.map(|view| view.on_screen(cx)).unwrap_or_default();
+    let pull_request_seen =
+        active.and_then(|view| state.read(cx).pull_requests.shown(view.window_id));
     for (session, alert) in alerts {
-        if !alert.enabled(settings) || seen.contains(&session) {
+        if !alert.enabled(settings)
+            || seen.contains(&session)
+            || (alert.pull_request() && pull_request_seen == Some(session))
+        {
             continue;
         }
         let Some(title) = state
@@ -134,7 +166,7 @@ pub(crate) fn offer(alerts: Vec<(u64, Alert)>, cx: &mut App) {
         };
         if state.update(cx, |state, _| state.notifier.record(session, alert)) {
             cx.show_system_notification(SystemNotification {
-                tag: tag(session).into(),
+                tag: tag(session, alert).into(),
                 title: title.into(),
                 body: alert.body().into(),
                 actions: Vec::new(),
@@ -148,6 +180,7 @@ fn open(response: SystemNotificationResponse, cx: &mut App) {
     let Some(session) = response
         .tag
         .strip_prefix("session-")
+        .map(|id| id.strip_suffix(PULL_REQUEST_TAG).unwrap_or(id))
         .and_then(|id| id.parse::<u64>().ok())
     else {
         return;
@@ -210,15 +243,19 @@ pub(crate) fn show(session: u64, cx: &mut App) {
 }
 
 impl Keystone {
-    /// The sessions whose conversation this window drew in its last frame, none while
-    /// the settings page or the narrow window's sidebar covers them.
-    pub(crate) fn on_screen(&self, cx: &App) -> Vec<u64> {
+    /// Whether the settings page or the narrow window's sidebar covers the layout.
+    pub(crate) fn covered(&self, cx: &App) -> bool {
         let arrangement = &self.presentation.current.arrangement;
-        if self.settings.is_some()
+        self.settings.is_some()
             || (arrangement.sidebar_overlay
                 && arrangement.fitted
                 && self.arrangement_has_sidebar(cx))
-        {
+    }
+
+    /// The sessions whose conversation this window drew in its last frame, none while
+    /// the settings page or the narrow window's sidebar covers them.
+    pub(crate) fn on_screen(&self, cx: &App) -> Vec<u64> {
+        if self.covered(cx) {
             return Vec::new();
         }
         let tabs = self.session_tabs(cx);

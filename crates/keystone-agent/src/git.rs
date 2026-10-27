@@ -197,7 +197,17 @@ pub(crate) enum Output {
 }
 
 /// Runs `command` with `input` on stdin.
-pub(crate) fn run(mut command: Command, input: Option<Vec<u8>>, output: Output) -> Result<Vec<u8>> {
+pub(crate) fn run(command: Command, input: Option<Vec<u8>>, output: Output) -> Result<Vec<u8>> {
+    run_within(command, input, output, None)
+}
+
+/// [`run`], but a command still running after `limit` is killed and fails.
+pub(crate) fn run_within(
+    mut command: Command,
+    input: Option<Vec<u8>>,
+    output: Output,
+    limit: Option<Duration>,
+) -> Result<Vec<u8>> {
     let name = describe(&command);
     let spawn = |error: io::Error| Error::Spawn(error.to_string());
     let (reader, writer) = io::pipe().map_err(spawn)?;
@@ -220,7 +230,30 @@ pub(crate) fn run(mut command: Command, input: Option<Vec<u8>>, output: Output) 
     });
     let stdout = child.stdout.take().map(drain);
     let written = drain(reader);
-    let status = child.wait().map_err(spawn)?;
+    let status = match limit {
+        None => child.wait().map_err(spawn)?,
+        Some(limit) => {
+            let deadline = Instant::now() + limit;
+            loop {
+                if let Some(status) = child.try_wait().map_err(spawn)? {
+                    break status;
+                }
+                if Instant::now() >= deadline {
+                    // A command from `program` leads its own process group, so whatever it
+                    // started goes with it and lets go of the output pipes.
+                    // SAFETY: kill has no memory effects; a pid that leads no group fails.
+                    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(Error::Spawn(format!(
+                        "no answer after {} seconds",
+                        limit.as_secs()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
     if let Some(feeder) = feeder {
         let _ = feeder.join();
     }
@@ -1264,5 +1297,42 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
         fs::write(root.join("loose.txt"), "x").unwrap();
         let status = status(root).unwrap();
         assert!(status.entries.is_empty() && status.untracked_hidden);
+    }
+
+    #[test]
+    fn a_command_past_its_limit_is_stopped_with_what_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut command = program(Path::new("sh"), dir.path());
+        command.args([
+            "-c",
+            &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+        ]);
+        let start = Instant::now();
+        let result = run_within(
+            command,
+            None,
+            Output::Separate,
+            Some(Duration::from_millis(200)),
+        );
+        assert!(
+            matches!(&result, Err(Error::Spawn(message)) if message.contains("no answer")),
+            "{result:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let child: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let gone = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only asks whether the process exists.
+        while unsafe { libc::kill(child, 0) } == 0 {
+            assert!(
+                Instant::now() < gone,
+                "the command's own child was left running"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

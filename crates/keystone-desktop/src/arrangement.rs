@@ -114,7 +114,9 @@ fn minimum(
                     [0., 0.]
                 }
             }
-            Component::Files | Component::Notes => [FILES_MIN, 160. + header],
+            Component::Files | Component::Notes | Component::PullRequest => {
+                [FILES_MIN, 160. + header]
+            }
             // The message box and Commit button sit above the list.
             Component::Changes => [FILES_MIN, 260. + header],
         },
@@ -191,11 +193,12 @@ fn displays(node: &Node, view: ViewId) -> bool {
     }
 }
 
-/// Files, Changes and Notes: one-of-a-kind surfaces that get a tab strip even alone.
+/// Files, Changes, Notes and Pull request: one-of-a-kind surfaces that get a tab strip
+/// even alone.
 fn is_side_surface(component: Option<Component>) -> bool {
     matches!(
         component,
-        Some(Component::Files | Component::Changes | Component::Notes)
+        Some(Component::Files | Component::Changes | Component::Notes | Component::PullRequest)
     )
 }
 
@@ -217,7 +220,9 @@ impl Keystone {
     /// occurrence id.
     fn tab_label(&self, id: ViewId, c: &Composition, cx: &App) -> String {
         match c.component(id).unwrap() {
-            component @ (Component::Files | Component::Notes) => label(component).to_owned(),
+            component @ (Component::Files | Component::Notes | Component::PullRequest) => {
+                label(component).to_owned()
+            }
             Component::Changes => self.changes.label(self.files_root(cx).ok().as_deref(), cx),
             Component::Conversation if !self.presentation.current.customization.is_open() => self
                 .view_session(id, cx)
@@ -341,6 +346,7 @@ impl Keystone {
             (Some(Component::Files), _, _) => self.focus_files(window, cx),
             (Some(Component::Notes), _, _) => self.focus_notes(window, cx),
             (Some(Component::Changes), _, _) => self.focus_changes(window, cx),
+            (Some(Component::PullRequest), _, _) => self.focus_pull_request(window, cx),
             (Some(Component::Conversation), Some(view), Some(session)) => self
                 .presentation
                 .current
@@ -394,6 +400,7 @@ impl Keystone {
                 .ok()
                 .map(|root| self.files.browser(&root, cx).focus_handle(cx)),
             Some(Component::Changes) => self.changes_panel(cx).map(|panel| panel.focus_handle(cx)),
+            Some(Component::PullRequest) => Some(self.pull_request_focus.clone()),
             Some(Component::Conversation) => self.view_session(view, cx).map(|session| {
                 self.presentation
                     .current
@@ -667,6 +674,8 @@ impl Keystone {
                                 format!("fitted-tab-{}", id.0),
                                 self.tab_label(id, &c, cx),
                                 selected == id,
+                                c.component(id) == Some(Component::PullRequest)
+                                    && self.pull_request_tab_dot(cx),
                                 cx,
                             )
                             .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
@@ -980,8 +989,15 @@ impl Keystone {
         let tabs: Vec<_> = views
             .iter()
             .map(|&id| {
-                Tab::new(("surface-tab", id.0 as usize), self.tab_label(id, c, cx))
-                    .dot(running(self, id, cx).then_some(TabDot::Working))
+                let unseen = c.component(id) == Some(Component::PullRequest)
+                    && self.pull_request_tab_dot(cx);
+                Tab::new(("surface-tab", id.0 as usize), self.tab_label(id, c, cx)).dot(
+                    if running(self, id, cx) {
+                        Some(TabDot::Working)
+                    } else {
+                        unseen.then_some(TabDot::Unseen)
+                    },
+                )
             })
             .collect();
         let mut bar = TabBar::new(bar_id)
@@ -1113,6 +1129,11 @@ impl Keystone {
             (Component::Notes, IconName::Note, "surface-add-notes"),
             (Component::Changes, IconName::Branch, "surface-add-changes"),
             (
+                Component::PullRequest,
+                IconName::PullRequest,
+                "surface-add-pull-request",
+            ),
+            (
                 Component::Conversation,
                 IconName::Chat,
                 "surface-add-conversation",
@@ -1138,6 +1159,7 @@ impl Keystone {
                             Component::Files => this.focus_files(window, cx),
                             Component::Notes => this.focus_notes(window, cx),
                             Component::Changes => this.focus_changes(window, cx),
+                            Component::PullRequest => this.focus_pull_request(window, cx),
                             _ => {}
                         }
                     })),
@@ -1151,13 +1173,15 @@ impl Keystone {
         id: String,
         text: String,
         selected: bool,
+        unseen: bool,
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let colors = cx.theme().colors;
         h_flex()
             .id(SharedString::from(id.clone()))
-            .automation_id(id)
+            .automation_id(id.clone())
             .h(px(26.))
+            .gap(px(6.))
             .flex_shrink_0()
             .max_w(px(200.))
             .px_2()
@@ -1183,6 +1207,16 @@ impl Keystone {
                     })
                     .truncate(),
             )
+            .when(unseen, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .size(px(7.))
+                        .rounded_full()
+                        .bg(colors.accent)
+                        .automation_id(format!("{id}-dot")),
+                )
+            })
     }
 
     pub(crate) fn measure_customize_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1328,6 +1362,9 @@ impl Keystone {
             }
             Component::Changes => {
                 pane = pane.child(self.changes_list(cx));
+            }
+            Component::PullRequest => {
+                pane = pane.child(self.pull_request_pane(cx));
             }
             Component::Conversation => {
                 self.presentation.current.arrangement.visible.push(id);

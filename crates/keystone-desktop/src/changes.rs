@@ -281,13 +281,13 @@ impl Notice {
         match error {
             github::Error::Missing => Notice::Hint {
                 id: "changes-hint-gh-missing",
-                title: "Install gh (cli.github.com), then run:".into(),
+                title: github::INSTALL_HINT.into(),
                 command: github::SIGN_IN,
                 output: None,
             },
             github::Error::SignedOut { output } => Notice::Hint {
                 id: "changes-hint-gh-signed-out",
-                title: "Sign in to gh:".into(),
+                title: github::SIGN_IN_HINT.into(),
                 command: github::SIGN_IN,
                 output: Some(output),
             },
@@ -2521,9 +2521,14 @@ mod ui_tests {
             settled_all(&view, cx)
                 && panel(&view, cx).read_with(cx, |panel, _| panel.form.is_none())
         });
-        assert_eq!(
-            fs::read_to_string(repo.join(".git/fake-gh-argv")).unwrap(),
-            "pr\ncreate\n--title\nPush from Changes\n--body-file\n-\n--base\nmain\n--draft\nAdds a push button.\n---\n"
+        let argv = fs::read_to_string(repo.join(".git/fake-gh-argv")).unwrap();
+        let create = "pr\ncreate\n--title\nPush from Changes\n--body-file\n-\n--base\nmain\n--draft\nAdds a push button.\n---\n";
+        assert!(argv.starts_with(create), "{argv}");
+        assert!(
+            argv[create.len()..]
+                .split_terminator("---\n")
+                .all(|call| call.starts_with("pr\nview\nhttps://github.com/owner/repo/pull/12\n")),
+            "then gh is only asked about the new pull request: {argv}"
         );
         let created = PullRequest {
             number: 12,
