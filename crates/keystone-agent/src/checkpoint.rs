@@ -8,7 +8,7 @@
 //! each new one is saved, in every workspace's store. Every call blocks.
 
 use crate::git::{self, Cancel, Output, Until, git, path, run, run_until};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -39,6 +39,10 @@ const GITLINK: &str = "160000";
 /// How the files Keystone keeps in the git folder while it works are named.
 const SCRATCH_INDEX: &str = "keystone-checkpoint-";
 const RESTORE_FOLDER: &str = "keystone-restore-";
+/// The file of a restore's folder recording each change made to the working tree.
+const JOURNAL: &str = "journal";
+/// The file in the git folder a restore or a put back locks while it runs.
+const RESTORING: &str = "keystone-restoring";
 
 #[derive(Debug)]
 pub enum Error {
@@ -54,6 +58,13 @@ pub enum Error {
         cause: Box<Error>,
         kept: PathBuf,
     },
+    /// Putting back a restore Keystone did not finish left some files where they are.
+    /// The ones they replace are in this folder.
+    Kept(PathBuf),
+    /// Another Keystone is restoring the working tree.
+    Busy,
+    /// A restore Keystone did not finish is still to be put back.
+    Unfinished,
 }
 
 impl fmt::Display for Error {
@@ -63,9 +74,12 @@ impl fmt::Display for Error {
             Self::Io(error) => error.fmt(f),
             Self::Gone => f.write_str("This checkpoint is no longer saved."),
             Self::Cancelled => f.write_str("Restore cancelled."),
-            Self::NotPutBack { cause, kept } => write!(
+            Self::NotPutBack { cause, kept } => write!(f, "{cause} {}", Self::Kept(kept.clone())),
+            Self::Busy => f.write_str("Another restore is running here."),
+            Self::Unfinished => f.write_str("Put files back first."),
+            Self::Kept(kept) => write!(
                 f,
-                "{cause} Some files could not be put back. They are in {}.",
+                "Some files could not be put back. They are in {}.",
                 kept.display()
             ),
         }
@@ -123,6 +137,9 @@ pub struct Checkpoints {
     /// By turn: how many files the turn changed, when the tree it started from was
     /// taken.
     pub turns: BTreeMap<u64, Option<usize>>,
+    /// A restore of the session's ended without finishing, with Keystone, so its
+    /// files are half in place until [`put_back`].
+    pub unfinished: bool,
 }
 
 /// What a restore left as it is: files the checkpoint has where a folder, a nested
@@ -435,9 +452,13 @@ pub fn list(root: &Path, session: &Session) -> Result<Checkpoints> {
             .find_map(|line| line.strip_prefix("Files: ")?.parse().ok());
         turns.insert(turn, files);
     }
+    let unfinished = restore_folders(Repo::new(root))?
+        .iter()
+        .any(|folder| Work::unfinished(folder, false).is_some());
     Ok(Checkpoints {
         root: root.to_owned(),
         turns,
+        unfinished,
     })
 }
 
@@ -629,8 +650,14 @@ pub fn restore(
         Err(git::Error::Failed { .. }) => return Err(Error::Gone),
         Err(error) => return Err(error.into()),
     };
+    let _held = hold(repo)?;
+    if restore_folders(repo)?
+        .iter()
+        .any(|folder| Work::unfinished(folder, true).is_some())
+    {
+        return Err(Error::Unfinished);
+    }
     let left_out = left_out(repo, &session.name(turn))?;
-    let read_at = SystemTime::now();
     let now = take(repo)?.tree;
     save(
         repo,
@@ -646,13 +673,18 @@ pub fn restore(
     let mut deletes = Vec::new();
     let mut writes = Vec::new();
     let mut skipped = Vec::new();
+    // The mode and blob the tree read now has at each path it holds.
+    let mut was = BTreeMap::new();
     let mut fields = output.split(|byte| *byte == 0);
     while let (Some(meta), Some(file)) = (fields.next(), fields.next()) {
         let meta = text(meta);
         let meta: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
-        let [old, new, _, _, status] = meta[..] else {
+        let [old, new, blob, _, status] = meta[..] else {
             continue;
         };
+        if status != "A" {
+            was.insert(file, (old.to_owned(), blob.to_owned()));
+        }
         if old == GITLINK || new == GITLINK {
             // A submodule's own commit is its repository's; only a file the checkpoint
             // has in its place is worth saying.
@@ -714,9 +746,23 @@ pub fn restore(
         .into_iter()
         .filter(|file| is_rule_file(file) || !ignored.contains(*file))
         .collect();
+    let replaced = writes
+        .iter()
+        .filter(|(added, _)| !added)
+        .map(|(_, file)| *file);
+    let unchanged = unchanged_since_read(repo, deletes.iter().copied().chain(replaced), &was)?;
+    let mut ignorecase = repo.git();
+    ignorecase.args(["config", "--type=bool", "core.ignorecase"]);
+    let case_insensitive = match repo.run(ignorecase, None) {
+        Ok(value) => text(&value) == "true",
+        Err(git::Error::Failed { code: Some(1), .. }) => false,
+        Err(error) => return Err(error.into()),
+    };
     let mut journal = Journal {
         root,
-        read_at,
+        unchanged,
+        case_insensitive,
+        listings: HashMap::new(),
         work,
         steps: Vec::new(),
     };
@@ -726,7 +772,11 @@ pub fn restore(
         false => Err(Error::Cancelled),
     });
     match outcome {
-        Ok(()) => Ok(Restored { skipped }),
+        Ok(()) => {
+            // Said before the folder goes, so a crash in between offers no put back.
+            let _ = journal.work.write(&[KEPT.to_vec()]);
+            Ok(Restored { skipped })
+        }
         Err(cause) => match journal.undo() {
             Ok(()) => Err(cause),
             Err(kept) => Err(Error::NotPutBack {
@@ -825,12 +875,16 @@ fn sparse(repo: Repo) -> Result<BTreeSet<Vec<u8>>> {
 }
 
 /// A restore's folder in the git folder: `stage` holds the checkpoint's files as git
-/// converted them, and `aside` the files of the working tree they replace. Removed
-/// when dropped, unless files could not be put back from it.
+/// converted them, `aside` the files of the working tree they replace, and the journal
+/// each folder made or removed and each file placed in the working tree, so
+/// [`put_back`] can undo a restore Keystone did not finish. The journal is locked
+/// while its restore runs. Removed when dropped, the journal first, unless files could
+/// not be put back from it.
 struct Work {
     folder: PathBuf,
     stage: PathBuf,
     aside: PathBuf,
+    journal: fs::File,
     keep: bool,
 }
 
@@ -849,33 +903,240 @@ impl Work {
         let (stage, aside) = (folder.join("stage"), folder.join("aside"));
         fs::create_dir(&stage)?;
         fs::create_dir(&aside)?;
+        let journal = fs::File::options()
+            .append(true)
+            .create_new(true)
+            .open(folder.join(JOURNAL))?;
+        // Waits out a reader that holds it a moment; the working tree's lock [`hold`]
+        // keeps restores apart.
+        let _ = journal.lock();
         Ok(Self {
             folder,
             stage,
             aside,
+            journal,
             keep: false,
         })
+    }
+
+    /// The folder of a restore that ended without finishing, with the steps its journal
+    /// records: `None` while the restore still runs, once it was kept, or when it
+    /// changed nothing. `held` when the caller holds the working tree's lock [`hold`]:
+    /// then no restore runs, a journal's lock is only another reader's for a moment,
+    /// and a kept restore's folder goes.
+    fn unfinished(folder: &Path, held: bool) -> Option<(Self, Vec<Step>)> {
+        use std::io::Read;
+        let mut journal = fs::File::options()
+            .read(true)
+            .append(true)
+            .open(folder.join(JOURNAL))
+            .ok()?;
+        match held {
+            true => {
+                let _ = journal.lock();
+            }
+            false => {
+                if let Err(fs::TryLockError::WouldBlock) = journal.try_lock() {
+                    return None;
+                }
+            }
+        }
+        let mut records = Vec::new();
+        journal.read_to_end(&mut records).ok()?;
+        let Some(steps) = parse(&records) else {
+            if held {
+                let _ = fs::remove_dir_all(folder);
+            }
+            return None;
+        };
+        let aside = folder.join("aside");
+        let changed = !steps.is_empty() || holds_files(&aside);
+        changed.then(|| {
+            let work = Self {
+                folder: folder.to_owned(),
+                stage: folder.join("stage"),
+                aside,
+                journal,
+                // Only an undo removes it.
+                keep: true,
+            };
+            (work, steps)
+        })
+    }
+
+    /// Adds a record to the journal: its fields, each ended by a NUL.
+    fn write(&mut self, fields: &[Vec<u8>]) -> io::Result<()> {
+        use std::io::Write;
+        let record: Vec<u8> = fields
+            .iter()
+            .flat_map(|field| field.iter().copied().chain([0]))
+            .collect();
+        self.journal.write_all(&record)
     }
 }
 
 impl Drop for Work {
     fn drop(&mut self) {
-        // A panic may leave originals aside; they stay.
+        // A panic may leave originals aside; they stay, and so does the journal.
         if !self.keep && !std::thread::panicking() {
+            let _ = fs::remove_file(self.folder.join(JOURNAL));
             let _ = fs::remove_dir_all(&self.folder);
         }
     }
 }
 
-/// One change a restore made to the working tree, in the order made.
+/// The lock a restore and a put back of the working tree at `repo` hold while they
+/// run, so two Keystones never move its files at once. Neither runs where the file
+/// system cannot lock.
+fn hold(repo: Repo) -> Result<fs::File> {
+    let lock = fs::File::options()
+        .create(true)
+        .append(true)
+        .open(git_path(repo, RESTORING)?)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(fs::TryLockError::WouldBlock) => Err(Error::Busy),
+        Err(fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// The folders restores left in the git folder of the repository or worktree.
+fn restore_folders(repo: Repo) -> Result<Vec<PathBuf>> {
+    let index = git_path(repo, "index")?;
+    let Some(folder) = index.parent() else {
+        return Ok(Vec::new());
+    };
+    Ok(fs::read_dir(folder)?
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(RESTORE_FOLDER)
+        })
+        .map(|entry| entry.path())
+        .collect())
+}
+
+/// Puts back what each restore in the working tree at `root` changed and did not
+/// finish, as a cancelled restore is put back. A file changed since stays, and the
+/// one it replaced stays aside: [`Error::Kept`] says where.
+pub fn put_back(root: &Path) -> Result<()> {
+    let repo = Repo::new(root);
+    let _held = hold(repo)?;
+    let mut kept = None;
+    for folder in restore_folders(repo)? {
+        let Some((mut work, steps)) = Work::unfinished(&folder, true) else {
+            continue;
+        };
+        work.keep = false;
+        let journal = Journal {
+            root,
+            unchanged: BTreeMap::new(),
+            case_insensitive: false,
+            listings: HashMap::new(),
+            work,
+            steps,
+        };
+        if let Err(aside) = journal.undo() {
+            kept = Some(aside);
+        }
+    }
+    kept.map_or(Ok(()), |kept| Err(Error::Kept(kept)))
+}
+
+/// One change a restore made to the working tree, in the order made. Paths are
+/// relative to the working tree's top folder. Files it moved aside are not recorded:
+/// an undo puts back whatever `aside` holds.
+#[derive(Debug, PartialEq)]
 enum Step {
-    /// A file moved from the working tree to the same path under `aside`.
-    Aside(PathBuf),
+    /// A file about to move from `stage` into the working tree, how it was there (a
+    /// rename keeps its inode, size and modified time) and its [`digest`].
+    Placing(PathBuf, Stamp, String),
     /// A file moved from `stage` into the working tree, and how it was then.
-    Placed(PathBuf, Option<Stamp>),
-    /// A folder made for a file, or removed once a file left it empty.
+    Placed(PathBuf, Stamp),
+    /// A folder made for a file.
     Made(PathBuf),
-    Removed(PathBuf, fs::Permissions),
+    /// A folder about to be removed once a file left it empty, with its mode.
+    Removing(PathBuf, u32),
+    /// A folder removed.
+    Removed(PathBuf),
+}
+
+impl Step {
+    /// The step as a journal records it.
+    fn fields(&self) -> Vec<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt;
+        let file = |file: &Path| file.as_os_str().as_bytes().to_vec();
+        let stamped = |kind: &[u8], placed: &Path, stamp: &Stamp| {
+            [kind.to_vec(), file(placed)]
+                .into_iter()
+                .chain(stamp.fields().map(String::into_bytes))
+                .collect()
+        };
+        match self {
+            Self::Placing(placing, stamp, digest) => {
+                let mut fields: Vec<Vec<u8>> = stamped(b"placing", placing, stamp);
+                fields.push(digest.clone().into_bytes());
+                fields
+            }
+            Self::Placed(placed, stamp) => stamped(b"placed", placed, stamp),
+            Self::Made(folder) => vec![b"made".to_vec(), file(folder)],
+            Self::Removing(folder, mode) => vec![
+                b"removing".to_vec(),
+                file(folder),
+                mode.to_string().into_bytes(),
+            ],
+            Self::Removed(folder) => vec![b"removed".to_vec(), file(folder)],
+        }
+    }
+}
+
+/// The record that a restore's files were kept.
+const KEPT: &[u8] = b"kept";
+
+fn number<T: std::str::FromStr>(field: Option<&[u8]>) -> Option<T> {
+    std::str::from_utf8(field?).ok()?.parse().ok()
+}
+
+/// The steps a journal records, or `None` once its restore was kept. A record the end
+/// of the journal cuts short, as a crash while writing it leaves, is not one.
+fn parse(journal: &[u8]) -> Option<Vec<Step>> {
+    let mut fields: Vec<&[u8]> = journal.split(|byte| *byte == 0).collect();
+    // What follows the last NUL: nothing, or a field cut short.
+    fields.pop();
+    let mut fields = fields.into_iter();
+    let mut steps = Vec::new();
+    while let Some(kind) = fields.next() {
+        if kind == KEPT {
+            return None;
+        }
+        let file = fields.next().map(path);
+        let step = match kind {
+            b"made" => file.map(Step::Made),
+            b"removing" => file
+                .zip(number(fields.next()))
+                .map(|(folder, mode)| Step::Removing(folder, mode)),
+            b"removed" => file.map(Step::Removed),
+            b"placing" => file
+                .zip(Stamp::parse(&mut fields))
+                .zip(
+                    fields
+                        .next()
+                        .and_then(|digest| std::str::from_utf8(digest).ok()),
+                )
+                .map(|((placing, stamp), digest)| Step::Placing(placing, stamp, digest.into())),
+            b"placed" => file
+                .zip(Stamp::parse(&mut fields))
+                .map(|(placed, stamp)| Step::Placed(placed, stamp)),
+            _ => None,
+        };
+        let Some(step) = step else {
+            break;
+        };
+        steps.push(step);
+    }
+    Some(steps)
 }
 
 /// The changes a restore made to the working tree, so each can be undone. Only files
@@ -883,8 +1144,15 @@ enum Step {
 /// worktree on another volume, a move is a copy, and then undoing needs space.
 struct Journal<'a> {
     root: &'a Path,
-    /// When the working tree was read for the restore: a file changed since is left.
-    read_at: SystemTime,
+    /// The stamp of each file the restore may replace that was still as the restore
+    /// read it once its files were converted. Anything else there was written since.
+    unchanged: BTreeMap<Vec<u8>, Stamp>,
+    /// Whether git takes the file system to ignore case, as macOS's does by default.
+    /// Then a file or folder moved aside is kept by the name its folder stores, so an
+    /// undo gives it back that name and not the case the tree has.
+    case_insensitive: bool,
+    /// Each folder's names and inodes, listed once, for [`Journal::stored`].
+    listings: HashMap<PathBuf, Vec<(std::ffi::OsString, u64)>>,
     work: Work,
     steps: Vec<Step>,
 }
@@ -894,7 +1162,7 @@ impl Journal<'_> {
     /// added flag and a path. A path where a folder stands, or one of whose folders is a
     /// file, a link or a nested repository, is left and goes to `skipped`, and so is a
     /// write where a file the snapshot left out (ignored or too large) stands, and a file
-    /// changed since the working tree was read; a file outside a sparse checkout's cone
+    /// written since the working tree was read; a file outside a sparse checkout's cone
     /// stays off disk.
     fn apply(
         &mut self,
@@ -904,9 +1172,9 @@ impl Journal<'_> {
         skipped: &mut Vec<PathBuf>,
         convert: &dyn Fn(Vec<&[u8]>) -> Result<()>,
     ) -> Result<()> {
-        for file in deletes {
+        for &file in deletes {
             let full = self.root.join(path(file));
-            if not_ours(self.root, &full) || self.changed_since_read(&full) {
+            if not_ours(self.root, &full) || self.changed_since_read(file, &full) {
                 skipped.push(path(file));
             } else {
                 self.delete(&path(file))?;
@@ -918,42 +1186,95 @@ impl Journal<'_> {
             if sparse.contains(file) && here.is_err() {
                 continue;
             }
-            if (added && here.is_ok())
-                || not_ours(self.root, &full)
-                || self.changed_since_read(&full)
-            {
+            let taken = |journal: &Self| {
+                (added && full.symlink_metadata().is_ok())
+                    || not_ours(journal.root, &full)
+                    || journal.changed_since_read(file, &full)
+            };
+            if taken(self) {
                 skipped.push(path(file));
-            } else {
-                if self.work.stage.join(path(file)).symlink_metadata().is_err() {
-                    convert(vec![file])?;
-                }
-                self.place(&path(file), here.is_ok())?;
+                continue;
             }
+            if self.work.stage.join(path(file)).symlink_metadata().is_err() {
+                convert(vec![file])?;
+                // A filter may take its time: what stands there is looked at again.
+                if taken(self) || full.symlink_metadata().is_ok() != here.is_ok() {
+                    skipped.push(path(file));
+                    continue;
+                }
+            }
+            self.place(&path(file), here.is_ok())?;
         }
         Ok(())
     }
 
-    /// A time after now is a skewed clock or an extracted archive, not a change.
-    fn changed_since_read(&self, full: &Path) -> bool {
-        full.symlink_metadata()
-            .and_then(|meta| meta.modified())
-            .is_ok_and(|modified| modified >= self.read_at && modified <= SystemTime::now())
+    /// Whether something stands at `file` other than what the restore read there.
+    fn changed_since_read(&self, file: &[u8], full: &Path) -> bool {
+        Stamp::of(full).is_some_and(|now| self.unchanged.get(file) != Some(&now))
+    }
+
+    /// Keeps `step`, made, for an undo now and in the journal for one after a crash.
+    fn record(&mut self, step: Step) -> io::Result<()> {
+        let fields = step.fields();
+        self.steps.push(step);
+        self.work.write(&fields)
+    }
+
+    /// `file` with its last name as its folder stores it, when the file system ignores
+    /// case: the one name there for the same file that differs only in case. A hard
+    /// link by another name, or two such names, leave `file` as it is.
+    fn stored(&mut self, file: &Path) -> PathBuf {
+        use std::os::unix::fs::{DirEntryExt, MetadataExt};
+        let full = self.root.join(file);
+        let (true, Some(folder), Some(name), Ok(meta)) = (
+            self.case_insensitive,
+            full.parent(),
+            file.file_name(),
+            full.symlink_metadata(),
+        ) else {
+            return file.to_owned();
+        };
+        let listing = self.listings.entry(folder.to_owned()).or_insert_with(|| {
+            fs::read_dir(folder)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| (entry.file_name(), entry.ino()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let same: Vec<&std::ffi::OsString> = listing
+            .iter()
+            .filter(|(_, inode)| *inode == meta.ino())
+            .map(|(entry, _)| entry)
+            .collect();
+        let folded = name.to_string_lossy().to_lowercase();
+        let named: Vec<_> = same
+            .iter()
+            .copied()
+            .filter(|entry| entry.to_string_lossy().to_lowercase() == folded)
+            .collect();
+        match (&same[..], &named[..]) {
+            ([entry], _) | (_, [entry]) => file.with_file_name(entry),
+            _ => file.to_owned(),
+        }
     }
 
     fn set_aside(&mut self, file: &Path) -> io::Result<()> {
-        let aside = self.work.aside.join(file);
+        let file = self.stored(file);
+        let aside = self.work.aside.join(&file);
         if let Some(folder) = aside.parent() {
             fs::create_dir_all(folder)?;
         }
-        match move_file(&self.root.join(file), &aside) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            moved => moved?,
+        match move_file(&self.root.join(&file), &aside) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            moved => moved,
         }
-        self.steps.push(Step::Aside(file.to_owned()));
-        Ok(())
     }
 
     fn delete(&mut self, file: &Path) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
         self.set_aside(file)?;
         let root = self.root;
         let mut folder = root.join(file).parent().map(Path::to_owned);
@@ -961,11 +1282,14 @@ impl Journal<'_> {
             let Ok(meta) = dir.symlink_metadata() else {
                 break;
             };
+            let relative = self.stored(dir.strip_prefix(root).unwrap_or(&dir));
+            // Recorded first, so a crash after the removal still has its mode.
+            self.record(Step::Removing(relative.clone(), meta.permissions().mode()))?;
             if fs::remove_dir(&dir).is_err() {
                 break;
             }
+            self.record(Step::Removed(relative))?;
             folder = dir.parent().map(Path::to_owned);
-            self.steps.push(Step::Removed(dir, meta.permissions()));
         }
         Ok(())
     }
@@ -983,50 +1307,94 @@ impl Journal<'_> {
             .collect();
         for folder in missing.into_iter().rev() {
             fs::create_dir(&folder)?;
-            self.steps.push(Step::Made(folder));
+            let relative = folder.strip_prefix(self.root).unwrap_or(&folder).to_owned();
+            self.record(Step::Made(relative))?;
         }
-        move_file(&self.work.stage.join(file), &full)?;
-        self.steps
-            .push(Step::Placed(file.to_owned(), Stamp::of(&full)));
-        Ok(())
+        let staged = self.work.stage.join(file);
+        let placing = Stamp::of(&staged).ok_or(io::ErrorKind::NotFound)?;
+        self.record(Step::Placing(file.to_owned(), placing, digest(&staged)?))?;
+        move_file(&staged, &full)?;
+        let stamp = Stamp::of(&full).ok_or(io::ErrorKind::NotFound)?;
+        self.record(Step::Placed(file.to_owned(), stamp))
     }
 
-    /// Undoes every step, the newest first. When one fails the rest are still undone,
-    /// and the folder holding the originals that did not go back is kept and returned.
-    /// A placed file someone changed since, or a file made since where one was deleted,
-    /// is kept, and its original stays aside.
+    /// Undoes every step, the newest first, then moves each file still aside back to
+    /// its path, unless something stands there. A placed file someone changed since
+    /// stays, and so does its original, aside. When a file stays aside, or a step
+    /// failed, the folder holding the originals is kept and returned. Undoing again,
+    /// after a crash cut an undo short, undoes only what is left.
     fn undo(mut self) -> std::result::Result<(), PathBuf> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let root = self.root;
         let mut failed = false;
-        let mut changed = BTreeSet::new();
+        let (mut placed, mut removed) = (BTreeSet::new(), BTreeSet::new());
         for step in std::mem::take(&mut self.steps).into_iter().rev() {
             let undone = match step {
                 Step::Placed(file, stamp) => {
-                    let full = self.root.join(&file);
+                    let full = root.join(&file);
+                    placed.insert(file);
                     match Stamp::of(&full) {
-                        None => Ok(()),
-                        now if now == stamp => fs::remove_file(full),
-                        _ => {
-                            changed.insert(file);
-                            Err(io::ErrorKind::AlreadyExists.into())
-                        }
+                        Some(now) if now == stamp => fs::remove_file(full),
+                        // Gone, changed since, or the original an undo put back.
+                        _ => Ok(()),
                     }
                 }
-                Step::Aside(file) if changed.contains(&file) => Ok(()),
-                // Something made since where a deleted file stood is kept, and the
-                // original stays aside.
-                Step::Aside(file) if self.root.join(&file).symlink_metadata().is_ok() => {
-                    Err(io::ErrorKind::AlreadyExists.into())
+                Step::Placing(file, ..) if placed.contains(&file) => Ok(()),
+                // A crash came as the file moved: there, it is the staged file, unless
+                // its contents changed since.
+                Step::Placing(file, stamp, staged) => {
+                    let full = root.join(&file);
+                    match Stamp::of(&full) {
+                        Some(now)
+                            if (now.inode, now.len, now.modified)
+                                == (stamp.inode, stamp.len, stamp.modified)
+                                && digest(&full).is_ok_and(|now| now == staged) =>
+                        {
+                            fs::remove_file(full)
+                        }
+                        _ => Ok(()),
+                    }
                 }
-                Step::Made(folder) => fs::remove_dir(folder),
-                Step::Removed(folder, permissions) => {
-                    fs::create_dir(&folder).and_then(|()| fs::set_permissions(&folder, permissions))
+                // A file there is the original an undo put back; files in it are the
+                // user's, written since.
+                Step::Made(folder) => match fs::remove_dir(root.join(folder)) {
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound
+                                | io::ErrorKind::NotADirectory
+                                | io::ErrorKind::DirectoryNotEmpty
+                        ) =>
+                    {
+                        Ok(())
+                    }
+                    removed => removed,
+                },
+                Step::Removed(folder) => {
+                    removed.insert(folder);
+                    Ok(())
                 }
-                Step::Aside(file) => {
-                    move_file(&self.work.aside.join(&file), &self.root.join(&file))
+                // A folder there that was not removed is as it was.
+                Step::Removing(folder, mode) => {
+                    let full = root.join(&folder);
+                    let made = fs::DirBuilder::new().mode(mode).create(&full);
+                    match made {
+                        Err(error)
+                            if error.kind() != io::ErrorKind::AlreadyExists
+                                || !full.symlink_metadata().is_ok_and(|meta| meta.is_dir()) =>
+                        {
+                            Err(error)
+                        }
+                        Err(_) if !removed.contains(&folder) => Ok(()),
+                        _ => fs::set_permissions(&full, fs::Permissions::from_mode(mode)),
+                    }
                 }
             };
             failed |= undone.is_err();
         }
+        failed |= put_aside_back(&self.work.aside, root, Path::new("")).is_err();
+        failed |= holds_files(&self.work.aside);
+        let _ = fs::remove_file(self.work.folder.join(JOURNAL));
         if failed {
             self.work.keep = true;
             let _ = fs::remove_dir_all(&self.work.stage);
@@ -1036,13 +1404,51 @@ impl Journal<'_> {
     }
 }
 
-/// What tells a file apart from one written in its place since.
-#[derive(PartialEq)]
+/// The SHA-256 of a file's contents, or of its target for a link.
+fn digest(full: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+    let mut hasher = Sha256::new();
+    match fs::read_link(full) {
+        Ok(target) => hasher.update(target.as_os_str().as_bytes()),
+        Err(_) => {
+            io::copy(&mut fs::File::open(full)?, &mut hasher)?;
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Moves each file under `aside`, at `relative`, back to the same path under `root`
+/// where nothing stands, with the folders it needs.
+fn put_aside_back(aside: &Path, root: &Path, relative: &Path) -> io::Result<()> {
+    let mut result = Ok(());
+    for entry in fs::read_dir(aside.join(relative))? {
+        let relative = relative.join(entry?.file_name());
+        let from = aside.join(&relative);
+        let to = root.join(&relative);
+        let moved = if from.symlink_metadata()?.is_dir() {
+            put_aside_back(aside, root, &relative)
+        } else if to.symlink_metadata().is_ok() {
+            Ok(())
+        } else {
+            to.parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| move_file(&from, &to))
+        };
+        result = result.and(moved);
+    }
+    result
+}
+
+/// What tells a file apart from one written in its place since. A write changes the
+/// file's change time even when it keeps the modified time, as `cp -p` and `rsync -t`
+/// do. The device is left out: some file systems number theirs anew at each mount.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Stamp {
-    device: u64,
     inode: u64,
     len: u64,
-    modified: Option<SystemTime>,
+    modified: (i64, i64),
+    changed: (i64, i64),
 }
 
 impl Stamp {
@@ -1050,12 +1456,77 @@ impl Stamp {
         use std::os::unix::fs::MetadataExt;
         let meta = full.symlink_metadata().ok()?;
         Some(Self {
-            device: meta.dev(),
             inode: meta.ino(),
             len: meta.len(),
-            modified: meta.modified().ok(),
+            modified: (meta.mtime(), meta.mtime_nsec()),
+            changed: (meta.ctime(), meta.ctime_nsec()),
         })
     }
+
+    fn fields(&self) -> [String; 6] {
+        [
+            self.inode.to_string(),
+            self.len.to_string(),
+            self.modified.0.to_string(),
+            self.modified.1.to_string(),
+            self.changed.0.to_string(),
+            self.changed.1.to_string(),
+        ]
+    }
+
+    fn parse<'a>(fields: &mut impl Iterator<Item = &'a [u8]>) -> Option<Self> {
+        Some(Self {
+            inode: number(fields.next())?,
+            len: number(fields.next())?,
+            modified: (number(fields.next())?, number(fields.next())?),
+            changed: (number(fields.next())?, number(fields.next())?),
+        })
+    }
+}
+
+/// The stamp of each of `files` still as the tree the restore read holds it, `read`
+/// giving its mode and blob there. Every stamp is taken first, then git hashes each
+/// file again through the same filters as the snapshot, so a file written since the
+/// read is left out even when it kept its modified time, and one written after its
+/// stamp was taken no longer matches it.
+fn unchanged_since_read<'a>(
+    repo: Repo,
+    files: impl IntoIterator<Item = &'a [u8]>,
+    read: &BTreeMap<&[u8], (String, String)>,
+) -> Result<BTreeMap<Vec<u8>, Stamp>> {
+    let mut unchanged = BTreeMap::new();
+    let mut entries = Vec::new();
+    for file in files {
+        let (Some((mode, blob)), Some(stamp)) =
+            (read.get(file), Stamp::of(&repo.root.join(path(file))))
+        else {
+            continue;
+        };
+        unchanged.insert(file.to_vec(), stamp);
+        entries.extend(format!("{mode} {blob}\t").bytes());
+        entries.extend(file);
+        entries.push(0);
+    }
+    if unchanged.is_empty() {
+        return Ok(unchanged);
+    }
+    let index = Scratch::new(repo)?;
+    let mut fill = index.git(repo);
+    fill.args(["update-index", "-z", "--index-info"]);
+    repo.run(fill, Some(entries))?;
+    // Entries with no stat are hashed again; those whose contents match get one.
+    let mut refresh = index.git(repo);
+    refresh.args(["update-index", "-q", "--refresh"]);
+    match repo.run(refresh, None) {
+        Ok(_) | Err(git::Error::Failed { code: Some(1), .. }) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let mut differ = index.git(repo);
+    differ.args(["diff-files", "-z", "--name-only"]);
+    for file in nul_separated(&repo.run(differ, None)?) {
+        unchanged.remove(file);
+    }
+    Ok(unchanged)
 }
 
 /// Moves the file or link at `from` to `to`; across file systems, copies it and
@@ -2374,5 +2845,653 @@ mod tests {
             !root.join(".git/index").exists(),
             "the user's index is never written"
         );
+    }
+
+    /// Restores the session's checkpoint for `turn` and ends as a crash would once every
+    /// file is in place, with nothing undone: a panic leaves the restore's folder.
+    fn crash_mid_restore(root: &Path, session: &Session, turn: u64) {
+        let crashed = std::panic::catch_unwind(|| {
+            let _ = restore(root, session, turn, &Cancel::default(), || panic!("killed"));
+        });
+        assert!(crashed.is_err());
+    }
+
+    /// The restore folder a crash left, and the steps its journal records.
+    fn left_by_crash(root: &Path) -> (PathBuf, Vec<Step>) {
+        let folders = restore_folders(Repo::new(root)).unwrap();
+        let [folder] = &folders[..] else {
+            panic!("{folders:?}");
+        };
+        let journal = fs::read(folder.join(JOURNAL)).unwrap();
+        (folder.clone(), parse(&journal).unwrap())
+    }
+
+    fn unfinished_in(root: &Path) -> bool {
+        list(root, &session(1)).unwrap().unfinished
+    }
+
+    /// A working tree a restore to turn one changes in every way it can.
+    fn edited_since_turn_one() -> tempfile::TempDir {
+        let dir = repository();
+        let root = dir.path();
+        write(root, "gone/deep/file.txt", "at the checkpoint\n");
+        write(root, "z-last.txt", "at the checkpoint\n");
+        save_turn(root, 1, 1, None, KEEP);
+        write(root, "edited.txt", "later\n");
+        write(root, "z-last.txt", "later\n");
+        write(root, "made/later.txt", "later\n");
+        fs::remove_file(root.join("kept.txt")).unwrap();
+        fs::remove_dir_all(root.join("gone")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_restore_keystone_did_not_finish_is_put_back() {
+        let dir = edited_since_turn_one();
+        let root = dir.path();
+        let before = tree_state(root);
+
+        crash_mid_restore(root, &session(1), 1);
+
+        assert_ne!(tree_state(root), before);
+        assert!(unfinished_in(root));
+        assert!(
+            list(root, &session(2)).unwrap().unfinished,
+            "any session sees it"
+        );
+        let again = restore(root, &session(1), 1, &Cancel::default(), || true);
+        assert!(matches!(again, Err(Error::Unfinished)), "{again:?}");
+
+        put_back(root).unwrap();
+
+        assert_eq!(tree_state(root), before);
+        no_work_left(root);
+        assert!(!unfinished_in(root));
+        put_back(root).unwrap();
+        assert_eq!(tree_state(root), before);
+    }
+
+    #[test]
+    fn a_restore_still_running_is_neither_offered_nor_put_back() {
+        let dir = edited_since_turn_one();
+        let root = dir.path();
+        let mut seen = None;
+
+        restore(root, &session(1), 1, &Cancel::default(), || {
+            seen = Some((unfinished_in(root), put_back(root)));
+            true
+        })
+        .unwrap();
+
+        let Some((false, Err(Error::Busy))) = seen else {
+            panic!("{seen:?}");
+        };
+        assert_eq!(read(root, "kept.txt").as_deref(), Some("kept\n"));
+        assert_eq!(read(root, "edited.txt").as_deref(), Some("first\n"));
+        no_work_left(root);
+    }
+
+    #[test]
+    fn a_file_changed_after_the_crash_stays_and_its_original_is_kept() {
+        let dir = edited_since_turn_one();
+        let root = dir.path();
+        crash_mid_restore(root, &session(1), 1);
+        write(root, "edited.txt", "typed after the crash\n");
+
+        let result = put_back(root);
+
+        let Err(Error::Kept(kept)) = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(
+            read(root, "edited.txt").as_deref(),
+            Some("typed after the crash\n")
+        );
+        assert_eq!(read(&kept, "edited.txt").as_deref(), Some("later\n"));
+        assert_eq!(read(root, "made/later.txt").as_deref(), Some("later\n"));
+        assert!(!root.join("kept.txt").exists());
+        assert!(!unfinished_in(root));
+    }
+
+    #[test]
+    fn a_replaced_file_placed_as_the_crash_came_gets_its_original_back() {
+        let dir = edited_since_turn_one();
+        let root = dir.path();
+        let before = tree_state(root);
+        crash_mid_restore(root, &session(1), 1);
+        let (folder, steps) = left_by_crash(root);
+        let Some(Step::Placed(last, _)) = steps.last() else {
+            panic!("{steps:?}");
+        };
+        assert_eq!(last, Path::new("z-last.txt"));
+        // The crash came as the last file was placed, before its record was whole.
+        let journal = folder.join(JOURNAL);
+        let length = fs::metadata(&journal).unwrap().len();
+        fs::File::options()
+            .write(true)
+            .open(&journal)
+            .unwrap()
+            .set_len(length - 3)
+            .unwrap();
+
+        put_back(root).unwrap();
+
+        assert_eq!(tree_state(root), before);
+        no_work_left(root);
+    }
+
+    #[test]
+    fn a_file_moved_aside_before_any_record_is_put_back() {
+        let dir = repository();
+        let root = dir.path();
+        let before = tree_state(root);
+        let mut work = Work::new(Repo::new(root)).unwrap();
+        move_file(&root.join("edited.txt"), &work.aside.join("edited.txt")).unwrap();
+        // Killed then: nothing recorded, the file aside.
+        work.keep = true;
+        drop(work);
+
+        assert!(unfinished_in(root));
+        put_back(root).unwrap();
+
+        assert_eq!(tree_state(root), before);
+        no_work_left(root);
+    }
+
+    #[test]
+    fn putting_back_again_after_a_crash_cut_an_undo_short_finishes_it() {
+        let dir = edited_since_turn_one();
+        let root = dir.path();
+        let before = tree_state(root);
+        crash_mid_restore(root, &session(1), 1);
+        let (folder, _) = left_by_crash(root);
+        // The undo got as far as the newest file: placed copy gone, original back.
+        fs::remove_file(root.join("z-last.txt")).unwrap();
+        move_file(&folder.join("aside/z-last.txt"), &root.join("z-last.txt")).unwrap();
+
+        put_back(root).unwrap();
+
+        assert_eq!(tree_state(root), before);
+        no_work_left(root);
+    }
+
+    #[test]
+    fn a_kept_restore_is_not_offered_and_its_folder_goes() {
+        let dir = edited_since_turn_one();
+        let root = dir.path();
+        let mut work = Work::new(Repo::new(root)).unwrap();
+        move_file(&root.join("edited.txt"), &work.aside.join("edited.txt")).unwrap();
+        work.write(&[KEPT.to_vec()]).unwrap();
+        work.keep = true;
+        drop(work);
+
+        assert!(!unfinished_in(root));
+        put_back(root).unwrap();
+        assert!(restore_folders(Repo::new(root)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_reader_holding_a_journal_a_moment_neither_hides_it_nor_lets_a_restore_past() {
+        let dir = edited_since_turn_one();
+        let root = dir.path();
+        let before = tree_state(root);
+        crash_mid_restore(root, &session(1), 1);
+        let (folder, _) = left_by_crash(root);
+        let reading = || {
+            let reader = fs::File::open(folder.join(JOURNAL)).unwrap();
+            reader.lock().unwrap();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                drop(reader);
+            })
+        };
+
+        let reader = reading();
+        let again = restore(root, &session(1), 1, &Cancel::default(), || true);
+        reader.join().unwrap();
+        assert!(matches!(again, Err(Error::Unfinished)), "{again:?}");
+
+        let reader = reading();
+        put_back(root).unwrap();
+        reader.join().unwrap();
+        assert_eq!(tree_state(root), before);
+        no_work_left(root);
+    }
+
+    #[test]
+    fn a_cancel_leaves_a_folder_it_did_not_remove_as_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = repository();
+        let root = dir.path();
+        write(root, "keep/stay.txt", "stays\n");
+        save_turn(root, 1, 1, None, KEEP);
+        write(root, "keep/later.txt", "later\n");
+
+        let result = restore(root, &session(1), 1, &Cancel::default(), || {
+            fs::set_permissions(root.join("keep"), fs::Permissions::from_mode(0o700)).unwrap();
+            false
+        });
+
+        assert!(!matches!(result, Err(Error::Kept(_))), "{result:?}");
+        let mode = fs::metadata(root.join("keep"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o700);
+        assert_eq!(read(root, "keep/later.txt").as_deref(), Some("later\n"));
+    }
+
+    #[test]
+    fn a_journal_cut_short_keeps_its_whole_records() {
+        let stamp = Stamp {
+            inode: 7,
+            len: 3,
+            modified: (-1, 999_999_999),
+            changed: (1_700_000_000, 5),
+        };
+        let steps = vec![
+            Step::Removing(PathBuf::from("dir"), 0o700),
+            Step::Removed(PathBuf::from("dir")),
+            Step::Made(PathBuf::from("a\nb")),
+            Step::Placing(PathBuf::from("a\nb/c.txt"), stamp, "ab".repeat(32)),
+            Step::Placed(PathBuf::from("a\nb/c.txt"), stamp),
+        ];
+        let mut journal = Vec::new();
+        for step in &steps {
+            for field in step.fields() {
+                journal.extend(field);
+                journal.push(0);
+            }
+        }
+        assert_eq!(parse(&journal).unwrap(), steps);
+        for cut in 1..20 {
+            let parsed = parse(&journal[..journal.len() - cut]).unwrap();
+            assert_eq!(parsed[..], steps[..4], "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn files_written_while_a_filter_holds_the_restore_are_left_and_said() {
+        let dir = repository();
+        let root = dir.path();
+        write(root, "slow", "at the checkpoint\n");
+        write(root, "z.txt", "at the checkpoint\n");
+        save_turn(root, 1, 1, None, KEEP);
+        fs::remove_file(root.join("slow")).unwrap();
+        write(root, "slow/inside.txt", "later\n");
+        write(root, "z.txt", "later\n");
+        // The path the delete frees is converted only as it is placed.
+        let (started, go) = (root.join(".git/started"), root.join(".git/go"));
+        sh(root, &["config", "filter.wait.clean", "cat"]);
+        sh(
+            root,
+            &[
+                "config",
+                "filter.wait.smudge",
+                &format!(
+                    "touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; cat",
+                    started.display(),
+                    go.display()
+                ),
+            ],
+        );
+        write(root, ".git/info/attributes", "slow filter=wait\n");
+        let editor = {
+            let root = root.to_owned();
+            std::thread::spawn(move || {
+                while !root.join(".git/started").exists() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                write(&root, "slow", "made while the filter ran\n");
+                let file = root.join("z.txt");
+                let modified = fs::metadata(&file).unwrap().modified().unwrap();
+                fs::write(&file, "LATER\n").unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(&file)
+                    .unwrap()
+                    .set_modified(modified)
+                    .unwrap();
+                fs::write(root.join(".git/go"), "").unwrap();
+            })
+        };
+
+        let restored = restore(root, &session(1), 1, &Cancel::default(), || true).unwrap();
+
+        editor.join().unwrap();
+        assert_eq!(
+            restored.skipped,
+            [PathBuf::from("slow"), PathBuf::from("z.txt")]
+        );
+        assert_eq!(
+            read(root, "slow").as_deref(),
+            Some("made while the filter ran\n")
+        );
+        assert_eq!(read(root, "z.txt").as_deref(), Some("LATER\n"));
+    }
+
+    #[test]
+    fn a_file_rewritten_with_its_old_times_during_the_restore_is_left_and_said() {
+        let dir = repository();
+        let root = dir.path();
+        save_turn(root, 1, 1, None, KEEP);
+        write(root, "edited.txt", "later\n");
+        let (started, go) = (root.join(".git/started"), root.join(".git/go"));
+        sh(
+            root,
+            &[
+                "config",
+                "filter.wait.smudge",
+                &format!(
+                    "touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; cat",
+                    started.display(),
+                    go.display()
+                ),
+            ],
+        );
+        write(root, ".git/info/attributes", "*.txt filter=wait\n");
+        let editor = {
+            let root = root.to_owned();
+            std::thread::spawn(move || {
+                while !root.join(".git/started").exists() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // As cp -p or rsync -t would: same size, same modified time.
+                let file = root.join("edited.txt");
+                let modified = fs::metadata(&file).unwrap().modified().unwrap();
+                fs::write(&file, "LATER\n").unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(&file)
+                    .unwrap()
+                    .set_modified(modified)
+                    .unwrap();
+                fs::write(root.join(".git/go"), "").unwrap();
+            })
+        };
+
+        let restored = restore(root, &session(1), 1, &Cancel::default(), || true).unwrap();
+
+        editor.join().unwrap();
+        assert_eq!(restored.skipped, [PathBuf::from("edited.txt")]);
+        assert_eq!(read(root, "edited.txt").as_deref(), Some("LATER\n"));
+    }
+
+    #[test]
+    fn a_file_rewritten_in_place_with_its_old_time_while_the_fork_opens_is_kept() {
+        let dir = repository();
+        let root = dir.path();
+        save_turn(root, 1, 1, None, KEEP);
+        write(root, "edited.txt", "later\n");
+
+        let result = restore(root, &session(1), 1, &Cancel::default(), || {
+            let file = root.join("edited.txt");
+            let modified = fs::metadata(&file).unwrap().modified().unwrap();
+            fs::write(&file, "FIRST\n").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+            false
+        });
+
+        let Err(Error::NotPutBack { kept, .. }) = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(read(root, "edited.txt").as_deref(), Some("FIRST\n"));
+        assert_eq!(read(&kept, "edited.txt").as_deref(), Some("later\n"));
+    }
+
+    /// A repository in a case-insensitive folder, as macOS has by default (on Linux,
+    /// scripts/case-insensitive-tests.sh mounts one), whose README.md and Docs folder
+    /// are renamed by case only after turn one: with `git mv`, or only on disk, which
+    /// git, ignoring case, does not see as a rename.
+    fn case_insensitive_repository(git_mv: bool) -> tempfile::TempDir {
+        let folder = std::env::var_os("KEYSTONE_CASE_INSENSITIVE_DIR")
+            .expect("KEYSTONE_CASE_INSENSITIVE_DIR names a case-insensitive folder");
+        let dir = tempfile::tempdir_in(folder).unwrap();
+        let root = dir.path();
+        write(root, "Probe", "");
+        assert!(root.join("probe").exists(), "{root:?} is case-sensitive");
+        fs::remove_file(root.join("Probe")).unwrap();
+        init(root);
+        assert_eq!(sh(root, &["config", "core.ignorecase"]).trim(), "true");
+        write(root, ".gitignore", "copy.md\n");
+        write(root, "README.md", "at the checkpoint\n");
+        write(root, "Docs/guide.md", "at the checkpoint\n");
+        sh(root, &["add", "--all"]);
+        sh(root, &["commit", "-q", "-m", "start"]);
+        save_turn(root, 1, 1, None, KEEP);
+        // Through another name: a casefolded Linux folder keeps a name renamed by case
+        // only, and git mv would move a folder into itself.
+        for (from, to) in [("README.md", "Readme.md"), ("Docs", "docs")] {
+            for (from, to) in [(from, "moving"), ("moving", to)] {
+                if git_mv {
+                    sh(root, &["mv", from, to]);
+                } else {
+                    fs::rename(root.join(from), root.join(to)).unwrap();
+                }
+            }
+        }
+        write(root, "Readme.md", "renamed later\n");
+        dir
+    }
+
+    /// The names a folder lists, in the case they are stored.
+    fn names(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(folder)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != ".git")
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    #[ignore = "needs a case-insensitive folder: scripts/case-insensitive-tests.sh"]
+    fn case_insensitive_a_case_only_rename_is_restored() {
+        for git_mv in [false, true] {
+            let dir = case_insensitive_repository(git_mv);
+            let root = dir.path();
+
+            let restored = restore_kept(root, &session(1), 1).unwrap();
+
+            assert!(restored.skipped.is_empty(), "{:?}", restored.skipped);
+            assert_eq!(
+                read(root, "README.md").as_deref(),
+                Some("at the checkpoint\n")
+            );
+            let expected: &[&str] = match git_mv {
+                true => &[".gitignore", "Docs", "README.md"],
+                // Git's tree keeps the folder's old name, and so does the restore.
+                false => &[".gitignore", "README.md", "docs"],
+            };
+            assert_eq!(names(root), expected, "git mv: {git_mv}");
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a case-insensitive folder: scripts/case-insensitive-tests.sh"]
+    fn case_insensitive_a_case_only_rename_a_crash_cut_short_is_put_back() {
+        for git_mv in [false, true] {
+            let dir = case_insensitive_repository(git_mv);
+            let root = dir.path();
+            let before = tree_state(root);
+
+            crash_mid_restore(root, &session(1), 1);
+            assert_ne!(tree_state(root), before);
+            put_back(root).unwrap();
+
+            assert_eq!(
+                names(root),
+                [".gitignore", "Readme.md", "docs"],
+                "git mv: {git_mv}"
+            );
+            assert_eq!(tree_state(root), before, "git mv: {git_mv}");
+            no_work_left(root);
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a case-insensitive folder: scripts/case-insensitive-tests.sh"]
+    fn case_insensitive_a_hard_link_by_another_name_is_left_alone() {
+        let dir = case_insensitive_repository(false);
+        let root = dir.path();
+        // Listed before the stored name, and after it, as folders may order them.
+        for link in ["a-copy.md", "copy.md"] {
+            fs::write(root.join(".gitignore"), format!("{link}\n")).unwrap();
+            fs::hard_link(root.join("Readme.md"), root.join(link)).unwrap();
+
+            restore_kept(root, &session(1), 1).unwrap();
+
+            assert_eq!(
+                read(root, link).as_deref(),
+                Some("renamed later\n"),
+                "{link}"
+            );
+            assert_eq!(
+                read(root, "README.md").as_deref(),
+                Some("at the checkpoint\n")
+            );
+            fs::remove_file(root.join(link)).unwrap();
+            write(root, "Readme.md", "renamed later\n");
+            fs::rename(root.join("README.md"), root.join("moving")).unwrap();
+            fs::rename(root.join("moving"), root.join("Readme.md")).unwrap();
+            fs::write(root.join(".gitignore"), "copy.md\n").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_new_file_placed_as_the_crash_came_is_taken_away() {
+        let dir = repository();
+        let root = dir.path();
+        write(root, "new.txt", "at the checkpoint\n");
+        save_turn(root, 1, 1, None, KEEP);
+        fs::remove_file(root.join("new.txt")).unwrap();
+        let before = tree_state(root);
+        crash_mid_restore(root, &session(1), 1);
+        let (folder, steps) = left_by_crash(root);
+        let [Step::Placing(..), Step::Placed(..)] = &steps[..] else {
+            panic!("{steps:?}");
+        };
+        // The crash came as the file was placed, before its record was whole.
+        let journal = folder.join(JOURNAL);
+        let length = fs::metadata(&journal).unwrap().len();
+        fs::File::options()
+            .write(true)
+            .open(&journal)
+            .unwrap()
+            .set_len(length - 3)
+            .unwrap();
+
+        put_back(root).unwrap();
+
+        assert_eq!(tree_state(root), before);
+        no_work_left(root);
+    }
+
+    #[test]
+    fn a_file_placed_as_the_crash_came_and_written_since_keeping_its_times_stays() {
+        let dir = repository();
+        let root = dir.path();
+        write(root, "new.txt", "at the checkpoint\n");
+        save_turn(root, 1, 1, None, KEEP);
+        fs::remove_file(root.join("new.txt")).unwrap();
+        crash_mid_restore(root, &session(1), 1);
+        let (folder, _) = left_by_crash(root);
+        let journal = folder.join(JOURNAL);
+        let length = fs::metadata(&journal).unwrap().len();
+        fs::File::options()
+            .write(true)
+            .open(&journal)
+            .unwrap()
+            .set_len(length - 3)
+            .unwrap();
+        let file = root.join("new.txt");
+        let modified = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "AT THE CHECKPOINT\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        put_back(root).unwrap();
+
+        assert_eq!(
+            read(root, "new.txt").as_deref(),
+            Some("AT THE CHECKPOINT\n")
+        );
+    }
+
+    #[test]
+    fn a_file_written_since_the_crash_in_a_folder_the_restore_made_stays_with_it() {
+        let dir = repository();
+        let root = dir.path();
+        write(root, "made/inside.txt", "at the checkpoint\n");
+        save_turn(root, 1, 1, None, KEEP);
+        fs::remove_dir_all(root.join("made")).unwrap();
+        crash_mid_restore(root, &session(1), 1);
+        write(root, "made/mine.txt", "written since\n");
+
+        put_back(root).unwrap();
+
+        assert_eq!(
+            read(root, "made/mine.txt").as_deref(),
+            Some("written since\n")
+        );
+        assert_eq!(read(root, "made/inside.txt"), None);
+        no_work_left(root);
+    }
+
+    #[test]
+    fn putting_back_again_where_an_undo_put_a_file_back_in_place_of_a_folder_is_clean() {
+        let dir = repository();
+        let root = dir.path();
+        write(root, "x/inside.txt", "at the checkpoint\n");
+        save_turn(root, 1, 1, None, KEEP);
+        fs::remove_dir_all(root.join("x")).unwrap();
+        write(root, "x", "original file\n");
+        let before = tree_state(root);
+        crash_mid_restore(root, &session(1), 1);
+        let (folder, _) = left_by_crash(root);
+        // As an undo a crash cut short left it: every file back, the journal still there.
+        fs::remove_file(root.join("x/inside.txt")).unwrap();
+        fs::remove_dir(root.join("x")).unwrap();
+        fs::rename(folder.join("aside/x"), root.join("x")).unwrap();
+
+        put_back(root).unwrap();
+
+        assert_eq!(tree_state(root), before);
+        no_work_left(root);
+    }
+
+    #[test]
+    #[ignore = "needs a case-insensitive folder: scripts/case-insensitive-tests.sh"]
+    fn case_insensitive_a_name_folded_beyond_lowercase_keeps_its_spelling() {
+        let folder = std::env::var_os("KEYSTONE_CASE_INSENSITIVE_DIR").unwrap();
+        let dir = tempfile::tempdir_in(folder).unwrap();
+        let root = dir.path();
+        init(root);
+        write(root, "ς.txt", "original\n");
+        assert!(root.join("Σ.txt").exists());
+        let mut journal = Journal {
+            root,
+            unchanged: BTreeMap::new(),
+            case_insensitive: true,
+            listings: HashMap::new(),
+            work: Work::new(Repo::new(root)).unwrap(),
+            steps: Vec::new(),
+        };
+
+        journal.set_aside(Path::new("Σ.txt")).unwrap();
+        journal.undo().unwrap();
+
+        assert_eq!(names(root), ["ς.txt"]);
     }
 }

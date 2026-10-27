@@ -2908,6 +2908,33 @@ impl Keystone {
                     ),
             );
         }
+        let state = self.state.read(cx);
+        if let Some(app_state::checkpoints::State::Saved(saved)) = state.checkpoints(session)
+            && saved.unfinished
+        {
+            empty = false;
+            let put_back = arrangement::selector("put-back", key.view);
+            view = view.child(
+                h_flex()
+                    .automation_id(arrangement::selector("restore-unfinished", key.view))
+                    .gap_2()
+                    .child(
+                        Label::new("A restore didn't finish.")
+                            .size(TextSize::Ui)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Button::new(put_back.clone(), "Put files back")
+                            .style(ButtonStyle::Subtle)
+                            .disabled(state.restoring(session))
+                            .debug_selector(move || put_back.to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state
+                                    .update(cx, |state, cx| state.put_back(session, cx))
+                            })),
+                    ),
+            );
+        }
         for (child, title, hold) in self.state.read(cx).waiting_results(session) {
             empty = false;
             view = view.child(

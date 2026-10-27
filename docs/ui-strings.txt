@@ -5,17 +5,21 @@ crates/keystone-agent/src/checkpoint.rs
 	\nFiles: {files}\n
 	--format=%(refname) %(objectname) %(committerdate:unix)
 	100644 blob {blob}\tleft-out\n
+	Another restore is running here.
 	Files: 
 	Keystone
 	Keystone checkpoint: session {}, turn {turn}\n
 	Keystone: before restoring turn {turn}\n
 	Left out: 
+	Put files back first.
 	Restore cancelled.
+	Some files could not be put back. They are in {}.
 	This checkpoint is no longer saved.
 	core.hooksPath=/dev/null
 	delete {name} {oid}\n
 	delete {}\n
-	{cause} Some files could not be put back. They are in {}.
+	{cause} {}
+	{mode} {blob}\t
 
 crates/keystone-agent/src/claude.rs
 	Authorization
@@ -990,6 +994,7 @@ crates/keystone-desktop/src/limit.rs
 
 crates/keystone-desktop/src/main.rs
 	 · applies next turn
+	A restore didn't finish.
 	Account not changed. {error}
 	All sessions
 	Allow
@@ -1027,6 +1032,7 @@ crates/keystone-desktop/src/main.rs
 	No matches
 	No session open.
 	Provider not changed. {error}
+	Put files back
 	Recovered history not saved. {error}
 	Recovered history not saved: log full. Continuing may lose it after a restart.
 	Rename

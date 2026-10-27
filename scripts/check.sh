@@ -25,13 +25,16 @@ if awk '/^crates\// { file = $0 } /Ctrl[+ ]/ && file != "crates/keystone-agent/s
   exit 1
 fi
 case "${1:-core}" in
-  core) cargo test -p keystone-core -p keystone-agent --locked ;;
+  core)
+    cargo test -p keystone-core -p keystone-agent --locked
+    bash scripts/case-insensitive-tests.sh ;;
   core-fast)
     if ! command -v cargo-nextest >/dev/null; then
       echo 'core-fast needs cargo-nextest, which is not on PATH. Install it from https://nexte.st/docs/installation/pre-built-binaries/ or run `bash scripts/check.sh core`.' >&2
       exit 2
     fi
     cargo nextest run -p keystone-core -p keystone-agent --locked --test-threads 16 --retries 0
+    bash scripts/case-insensitive-tests.sh
     cargo test -p keystone-core -p keystone-agent --locked --doc
     ;;
   ui)

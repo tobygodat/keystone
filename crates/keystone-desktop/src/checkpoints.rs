@@ -371,6 +371,113 @@ impl AppState {
         self.publish(cx);
     }
 
+    /// Refuses, with the reason, while a restore or a turn runs in the repository at
+    /// `root`.
+    fn idle_in(&self, root: &Path) -> Result<(), String> {
+        let busy = self.restoring.contains_key(root)
+            || self.conversations.iter().any(|(id, conversation)| {
+                (conversation.running
+                    || self.saving.contains_key(id)
+                    || self.started(*id).is_some_and(|c| c.is_running(*id)))
+                    && match self.checkpoints.get(id) {
+                        Some(State::Saved(other)) => other.root == root,
+                        _ => self
+                            .checkpoint_folder(*id)
+                            .is_some_and(|folder| within(&folder, root)),
+                    }
+            });
+        match busy {
+            true => Err("A turn is running here. Stop it first.".into()),
+            false => Ok(()),
+        }
+    }
+
+    /// Says in each session's checkpoints in the repository at `root` whether a restore
+    /// there is unfinished: the offer to put files back is the repository's.
+    fn unfinished_in(&mut self, root: &Path, unfinished: bool) {
+        let sessions: Vec<u64> = self
+            .checkpoints
+            .iter_mut()
+            .filter_map(|(id, state)| match state {
+                State::Saved(saved) if saved.root == root && saved.unfinished != unfinished => {
+                    saved.unfinished = unfinished;
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        for session in sessions {
+            if let Some(conversation) = self.conversations.get_mut(&session) {
+                conversation.show_checkpoints();
+                self.commit(session);
+            }
+        }
+    }
+
+    /// Puts back the files of the session's restore that Keystone ended before it
+    /// finished, on a thread of its own, as a cancelled restore puts them back. No
+    /// message to a session in that repository goes until it ends.
+    pub(crate) fn put_back(&mut self, session: u64, cx: &mut Context<Self>) {
+        let Some(State::Saved(saved)) = self.checkpoints.get(&session) else {
+            return;
+        };
+        let root = saved.root.clone();
+        let started = self.idle_in(&root).and_then(|()| {
+            let key = self.checkpoint_session(session)?;
+            let (ended, end) = oneshot::channel();
+            let folder = root.clone();
+            let thread = std::thread::Builder::new()
+                .name("keystone-put-back".into())
+                .spawn(move || {
+                    let put = checkpoint::put_back(&folder);
+                    let _ = ended.send((put, checkpoint::list(&folder, &key)));
+                })
+                .map_err(|error| error.to_string())?;
+            Ok((end, thread))
+        });
+        let (end, thread) = match started {
+            Ok(started) => started,
+            Err(error) => return self.checkpoint_notice(session, &error, cx),
+        };
+        self.restoring.insert(
+            root.clone(),
+            InFlight {
+                cancel: Cancel::default(),
+                thread,
+            },
+        );
+        self.publish(cx);
+        cx.spawn(async move |this, cx| {
+            let ended = end.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(put) = this.restoring.remove(&root) {
+                    let _ = put.thread.join();
+                }
+                this.changes.files.push(session);
+                this.deliveries_due = true;
+                let Ok((put, listed)) = ended else {
+                    return this.publish(cx);
+                };
+                match (&listed, &put) {
+                    (Ok(listed), _) => this.unfinished_in(&root, listed.unfinished),
+                    (Err(_), Ok(())) => this.unfinished_in(&root, false),
+                    (Err(_), Err(_)) => {}
+                }
+                if let Err(error) = put {
+                    this.conversation(session).error = Some(error.to_string());
+                    this.commit(session);
+                }
+                this.checkpoints_read(
+                    session,
+                    listed.map(Some).map_err(|e| e.to_string()),
+                    false,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
     /// Starts putting the session's repository's working tree back the way its
     /// checkpoint for `turn` saved it. Refused at once, with the reason, while a turn runs
     /// in that repository or when the checkpoint is not saved. No message to a session
@@ -387,21 +494,7 @@ impl AppState {
             Some(State::Failed(error)) => return Err(error.clone()),
             _ => return Err("This checkpoint is no longer saved.".into()),
         };
-        let busy = self.restoring.contains_key(&root)
-            || self.conversations.iter().any(|(id, conversation)| {
-                (conversation.running
-                    || self.saving.contains_key(id)
-                    || self.started(*id).is_some_and(|c| c.is_running(*id)))
-                    && match self.checkpoints.get(id) {
-                        Some(State::Saved(other)) => other.root == root,
-                        _ => self
-                            .checkpoint_folder(*id)
-                            .is_some_and(|folder| within(&folder, &root)),
-                    }
-            });
-        if busy {
-            return Err("A turn is running here. Stop it first.".into());
-        }
+        self.idle_in(&root)?;
         let key = self.checkpoint_session(session)?;
         let cancel = Cancel::default();
         let (placed_sender, placed) = oneshot::channel();
@@ -453,6 +546,9 @@ impl AppState {
                 this.changes.files.push(session);
                 // A launched session's result held meanwhile may go.
                 this.deliveries_due = true;
+                if matches!(restored, Err(checkpoint::Error::Unfinished)) {
+                    this.unfinished_in(&root, true);
+                }
                 this.publish(cx);
             });
             let _ = finished.send(restored);

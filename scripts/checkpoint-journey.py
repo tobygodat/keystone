@@ -14,7 +14,9 @@ open (the workspace database held by another writer) changes no file, that Resto
 turn one brings its files back without touching the index, HEAD, stash or ignored files, that
 a linked fork holds turn one, and that retention prunes the oldest ref. With --outside-git it
 uses a folder outside any repository instead and checks that Restore says checkpoints need one
-only in its tooltip. --theme picks Settings → Appearance first, and --record saves the run as
+only in its tooltip. With --killed it kills Keystone while a restore moves files, launches it
+again and checks that the conversation offers to put them back and that Put files back does,
+recording DIR/killed.mp4 with --record. --theme picks Settings → Appearance first, and --record saves the run as
 DIR/journey.mp4. Screenshots, DIR/frames for a step-by-step video and DIR/report.json record
 each check; the script exits non-zero when one fails.
 """
@@ -56,9 +58,9 @@ def digest(path):
 
 
 class Journey(screen_walk.Walk):
-    def __init__(self, width, height, out, driver, plain=False, theme=None, record=False):
+    def __init__(self, width, height, out, driver, plain=False, theme=None, record=False, killed=False):
         self.width, self.height = width, height
-        self.plain, self.theme, self.record = plain, theme, record
+        self.plain, self.theme, self.record, self.killed = plain, theme, record, killed
         self.out = out
         shutil.rmtree(out, ignore_errors=True)
         out.mkdir(parents=True)
@@ -135,7 +137,8 @@ class Journey(screen_walk.Walk):
         return [name.split('/', 4)[4] for name in names]
 
     def leftovers(self):
-        return sorted(p.name for p in (self.repo / '.git').iterdir() if p.name.startswith('keystone-'))
+        return sorted(p.name for p in (self.repo / '.git').iterdir()
+                      if p.name.startswith('keystone-') and p.name != 'keystone-restoring')
 
     def refs(self):
         """The checkpoint refs as <session>/<name>, after the workspace's store name."""
@@ -198,10 +201,10 @@ class Journey(screen_walk.Walk):
             self.wait('welcome-claude', 30)
             if self.theme:
                 self.choose_theme()
-            if self.record:
+            if self.record and not self.killed:
                 self.tool('record_start')
             self.journey()
-            if self.record:
+            if self.record and not self.killed:
                 shutil.copy(self.tool('record_stop')['path'], self.out / 'journey.mp4')
         finally:
             try:
@@ -314,9 +317,87 @@ class Journey(screen_walk.Walk):
         self.key('Escape')
         self.wait('restore-dialog-confirm', 5, present=False)
 
+    def killed_restore(self):
+        """Keystone killed while a restore moves its files, then launched again."""
+        self.click('welcome-claude')
+        self.wait('composer-field', 10)
+        self.send('Turn one; write slow: turn one; write edited.txt: turn one')
+        self.idle(30)
+        self.until(lambda ids: len(self.refs()) == 1 or None, 'turn one checkpoint', 15)
+        self.send('Turn two; delete slow; write slow/inside.txt: turn two; write edited.txt: turn two')
+        self.idle(30)
+        self.until(lambda ids: len(self.refs()) == 2 or None, 'turn two checkpoint', 15)
+        self.until(lambda ids: len(self.restores()) == 2 or None, 'two Restore controls', 10)
+        session = self.sessions()[0]['id']
+        before = self.files()
+        # The file the deletes free is converted only as it is placed, after other files
+        # have moved: the filter holds the restore there.
+        pid = self.repo / '.git/filter-pid'
+        git(self.repo, 'config', 'filter.slow.clean', 'cat')
+        git(self.repo, 'config', 'filter.slow.smudge', f"echo $$ > '{pid}'; sleep 60; cat")
+        (self.repo / '.git/info/attributes').write_text('slow filter=slow\n')
+        self.snap('1-two-turns')
+        if self.record:
+            self.tool('record_start')
+        self.confirm_turn_one()
+        deadline = time.monotonic() + 15
+        while not (pid.exists() and pid.read_text().strip().isdigit()):
+            if time.monotonic() > deadline:
+                raise RuntimeError('the filter did not start')
+            time.sleep(0.1)
+        filter_pid = int(pid.read_text())
+        self.check('files moved before the kill',
+                   (self.repo / 'edited.txt').read_text() == 'turn one\n' and not (self.repo / 'slow').exists())
+        self.snap('2-restore-placing-files')
+        app = [p['pid'] for p in self.tool('doctor')['processes'] if not p.get('exited')][-1]
+        os.kill(app, 9)
+        try:
+            os.kill(filter_pid, 9)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 10
+        while not any(p['pid'] == app and p.get('exited') for p in self.tool('doctor')['processes']):
+            if time.monotonic() > deadline:
+                raise RuntimeError('Keystone did not exit')
+            time.sleep(0.2)
+        time.sleep(1)
+        self.frame()
+        left = self.leftovers()
+        self.check('the killed restore left its folder', any(name.startswith('keystone-restore-') for name in left),
+                   left)
+        self.check('files are half restored', self.files() != before)
+        pid.unlink()
+        self.tool('launch')
+        shown = self.until(lambda ids: self.find('put-back', ids) or self.find('welcome-claude', ids),
+                           'the relaunched window', 30)
+        if not shown.startswith('put-back'):
+            self.sidebar(True)
+            self.click(f'session-{session}')
+        self.wait('put-back', 15)
+        time.sleep(0.5)
+        self.snap('3-relaunched-offers-put-back')
+        self.check('the offer shows once', sum(1 for i in self.ids() if self.find('put-back', [i])) == 1)
+        self.click('put-back')
+        self.wait('put-back', 15, present=False)
+        time.sleep(1)
+        self.snap('4-files-put-back')
+        if self.record:
+            shutil.copy(self.tool('record_stop')['path'], self.out / 'killed.mp4')
+        after = self.files()
+        self.check('every file is back', after == before, {'before': before, 'after': after})
+        self.check('the files are those before-restore saved',
+                   self.checkpoint(self.ref(f'{session}/before-restore')) == before)
+        # A scratch index the kill left goes with expiry, as after any killed save.
+        restores = [name for name in self.leftovers() if name.startswith('keystone-restore-')]
+        self.check('no restore folder left in .git', restores == [], self.leftovers())
+        self.check('no conversation error', self.find('conversation-notice') is None)
+        return session
+
     def journey(self):
         if self.plain:
             return self.outside_git()
+        if self.killed:
+            return self.killed_restore()
         self.click('welcome-claude')
         self.wait('composer-field', 10)
         before = self.untouched()
@@ -427,10 +508,13 @@ def main():
     parser.add_argument('--driver')
     parser.add_argument('--outside-git', action='store_true',
                         help='use a folder outside any repository and check what Restore says there')
+    parser.add_argument('--killed', action='store_true',
+                        help='kill Keystone while a restore moves files, launch it again and put them back')
     parser.add_argument('--theme', choices=screen_walk.THEMES)
     parser.add_argument('--record', action='store_true', help='save the run as DIR/journey.mp4')
     args = parser.parse_args()
-    journey = Journey(args.width, args.height, args.out, args.driver, args.outside_git, args.theme, args.record)
+    journey = Journey(args.width, args.height, args.out, args.driver, args.outside_git, args.theme, args.record,
+                      args.killed)
     journey.run()
     failed = [c['check'] for c in journey.checks if not c['ok']]
     print(f'{len(journey.checks) - len(failed)} of {len(journey.checks)} checks passed')

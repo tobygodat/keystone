@@ -259,3 +259,123 @@ fn outside_git_the_restore_control_says_why_only_in_its_tooltip(
         assert_eq!(v.state.read(cx).conversations()[&1].error, None);
     });
 }
+
+/// A workspace whose session 1, in a repository, was restoring turn one's files when
+/// Keystone was killed: files half in place, and the restore's folder left behind.
+fn killed_mid_restore(dir: &Path) -> PathBuf {
+    let repo = repository(dir);
+    kill_a_restore(dir, &repo, 1);
+    repo
+}
+
+/// A restore of `repo` by session `id` of another Keystone, killed with its files half
+/// in place.
+fn kill_a_restore(dir: &Path, repo: &Path, id: u64) {
+    use keystone_agent::checkpoint;
+    let session = checkpoint::Session {
+        store: Store::open(&dir.join("workspace.json"))
+            .unwrap()
+            .database()
+            .checkpoint_store("killed")
+            .unwrap(),
+        id,
+    };
+    let snapshot = checkpoint::snapshot(repo).unwrap();
+    checkpoint::record(repo, &session, 1, &snapshot, None, checkpoint::KEEP).unwrap();
+    let start = std::fs::read_to_string(repo.join("a.txt")).unwrap();
+    std::fs::write(repo.join("a.txt"), "later\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "later\n").unwrap();
+    let killed = std::panic::catch_unwind(|| {
+        let _ = checkpoint::restore(repo, &session, 1, &keystone_agent::git::Cancel::default(), || panic!("killed"));
+    });
+    assert!(killed.is_err());
+    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), start);
+}
+
+fn unfinished(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> bool {
+    view.read_with(cx, |v, cx| {
+        matches!(v.state.read(cx).checkpoints(1), Some(State::Saved(saved)) if saved.unfinished)
+    })
+}
+
+#[gpui::test]
+fn a_restore_keystone_did_not_finish_is_offered_and_put_back(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = killed_mid_restore(dir.path());
+    let (view, cx) = open_in(dir.path(), &repo, cx);
+    view.update(cx, |v, cx| v.state.update(cx, |state, cx| state.read_checkpoints(1, cx)));
+    wait_until(cx, &view, |v, cx| v.state.read(cx).checkpoints(1).is_some());
+    assert!(unfinished(&view, cx));
+    let put_back = cx.debug_bounds("put-back").expect("the offer shows");
+
+    cx.simulate_click(put_back.center(), gpui::Modifiers::none());
+    wait_until(cx, &view, |v, cx| {
+        !v.state.read(cx).restoring(1)
+            && matches!(v.state.read(cx).checkpoints(1), Some(State::Saved(saved)) if !saved.unfinished)
+    });
+
+    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "later\n");
+    assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "later\n");
+    assert!(cx.debug_bounds("put-back").is_none());
+    view.read_with(cx, |v, cx| {
+        assert_eq!(v.state.read(cx).conversations()[&1].error, None);
+    });
+}
+
+#[gpui::test]
+fn a_file_changed_since_the_crash_stays_and_the_conversation_says_where_its_original_is(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = killed_mid_restore(dir.path());
+    std::fs::write(repo.join("a.txt"), "typed after the crash\n").unwrap();
+    let (view, cx) = open_in(dir.path(), &repo, cx);
+    view.update(cx, |v, cx| v.state.update(cx, |state, cx| state.read_checkpoints(1, cx)));
+    wait_until(cx, &view, |v, cx| v.state.read(cx).checkpoints(1).is_some());
+    let put_back = cx.debug_bounds("put-back").expect("the offer shows");
+
+    cx.simulate_click(put_back.center(), gpui::Modifiers::none());
+    wait_until(cx, &view, |v, cx| {
+        v.state.read(cx).conversations()[&1].error.is_some()
+    });
+
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "typed after the crash\n"
+    );
+    assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "later\n");
+    view.read_with(cx, |v, cx| {
+        let error = v.state.read(cx).conversations()[&1].error.clone().unwrap();
+        assert!(error.starts_with("Some files could not be put back. They are in "), "{error}");
+    });
+    wait_until(cx, &view, |v, cx| {
+        matches!(v.state.read(cx).checkpoints(1), Some(State::Saved(saved)) if !saved.unfinished)
+    });
+}
+
+#[gpui::test]
+fn a_restore_refused_for_one_left_unfinished_elsewhere_offers_to_put_files_back(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repository(dir.path());
+    let (view, cx) = open_in(dir.path(), &repo, cx);
+    turn_then_edits(&view, &repo, cx);
+    assert!(!unfinished(&view, cx));
+    std::fs::write(repo.join("a.txt"), "between\n").unwrap();
+    kill_a_restore(dir.path(), &repo, 2);
+
+    confirm_restore_of_turn_one(&view, cx);
+    wait_until(cx, &view, |v, _| {
+        v.restore_dialog.as_ref().is_some_and(|d| !d.busy())
+    });
+
+    view.read_with(cx, |v, _| {
+        let error = v.restore_dialog.as_ref().and_then(|d| d.error.clone());
+        assert_eq!(error.as_deref(), Some("Put files back first."));
+    });
+    assert!(unfinished(&view, cx));
+    assert!(cx.debug_bounds("put-back").is_some());
+}

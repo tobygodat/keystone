@@ -20,7 +20,7 @@ pub(crate) struct RestoreDialog {
     index: usize,
     turn: u64,
     focus: DialogFocus,
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     running: Option<(Cancel, Task<()>)>,
 }
 
