@@ -882,16 +882,20 @@ impl Keystone {
                 this.runtime_changed(changed, cx);
             }),
         );
-        // An open right-click menu takes Escape before any binding of the focused element,
-        // such as a reply's Clear or the Files view's Back.
+        // An open right-click menu closes on any key but a lone modifier, and takes Escape
+        // before any binding of the focused element, such as a reply's Clear or Files' Back.
         let (menu_owner, menu_window) = (cx.weak_entity(), window.window_handle());
         subscriptions.push(cx.intercept_keystrokes(move |event, window, cx| {
-            if event.keystroke.key == "escape"
-                && window.window_handle() == menu_window
-                && menu_owner
-                    .update(cx, |this, cx| this.close_context_menu(cx))
-                    .unwrap_or(false)
+            let key = event.keystroke.key.as_str();
+            if window.window_handle() != menu_window
+                || matches!(key, "shift" | "control" | "alt" | "platform" | "function")
             {
+                return;
+            }
+            let closed = menu_owner
+                .update(cx, |this, cx| this.close_context_menu(cx))
+                .unwrap_or(false);
+            if closed && key == "escape" {
                 cx.stop_propagation();
             }
         }));

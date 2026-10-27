@@ -1067,3 +1067,86 @@ fn a_window_saved_off_the_display_opens_on_it(cx: &mut TestAppContext) {
         "a window on the display opens where it was"
     );
 }
+
+/// A right-click menu on a session or a tab closes when a key opens rename, settings or
+/// the palette over it, so Escape goes to what now shows and closes it, and a further
+/// Escape leaves the window as it was. A lone modifier keeps the menu open, and Settings
+/// opened with no key, from the macOS app menu, closes it too. Session 2 is opened in a
+/// second tab first.
+#[gpui::test]
+fn a_key_closes_a_right_click_menu_before_what_it_opens(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    launch(&seeded(dir.path(), |_| {}), cx);
+    let first = view_in(WindowId::FIRST, cx);
+    let window = handle(&first, cx);
+    let cx = &mut VisualTestContext::from_window(window, cx);
+    cx.simulate_resize(gpui::size(px(1280.), px(800.)));
+    cx.run_until_parked();
+    let open = |cx: &VisualTestContext| {
+        first.read_with(cx, |view, _| {
+            [
+                view.renaming.is_some(),
+                view.settings.is_some(),
+                view.palette.is_some(),
+            ]
+        })
+    };
+    let session = cx.debug_bounds("session-2").unwrap().center();
+    cx.simulate_click(session, Modifiers::secondary_key());
+    cx.run_until_parked();
+    let shown = selected(&first, cx);
+    for target in ["session-3", "surface-tabs-0-tab-0"] {
+        for (overlay, keys) in ["f2", "secondary-,", "secondary-k"].into_iter().enumerate() {
+            let at = cx
+                .debug_bounds(target)
+                .unwrap_or_else(|| panic!("{target} shows"))
+                .center();
+            cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+            cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("menu-open-in-new-window").is_some(),
+                "{target} opens its menu"
+            );
+            cx.simulate_modifiers_change(Modifiers::shift());
+            cx.simulate_modifiers_change(Modifiers::none());
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("menu-open-in-new-window").is_some(),
+                "a lone Shift keeps the menu open"
+            );
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            let mut expected = [false; 3];
+            expected[overlay] = true;
+            assert_eq!(open(cx), expected, "{target}: {keys} opens");
+            assert!(
+                first.read_with(cx, |view, _| view.context_menu.is_none()),
+                "{target}: {keys} closes the menu"
+            );
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            assert_eq!(
+                open(cx),
+                [false; 3],
+                "{target}: Escape closes what {keys} opened"
+            );
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            assert_eq!(open(cx), [false; 3]);
+            assert_eq!(selected(&first, cx), shown);
+        }
+    }
+    let at = cx.debug_bounds("session-3").unwrap().center();
+    cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    cx.dispatch_action(crate::OpenSettings);
+    cx.run_until_parked();
+    assert_eq!(
+        open(cx),
+        [false, true, false],
+        "Settings… in the macOS app menu"
+    );
+    assert!(first.read_with(cx, |view, _| view.context_menu.is_none()));
+}

@@ -193,6 +193,35 @@ fn reply_images_are_thumbnails_that_open_a_preview(cx: &mut TestAppContext) {
     view.update_in(cx, |this, _, _| assert!(this.preview.is_none()));
 }
 
+/// A click on a thumbnail while a session's right-click menu is open closes the menu as
+/// it opens the preview, so Escape then closes the preview.
+#[gpui::test]
+fn a_thumbnail_click_closes_a_right_click_menu_before_its_preview(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    cx.simulate_input("show me");
+    cx.simulate_keystrokes("secondary-enter");
+    wait(cx, |cx| {
+        view.read_with(cx, |view, cx| {
+            !view.state.read(cx).conversations()[&1].running
+        })
+    });
+    let reply = row(&view, cx, |kind| *kind == ItemKind::AgentMessage);
+    let thumbnail = selector(format!("thumbnail-{reply}-0"));
+    wait(cx, |cx| cx.debug_bounds(thumbnail).is_some());
+    let session = cx.debug_bounds("session-1").unwrap().center();
+    cx.simulate_mouse_down(session, gpui::MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(session, gpui::MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("menu-open-in-new-window").is_some());
+    click(cx, thumbnail);
+    assert!(cx.debug_bounds("menu-open-in-new-window").is_none());
+    assert!(cx.debug_bounds("preview-overlay").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("preview-overlay").is_none());
+    assert!(view.read_with(cx, |view, _| view.context_menu.is_none()));
+}
+
 /// While the overlay shows, app shortcuts and Tab stay off and focus stays in it. Escape
 /// closes it and gives focus back to what had it, here the composer.
 #[gpui::test]

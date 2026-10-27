@@ -297,11 +297,8 @@ fn with_no_session_nothing_is_sent(cx: &mut TestAppContext) {
     assert_eq!(composer(&view, cx), "");
 }
 
-/// Text selected in a reply goes into the composer quoted, by shortcut, menu and
-/// palette, and nothing is sent.
-#[gpui::test]
-fn a_reply_selection_goes_into_the_composer_quoted(cx: &mut TestAppContext) {
-    let (run, view, cx) = launch(LIB, true, cx);
+/// Shows a completed reply holding the text in the window's session, once it has loaded.
+fn show_reply(view: &Entity<Keystone>, text: &str, cx: &mut VisualTestContext) {
     let session = view.read_with(cx, |view, cx| view.selected(cx).unwrap());
     let loaded = std::time::Instant::now();
     while view.read_with(cx, |view, cx| {
@@ -317,7 +314,7 @@ fn a_reply_selection_goes_into_the_composer_quoted(cx: &mut TestAppContext) {
                 .apply(Event::ItemCompleted(Item {
                     id: "reply".into(),
                     kind: ItemKind::AgentMessage,
-                    text: "Plain **bold** words here.\n\nSecond paragraph.".into(),
+                    text: text.into(),
                     status: ItemStatus::Completed,
                 }));
         });
@@ -325,6 +322,14 @@ fn a_reply_selection_goes_into_the_composer_quoted(cx: &mut TestAppContext) {
         cx.notify();
     });
     cx.run_until_parked();
+}
+
+/// Text selected in a reply goes into the composer quoted, by shortcut, menu and
+/// palette, and nothing is sent.
+#[gpui::test]
+fn a_reply_selection_goes_into_the_composer_quoted(cx: &mut TestAppContext) {
+    let (run, view, cx) = launch(LIB, true, cx);
+    show_reply(&view, "Plain **bold** words here.\n\nSecond paragraph.", cx);
     let select = |cx: &mut VisualTestContext| {
         let bounds = cx.debug_bounds("reply-0-selection-surface").unwrap();
         let from = bounds.origin + point(px(1.), px(8.));
@@ -378,15 +383,35 @@ fn a_reply_selection_goes_into_the_composer_quoted(cx: &mut TestAppContext) {
         Some("Plain bold words here."),
         "and keeps the selection"
     );
+    assert_eq!(run.received(), "", "nothing is sent");
+}
 
+/// A right click on a reply offers only that reply's own selection. Here the Files view
+/// has focus with a line selected, which the shortcut would send, and the reply was
+/// never selected; the reply's menu must not offer the line.
+#[gpui::test]
+fn a_reply_menu_never_offers_another_views_selection(cx: &mut TestAppContext) {
+    let (run, view, cx) = launch(LIB, true, cx);
+    show_reply(&view, "Plain **bold** words here.", cx);
     view_lib(cx);
     click(cx, "file-line-1", MouseButton::Left, Modifiers::none());
+    let taken = view.update_in(cx, |view, window, cx| view.take_selection(window, cx));
+    assert_eq!(
+        taken.map(|(_, excerpt)| excerpt.prompt()),
+        Some(fenced(2..=2, "two")),
+        "the Files view has focus and its line is selected"
+    );
+    let at = cx
+        .debug_bounds("reply-0-selection-surface")
+        .expect("the reply shows beside the Files view")
+        .origin
+        + point(px(1.), px(8.));
     cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
     cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("menu-send-selection").is_none(),
-        "a reply's menu never offers the Files view's lines"
+        "the reply's menu does not offer the Files view's line"
     );
     assert_eq!(run.received(), "", "nothing is sent");
 }
@@ -421,19 +446,67 @@ fn a_file_changed_since_it_was_shown_is_read_again_before_sending(cx: &mut TestA
     );
 }
 
-/// A selection menu closes once the window shows another session.
+/// A selection menu closes once the window shows another session, here through a
+/// notification, which presses no key.
 #[gpui::test]
 fn a_selection_menu_closes_when_the_session_changes(cx: &mut TestAppContext) {
     let (_run, view, cx) = launch(LIB, true, cx);
+    cx.simulate_keystrokes("secondary-n");
+    cx.run_until_parked();
+    click(cx, "session-1", MouseButton::Left, Modifiers::none());
     view_lib(cx);
     click(cx, "file-line-1", MouseButton::Right, Modifiers::none());
     assert!(cx.debug_bounds("menu-send-selection").is_some());
-    let first = view.read_with(cx, |view, cx| view.selected(cx));
-    cx.simulate_keystrokes("secondary-n");
+    cx.update(|_, cx| cx.defer(|cx| crate::notifications::show(2, cx)));
     cx.run_until_parked();
-    assert_ne!(view.read_with(cx, |view, cx| view.selected(cx)), first);
+    assert_eq!(view.read_with(cx, |view, cx| view.selected(cx)), Some(2));
     assert!(cx.debug_bounds("menu-send-selection").is_none());
     assert!(view.read_with(cx, |view, _| view.context_menu.is_none()));
+}
+
+/// The palette's Send, opened over a selection, puts it only in the session it was taken
+/// for: nothing while a notification has the window on another session, and the
+/// selection once the window is back on its own.
+#[gpui::test]
+fn the_palette_sends_only_into_the_session_it_was_opened_on(cx: &mut TestAppContext) {
+    let (_run, view, cx) = launch(LIB, true, cx);
+    cx.simulate_keystrokes("secondary-n");
+    cx.run_until_parked();
+    click(cx, "session-1", MouseButton::Left, Modifiers::none());
+    view_lib(cx);
+    let palette_over_line_2 = |cx: &mut VisualTestContext| {
+        click(cx, "file-line-1", MouseButton::Left, Modifiers::none());
+        cx.simulate_keystrokes("secondary-k");
+        cx.simulate_input("Send selection");
+        cx.run_until_parked();
+    };
+    let show = |session: u64, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| cx.defer(move |cx| crate::notifications::show(session, cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.selected(cx)),
+            Some(session)
+        );
+    };
+    let pick = |cx: &mut VisualTestContext| {
+        click(cx, "palette-input", MouseButton::Left, Modifiers::none());
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette").is_none(), "Enter picked the row");
+    };
+
+    palette_over_line_2(cx);
+    show(2, cx);
+    pick(cx);
+    assert_eq!(composer(&view, cx), "");
+    click(cx, "session-1", MouseButton::Left, Modifiers::none());
+    assert_eq!(composer(&view, cx), "");
+
+    palette_over_line_2(cx);
+    show(2, cx);
+    show(1, cx);
+    pick(cx);
+    assert_eq!(composer(&view, cx), fenced(2..=2, "two"));
 }
 
 /// A blank line still has a path and a number to send.

@@ -175,6 +175,7 @@ impl Keystone {
         self.attach.menu = false;
         self.model_menu = None;
         self.presentation.current.arrangement.surface_menu = None;
+        self.context_menu = None;
         let page = SettingsPage::new(cx);
         window.focus(&page.sections[page.section_index()], cx);
         self.settings = Some(page);
