@@ -937,3 +937,308 @@ fn the_copy_panel_closes_when_the_accounts_move_and_a_removed_copy_is_forgotten(
         "a copy that is gone is forgotten"
     );
 }
+
+#[gpui::test]
+fn a_server_edited_since_its_preview_is_copied_only_on_a_second_press(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = fixture();
+    let config = fixture.codex.join("config.toml");
+    let before = std::fs::read_to_string(&config).unwrap();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-copy");
+    assert!(!copy_preview(&view, vcx).0.contains("server2.py"));
+    let global = fixture.claude.join(".claude.json");
+    write(
+        &global,
+        &std::fs::read_to_string(&global)
+            .unwrap()
+            .replace("server.py", "server2.py"),
+    );
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        before,
+        "nothing is written"
+    );
+    assert_eq!(notice(&view, vcx), None);
+    assert!(copy_preview(&view, vcx).0.contains("server2.py"));
+    assert!(vcx.debug_bounds("integrations-copy-changed").is_some());
+    let remembered = view.read_with(vcx, |view, cx| {
+        view.state.read(cx).store().database().copies().unwrap()
+    });
+    assert_eq!(remembered, [], "no copy is remembered");
+
+    click(vcx, "integrations-copy-secret-FIXTURE_TOKEN");
+    click(vcx, "integrations-refresh");
+    settle(&view, vcx);
+    assert!(
+        vcx.debug_bounds("integrations-copy-changed").is_some(),
+        "a new preview or read keeps the note"
+    );
+    let (text, _) = copy_preview(&view, vcx);
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        format!(
+            "{before}\n{}",
+            text.replace(copy::MASK, "fixture-secret-value")
+        ),
+        "the second press writes the new preview"
+    );
+    assert!(vcx.debug_bounds("integrations-copy-changed").is_none());
+}
+
+#[gpui::test]
+fn a_skill_edited_since_its_preview_is_copied_only_on_a_second_press(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = fixture();
+    let copied = fixture.codex.join("skills/fixture-skill");
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(
+        vcx,
+        "integration-claude-default-skill-user-fixture-skill-copy",
+    );
+    let edited = "---\nname: fixture-skill\ndescription: Edited\n---\nNew body.\n";
+    write(
+        &fixture.claude.join("skills/fixture-skill/SKILL.md"),
+        edited,
+    );
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert!(!copied.exists(), "nothing is copied");
+    assert_eq!(notice(&view, vcx), None);
+    assert_eq!(copy_preview(&view, vcx).0, "SKILL.md");
+    assert!(vcx.debug_bounds("integrations-copy-changed").is_some());
+
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    assert_eq!(
+        std::fs::read_to_string(copied.join("SKILL.md")).unwrap(),
+        edited
+    );
+}
+
+#[gpui::test]
+fn a_token_in_a_url_path_is_masked_and_offered_as_the_url_switch(cx: &mut gpui::TestAppContext) {
+    let fixture = fixture();
+    let token = "aB3dE5fG7hJ9kL1mN3pQ5rS7";
+    let hook = format!("https://hooks.slack.com/services/T0123ABCD/B0456EFGH/{token}");
+    write(
+        &fixture.claude.join(".claude.json"),
+        &serde_json::json!({"mcpServers": {"fixture-hook": {"type": "http", "url": hook}}})
+            .to_string(),
+    );
+    let config = fixture.codex.join("config.toml");
+    let before = std::fs::read_to_string(&config).unwrap();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integration-claude-default-mcp-user-fixture-hook-copy");
+    let (text, secrets) = copy_preview(&view, vcx);
+    assert_eq!(secrets, ["URL"]);
+    assert!(
+        text.contains("url = \"https://hooks.slack.com/services/T0123ABCD/B0456EFGH\""),
+        "{text}"
+    );
+    click(vcx, "integrations-copy-secret-URL");
+    let (text, _) = copy_preview(&view, vcx);
+    assert!(
+        text.contains(&format!("/B0456EFGH/{}\"", copy::MASK)),
+        "{text}"
+    );
+    assert!(!text.contains(token), "{text}");
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        format!("{before}\n{}", text.replace(copy::MASK, token))
+    );
+}
+
+/// Clicks each of `ids` in turn before anything the clicks start runs, as a user who
+/// clicks again while a change is under way.
+fn click_together(cx: &mut gpui::VisualTestContext, ids: &[&'static str]) {
+    let points: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            cx.debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} rendered"))
+                .center()
+        })
+        .collect();
+    cx.update(|window, cx| {
+        for position in points {
+            let (button, modifiers) = (gpui::MouseButton::Left, gpui::Modifiers::none());
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                }),
+                cx,
+            );
+        }
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_secret_switched_while_the_copy_rechecks_keeps_the_changed_note(cx: &mut gpui::TestAppContext) {
+    let fixture = fixture();
+    let config = fixture.codex.join("config.toml");
+    let before = std::fs::read_to_string(&config).unwrap();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-copy");
+    let global = fixture.claude.join(".claude.json");
+    write(
+        &global,
+        &std::fs::read_to_string(&global)
+            .unwrap()
+            .replace("server.py", "server2.py"),
+    );
+    click_together(
+        vcx,
+        &[
+            "integrations-form-submit",
+            "integrations-copy-secret-FIXTURE_TOKEN",
+        ],
+    );
+    settle(&view, vcx);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        before,
+        "nothing is written"
+    );
+    assert!(
+        vcx.debug_bounds("integrations-copy-changed").is_some(),
+        "the switch moved the preview on, and the copy is still the one that changed"
+    );
+    let (text, _) = copy_preview(&view, vcx);
+    assert!(text.contains("server2.py"), "{text}");
+    assert!(
+        text.contains(&format!("FIXTURE_TOKEN = \"{}\"", copy::MASK)),
+        "{text}"
+    );
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        format!(
+            "{before}\n{}",
+            text.replace(copy::MASK, "fixture-secret-value")
+        )
+    );
+}
+
+#[gpui::test]
+fn a_name_taken_while_the_copy_rechecks_leaves_no_changed_note_behind(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = fixture();
+    let config = fixture.codex.join("config.toml");
+    let before = std::fs::read_to_string(&config).unwrap();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-copy");
+    write(
+        &config,
+        &format!("{before}\n[mcp_servers.fixture-ok]\ncommand = \"uvx\"\n"),
+    );
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert!(vcx.debug_bounds("integrations-copy-error").is_some());
+    write(&config, &before);
+    click(vcx, "integrations-refresh");
+    settle(&view, vcx);
+    copy_preview(&view, vcx);
+    assert!(
+        vcx.debug_bounds("integrations-copy-changed").is_none(),
+        "the source never changed"
+    );
+}
+
+#[gpui::test]
+fn another_scope_clears_the_changed_note(cx: &mut gpui::TestAppContext) {
+    let fixture = fixture();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-copy");
+    let global = fixture.claude.join(".claude.json");
+    write(
+        &global,
+        &std::fs::read_to_string(&global)
+            .unwrap()
+            .replace("server.py", "server2.py"),
+    );
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert!(vcx.debug_bounds("integrations-copy-changed").is_some());
+    click(vcx, "integrations-form-scope");
+    click(vcx, "integrations-form-scope-option-1");
+    settle(&view, vcx);
+    copy_preview(&view, vcx);
+    assert!(vcx.debug_bounds("integrations-copy-changed").is_none());
+}
+
+#[gpui::test]
+fn another_scope_picked_while_the_copy_rechecks_gets_no_changed_note(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = fixture();
+    let config = fixture.codex.join("config.toml");
+    let before = std::fs::read_to_string(&config).unwrap();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-copy");
+    let global = fixture.claude.join(".claude.json");
+    write(
+        &global,
+        &std::fs::read_to_string(&global)
+            .unwrap()
+            .replace("server.py", "server2.py"),
+    );
+    click(vcx, "integrations-form-scope");
+    click_together(
+        vcx,
+        &[
+            "integrations-form-submit",
+            "integrations-form-scope-option-1",
+        ],
+    );
+    settle(&view, vcx);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        before,
+        "nothing is written"
+    );
+    let scope = view.read_with(vcx, |view, _| {
+        let page = &view.settings.as_ref().unwrap().integrations;
+        page.form.as_ref().unwrap().scope
+    });
+    assert_eq!(scope, 1, "the other scope is picked");
+    let (text, _) = copy_preview(&view, vcx);
+    assert!(text.contains("server2.py"), "{text}");
+    assert!(
+        vcx.debug_bounds("integrations-copy-changed").is_none(),
+        "the note is the scope's that was copied to"
+    );
+}

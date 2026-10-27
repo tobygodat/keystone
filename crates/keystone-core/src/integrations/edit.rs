@@ -34,7 +34,7 @@ pub struct Server {
     pub env: Vec<(String, Option<String>)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Change {
     /// Turn an MCP server or plugin on or off.
     Switch { item: Item, on: bool },
@@ -47,8 +47,14 @@ pub enum Change {
         name: String,
         server: Server,
     },
-    /// Copy a skill folder in.
-    AddSkill { scope: Scope, folder: PathBuf },
+    /// Copy a skill folder in. A copy's `content` is the folder as its preview hashed
+    /// it, and nothing lands unless what was copied still hashes so; the add form's has
+    /// none.
+    AddSkill {
+        scope: Scope,
+        folder: PathBuf,
+        content: super::Fingerprint,
+    },
     /// Add an MCP server as the provider's own definition: Claude's JSON, or Codex's
     /// table as JSON.
     AddDefinition {
@@ -77,6 +83,7 @@ enum Step {
     CopyFolder {
         from: PathBuf,
         to: PathBuf,
+        content: super::Fingerprint,
     },
     RemoveFolder(PathBuf),
 }
@@ -129,7 +136,14 @@ pub fn plan(
         project: project.to_owned(),
     };
     match (location, change) {
-        (_, Change::AddSkill { scope, folder }) => {
+        (
+            _,
+            Change::AddSkill {
+                scope,
+                folder,
+                content,
+            },
+        ) => {
             if !folder.join("SKILL.md").is_file() {
                 return Err("That folder has no SKILL.md.".into());
             }
@@ -138,6 +152,7 @@ pub fn plan(
             plan.steps.push(Step::CopyFolder {
                 to: root.join(name),
                 from: folder,
+                content,
             });
         }
         (_, Change::Remove { item }) if item.kind() == Kind::Skill => {
@@ -1070,19 +1085,31 @@ pub fn apply(
 }
 
 /// `error` with every value `call` passed that can hold a secret (an environment or
-/// header value, a URL, an argument) hidden, since a CLI can echo what it was given.
+/// header value, a URL, an argument, the command and each of its words) hidden, since
+/// a CLI can echo what it was given. Of an argument or a word of the command, what
+/// follows its first `=` and the credential after `Bearer ` or `Basic ` are hidden too,
+/// and of a URL among them its user and password, each path segment and each query or
+/// fragment value of eight characters or more.
 fn scrub(error: &str, call: &Cli) -> String {
-    let mut secrets = Vec::new();
-    let mut words = call.args.iter().peekable();
-    while let Some(word) = words.next() {
-        if let Ok(Value::Object(definition)) = serde_json::from_str::<Value>(word) {
+    let (mut secrets, mut words) = (Vec::new(), Vec::new());
+    let mut given = call.args.iter().peekable();
+    while let Some(arg) = given.next() {
+        if let Ok(Value::Object(definition)) = serde_json::from_str::<Value>(arg) {
             for key in ["env", "headers"] {
                 if let Some(Value::Object(values)) = definition.get(key) {
                     secrets.extend(values.values().filter_map(Value::as_str).map(str::to_owned));
                 }
             }
             if let Some(Value::Array(args)) = definition.get("args") {
-                secrets.extend(args.iter().filter_map(Value::as_str).map(str::to_owned));
+                words.extend(args.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+            if let Some(command) = definition.get("command").and_then(Value::as_str) {
+                words.push(command.to_owned());
+                words.extend(
+                    super::copy::shell_words(command)
+                        .into_iter()
+                        .map(|(word, _)| word),
+                );
             }
             secrets.extend(
                 definition
@@ -1091,21 +1118,48 @@ fn scrub(error: &str, call: &Cli) -> String {
                     .map(str::to_owned),
             );
         }
-        match word.as_str() {
+        match arg.as_str() {
             "--env" => secrets.extend(
-                words
+                given
                     .next()
                     .and_then(|pair| pair.split_once('='))
                     .map(|(_, value)| value.to_owned()),
             ),
-            "--url" => secrets.extend(words.next().cloned()),
+            "--url" => secrets.extend(given.next().cloned()),
             "--" => {
-                words.next();
-                secrets.extend(words.by_ref().cloned());
+                given.next();
+                words.extend(given.by_ref().cloned());
             }
             _ => {}
         }
     }
+    for word in words {
+        let lower = word.to_ascii_lowercase();
+        let value = word.split_once('=').map(|(_, value)| value);
+        let credential = ["bearer ", "basic "]
+            .iter()
+            .find_map(|scheme| lower.find(scheme).map(|at| &word[at + scheme.len()..]));
+        let parts = [value, credential].into_iter().flatten();
+        secrets.extend(parts.map(|part| part.trim().to_owned()));
+        secrets.push(word);
+    }
+    let parts: Vec<String> = secrets
+        .iter()
+        .filter_map(|secret| secret.find("://").map(|at| &secret[at + 3..]))
+        .flat_map(|url| {
+            let url = url.split(char::is_whitespace).next().unwrap_or_default();
+            let (head, tail) = url.split_once(['?', '#']).unwrap_or((url, ""));
+            let (authority, path) = head.split_at(head.find('/').unwrap_or(head.len()));
+            let user = authority.rsplit_once('@').map_or("", |(user, _)| user);
+            let values = tail
+                .split(['&', '?', '#'])
+                .map(|param| param.split_once('=').map_or(param, |(_, value)| value));
+            user.split(':').chain(path.split('/')).chain(values)
+        })
+        .filter(|part| part.len() >= 8)
+        .map(str::to_owned)
+        .collect();
+    secrets.extend(parts);
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     secrets
         .iter()
@@ -1190,7 +1244,7 @@ fn run_step(
             }
             replace(&path, &new).map_err(text)
         }
-        Step::CopyFolder { from, to } => {
+        Step::CopyFolder { from, to, content } => {
             if to.exists() {
                 let name = to.file_name().unwrap_or_default().to_string_lossy();
                 return Err(format!("A skill named {name} is already there.").into());
@@ -1198,11 +1252,17 @@ fn run_step(
             let parent = to.parent().ok_or("no folder to copy into")?;
             fs::create_dir_all(parent).map_err(text)?;
             let staged = staged(&to);
-            let copied = copy_folder(&from, &staged).and_then(|()| fs::rename(&staged, &to));
+            let copied = copy_folder(&from, &staged).map_err(text).and_then(|()| {
+                if content.is_some() && fingerprint_now(&staged, project).map_err(text)? != content
+                {
+                    return Err(StepError::Conflict(from));
+                }
+                fs::rename(&staged, &to).map_err(text)
+            });
             if copied.is_err() {
                 let _ = fs::remove_dir_all(&staged);
             }
-            copied.map_err(text)
+            copied
         }
         Step::RemoveFolder(folder) => {
             let to = backups.join(relative(&folder));

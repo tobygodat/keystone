@@ -295,6 +295,99 @@ fn adding_a_claude_server_runs_its_cli_at_the_chosen_scope() {
     assert_eq!(failed.0, Err(Failure::Failed("exists".into())));
 }
 
+#[test]
+fn a_claude_cli_that_echoes_a_credential_in_the_command_shows_none_of_it() {
+    let fixture = fixture();
+    let location = fixture.claude();
+    let shown = fixture.read(&location);
+    let token = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+    let add = Change::AddDefinition {
+        scope: Scope::User,
+        name: "added".into(),
+        definition: serde_json::json!({
+            "type": "stdio",
+            "command": format!("node server.js --token {token} --password \"correct horse battery staple\"")
+        }),
+    };
+    let echo = format!("refused --token {token} --password correct horse battery staple");
+    let (result, _) = change(&fixture, &location, true, &shown, add, Err(echo));
+    let Err(Failure::Failed(error)) = result else {
+        panic!("{result:?}")
+    };
+    assert!(!error.contains(token), "{error}");
+    assert!(!error.contains("correct"), "{error}");
+}
+
+#[test]
+fn a_claude_cli_that_echoes_only_a_value_or_a_credential_shows_none_of_it() {
+    let fixture = fixture();
+    let location = fixture.claude();
+    let shown = fixture.read(&location);
+    let token = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+    let header = "Authorization: Bearer opaquecredential123";
+    let url = "https://mcp.example.com/s/aB3dE5fG7hJ9kL1mN3pQ5/mcp";
+    let cases = [
+        (
+            serde_json::json!({"command": "node", "args": ["server.js", format!("--token={token}")]}),
+            token,
+        ),
+        (
+            serde_json::json!({"command": "env API_KEY=sk-proj-abc123def456ghi789 node server.js"}),
+            "sk-proj-abc123def456ghi789",
+        ),
+        (
+            serde_json::json!({"command": "npx", "args": ["mcp-remote", "https://example.com/mcp", "--header", header]}),
+            "opaquecredential123",
+        ),
+        (
+            serde_json::json!({"command": format!("npx mcp-remote https://example.com/mcp --header \"{header}\"")}),
+            "opaquecredential123",
+        ),
+        (
+            serde_json::json!({"command": "node", "args": ["server.js", "--password=correct horse battery staple"]}),
+            "correct horse battery staple",
+        ),
+        (
+            serde_json::json!({"command": "node server.js --password correct\\ horse\\ battery\\ staple"}),
+            "correct horse battery staple",
+        ),
+        (
+            serde_json::json!({"command": "npx", "args": ["mcp-remote", url]}),
+            "aB3dE5fG7hJ9kL1mN3pQ5",
+        ),
+        (
+            serde_json::json!({"command": format!("npx mcp-remote {url}")}),
+            "aB3dE5fG7hJ9kL1mN3pQ5",
+        ),
+        (
+            serde_json::json!({"type": "http", "url": url}),
+            "aB3dE5fG7hJ9kL1mN3pQ5",
+        ),
+        (
+            serde_json::json!({"type": "http", "url": "https://alice:hunter2hunter2@mcp.example.com/mcp?region=us#access_token=opaqueCredential123"}),
+            "hunter2hunter2 opaqueCredential123",
+        ),
+    ];
+    for (mut definition, secret) in cases {
+        if definition["type"].is_null() {
+            definition["type"] = "stdio".into();
+        }
+        let add = Change::AddDefinition {
+            scope: Scope::User,
+            name: "added".into(),
+            definition,
+        };
+        let echo = format!("refused {secret}");
+        let (result, _) = change(&fixture, &location, true, &shown, add, Err(echo));
+        let Err(Failure::Failed(error)) = result else {
+            panic!("{result:?}")
+        };
+        for word in secret.split_whitespace() {
+            assert!(!error.contains(word), "{error}");
+        }
+    }
+}
+
 fn claude_fixture(fixture: &Fixture) -> PathBuf {
     let global = fixture.root.join("claude/.claude.json");
     write(
@@ -584,6 +677,7 @@ fn skill_folders_are_copied_in_and_removed_to_the_backups() {
     let add = Change::AddSkill {
         scope: Scope::Project,
         folder: source.clone(),
+        content: None,
     };
     assert_eq!(
         change(&fixture, &location, true, &shown, add.clone(), Ok(())).0,
@@ -622,12 +716,51 @@ fn skill_folders_are_copied_in_and_removed_to_the_backups() {
     let none = Change::AddSkill {
         scope: Scope::User,
         folder: empty,
+        content: None,
     };
     assert_eq!(
         plan(&location, true, &fixture.project, none)
             .err()
             .as_deref(),
         Some("That folder has no SKILL.md.")
+    );
+}
+
+#[test]
+fn a_skill_copy_that_no_longer_has_the_previewed_content_lands_nothing() {
+    let fixture = fixture();
+    let location = fixture.codex();
+    let source = fixture.root.join("elsewhere/my-skill");
+    write(&source.join("SKILL.md"), "---\nname: my-skill\n---\n");
+    let previewed = fingerprint_now(&source, &fixture.project).unwrap();
+    write(
+        &source.join("SKILL.md"),
+        "---\nname: my-skill\n---\nEdited.\n",
+    );
+    let shown = fixture.read(&location);
+    let add = |content| Change::AddSkill {
+        scope: Scope::Project,
+        folder: source.clone(),
+        content,
+    };
+    let root = fixture.project.join(".agents/skills");
+    assert_eq!(
+        change(&fixture, &location, true, &shown, add(previewed), Ok(())).0,
+        Err(Failure::Conflict(source.clone()))
+    );
+    assert_eq!(
+        fs::read_dir(&root).map_or(0, Iterator::count),
+        0,
+        "nothing lands, staged or not"
+    );
+    let now = fingerprint_now(&source, &fixture.project).unwrap();
+    assert_eq!(
+        change(&fixture, &location, true, &shown, add(now), Ok(())).0,
+        Ok(())
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("my-skill/SKILL.md")).unwrap(),
+        "---\nname: my-skill\n---\nEdited.\n"
     );
 }
 

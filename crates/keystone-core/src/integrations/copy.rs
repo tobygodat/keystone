@@ -74,8 +74,10 @@ pub struct Pair {
     pub project: PathBuf,
 }
 
-/// What a copy will write, before it is made.
-#[derive(Clone, Debug)]
+/// What a copy will write, before it is made. Two previews of one copy are equal while
+/// its source still gives what the first showed, a skill folder's content included; an
+/// edit to the rest of the source's file is not a change.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Preview {
     /// The file or folder it writes.
     pub to: PathBuf,
@@ -83,7 +85,7 @@ pub struct Preview {
     /// the skill's files one per line.
     pub text: String,
     /// Each value that looks like a secret, by the name of its variable, header or
-    /// flag.
+    /// flag, or by where it is: `Argument 2`, `URL` or `Command`.
     pub secrets: Vec<String>,
     pub change: Change,
     pub pair: Pair,
@@ -140,6 +142,11 @@ pub fn preview(
                     name.to_string_lossy()
                 ));
             }
+            let print =
+                fingerprint_now(&item.source, project).map_err(|error| error.to_string())?;
+            if print.is_none() {
+                return Err(format!("{} is no longer there.", item.name));
+            }
             let mut files = Vec::new();
             if list_files(&item.source, Path::new(""), &mut files) {
                 return Err(format!("{} links outside its folder.", item.name));
@@ -151,6 +158,7 @@ pub fn preview(
                 change: Change::AddSkill {
                     scope,
                     folder: item.source.clone(),
+                    content: print,
                 },
                 pair: Pair {
                     from: End::of(item),
@@ -238,7 +246,7 @@ pub fn drift(pair: &Pair, from: &Location, to: &Location, project: &Path) -> Opt
     };
     // An argument is named by its place, which leaving one out moves, so when any was
     // left out every one is compared by count rather than by place.
-    let positional = |secret: &Secret| matches!(secret.place, Place::Arg(_));
+    let positional = |secret: &Secret| matches!(secret.place, Place::Arg(Word::Whole(_)));
     let wanted = secrets(&expected, to.provider());
     let present = secrets(&copy, to.provider());
     let left_out = |secret: &Secret| pair.left_out.contains(&secret.label);
@@ -252,6 +260,9 @@ pub fn drift(pair: &Pair, from: &Location, to: &Location, project: &Path) -> Opt
             left_out(secret)
         }
     };
+    // A URL's or the command's secrets share one label, so it is filled only once every
+    // one of them is back.
+    let (source_masked, copy_masked) = (mask(&expected, &wanted), mask(&copy, &present));
     let expected = leave_out(&expected, &wanted, skip);
     let args_filled = present.iter().filter(|s| positional(s)).count()
         >= wanted.iter().filter(|s| positional(s)).count();
@@ -260,6 +271,13 @@ pub fn drift(pair: &Pair, from: &Location, to: &Location, project: &Path) -> Opt
     for label in &pair.left_out {
         let filled = match wanted.iter().find(|secret| &secret.label == label) {
             Some(secret) if positional(secret) => args_filled,
+            Some(Secret {
+                place: Place::Url, ..
+            }) => source_masked["url"] == copy_masked["url"],
+            Some(Secret {
+                place: Place::Command(_),
+                ..
+            }) => source_masked["command"] == copy_masked["command"],
             _ => present
                 .iter()
                 .any(|secret| !positional(secret) && &secret.label == label),
@@ -354,6 +372,11 @@ fn reference(value: &str) -> Option<&str> {
 fn bearer_reference(value: &str) -> Option<&str> {
     let bearer = value.get(..7)?.eq_ignore_ascii_case("bearer ");
     bearer.then(|| reference(&value[7..])).flatten()
+}
+
+/// Whether `text` names a variable, as `${NAME}` or `$NAME`, rather than holding a value.
+fn variable(text: &str) -> bool {
+    reference(text).is_some() || text.strip_prefix('$').is_some_and(env_name)
 }
 
 fn object(value: &Value) -> impl Iterator<Item = (&String, &Value)> {
@@ -501,14 +524,42 @@ struct Secret {
 enum Place {
     /// The entry `name` of the table `table`: an environment variable or a header.
     Entry { table: &'static str, name: String },
-    /// The argument at this index, as `--flag=value`.
-    Joined(usize),
+    /// A secret among the arguments.
+    Arg(Word),
+    /// Every secret among the command's words.
+    Command(Vec<Word>),
+    /// A password, a path segment or a query value in the URL.
+    Url,
+}
+
+/// Where a secret is in a list of words: the arguments, or the command's words.
+#[derive(Clone, Debug)]
+enum Word {
+    /// The word at this index, as `--flag=value` or `NAME=value`.
+    Joined { at: usize, name: String },
     /// The flag at this index and the value after it.
     Flag(usize),
-    /// The argument at this index, on its own.
-    Arg(usize),
-    /// A password or a query value in the URL.
-    Url,
+    /// The word at this index, on its own.
+    Whole(usize),
+}
+
+impl Word {
+    /// The index of the word that shows [`MASK`] for this secret, and what it shows.
+    fn masked(&self) -> (usize, String) {
+        match self {
+            Word::Joined { at, name } => (*at, format!("{name}={MASK}")),
+            Word::Flag(at) => (at + 1, MASK.into()),
+            Word::Whole(at) => (*at, MASK.into()),
+        }
+    }
+
+    /// The indexes of the words it takes up.
+    fn span(&self) -> std::ops::Range<usize> {
+        match *self {
+            Word::Joined { at, .. } | Word::Whole(at) => at..at + 1,
+            Word::Flag(at) => at..at + 2,
+        }
+    }
 }
 
 /// The words that, at the end of a part of a name, say it holds a secret.
@@ -539,18 +590,22 @@ fn secret_name(name: &str) -> bool {
 }
 
 /// Whether `text` holds a secret whatever it is named: a bearer or basic credential (one
-/// word of eight characters or more after the scheme),
-/// a URL with a password, or a word that starts as well-known tokens do.
+/// word of eight characters or more after the scheme, at the start or after a colon and
+/// any whitespace), a URL with a [`secret_segment`] as
+/// its user name or in its path or with a password, or a word that starts as well-known
+/// tokens do. A credential after its scheme that names a [`variable`] is not one.
 fn secret_value(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let credential = ["bearer ", "basic "].iter().any(|scheme| {
-        let start = lower
-            .strip_prefix(scheme)
-            .map(|_| 0)
-            .or_else(|| lower.find(&format!(": {scheme}")).map(|at| at + 2));
+        let start = lower.strip_prefix(scheme).map(|_| 0).or_else(|| {
+            lower.match_indices(':').find_map(|(at, _)| {
+                let after = lower[at + 1..].trim_start();
+                after.starts_with(scheme).then(|| lower.len() - after.len())
+            })
+        });
         start.is_some_and(|at| {
             let rest = text[at + scheme.len()..].trim();
-            rest.len() >= 8 && !rest.contains(char::is_whitespace) && reference(rest).is_none()
+            rest.len() >= 8 && !rest.contains(char::is_whitespace) && !variable(rest)
         })
     });
     let password = text.find("://").is_some_and(|at| {
@@ -559,8 +614,8 @@ fn secret_value(text: &str) -> bool {
             .next()
             .unwrap_or_default();
         authority.rsplit_once('@').is_some_and(|(user, _)| {
-            user.split_once(':')
-                .is_some_and(|(_, password)| !password.is_empty() && reference(password).is_none())
+            let (name, password) = user.split_once(':').unwrap_or((user, ""));
+            secret_segment(name) || (!password.is_empty() && reference(password).is_none())
         })
     });
     const PREFIXES: [&str; 9] = [
@@ -577,7 +632,47 @@ fn secret_value(text: &str) -> bool {
     let token = text
         .split(|c: char| c.is_whitespace() || c == '=' || c == ':' || c == '"')
         .any(|word| word.len() >= 16 && PREFIXES.iter().any(|prefix| word.starts_with(prefix)));
-    credential || password || token
+    let path = text.find("://").is_some_and(|at| {
+        let rest = text[at + 3..].split(['?', '#']).next().unwrap_or_default();
+        rest.split('/').skip(1).any(secret_segment)
+    });
+    credential || password || token || path
+}
+
+/// Whether `segment`, one part of a URL's path or its user name, is a secret once
+/// percent-decoded and without the `=` that pads its end: a well-known token, a UUID,
+/// a piece between `-`, `_`, `.`, `~` and `:` of 16 or more letters and digits that
+/// holds both, or 20 or more letters, digits, `-`, `_`, `+` and `/` holding a capital, a
+/// small letter and a digit, at least half of whose letters and digits are in pieces
+/// between `-`, `_`, `+` and `/` that hold both a letter and a digit. A name, a model's
+/// name, a version, a date or a number is not.
+fn secret_segment(segment: &str) -> bool {
+    let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+    let segment = decoded.trim_end_matches('=');
+    let has = |text: &str, test: fn(&char) -> bool| text.chars().any(|c| test(&c));
+    let uuid = segment.split('-').map(str::len).eq([8, 4, 4, 4, 12])
+        && segment.chars().all(|c| c == '-' || c.is_ascii_hexdigit());
+    let mixed = segment.split(['-', '_', '.', '~', ':']).any(|piece| {
+        piece.len() >= 16
+            && piece.chars().all(|c| c.is_ascii_alphanumeric())
+            && has(piece, char::is_ascii_alphabetic)
+            && has(piece, char::is_ascii_digit)
+    });
+    let separators = ['-', '_', '+', '/'];
+    let in_mixed_pieces: usize = segment
+        .split(separators)
+        .filter(|&piece| has(piece, char::is_ascii_alphabetic) && has(piece, char::is_ascii_digit))
+        .map(str::len)
+        .sum();
+    let long = segment.len() >= 20
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || separators.contains(&c))
+        && has(segment, char::is_ascii_uppercase)
+        && has(segment, char::is_ascii_lowercase)
+        && has(segment, char::is_ascii_digit)
+        && 2 * in_mixed_pieces >= segment.len() - segment.matches(separators).count();
+    secret_value(segment) || uuid || mixed || long
 }
 
 /// Whether `name` reads as an environment variable's name, as in `env NAME=value`.
@@ -585,8 +680,10 @@ fn env_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// `url` with its password and each secret query value as `with`, or taken out when
-/// `with` is `None`.
+/// `url` with its user and password when its user name is a [`secret_segment`], else its
+/// password, each [`secret_segment`] of its path and each secret query value, and of a
+/// fragment of the form `k=v&k=v` too, as `with`, or taken out (a user with its `@`)
+/// when `with` is `None`.
 fn url_secrets(url: &str, with: Option<&str>) -> String {
     let (head, fragment) = url
         .split_once('#')
@@ -596,33 +693,56 @@ fn url_secrets(url: &str, with: Option<&str>) -> String {
         .map_or((head, None), |(h, q)| (h, Some(q)));
     let mut out = head.to_owned();
     if let Some(at) = head.find("://") {
-        let authority = head[at + 3..].split('/').next().unwrap_or_default();
-        if let Some((user, _)) = authority.rsplit_once('@')
-            && let Some((name, password)) = user.split_once(':')
-            && !password.is_empty()
-        {
-            let kept = match with {
-                Some(with) => format!("{name}:{with}"),
-                None => name.to_owned(),
-            };
-            out = format!("{}{kept}{}", &head[..at + 3], &head[at + 3 + user.len()..]);
+        let rest = &head[at + 3..];
+        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        let mut kept = authority.to_owned();
+        if let Some((user, host)) = authority.rsplit_once('@') {
+            let (name, password) = user.split_once(':').unwrap_or((user, ""));
+            if secret_segment(name) {
+                kept = with.map_or(host.to_owned(), |with| format!("{with}@{host}"));
+            } else if !password.is_empty() {
+                kept = with.map_or(format!("{name}@{host}"), |with| {
+                    format!("{name}:{with}@{host}")
+                });
+            }
         }
+        let path: Vec<&str> = path
+            .split('/')
+            .filter_map(|segment| {
+                if secret_segment(segment) {
+                    with
+                } else {
+                    Some(segment)
+                }
+            })
+            .collect();
+        out = format!("{}{kept}{}", &head[..at + 3], path.join("/"));
     }
-    if let Some(query) = query {
-        let params: Vec<String> = query
-            .split('&')
+    let params = |part: &str| -> Vec<String> {
+        part.split('&')
             .filter_map(|param| match param.split_once('=') {
                 Some((key, value)) if secret_name(key) || secret_value(value) => {
                     with.map(|with| format!("{key}={with}"))
                 }
                 _ => Some(param.to_owned()),
             })
-            .collect();
+            .collect()
+    };
+    if let Some(query) = query {
+        let params = params(query);
         if !params.is_empty() {
             out = format!("{out}?{}", params.join("&"));
         }
     }
     match fragment {
+        Some(fragment) if fragment.split('&').all(|param| param.contains('=')) => {
+            let params = params(fragment);
+            if params.is_empty() {
+                out
+            } else {
+                format!("{out}#{}", params.join("&"))
+            }
+        }
         Some(fragment) => format!("{out}#{fragment}"),
         None => out,
     }
@@ -651,50 +771,31 @@ fn secrets(definition: &Value, provider: Provider) -> Vec<Secret> {
             }
         }
     }
+    let command = shell_words(definition["command"].as_str().unwrap_or_default());
+    let words: Vec<&str> = command.iter().map(|(word, _)| word.as_str()).collect();
+    let hits = scan(&words);
+    if !hits.is_empty() {
+        found.push(Secret {
+            label: "Command".into(),
+            place: Place::Command(hits),
+        });
+    }
     let args: Vec<&str> = definition["args"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|arg| arg.as_str().unwrap_or_default())
         .collect();
-    let mut at = 0;
-    while at < args.len() {
-        let word = args[at];
-        let flag = word.starts_with('-');
-        let switch = word.starts_with("--no-");
-        match word.split_once('=') {
-            Some((name, value))
-                if (flag || env_name(name))
-                    && !value.is_empty()
-                    && (secret_name(name) || secret_value(value)) =>
-            {
-                found.push(Secret {
-                    label: name.to_owned(),
-                    place: Place::Joined(at),
-                })
-            }
-            None if flag
-                && !switch
-                && secret_name(word)
-                && args.get(at + 1).is_some_and(|next| !next.starts_with('-')) =>
-            {
-                found.push(Secret {
-                    label: word.to_owned(),
-                    place: Place::Flag(at),
-                });
-                at += 1;
-            }
-            _ if secret_value(word)
-                || (word.contains("://") && url_secrets(word, Some(MASK)) != word) =>
-            {
-                found.push(Secret {
-                    label: format!("Argument {}", at + 1),
-                    place: Place::Arg(at),
-                })
-            }
-            _ => {}
-        }
-        at += 1;
+    for word in scan(&args) {
+        let label = match &word {
+            Word::Joined { name, .. } => name.clone(),
+            Word::Flag(at) => args[*at].to_owned(),
+            Word::Whole(at) => format!("Argument {}", at + 1),
+        };
+        found.push(Secret {
+            label,
+            place: Place::Arg(word),
+        });
     }
     if let Some(url) = definition["url"].as_str()
         && url_secrets(url, Some(MASK)) != url
@@ -707,15 +808,140 @@ fn secrets(definition: &Value, provider: Provider) -> Vec<Secret> {
     found
 }
 
+/// Each secret among `words`, a command's words or a server's arguments:
+/// `NAME=value` or `--flag=value`, a flag and the value after it, the word of eight
+/// characters or more after `Bearer` or a word ending in `:Bearer`, or after `Basic` when
+/// the word before that ends in `Authorization:` or after a word ending in
+/// `Authorization:Basic`, unless it names a [`variable`], a word that is one by itself, or
+/// a JSON object holding a [`json_secret`].
+fn scan(words: &[&str]) -> Vec<Word> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < words.len() {
+        let word = words[at];
+        let flag = word.starts_with('-');
+        let switch = word.starts_with("--no-");
+        match word.split_once('=') {
+            _ if at.checked_sub(1).is_some_and(|before| {
+                let scheme = words[before].to_ascii_lowercase();
+                scheme == "bearer"
+                    || scheme.ends_with(":bearer")
+                    || scheme.ends_with("authorization:basic")
+                    || (scheme == "basic"
+                        && before.checked_sub(1).is_some_and(|header| {
+                            words[header]
+                                .to_ascii_lowercase()
+                                .ends_with("authorization:")
+                        }))
+            }) && word.len() >= 8
+                && !word.starts_with('-')
+                && !variable(word) =>
+            {
+                found.push(Word::Whole(at))
+            }
+            Some((name, value))
+                if (flag || env_name(name))
+                    && !value.is_empty()
+                    && (secret_name(name) || secret_value(value)) =>
+            {
+                found.push(Word::Joined {
+                    at,
+                    name: name.to_owned(),
+                })
+            }
+            None if flag
+                && !switch
+                && secret_name(word)
+                && words.get(at + 1).is_some_and(|next| !next.starts_with('-')) =>
+            {
+                found.push(Word::Flag(at));
+                at += 1;
+            }
+            _ if secret_value(word)
+                || (word.contains("://") && url_secrets(word, Some(MASK)) != word)
+                || serde_json::from_str::<Value>(word)
+                    .is_ok_and(|value| value.is_object() && json_secret("", &value)) =>
+            {
+                found.push(Word::Whole(at))
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    found
+}
+
+/// Whether a string in `value`, at any depth, is a secret: a non-empty one that is not a
+/// `${VAR}` reference under a key [`secret_name`] accepts, or a [`secret_value`] under any.
+fn json_secret(key: &str, value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            (secret_name(key) && !text.is_empty() && reference(text).is_none())
+                || secret_value(text)
+        }
+        Value::Array(items) => items.iter().any(|item| json_secret(key, item)),
+        Value::Object(entries) => entries.iter().any(|(key, value)| json_secret(key, value)),
+        _ => false,
+    }
+}
+
+/// The words of `command` as a shell splits it, each without its quotes and with where
+/// it is in `command`. Whitespace outside quotes ends a word; `'…'` keeps what it holds
+/// as it is, and `"…"` too but for a `\` before `"`, `\`, `$` or a backtick, which
+/// stands for that character. Outside quotes a `\` stands for the character after it,
+/// a `\` before a newline joins the lines, and a `\` that ends `command` is kept.
+pub(super) fn shell_words(command: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    let mut words = Vec::new();
+    let mut chars = command.char_indices().peekable();
+    loop {
+        while chars
+            .next_if(|&(at, c)| c.is_whitespace() || command[at..].starts_with("\\\n"))
+            .is_some()
+        {}
+        let Some(&(start, _)) = chars.peek() else {
+            return words;
+        };
+        let (mut word, mut quote) = (String::new(), None);
+        while let Some((_, c)) = chars.next_if(|&(_, c)| quote.is_some() || !c.is_whitespace()) {
+            match (quote, c) {
+                (None, '\'' | '"') => quote = Some(c),
+                (Some(open), c) if c == open => quote = None,
+                (None, '\\') => match chars.next() {
+                    Some((_, '\n')) => {}
+                    Some((_, escaped)) => word.push(escaped),
+                    None => word.push('\\'),
+                },
+                (Some('"'), '\\') => {
+                    let escaped = chars.next_if(|(_, next)| matches!(next, '"' | '\\' | '$' | '`'));
+                    word.push(escaped.map_or('\\', |(_, escaped)| escaped));
+                }
+                _ => word.push(c),
+            }
+        }
+        let end = chars.peek().map_or(command.len(), |&(at, _)| at);
+        words.push((word, start..end));
+    }
+}
+
 /// `definition` with each secret's value as [`MASK`].
 fn mask(definition: &Value, secrets: &[Secret]) -> Value {
     let mut out = definition.clone();
     for secret in secrets {
         match &secret.place {
             Place::Entry { table, name } => out[*table][name] = MASK.into(),
-            Place::Joined(at) => out["args"][*at] = format!("{}={MASK}", secret.label).into(),
-            Place::Flag(at) => out["args"][at + 1] = MASK.into(),
-            Place::Arg(at) => out["args"][*at] = MASK.into(),
+            Place::Arg(word) => {
+                let (at, with) = word.masked();
+                out["args"][at] = with.into();
+            }
+            Place::Command(hits) => {
+                let mut command = out["command"].as_str().unwrap_or_default().to_owned();
+                let spans = shell_words(&command);
+                for hit in hits.iter().rev() {
+                    let (at, with) = hit.masked();
+                    command.replace_range(spans[at].1.clone(), &with);
+                }
+                out["command"] = command.into();
+            }
             Place::Url => {
                 let url = url_secrets(out["url"].as_str().unwrap_or_default(), Some(MASK));
                 out["url"] = url.into();
@@ -726,7 +952,8 @@ fn mask(definition: &Value, secrets: &[Secret]) -> Value {
 }
 
 /// `definition` without the secrets `drop` picks, and without a table or argument
-/// list that leaves empty.
+/// list that leaves empty. A command loses each secret's words and the whitespace that
+/// parts them from the rest, and keeps every other byte.
 fn leave_out(definition: &Value, secrets: &[Secret], drop: impl Fn(&Secret) -> bool) -> Value {
     let mut out = definition.clone();
     let mut gone = Vec::new();
@@ -737,8 +964,20 @@ fn leave_out(definition: &Value, secrets: &[Secret], drop: impl Fn(&Secret) -> b
                     entries.remove(name);
                 }
             }
-            Place::Joined(at) | Place::Arg(at) => gone.push(*at),
-            Place::Flag(at) => gone.extend([*at, at + 1]),
+            Place::Arg(word) => gone.extend(word.span()),
+            Place::Command(hits) => {
+                let mut command = out["command"].as_str().unwrap_or_default().to_owned();
+                let spans = shell_words(&command);
+                for hit in hits.iter().rev() {
+                    let taken = hit.span();
+                    let start = taken.start.checked_sub(1).map_or(0, |at| spans[at].1.end);
+                    command.replace_range(start..spans[taken.end - 1].1.end, "");
+                    if start == 0 {
+                        command = command.trim_start().to_owned();
+                    }
+                }
+                out["command"] = command.into();
+            }
             Place::Url => {
                 let url = url_secrets(out["url"].as_str().unwrap_or_default(), None);
                 out["url"] = url.into();

@@ -357,7 +357,6 @@ crates/keystone-core/src/delivery.rs
 	session {child} has no delivery
 
 crates/keystone-core/src/integrations/copy.rs
-	: {scheme}
 	A server named {} is already there.
 	A skill named {} is already there.
 	Argument {}
@@ -372,9 +371,10 @@ crates/keystone-core/src/integrations/copy.rs
 	Codex can't use SSE servers.
 	Codex needs a command or a URL.
 	Codex only
+	Command
+	{name}={MASK}
 	{} is no longer there.
 	{} links outside its folder.
-	{}={MASK}
 
 crates/keystone-core/src/integrations/edit.rs
 	A server named {name} is already there.
@@ -945,6 +945,7 @@ crates/keystone-desktop/src/integrations.rs
 	{who} · {} · {source}
 	{who}: could not read {}: {}
 	{who}: folder unknown
+	{} changed since the preview.
 	{} in {}
 	{} is no longer there.
 

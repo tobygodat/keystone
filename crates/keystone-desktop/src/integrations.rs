@@ -90,6 +90,17 @@ struct CopyForm {
     include: Vec<String>,
     asked: u64,
     preview: Option<(u64, Result<Preview, String>)>,
+    /// The last press of Copy found the source changed since the preview it showed, and
+    /// wrote nothing.
+    changed: bool,
+}
+
+/// A copy to make: the preview numbered `asked` that the panel showed, and that preview
+/// worked out again from the source as it is when the copy is made.
+struct Copying {
+    asked: u64,
+    preview: Preview,
+    again: Box<dyn FnOnce() -> Result<Preview, String> + Send>,
 }
 
 /// The open form: what it makes, and the account (an index into the read) and scope
@@ -546,7 +557,7 @@ impl Keystone {
                     Button::new("integrations-refresh", "Refresh")
                         .style(ButtonStyle::Subtle)
                         .size(ButtonSize::Compact)
-                        .disabled(integrations.reading)
+                        .disabled(integrations.reading || integrations.applying)
                         .track_focus(&integrations.refresh)
                         .debug_selector(|| "integrations-refresh".into())
                         .on_click(
@@ -943,6 +954,9 @@ impl Keystone {
                             if let Some(form) = this.integrations_form() {
                                 form.account = choices[chosen];
                                 form.scope = 0;
+                                if let FormKind::Copy(copy) = &mut form.kind {
+                                    copy.changed = false;
+                                }
                             }
                             this.refresh_copy(cx);
                             cx.notify();
@@ -964,6 +978,9 @@ impl Keystone {
                         |this, &scope: &usize, _, cx| {
                             if let Some(form) = this.integrations_form() {
                                 form.scope = scope;
+                                if let FormKind::Copy(copy) = &mut form.kind {
+                                    copy.changed = false;
+                                }
                             }
                             this.refresh_copy(cx);
                             cx.notify();
@@ -1122,6 +1139,13 @@ impl Keystone {
             None => div().into_any_element(),
             Some((_, Ok(preview))) => v_flex()
                 .gap(spacing::SM)
+                .children(copy.changed.then(|| {
+                    div().automation_id("integrations-copy-changed").child(
+                        Label::new(format!("{} changed since the preview.", copy.item.name))
+                            .size(TextSize::Sm)
+                            .color(Color::Warning),
+                    )
+                }))
                 .child(
                     Label::new(shown_path(&preview.to, home))
                         .size(TextSize::Sm)
@@ -1208,6 +1232,7 @@ impl Keystone {
             include: Vec::new(),
             asked: 0,
             preview: None,
+            changed: false,
         }));
         let scope = scopes(read[account].provider, &kind)
             .iter()
@@ -1223,38 +1248,22 @@ impl Keystone {
         cx.notify();
     }
 
-    /// Works out again, off the UI thread, what the open copy would write.
-    fn refresh_copy(&mut self, cx: &mut Context<Self>) {
-        let project = self
-            .presentation
-            .project
-            .as_ref()
-            .ok()
-            .map(|p| p.path().to_owned());
-        let Some(page) = self.integrations_page() else {
-            return;
+    /// What the open copy would write, worked out by the closure from the item, accounts,
+    /// scope and secrets the panel names now; `None` when no copy panel is open or a
+    /// folder it needs is unknown.
+    fn copy_preview(&self) -> Option<impl FnOnce() -> Result<Preview, String> + Send + use<>> {
+        let project = self.presentation.project.as_ref().ok()?.path().to_owned();
+        let page = &self.settings.as_ref()?.integrations;
+        let (form, read) = (page.form.as_ref()?, page.read.as_ref()?);
+        let to = read.get(form.account)?;
+        let scope = *scopes(to.provider, &form.kind).get(form.scope)?;
+        let FormKind::Copy(copy) = &form.kind else {
+            return None;
         };
-        let (Some(form), Some(read)) = (page.form.as_mut(), page.read.as_ref()) else {
-            return;
-        };
-        let Some(to) = read.get(form.account) else {
-            return;
-        };
-        let scope = scopes(to.provider, &form.kind).get(form.scope).copied();
-        let FormKind::Copy(copy) = &mut form.kind else {
-            return;
-        };
-        let from = read.get(copy.from).and_then(|from| from.location.clone());
-        let (Some(from), Some(location), Some(project), Some(scope)) =
-            (from, to.location.clone(), project, scope)
-        else {
-            return;
-        };
-        let account = to.id();
-        let asked = PREVIEWS.fetch_add(1, Ordering::Relaxed) + 1;
-        copy.asked = asked;
+        let from = read.get(copy.from)?.location.clone()?;
+        let (location, account) = (to.location.clone()?, to.id());
         let (item, include) = (copy.item.clone(), copy.include.clone());
-        let task = cx.background_executor().spawn(async move {
+        Some(move || {
             copy::preview(
                 &item,
                 &from,
@@ -1262,7 +1271,24 @@ impl Keystone {
                 &project,
                 &include,
             )
-        });
+        })
+    }
+
+    /// Works out again, off the UI thread, what the open copy would write.
+    fn refresh_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(preview) = self.copy_preview() else {
+            return;
+        };
+        let Some(Form {
+            kind: FormKind::Copy(copy),
+            ..
+        }) = self.integrations_form()
+        else {
+            return;
+        };
+        let asked = PREVIEWS.fetch_add(1, Ordering::Relaxed) + 1;
+        copy.asked = asked;
+        let task = cx.background_executor().spawn(async move { preview() });
         cx.spawn(async move |this, cx| {
             let preview = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1407,9 +1433,16 @@ impl Keystone {
                 && read
                     .get(form.account)
                     .is_some_and(|to| to.is(preview.pair.to.provider, &preview.pair.to.account))
+                && let Some(again) = self.copy_preview()
             {
                 let at = form.account;
-                self.change_integration(at, preview.change, Some(preview.pair), cx);
+                let change = preview.change.clone();
+                let copying = Copying {
+                    asked,
+                    preview,
+                    again: Box::new(again),
+                };
+                self.change_integration(at, change, Some(copying), cx);
             }
             return;
         }
@@ -1448,6 +1481,7 @@ impl Keystone {
             (FormKind::AddSkill, Some(scope)) => Ok(Change::AddSkill {
                 scope,
                 folder: expand_home(&value(&page.folder), home.as_deref()),
+                content: None,
             }),
             (FormKind::Copy(_), _) | (_, None) => return,
         };
@@ -1464,13 +1498,18 @@ impl Keystone {
     }
 
     /// Makes `change` to the account at `at` in the read off the UI thread, against the
-    /// files as that read found them, then reads them again. A change that makes a
-    /// copy remembers it as `copied`.
+    /// files as that read found them, then reads them again. A copy's change is its
+    /// preview's, and it is made only while the preview worked out again just before
+    /// is still that one; otherwise nothing is written and, while the panel is still that
+    /// copy, it shows the new preview. What a copy writes is always what its preview
+    /// showed: a server's definition is in the change, and a skill folder's copy lands
+    /// only if it still has the content the preview hashed. A source edited after the
+    /// check shows later as out of sync. A made copy is remembered.
     fn change_integration(
         &mut self,
         at: usize,
         change: Change,
-        copied: Option<Pair>,
+        copying: Option<Copying>,
         cx: &mut Context<Self>,
     ) {
         let project = self
@@ -1522,21 +1561,39 @@ impl Keystone {
         if let Some(page) = self.integrations_page() {
             page.applying = true;
             page.notice = None;
+            if let Some(Form {
+                kind: FormKind::Copy(copy),
+                ..
+            }) = &mut page.form
+                && copying.is_some()
+            {
+                copy.changed = false;
+            }
         }
+        let copied = copying
+            .as_ref()
+            .map(|copying| (copying.asked, copying.preview.pair.clone()));
         let task = cx.background_executor().spawn(async move {
-            let profile = profile.map_err(Failure::Failed)?;
-            let plan = edit::plan(&location, claude_writes_global, &project, change)
-                .map_err(Failure::Failed)?;
-            edit::apply(plan, &shown, &backups, &mut |call| {
-                keystone_agent::run_config_cli(provider, program.as_deref(), &profile, call)
-            })
+            if let Some(copying) = copying {
+                let again = (copying.again)();
+                if again.as_ref() != Ok(&copying.preview) {
+                    return Err(again);
+                }
+            }
+            Ok(profile.map_err(Failure::Failed).and_then(|profile| {
+                let plan = edit::plan(&location, claude_writes_global, &project, change)
+                    .map_err(Failure::Failed)?;
+                edit::apply(plan, &shown, &backups, &mut |call| {
+                    keystone_agent::run_config_cli(provider, program.as_deref(), &profile, call)
+                })
+            }))
         });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let made = task.await;
             let _ = this.update(cx, |this, cx| {
-                let recorded = match (&result, copied) {
-                    (Ok(()), Some(pair)) => {
-                        this.state.read(cx).store().database().record_copy(&pair)
+                let recorded = match (&made, &copied) {
+                    (Ok(Ok(())), Some((_, pair))) => {
+                        this.state.read(cx).store().database().record_copy(pair)
                     }
                     _ => Ok(()),
                 };
@@ -1544,6 +1601,33 @@ impl Keystone {
                     return;
                 };
                 page.applying = false;
+                let result = match made {
+                    Ok(result) => result,
+                    Err(again) => {
+                        if let Some(form) = &mut page.form
+                            && let Some((asked, pair)) = &copied
+                            && page
+                                .read
+                                .as_ref()
+                                .and_then(|read| read.get(form.account))
+                                .is_some_and(|to| {
+                                    to.is(pair.to.provider, &pair.to.account)
+                                        && scopes(to.provider, &form.kind).get(form.scope)
+                                            == Some(&pair.to.scope)
+                                })
+                            && let FormKind::Copy(copy) = &mut form.kind
+                            && pair.from.is(&copy.item)
+                        {
+                            copy.changed = again.is_ok();
+                            if *asked == copy.asked {
+                                copy.preview = Some((copy.asked, again));
+                            }
+                        }
+                        this.read_integrations(cx);
+                        cx.notify();
+                        return;
+                    }
+                };
                 page.notice = match &result {
                     Ok(()) => running.then_some(Notice::NextStart),
                     Err(Failure::Conflict(_)) => Some(Notice::Conflict),

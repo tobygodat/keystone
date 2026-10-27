@@ -2848,6 +2848,7 @@ name = "keystone-core"
 version = "0.1.0"
 dependencies = [
  "parking_lot",
+ "percent-encoding",
  "rusqlite",
  "serde",
  "serde_json",
