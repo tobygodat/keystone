@@ -13,7 +13,10 @@ line to DIR/calls.log and answers from the stage named in DIR/stage:
   blocked    as mergeable, but the base branch's rules block the merge
   merged     the pull request is merged
 
-Write a stage name to DIR/stage to move on. The repository allows squash and merge commits. A merge
+Write a stage name to DIR/stage to move on. The failed test check ran as Actions job 9311, whose
+failed steps' log (`gh run view --job 9311 --log-failed`) is about 76 KiB: FIRST-LINE and LAST-LINE
+end it, and MIDDLE-LINE sits where a 32 KiB head and tail leave a gap. The repository allows squash
+and merge commits. A merge
 (`gh api --method PUT .../merge`) is recorded and moves the stage to `merged`; `exit4` as the stage
 makes every call fail as a missing login does.
 """
@@ -27,17 +30,30 @@ TIME = '2026-10-25T08:00:00Z'
 UNSET = '0001-01-01T00:00:00Z'
 
 
-def check(name, status, conclusion='', completed=UNSET, started=TIME):
+JOB = 'https://github.com/keystone-fixture/demo/actions/runs/4207/job/9311'
+
+
+def check(name, status, conclusion='', completed=UNSET, started=TIME, url=''):
     return {'__typename': 'CheckRun', 'name': name, 'workflowName': 'CI', 'status': status,
             'conclusion': conclusion, 'startedAt': started, 'completedAt': completed,
-            'detailsUrl': ''}
+            'detailsUrl': url}
+
+
+def failed_log():
+    steps = ''.join(f'test\tRun cargo test\t2026-10-25T08:02:{n % 60:02d}.0000000Z test upload::case_{n} ... ok\n'
+                    for n in range(500))
+    return ('test\tRun cargo test\t2026-10-25T08:01:00.0000000Z FIRST-LINE running 1001 tests\n' + steps
+            + 'test\tRun cargo test\t2026-10-25T08:02:30.0000000Z MIDDLE-LINE\n' + steps
+            + 'test\tRun cargo test\t2026-10-25T08:03:11.0000000Z thread \'upload::retries_three_times\' panicked at src/lib.rs:2:\n'
+            + 'test\tRun cargo test\t2026-10-25T08:03:11.0000000Z assertion failed: tries <= 3\n'
+            + 'test\tRun cargo test\t2026-10-25T08:03:12.0000000Z error: test failed, LAST-LINE\n')
 
 
 LINT = check('lint', 'COMPLETED', 'SUCCESS', '2026-10-25T08:00:41Z')
 CHECKS = {
     'running': [check('test', 'IN_PROGRESS'), LINT],
-    'failing': [check('test', 'COMPLETED', 'FAILURE', '2026-10-25T08:03:12Z'), LINT],
-    'review': [check('test', 'COMPLETED', 'FAILURE', '2026-10-25T08:03:12Z'), LINT],
+    'failing': [check('test', 'COMPLETED', 'FAILURE', '2026-10-25T08:03:12Z', url=JOB), LINT],
+    'review': [check('test', 'COMPLETED', 'FAILURE', '2026-10-25T08:03:12Z', url=JOB), LINT],
     'mergeable': [check('test', 'COMPLETED', 'SUCCESS', '2026-10-25T08:12:30Z',
                         '2026-10-25T08:10:00Z'), LINT],
 }
@@ -75,6 +91,8 @@ def answer(home, args):
         print(json.dumps({'number': 12, 'url': URL, 'state': 'OPEN'}))
     elif args[:2] == ['pr', 'view']:
         print(json.dumps(view(stage)))
+    elif args[:2] == ['run', 'view'] and '--log-failed' in args:
+        sys.stdout.write(failed_log())
     elif args[:2] == ['repo', 'view']:
         print(json.dumps({'squashMergeAllowed': True, 'mergeCommitAllowed': True,
                           'rebaseMergeAllowed': False}))

@@ -63,6 +63,10 @@ case "$1 $2" in
       cat ".git/view-$stage.json"
     fi ;;
   "repo view") echo '{"squashMergeAllowed":true,"mergeCommitAllowed":true,"rebaseMergeAllowed":false}' ;;
+  "run view")
+    [ -f .git/slow ] && sleep 1
+    [ -f .git/log.txt ] || { echo 'failed to get run log: log not found' >&2; exit 1; }
+    cat .git/log.txt ;;
   api*)
     case "$*" in
       *--method*) echo merged > .git/stage; echo '{"merged":true}' ;;
@@ -83,7 +87,7 @@ fn view_json(state: &str, merge_state: &str, decision: &str, checks: &str) -> St
 }
 
 const RUNNING: &str = r#"{"__typename":"CheckRun","name":"test","workflowName":"CI","status":"IN_PROGRESS","conclusion":"","startedAt":"2026-10-25T08:00:00Z","completedAt":"0001-01-01T00:00:00Z","detailsUrl":""}"#;
-const FAILED: &str = r#"{"__typename":"CheckRun","name":"test","workflowName":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-25T08:00:00Z","completedAt":"2026-10-25T08:01:12Z","detailsUrl":""}"#;
+const FAILED: &str = r#"{"__typename":"CheckRun","name":"test","workflowName":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-25T08:00:00Z","completedAt":"2026-10-25T08:01:12Z","detailsUrl":"https://github.com/o/r/actions/runs/11/job/22"}"#;
 const PASSED: &str = r#"{"__typename":"CheckRun","name":"test","workflowName":"CI","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-25T08:02:00Z","completedAt":"2026-10-25T08:03:00Z","detailsUrl":""}"#;
 
 /// `repo` on branch `fix` with gh scripted through every stage, and `other` inside
@@ -669,4 +673,280 @@ fn failures_back_off_up_to_half_an_hour(app: &mut TestAppContext) {
             idle(&view, cx) && views(&root) == asks
         });
     }
+}
+
+fn composer(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> String {
+    view.read_with(cx, |view, cx| view.composer.read(cx).value().to_owned())
+}
+
+fn draft(view: &Entity<Keystone>, session: u64, cx: &mut VisualTestContext) -> String {
+    view.read_with(cx, |view, cx| {
+        view.state
+            .read(cx)
+            .session(session)
+            .unwrap()
+            .draft()
+            .to_owned()
+    })
+}
+
+/// A failed steps' log longer than twice the 32 KiB kept from each end, with a marker
+/// at each end and one in the middle that the excerpt leaves out.
+fn long_log(root: &Path) {
+    let filler = |n: usize| "test\tRun cargo test\tline of output\n".repeat(n);
+    fs::write(
+        root.join(".git/log.txt"),
+        format!(
+            "FIRST-LINE\n{}MIDDLE-LINE\n{}error: LAST-LINE\n",
+            filler(1200),
+            filler(1200)
+        ),
+    )
+    .unwrap();
+}
+
+#[gpui::test]
+fn repair_and_send_put_the_check_and_comment_in_the_composer_and_send_nothing(
+    app: &mut TestAppContext,
+) {
+    fake_gh();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fixture(&root);
+    long_log(&root);
+    stage(&root, "failing");
+    let path = seeded(&root);
+    let (view, handle) = launch(&path, app);
+    let cx = visual(handle, app);
+    cx.simulate_keystrokes("ctrl-alt-p");
+    until(cx, "the failed check shows", |cx| {
+        idle(&view, cx) && shown(cx, "pull-request-repair-0")
+    });
+    assert!(
+        !shown(cx, "pull-request-repair-1"),
+        "only a failed check offers a repair"
+    );
+
+    click(cx, "pull-request-repair-0");
+    until(cx, "the log reaches the composer", |cx| {
+        composer(&view, cx).contains("LAST-LINE")
+    });
+    let text = composer(&view, cx);
+    assert!(
+        text.starts_with(
+            "Fix the failing check `CI / test` on https://github.com/o/r/pull/12.\n\n```\nFIRST-LINE\n"
+        ),
+        "{}",
+        &text[..200]
+    );
+    assert!(text.ends_with("error: LAST-LINE\n```"));
+    assert!(text.contains("bytes omitted") && !text.contains("MIDDLE-LINE"));
+    assert!(text.len() < 2 * keystone_agent::OUTPUT_CAP + 200);
+    assert!(
+        calls(&root).contains("run\nview\n--job\n22\n--log-failed\n--repo\ngithub.com/o/r\n---"),
+        "{}",
+        calls(&root)
+    );
+    assert_eq!(draft(&view, 1, cx), text, "the draft is saved");
+
+    stage(&root, "review");
+    click(cx, "pull-request-refresh");
+    until(cx, "the comment shows", |cx| {
+        idle(&view, cx) && shown(cx, "pull-request-send-0")
+    });
+    let opened = calls(&root);
+    click(cx, "pull-request-send-0");
+    let text = composer(&view, cx);
+    assert!(
+        text.ends_with(
+            "```\nAddress ana's review comment on src/lib.rs:42 in https://github.com/o/r/pull/12:\n\n> Rename this"
+        ),
+        "the comment goes on a line after the log: {}",
+        &text[text.len() - 200..]
+    );
+    assert_eq!(calls(&root), opened, "Send to asks gh for nothing");
+    assert_eq!(draft(&view, 1, cx), text);
+    view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        assert!(!state.session(1).unwrap().started(), "nothing was sent");
+    });
+    assert!(
+        !calls(&root).contains("--method"),
+        "nothing was pushed or merged"
+    );
+
+    fs::write(
+        root.join(".git/view-merged.json"),
+        view_json("MERGED", "UNKNOWN", "APPROVED", FAILED),
+    )
+    .unwrap();
+    stage(&root, "merged");
+    click(cx, "pull-request-refresh");
+    until(cx, "the pull request is merged", |cx| {
+        idle(&view, cx) && report(&view, 1, cx).unwrap().state == PullRequestState::Merged
+    });
+    assert!(shown(cx, "pull-request-check-0") && shown(cx, "pull-request-comment-0"));
+    assert!(!shown(cx, "pull-request-repair-0") && !shown(cx, "pull-request-send-0"));
+}
+
+#[gpui::test]
+fn a_log_that_arrives_after_switching_sessions_goes_to_its_own_draft(app: &mut TestAppContext) {
+    fake_gh();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fixture(&root);
+    long_log(&root);
+    fs::write(root.join(".git/slow"), "").unwrap();
+    stage(&root, "failing");
+    let path = seeded(&root);
+    let (view, handle) = launch(&path, app);
+    let cx = visual(handle, app);
+    cx.simulate_keystrokes("ctrl-alt-p");
+    until(cx, "the failed check shows", |cx| {
+        idle(&view, cx) && shown(cx, "pull-request-repair-0")
+    });
+    view.update(cx, |view, cx| {
+        view.composer
+            .update(cx, |input, cx| input.set_value("Kept".into(), cx))
+    });
+    click(cx, "pull-request-repair-0");
+    click(cx, "session-2");
+    until(cx, "the log reaches session 1's draft", |cx| {
+        draft(&view, 1, cx).contains("LAST-LINE")
+    });
+    assert!(draft(&view, 1, cx).starts_with("Kept\nFix the failing check"));
+    assert!(!composer(&view, cx).contains("LAST-LINE"));
+    assert!(!draft(&view, 2, cx).contains("LAST-LINE"));
+}
+
+#[gpui::test]
+fn a_log_gh_cannot_read_leaves_the_check_link_and_says_why(app: &mut TestAppContext) {
+    fake_gh();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fixture(&root);
+    stage(&root, "failing");
+    let path = seeded(&root);
+    let (view, handle) = launch(&path, app);
+    let cx = visual(handle, app);
+    cx.simulate_keystrokes("ctrl-alt-p");
+    until(cx, "the failed check shows", |cx| {
+        idle(&view, cx) && shown(cx, "pull-request-repair-0")
+    });
+    click(cx, "pull-request-repair-0");
+    until(cx, "gh's refusal shows", |cx| {
+        view.read_with(cx, |view, _| view.repair.is_none() && view.error.is_some())
+    });
+    assert_eq!(
+        view.read_with(cx, |view, _| view.error.clone()),
+        Some("Log not read. failed to get run log: log not found".into())
+    );
+    assert_eq!(
+        composer(&view, cx),
+        "Fix the failing check `CI / test` on https://github.com/o/r/pull/12.\n\nhttps://github.com/o/r/actions/runs/11/job/22"
+    );
+}
+
+#[gpui::test]
+fn a_prefill_keeps_the_selection_and_goes_on_lines_of_its_own(app: &mut TestAppContext) {
+    fake_gh();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fixture(&root);
+    stage(&root, "review");
+    let path = seeded(&root);
+    let (view, handle) = launch(&path, app);
+    let cx = visual(handle, app);
+    cx.simulate_keystrokes("ctrl-alt-p");
+    until(cx, "the comment shows", |cx| {
+        idle(&view, cx) && shown(cx, "pull-request-send-0")
+    });
+    view.update_in(cx, |view, window, cx| {
+        view.composer.update(cx, |input, cx| {
+            input.set_value("Selected draft".into(), cx);
+            input.select_all(&keystone_ui::text_input::SelectAll, window, cx);
+        })
+    });
+    click(cx, "pull-request-send-0");
+    assert_eq!(
+        composer(&view, cx),
+        "Selected draft\nAddress ana's review comment on src/lib.rs:42 in https://github.com/o/r/pull/12:\n\n> Rename this"
+    );
+    assert_eq!(crate::on_own_line("a", "b", " c"), "\nb\n");
+    assert_eq!(crate::on_own_line("a\n", "b", "\nc"), "b");
+    assert_eq!(crate::on_own_line("", "b", ""), "b");
+}
+
+#[gpui::test]
+fn a_log_for_a_session_another_window_shows_lands_in_that_windows_composer(
+    app: &mut TestAppContext,
+) {
+    fake_gh();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fixture(&root);
+    long_log(&root);
+    fs::write(root.join(".git/slow"), "").unwrap();
+    stage(&root, "failing");
+    let path = seeded(&root);
+    let (view, handle) = launch(&path, app);
+    handle
+        .update(app, |_, window, cx| {
+            view.update(cx, |this, cx| this.open_new_window(Some(1), window, cx))
+        })
+        .unwrap();
+    app.run_until_parked();
+    let other = app
+        .update(|cx| open_windows(cx))
+        .into_iter()
+        .find(|w| *w != view)
+        .unwrap();
+    let cx = visual(handle, app);
+    cx.simulate_keystrokes("ctrl-alt-p");
+    until(cx, "the failed check shows", |cx| {
+        idle(&view, cx) && shown(cx, "pull-request-repair-0")
+    });
+    click(cx, "pull-request-repair-0");
+    click(cx, "session-2");
+    until(cx, "the log reaches the other window", |cx| {
+        composer(&other, cx).contains("LAST-LINE")
+    });
+    assert!(draft(&view, 1, cx).contains("LAST-LINE"), "and is saved");
+    assert!(!composer(&view, cx).contains("LAST-LINE"));
+}
+
+#[test]
+fn a_repair_prompt_fences_the_log_past_its_backticks_and_links_a_check_without_one() {
+    let link = PullRequest {
+        number: 3,
+        url: "https://github.com/o/r/pull/3".into(),
+    };
+    let check = |workflow: &str, url: &str| Check {
+        name: "build".into(),
+        workflow: workflow.into(),
+        state: CheckState::Failed,
+        summary: "Failure".into(),
+        started_at: None,
+        completed_at: None,
+        url: url.into(),
+    };
+    assert_eq!(
+        repair_prompt(&link, &check("CI", ""), Some("a ```` fence\n\n")),
+        "Fix the failing check `CI / build` on https://github.com/o/r/pull/3.\n\n`````\na ```` fence\n`````"
+    );
+    assert_eq!(
+        repair_prompt(&link, &check("", "https://ci.example/9"), None),
+        "Fix the failing check `build` on https://github.com/o/r/pull/3.\n\nhttps://ci.example/9"
+    );
+    let comment = ReviewComment {
+        id: 1,
+        author: "ana".into(),
+        path: "README.md".into(),
+        line: None,
+        body: "Two lines\n\nhere".into(),
+    };
+    assert_eq!(
+        comment_prompt(&link, &comment),
+        "Address ana's review comment on README.md in https://github.com/o/r/pull/3:\n\n> Two lines\n>\n> here"
+    );
 }

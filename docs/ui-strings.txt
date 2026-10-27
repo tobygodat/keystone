@@ -1118,7 +1118,11 @@ crates/keystone-desktop/src/prompts.rs
 	Search prompts
 
 crates/keystone-desktop/src/pull_request.rs
+	\n\n{fence}\n{log}\n{fence}
+	> {line}
+	Address {}'s review comment on {} in {}:\n\n{}
 	Approved
+	Ask {provider} to repair
 	Changes requested
 	Closed
 	Conflicts
@@ -1127,9 +1131,12 @@ crates/keystone-desktop/src/pull_request.rs
 	Could not read the pull request.
 	Dismissed
 	Draft
+	Draft not saved. {error}
+	Fix the failing check `{}` on {}.
 	GitHub is still checking whether it can merge.
 	It is a draft.
 	It is no longer open.
+	Log not read. {error}
 	Merge
 	Merge #{}?
 	Merged
@@ -1138,6 +1145,7 @@ crates/keystone-desktop/src/pull_request.rs
 	Open
 	Refresh
 	Review required
+	Send to {provider}
 	The base branch's rules block it.
 	The branch has conflicts.
 	The branch is behind its base.

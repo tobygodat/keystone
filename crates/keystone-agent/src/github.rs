@@ -593,6 +593,66 @@ pub fn merge(
     .map(drop)
 }
 
+/// The Actions job a check ran as, named by the check's details link
+/// (`https://<host>/<owner>/<repo>/actions/runs/<run>/job/<job>`). Other checks and
+/// commit statuses have no job, and so no log gh is asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Job {
+    host: String,
+    repository: String,
+    id: u64,
+}
+
+impl Job {
+    /// The job `url` names, when it is in `pull_request`'s own repository, so gh never
+    /// sends its login to a host a check's link names.
+    pub fn of(url: &str, pull_request: &PullRequest) -> Option<Self> {
+        let (_, rest) = url.split_once("://")?;
+        let (host, path) = rest.split_once('/')?;
+        let (repository, job) = path.split_once("/actions/runs/")?;
+        let (_, id) = job.split_once("/job/")?;
+        let id = id.split(['/', '?', '#']).next()?.parse().ok()?;
+        let (own_host, own_repository) = self::repository(pull_request).ok()?;
+        (host.eq_ignore_ascii_case(own_host) && repository.eq_ignore_ascii_case(own_repository))
+            .then(|| Self {
+                host: host.to_owned(),
+                repository: repository.to_owned(),
+                id,
+            })
+    }
+}
+
+/// The log of `job`'s failed steps, as `gh run view --log-failed` prints it, without
+/// the terminal colour codes many workflows write.
+pub fn failed_log(program: &Path, root: &Path, job: &Job) -> Result<String, Error> {
+    let output = run(
+        program,
+        root,
+        &[
+            "run",
+            "view",
+            "--job",
+            &job.id.to_string(),
+            "--log-failed",
+            "--repo",
+            &format!("{}/{}", job.host, job.repository),
+        ],
+    )?;
+    let mut log = String::new();
+    let output = String::from_utf8_lossy(&output);
+    let mut rest: &str = &output;
+    while let Some(start) = rest.find("\x1b[") {
+        log.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after
+            .find(|c: char| ('@'..='~').contains(&c))
+            .map_or(after.len(), |end| end + 1);
+        rest = &after[end..];
+    }
+    log.push_str(rest);
+    Ok(log)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,6 +770,67 @@ mod tests {
             Err(Error::Failed {
                 output: "GraphQL: Head sha can't be blank\n".into()
             })
+        );
+    }
+
+    #[test]
+    fn finds_the_actions_job_a_check_ran_as_only_in_its_own_repository() {
+        let pull = |url: &str| PullRequest {
+            number: 4,
+            url: url.into(),
+        };
+        let github = pull("https://github.com/o/r/pull/4");
+        assert_eq!(
+            Job::of("https://github.com/o/r/actions/runs/11/job/22", &github),
+            Some(Job {
+                host: "github.com".into(),
+                repository: "o/r".into(),
+                id: 22
+            })
+        );
+        assert_eq!(
+            Job::of(
+                "https://ghe.example/o/r/actions/runs/11/job/22?pr=4",
+                &pull("https://ghe.example/o/r/pull/4")
+            )
+            .map(|j| j.id),
+            Some(22)
+        );
+        for other in [
+            "",
+            "https://github.com/o/r/runs/1",
+            "https://github.com/o/r/actions/runs/11",
+            "https://ci.example/1",
+            "https://github.com/o/r/actions/runs/11/job/latest",
+            "https://attacker.example/o/r/actions/runs/11/job/22",
+            "https://github.com/someone/else/actions/runs/11/job/22",
+        ] {
+            assert_eq!(Job::of(other, &github), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn reads_a_failed_job_log_from_its_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake(
+            dir.path(),
+            "printf 'test\\tRun cargo test\\t\\033[1m\\033[31merror\\033[0m\\n'\n",
+        );
+        let job = Job::of(
+            "https://ghe.example/o/r/actions/runs/11/job/22",
+            &PullRequest {
+                number: 4,
+                url: "https://ghe.example/o/r/pull/4".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            failed_log(&gh, dir.path(), &job).unwrap(),
+            "test\tRun cargo test\terror\n"
+        );
+        assert_eq!(
+            argv(dir.path()),
+            "run\nview\n--job\n22\n--log-failed\n--repo\nghe.example/o/r\n---\n"
         );
     }
 

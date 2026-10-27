@@ -16,8 +16,8 @@ use gpui::{
 use keystone_agent::github::{self, MergeMethod};
 use keystone_agent::worker::Worker;
 use keystone_core::{
-    CheckState, Component, MergeState, PullRequest, PullRequestAlert, PullRequestReport,
-    PullRequestState, ReviewDecision, ReviewState, WindowId,
+    Check, CheckState, Component, MergeState, PullRequest, PullRequestAlert, PullRequestReport,
+    PullRequestState, ReviewComment, ReviewDecision, ReviewState, WindowId,
 };
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
@@ -39,10 +39,11 @@ const LONGEST: Duration = Duration::from_secs(1800);
 /// gh's answers for every session, kept by the app so each window draws the same.
 #[derive(Default)]
 pub(crate) struct Monitor {
-    /// Runs gh for polls, one call at a time, and for merges, so a slow poll never
-    /// holds up a merge the user confirmed.
-    worker: Option<Worker>,
+    /// Run gh one call at a time for polls, for merges and for failed checks' logs, so
+    /// none of them waits behind another.
+    polls: Option<Worker>,
     merges: Option<Worker>,
+    logs: Option<Worker>,
     watches: HashMap<u64, Watch>,
     /// The session each window's Pull request surface showed in its last frame.
     shown: HashMap<WindowId, u64>,
@@ -79,6 +80,12 @@ enum MergeStep {
     Failed(github::Error),
 }
 
+enum Lane {
+    Poll,
+    Merge,
+    Log,
+}
+
 /// gh's report on the session's pull request, or `None` when the session's branch has
 /// no open pull request.
 type Answer = Option<(PullRequest, PullRequestReport)>;
@@ -99,14 +106,14 @@ pub(crate) struct MergeConfirm {
 impl Monitor {
     fn run<T: Send + 'static>(
         &mut self,
-        merge: bool,
+        lane: Lane,
         job: impl FnOnce() -> T + Send + 'static,
     ) -> oneshot::Receiver<T> {
         let (sender, receiver) = oneshot::channel();
-        let (worker, name) = if merge {
-            (&mut self.merges, "keystone-gh-merge")
-        } else {
-            (&mut self.worker, "keystone-gh")
+        let (worker, name) = match lane {
+            Lane::Poll => (&mut self.polls, "keystone-gh"),
+            Lane::Merge => (&mut self.merges, "keystone-gh-merge"),
+            Lane::Log => (&mut self.logs, "keystone-gh-log"),
         };
         worker
             .get_or_insert_with(|| Worker::new(name))
@@ -119,7 +126,7 @@ impl Monitor {
     /// Stops asking gh. A call gh is still answering is left to finish on its own.
     pub(crate) fn stop(&mut self) {
         self.timer = None;
-        for worker in [self.worker.take(), self.merges.take()]
+        for worker in [self.polls.take(), self.merges.take(), self.logs.take()]
             .into_iter()
             .flatten()
         {
@@ -271,7 +278,9 @@ impl AppState {
         watch.asked = Some(now);
         watch.asks += 1;
         let asks = watch.asks;
-        let answer = self.pull_requests.run(false, move || ask(folder, link));
+        let answer = self
+            .pull_requests
+            .run(Lane::Poll, move || ask(folder, link));
         cx.spawn(async move |this, cx| {
             let Ok(answer) = answer.await else {
                 return;
@@ -417,7 +426,7 @@ impl AppState {
     ) -> oneshot::Receiver<Vec<MergeMethod>> {
         self.merge_step(session, MergeStep::Asking, cx);
         let folder = gh_folder(self.session_folder(session));
-        let methods = self.pull_requests.run(true, move || {
+        let methods = self.pull_requests.run(Lane::Merge, move || {
             github::merge_methods(&github::locate()?, &folder, &link)
         });
         let (sender, receiver) = oneshot::channel();
@@ -461,7 +470,7 @@ impl AppState {
         } = confirmed;
         self.merge_step(session, MergeStep::Merging, cx);
         let folder = gh_folder(self.session_folder(session));
-        let merged = self.pull_requests.run(true, move || {
+        let merged = self.pull_requests.run(Lane::Merge, move || {
             let gh = github::locate()?;
             // GitHub's merge endpoint does not refuse what the base branch's rules
             // block when the user may bypass them, so this asks first, as gh does.
@@ -504,6 +513,59 @@ fn duration(seconds: u64) -> String {
         60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
         _ => format!("{}h {}m", seconds / 3600, seconds / 60 % 60),
     }
+}
+
+fn check_name(check: &Check) -> String {
+    if check.workflow.is_empty() {
+        check.name.clone()
+    } else {
+        format!("{} / {}", check.workflow, check.name)
+    }
+}
+
+fn comment_place(comment: &ReviewComment) -> String {
+    match comment.line {
+        Some(line) => format!("{}:{line}", comment.path),
+        None => comment.path.clone(),
+    }
+}
+
+/// What "Ask … to repair" puts in the composer: the failed check, and the first and
+/// last 32 KiB of its failed steps' log, as tool output keeps, or its link without one.
+fn repair_prompt(link: &PullRequest, check: &Check, log: Option<&str>) -> String {
+    let mut prompt = format!(
+        "Fix the failing check `{}` on {}.",
+        check_name(check),
+        link.url
+    );
+    match log.map(str::trim_end).filter(|log| !log.is_empty()) {
+        Some(log) => {
+            let log = keystone_agent::cap_output(log);
+            let longest = log.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+            let fence = "`".repeat(longest.max(2) + 1);
+            prompt.push_str(&format!("\n\n{fence}\n{log}\n{fence}"));
+        }
+        None if !check.url.is_empty() => prompt.push_str(&format!("\n\n{}", check.url)),
+        None => {}
+    }
+    prompt
+}
+
+/// What "Send to …" puts in the composer: where the comment is, who wrote it, and
+/// what it says.
+fn comment_prompt(link: &PullRequest, comment: &ReviewComment) -> String {
+    let quoted: Vec<String> = comment
+        .body
+        .lines()
+        .map(|line| format!("> {line}").trim_end().to_owned())
+        .collect();
+    format!(
+        "Address {}'s review comment on {} in {}:\n\n{}",
+        comment.author,
+        comment_place(comment),
+        link.url,
+        quoted.join("\n")
+    )
 }
 
 impl Keystone {
@@ -569,6 +631,90 @@ impl Keystone {
             });
         })
         .detach();
+    }
+
+    /// "Ask … to repair": reads the failed check's log through gh, then puts the check
+    /// and its log in the session's composer for the user to send. A log gh cannot
+    /// read, as while other jobs of its run are still going, leaves the check's link
+    /// in its place and gh's words in the error line. A click while a log is read does
+    /// nothing.
+    fn ask_to_repair(
+        &mut self,
+        session: u64,
+        link: PullRequest,
+        check: Check,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.repair.is_some() {
+            return;
+        }
+        let job = github::Job::of(&check.url, &link);
+        let log = self.state.update(cx, |state, _| {
+            let folder = gh_folder(state.session_folder(session));
+            state.pull_requests.run(Lane::Log, move || match job {
+                Some(job) => github::failed_log(&github::locate()?, &folder, &job).map(Some),
+                None => Ok(None),
+            })
+        });
+        self.repair = Some(cx.spawn_in(window, async move |this, cx| {
+            let log = log.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.repair = None;
+                let Ok(log) = log else {
+                    return this.refresh(cx);
+                };
+                let text =
+                    repair_prompt(&link, &check, log.as_ref().ok().and_then(Option::as_deref));
+                this.prefill(session, text, window, cx);
+                if let Err(error) = log {
+                    this.error = Some(format!("Log not read. {error}"));
+                    this.refresh(cx);
+                }
+            });
+        }));
+    }
+
+    /// Puts `text` in `session`'s draft for the user to send: in the composer of a
+    /// window that shows the session, this one first, else after the draft saved for it.
+    /// Another window's composer is filled once this update ends, since saving it shares
+    /// the draft with this window.
+    fn prefill(&mut self, session: u64, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected(cx) == Some(session) {
+            return self.insert_into_composer(&text, window, cx);
+        }
+        let this = cx.entity();
+        if let Some(other) = crate::open_windows(cx)
+            .into_iter()
+            .find(|other| *other != this && other.read(cx).selected(cx) == Some(session))
+        {
+            let handle = other.read(cx).handle;
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    other.update(cx, |other, cx| {
+                        other.insert_into_composer(&text, window, cx)
+                    })
+                });
+            });
+            return;
+        }
+        let Some(draft) = self
+            .state
+            .read(cx)
+            .session(session)
+            .map(|s| s.draft().to_owned())
+        else {
+            return;
+        };
+        let draft = format!("{draft}{}", crate::on_own_line(&draft, &text, ""));
+        self.error = match self
+            .state
+            .update(cx, |state, cx| state.set_draft(session, draft, cx))
+        {
+            Ok(applied) => crate::durability_warning(applied.durability),
+            Err(error) => Some(format!("Draft not saved. {error}")),
+        };
+        self.refresh(cx);
     }
 
     fn close_merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -656,6 +802,7 @@ impl Keystone {
         };
         let link = s.pull_request().cloned();
         let report = s.pull_request_watch().map(|w| w.report.clone());
+        let provider = s.provider();
         let asked = watch.is_some_and(|w| w.asked.is_some());
         let refresh = IconButton::new("pull-request-refresh", IconName::Refresh)
             .size(ButtonSize::Compact)
@@ -782,6 +929,7 @@ impl Keystone {
             );
         let now = crate::now_ms() / 1000;
         let hover = cx.theme().colors.element_hover;
+        let open = report.state.is_open();
         let pending = Color::Warning.to_hsla(cx);
         let checks = (!report.checks.is_empty()).then(|| {
             section(
@@ -827,12 +975,28 @@ impl Keystone {
                             ),
                             None => check.summary.clone(),
                         };
-                        let name = if check.workflow.is_empty() {
-                            check.name.clone()
-                        } else {
-                            format!("{} / {}", check.workflow, check.name)
-                        };
+                        let name = check_name(check);
                         let url = check.url.clone();
+                        let repair =
+                            (open && check.state == CheckState::Failed).then(|| {
+                                let (link, check) = (link.clone(), check.clone());
+                                Button::new(
+                                    ("pull-request-repair", index),
+                                    format!("Ask {provider} to repair"),
+                                )
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .debug_selector(move || format!("pull-request-repair-{index}"))
+                                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                                    this.ask_to_repair(
+                                        session,
+                                        link.clone(),
+                                        check.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                }))
+                            });
                         h_flex()
                             .id(("pull-request-check", index))
                             .automation_id(format!("pull-request-check-{index}"))
@@ -862,6 +1026,7 @@ impl Keystone {
                                     })
                                     .tabular(),
                             )
+                            .children(repair)
                             .into_any_element()
                     })
                     .collect(),
@@ -903,11 +1068,18 @@ impl Keystone {
             })
             .collect();
         reviews.extend(report.comments.iter().enumerate().map(|(index, comment)| {
-            let place = match comment.line {
-                Some(line) => format!("{}:{line}", comment.path),
-                None => comment.path.clone(),
-            };
+            let place = comment_place(comment);
             let path = folder.clone().map(|folder| (folder, comment.path.clone()));
+            let send = open.then(|| {
+                let text = comment_prompt(&link, comment);
+                Button::new(("pull-request-send", index), format!("Send to {provider}"))
+                    .style(ButtonStyle::Subtle)
+                    .size(ButtonSize::Compact)
+                    .debug_selector(move || format!("pull-request-send-{index}"))
+                    .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                        this.prefill(session, text.clone(), window, cx)
+                    }))
+            });
             v_flex()
                 .id(("pull-request-comment", index))
                 .automation_id(format!("pull-request-comment-{index}"))
@@ -939,7 +1111,9 @@ impl Keystone {
                             Label::new(comment.author.clone())
                                 .size(TextSize::Sm)
                                 .color(Color::Muted),
-                        ),
+                        )
+                        .child(div().flex_1())
+                        .children(send),
                 )
                 .child(Label::new(comment.body.clone()).size(TextSize::Ui))
                 .into_any_element()

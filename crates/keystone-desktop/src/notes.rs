@@ -4,8 +4,8 @@
 
 use crate::Keystone;
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EntityInputHandler, Focusable, IntoElement,
-    Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, App, AppContext, Context, Entity, Focusable, IntoElement, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use keystone_core::{Component, ProjectId};
 use keystone_ui::prelude::*;
@@ -206,19 +206,7 @@ impl Keystone {
         if text.trim().is_empty() || self.selected(cx).is_none() {
             return;
         }
-        let composer = self.composer.read(cx);
-        let before = &composer.value()[..composer.selected_range().start];
-        let text = if before.is_empty() || before.ends_with('\n') {
-            text
-        } else {
-            format!("\n{text}")
-        };
-        self.composer.update(cx, |input, cx| {
-            input.replace_text_in_range(None, &text, window, cx)
-        });
-        self.composer.focus_handle(cx).focus(window, cx);
-        self.save_draft(cx);
-        self.refresh(cx);
+        self.insert_into_composer(&text, window, cx);
     }
 
     pub(crate) fn note_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {

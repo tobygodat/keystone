@@ -47,9 +47,10 @@ use conversation::{Conversation, Row};
 use futures::StreamExt;
 use gpui::{
     Anchor, AnyElement, AnyView, App, AvailableSpace, BackgroundExecutor, BoxShadow, Context,
-    Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement, ListOffset,
-    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle, StyleRefinement,
-    Subscription, WeakEntity, Window, WindowBounds, canvas, div, list, point, prelude::*, px, size,
+    Entity, EntityInputHandler, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
+    ListOffset, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollHandle,
+    StyleRefinement, Subscription, WeakEntity, Window, WindowBounds, canvas, div, list, point,
+    prelude::*, px, size,
 };
 use keystone_agent::log::{Logs, Report};
 use keystone_agent::{
@@ -226,6 +227,22 @@ fn install_app_state(store: Store, cx: &mut App) -> Entity<AppState> {
 fn register_window(root: WeakEntity<Keystone>, window: &Window, cx: &mut App) {
     cx.global_mut::<DesktopApp>().windows.push(root.clone());
     window.on_window_should_close(cx, move |window, cx| close_window(&root, window, cx));
+}
+
+/// `text` with the line breaks that put it on lines of its own between `before` and
+/// `after`.
+fn on_own_line(before: &str, text: &str, after: &str) -> String {
+    let lead = if before.is_empty() || before.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let trail = if after.is_empty() || after.starts_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    format!("{lead}{text}{trail}")
 }
 
 /// The open Keystone windows, without any that closed since.
@@ -487,6 +504,8 @@ struct Keystone {
     /// The session the Pull request surface showed in the frame being built.
     pull_request_drawn: Option<u64>,
     merge_confirm: Option<pull_request::MergeConfirm>,
+    /// Reading a failed check's log for "Ask … to repair".
+    repair: Option<gpui::Task<()>>,
     slash: slash_menu::SlashMenu,
     mentions: mentions::Mentions,
     attach: attachments::Attach,
@@ -876,6 +895,7 @@ impl Keystone {
             pull_request_focus: cx.focus_handle(),
             pull_request_drawn: None,
             merge_confirm: None,
+            repair: None,
             slash,
             mentions,
             attach: attachments::Attach::new(cx),
@@ -1045,6 +1065,21 @@ impl Keystone {
                 false
             }
         }
+    }
+
+    /// Puts `text` on lines of its own after the composer's cursor or selection, which
+    /// it keeps, focuses the composer and saves the draft. Nothing is sent.
+    fn insert_into_composer(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let composer = self.composer.read(cx);
+        let (value, at) = (composer.value(), composer.selected_range().end);
+        let text = on_own_line(&value[..at], text, &value[at..]);
+        let at = value[..at].encode_utf16().count();
+        self.composer.update(cx, |input, cx| {
+            input.replace_text_in_range(Some(at..at), &text, window, cx)
+        });
+        self.composer.focus_handle(cx).focus(window, cx);
+        self.save_draft(cx);
+        self.refresh(cx);
     }
 
     /// Returns false, with the error shown, when the draft or the session cannot be
