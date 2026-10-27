@@ -342,8 +342,10 @@ fn codex_injects_start_and_resume_only_after_initialization() {
         );
         assert!(out.writes.is_empty());
         codex_initialized(&mut driver, &mut out);
-        assert_eq!(out.writes.len(), 2);
+        assert_eq!(out.writes.len(), 3);
         assert_eq!(wire(&out.writes[0])["method"], "initialized");
+        assert_eq!(wire(&out.writes[2])["method"], "account/rateLimits/read");
+        assert!(!out.writes[2].contains("synthetic-token"));
         let open = wire(&out.writes[1]);
         assert_eq!(
             open["method"],

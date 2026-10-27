@@ -1613,3 +1613,194 @@ fn a_fork_codex_refuses_fails_with_the_handoff_way_on_and_no_new_thread() {
         Event::Failed { message } if *message == format!("Could not fork this Codex conversation: turn not found: not-a-turn. Hand off ({}) to continue it.", keystone_agent::HAND_OFF_KEYS))),
         "{:?}", out.events);
 }
+
+/// An `account/rateLimits/read` answer, as Codex 0.163.0 sends one.
+fn rate_limits_answer(body: &str) -> String {
+    format!(r#"{{"id":"keystone-rate-limits",{body}}}"#)
+}
+
+fn limit_window(
+    id: &str,
+    label: &str,
+    used: f64,
+    resets_at: Option<u64>,
+) -> keystone_core::LimitWindow {
+    keystone_core::LimitWindow {
+        id: id.into(),
+        label: label.into(),
+        used_percent: used,
+        resets_at,
+    }
+}
+
+#[test]
+fn an_initialized_app_server_is_asked_its_rate_limits_after_the_waiting_requests() {
+    let mut out = Outputs::default();
+    let mut driver = CodexDriver::new("0.0.0-test", &mut out);
+    driver.command(
+        Command::Open {
+            session: SESSION,
+            cwd: "/tmp/repo".into(),
+            resume: None,
+            model: None,
+        },
+        &mut out,
+    );
+    let mut out = Outputs::default();
+    driver.on_line(br#"{"id":1,"result":{"userAgent":"test"}}"#, &mut out);
+    let written: Vec<Value> = out
+        .writes
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        written
+            .iter()
+            .map(|w| w["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["initialized", "thread/start", "account/rateLimits/read"]
+    );
+    assert_eq!(
+        written[2],
+        serde_json::json!({"id": "keystone-rate-limits", "method": "account/rateLimits/read",
+            "params": {"excludeResetCreditDetails": true}})
+    );
+    assert_eq!(written[1]["id"], 2);
+    assert!(out.events.is_empty());
+}
+
+#[test]
+fn a_rate_limits_answer_reports_each_bucket_once_and_reads_nothing_else() {
+    let mut driver = opened();
+    let out = feed(
+        &mut driver,
+        &[rate_limits_answer(
+            r#""result":{"accountId":"synthetic","ordinaryUsageAllowed":true,"rateLimitResetCredits":null,
+            "rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":41,"windowDurationMins":300,"resetsAt":1800000000},"secondary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1800500000},"credits":{"hasCredits":true,"unlimited":false,"balance":"5"},"planType":"pro"},
+            "rateLimitsByLimitId":{
+                "codex":{"limitId":"codex","primary":{"usedPercent":41,"windowDurationMins":300,"resetsAt":1800000000},"secondary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1800500000}},
+                "codex_other":{"limitId":"codex_other","limitName":"Spark","primary":{"usedPercent":3,"windowDurationMins":null,"resetsAt":null},"secondary":null},
+                "codex_bengalfox":{"limitId":null,"primary":{"usedPercent":9,"windowDurationMins":300,"resetsAt":null}},
+                "renamed":{"limitId":"codex_spark","limitName":"Spark","primary":{"usedPercent":5,"windowDurationMins":300,"resetsAt":null}},
+                "broken":{"primary":{"usedPercent":"full"}},
+                "empty":null}}"#,
+        )],
+    );
+    assert_eq!(
+        out.events,
+        vec![(
+            0,
+            Event::Usage(vec![
+                limit_window("codex/primary", "5-hour", 41.0, Some(1_800_000_000)),
+                limit_window("codex/secondary", "Weekly", 12.0, Some(1_800_500_000)),
+                limit_window("codex_other/primary", "Spark Primary", 3.0, None),
+                limit_window("codex_spark/primary", "Spark 5-hour", 5.0, None),
+            ])
+        )]
+    );
+    assert!(out.writes.is_empty());
+    assert_eq!(driver.unknown, 0);
+}
+
+#[test]
+fn a_rate_limits_error_or_unreadable_answer_is_ignored_quietly() {
+    let mut driver = opened();
+    let out = feed(
+        &mut driver,
+        &[
+            rate_limits_answer(
+                r#""error":{"code":-32600,"message":"codex account authentication required to read rate limits"}"#,
+            ),
+            rate_limits_answer(
+                r#""error":{"code":-32600,"message":"Invalid request: unknown variant `account/rateLimits/read`"}"#,
+            ),
+            rate_limits_answer(
+                r#""error":{"code":-32603,"message":"no"},"result":{"rateLimits":{"primary":{"usedPercent":50}}}"#,
+            ),
+            rate_limits_answer(r#""result":null"#),
+            rate_limits_answer(r#""result":"a string""#),
+            rate_limits_answer(r#""result":{"rateLimits":"full","rateLimitsByLimitId":[1,2]}"#),
+            rate_limits_answer(r#""result":{"rateLimits":{"primary":{"usedPercent":"12"}}}"#),
+            rate_limits_answer(
+                r#""result":{"rateLimits":{"limitId":null,"primary":null,"secondary":null},"rateLimitsByLimitId":null}"#,
+            ),
+            r#"{"id":"keystone-rate-limits"}"#.into(),
+        ],
+    );
+    assert!(out.events.is_empty(), "{:?}", out.events);
+    assert!(out.writes.is_empty(), "{:?}", out.writes);
+    assert_eq!(driver.unknown, 0);
+}
+
+#[test]
+fn a_late_rate_limits_answer_keeps_the_windows_a_notification_reported() {
+    let mut driver = opened();
+    let out = feed(
+        &mut driver,
+        &[
+            r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":40,"windowDurationMins":300,"resetsAt":1800000000},"secondary":null}}}"#.into(),
+            rate_limits_answer(
+                r#""result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":30,"windowDurationMins":300,"resetsAt":1700000000},"secondary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1800500000}}}"#,
+            ),
+        ],
+    );
+    assert_eq!(
+        out.events,
+        vec![
+            (
+                0,
+                Event::Usage(vec![limit_window(
+                    "codex/primary",
+                    "5-hour",
+                    40.0,
+                    Some(1_800_000_000)
+                )])
+            ),
+            (
+                0,
+                Event::Usage(vec![limit_window(
+                    "codex/secondary",
+                    "Weekly",
+                    12.0,
+                    Some(1_800_500_000)
+                )])
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_rate_limits_answer_during_a_turn_leaves_the_turn_alone() {
+    let mut driver = opened();
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "first".into(),
+            images: Vec::new(),
+        },
+        &mut out,
+    );
+    driver.on_line(started("T1").as_bytes(), &mut out);
+    assert!(driver.is_running(SESSION));
+    let out = feed(
+        &mut driver,
+        &[rate_limits_answer(
+            r#""result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":85,"windowDurationMins":300,"resetsAt":1800000000}}}"#,
+        )],
+    );
+    assert!(driver.is_running(SESSION));
+    assert!(out.writes.is_empty());
+    assert_eq!(
+        out.events,
+        vec![(
+            0,
+            Event::Usage(vec![limit_window(
+                "codex/primary",
+                "5-hour",
+                85.0,
+                Some(1_800_000_000)
+            )])
+        )]
+    );
+}

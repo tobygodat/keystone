@@ -324,7 +324,15 @@ fn codex_history_is_read_from_the_accounts_app_server_without_resuming_anything(
     let (result, methods) = read_codex(&[], home.path(), "thread-a");
     let snapshot = result.unwrap();
     assert_eq!(hash_tree(home.path()), before, "reading never writes");
-    assert_eq!(methods, ["initialize", "initialized", "thread/turns/list"]);
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "initialized",
+            "thread/turns/list",
+            "account/rateLimits/read"
+        ]
+    );
     assert_eq!(snapshot.turns.len(), 2);
     assert_eq!(snapshot.turns[0].end, Some(TurnStatus::Completed));
     assert_eq!(snapshot.turns[1].items[2].status, ItemStatus::Interrupted);
@@ -350,6 +358,7 @@ fn codex_history_is_read_from_the_accounts_app_server_without_resuming_anything(
             "initialize",
             "initialized",
             "thread/turns/list",
+            "account/rateLimits/read",
             "thread/items/list"
         ]
     );

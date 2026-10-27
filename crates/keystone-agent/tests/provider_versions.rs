@@ -315,7 +315,13 @@ fn observed_non_inference_handshakes_accept_the_installed_cli_versions_and_early
             .as_bytes(),
         &mut out,
     );
-    assert_eq!(out.writes, [r#"{"method":"initialized"}"#]);
+    assert_eq!(
+        out.writes,
+        [
+            r#"{"method":"initialized"}"#,
+            r#"{"id":"keystone-rate-limits","method":"account/rateLimits/read","params":{"excludeResetCreditDetails":true}}"#
+        ]
+    );
     assert!(out.events.is_empty());
     let mut out = Outputs::default();
     let mut claude =

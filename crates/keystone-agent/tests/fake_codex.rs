@@ -477,3 +477,96 @@ fn a_rejected_steer_retried_as_a_turn_uses_the_mode_chosen_since() {
         Event::ItemCompleted(item) if item.text.contains("You wrote: late"))));
     assert_eq!(policy_of(&events), "on-request / readOnly");
 }
+
+/// A scripted Codex whose `account/rateLimits/read` answers as `setting` says, or like
+/// Codex with no login when it is empty.
+fn connect_with_rate_limits(
+    dir: &std::path::Path,
+    setting: &str,
+) -> (CodexConnection, Receiver<()>) {
+    use std::os::unix::fs::PermissionsExt;
+    unsafe { std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "20") };
+    let script = dir.join("codex");
+    let export = if setting.is_empty() {
+        String::new()
+    } else {
+        std::fs::write(dir.join("rate-limits"), setting).unwrap();
+        format!(
+            "export KEYSTONE_FAKE_CODEX_RATE_LIMITS=\"$(cat '{}')\"\n",
+            dir.join("rate-limits").display()
+        )
+    };
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n{export}exec '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_keystone-fake-codex")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (tx, rx) = channel();
+    let wake = Arc::new(move || {
+        let _ = tx.send(());
+    });
+    (CodexConnection::new(Some(script), "0.0.0-test", wake), rx)
+}
+
+/// The scripted `account/rateLimits/read` answer reaches the account's usage before the
+/// first turn ends, without an `account/rateLimits/updated`; an error, an app-server
+/// that does not know the method, or the default answer with no login reports nothing,
+/// and the turn completes all the same.
+#[test]
+fn an_app_server_reports_its_rate_limits_read_as_the_first_turn_runs() {
+    let custom = r#"{"rateLimits":{"limitId":"codex","primary":{"usedPercent":7,"windowDurationMins":300,"resetsAt":null}}}"#;
+    for setting in ["85", "error", "unsupported", "", custom] {
+        let dir = tempfile::tempdir().unwrap();
+        let (conn, wake) = connect_with_rate_limits(dir.path(), setting);
+        conn.command(Command::Open {
+            session: 1,
+            cwd: "/tmp".into(),
+            resume: None,
+            model: None,
+        });
+        conn.command(Command::Send {
+            session: 1,
+            text: "hello".into(),
+            images: Vec::new(),
+        });
+        let events = until(&conn, &wake, completed);
+        let usage: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Usage(windows) => Some(
+                    windows
+                        .iter()
+                        .map(|w| (w.id.as_str(), w.used_percent, w.resets_at.is_some()))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let expected = match setting {
+            "85" => vec![vec![
+                ("codex/primary", 85.0, true),
+                ("codex/secondary", 20.0, true),
+            ]],
+            s if s == custom => vec![vec![("codex/primary", 7.0, false)]],
+            _ => Vec::new(),
+        };
+        assert_eq!(usage, expected, "{setting}: {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Failed { .. } | Event::Warning { .. })),
+            "{events:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Event::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            })
+        ));
+    }
+}

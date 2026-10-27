@@ -24,6 +24,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const CATALOG_PAGES: u32 = 20;
 
+/// The ID of the `account/rateLimits/read` an app-server is asked once it is
+/// initialized. It is outside the numbered requests, so no other request's ID moves,
+/// and nothing waits for it: an error or an answer Keystone cannot read only leaves the
+/// account's usage as it was.
+const RATE_LIMITS_REQUEST: &str = "keystone-rate-limits";
+
 /// Notifications Keystone does not show. Codex skips sending them.
 const OPT_OUT: [&str; 3] = [
     "remoteControl/status/changed",
@@ -238,6 +244,10 @@ pub struct CodexDriver {
     widgets: bool,
     /// Import listings waiting for their turn counts, by ticket.
     listings: HashMap<u64, Listing>,
+    /// The windows `account/rateLimits/updated` reported in this process. A later
+    /// `account/rateLimits/read` answer leaves them alone: it was asked for first, so it
+    /// is taken as the older reading.
+    reported: HashSet<String>,
     /// Messages Keystone did not recognize. Never fatal.
     pub unknown: u64,
 }
@@ -273,6 +283,7 @@ impl CodexDriver {
             injected: HashSet::new(),
             widgets,
             listings: HashMap::new(),
+            reported: HashSet::new(),
             unknown: 0,
         };
         let line = driver.request("initialize", params, Pending::Initialize);
@@ -923,6 +934,19 @@ impl CodexDriver {
     }
 
     fn on_response(&mut self, id: Value, error: Option<RpcError>, line: &[u8], out: &mut Outputs) {
+        // Like `account/rateLimits/updated`, the answer is account-wide.
+        if id == RATE_LIMITS_REQUEST {
+            let mut windows = if error.is_none() {
+                read_windows(line)
+            } else {
+                Vec::new()
+            };
+            windows.retain(|window| !self.reported.contains(&window.id));
+            if !windows.is_empty() {
+                out.event(0, Event::Usage(windows));
+            }
+            return;
+        }
         let Some(pending) = id.as_u64().and_then(|id| self.pending.remove(&id)) else {
             self.unknown += 1;
             return;
@@ -961,6 +985,11 @@ impl CodexDriver {
                 self.ready = true;
                 out.writes.push(r#"{"method":"initialized"}"#.to_owned());
                 out.writes.append(&mut self.before_ready);
+                out.writes.push(
+                    json!({"id": RATE_LIMITS_REQUEST, "method": "account/rateLimits/read",
+                        "params": {"excludeResetCreditDetails": true}})
+                    .to_string(),
+                );
             }
             Pending::Baseline { cwd } => {
                 let result = serde_json::from_slice::<Response<ThreadResult>>(line)
@@ -1415,6 +1444,8 @@ impl CodexDriver {
                     return self.unknown += 1;
                 };
                 let windows = note.rate_limits.windows();
+                self.reported
+                    .extend(windows.iter().map(|window| window.id.clone()));
                 if !windows.is_empty() {
                     out.event(0, Event::Usage(windows));
                 }
@@ -1808,6 +1839,42 @@ impl RateLimitSnapshot {
             })
             .collect()
     }
+}
+
+/// The windows of an `account/rateLimits/read` answer, as Codex 0.163.0 reports them:
+/// `rateLimits` and each bucket of `rateLimitsByLimitId`, read like
+/// `account/rateLimits/updated`. Each bucket is read on its own, so one Keystone cannot
+/// read is left out, and a window both views carry is reported once. A bucket other than
+/// `codex` with no `limitName` is left out rather than shown under its raw ID.
+fn read_windows(line: &[u8]) -> Vec<LimitWindow> {
+    let Ok(response) = serde_json::from_slice::<Value>(line) else {
+        return Vec::new();
+    };
+    let answer = &response["result"];
+    let buckets = answer["rateLimitsByLimitId"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, bucket)| (Some(id), bucket));
+    let mut windows: Vec<LimitWindow> = Vec::new();
+    for (id, bucket) in std::iter::once((None, &answer["rateLimits"])).chain(buckets) {
+        let Ok(mut snapshot) = RateLimitSnapshot::deserialize(bucket) else {
+            continue;
+        };
+        snapshot.limit_id = snapshot.limit_id.or_else(|| id.cloned());
+        if snapshot.limit_name.is_none()
+            && snapshot.limit_id.as_deref().is_some_and(|id| id != "codex")
+        {
+            continue;
+        }
+        for window in snapshot.windows() {
+            if !windows.iter().any(|w| w.id == window.id) {
+                windows.push(window);
+            }
+        }
+    }
+    windows.sort_by(|a, b| a.id.cmp(&b.id));
+    windows
 }
 
 #[derive(Deserialize)]

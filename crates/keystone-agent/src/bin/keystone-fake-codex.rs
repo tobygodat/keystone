@@ -66,6 +66,12 @@
 //! A prompt containing "usage NN" ends its turn with synthetic, labelled
 //! `account/rateLimits/updated` (the 5-hour window at NN%) and `thread/tokenUsage/updated`
 //! notifications.
+//!
+//! `account/rateLimits/read` answers like Codex 0.163.0 with no login, a -32600 error,
+//! unless `KEYSTONE_FAKE_CODEX_RATE_LIMITS` scripts it: a number NN gives synthetic,
+//! labelled windows with the 5-hour one at NN% (see [`scripted_rate_limits`]), `error`
+//! answers with an error, `unsupported` as an older Codex that does not know the method,
+//! and anything else is parsed as the answer's JSON (`null` if it is not JSON).
 
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -598,6 +604,27 @@ fn main() {
                     json!({"id": id, "error": {"code": -32600, "message": "invalid cursor"}}),
                 ),
             },
+            "account/rateLimits/read" => match std::env::var("KEYSTONE_FAKE_CODEX_RATE_LIMITS")
+                .ok()
+                .as_deref()
+            {
+                None => emit(
+                    &out,
+                    json!({"id": id, "error": {"code": -32600, "message": "codex account authentication required to read rate limits"}}),
+                ),
+                Some("error") => emit(
+                    &out,
+                    json!({"id": id, "error": {"code": -32603, "message": "Scripted rateLimits failure"}}),
+                ),
+                Some("unsupported") => emit(
+                    &out,
+                    json!({"id": id, "error": {"code": -32600, "message": "Invalid request: unknown variant `account/rateLimits/read`"}}),
+                ),
+                Some(setting) => reply(setting.parse().map_or_else(
+                    |_| serde_json::from_str(setting).unwrap_or_default(),
+                    scripted_rate_limits,
+                )),
+            },
             "skills/list" => {
                 let cwd = params["cwds"][0].as_str().unwrap_or_default().to_owned();
                 reply(json!({"data": [{"cwd": cwd, "skills": skills(&cwd)}]}));
@@ -970,6 +997,25 @@ fn run_turn(
         emit_usage(out, thread, turn_id, percent);
     }
     finish(out, thread, turn_id, "completed");
+}
+
+/// A synthetic, labelled `account/rateLimits/read` answer in Codex 0.163.0's shape: the
+/// 5-hour window at `percent`, resetting in two hours, and the weekly one at 20%,
+/// resetting in four days, in both `rateLimits` and `rateLimitsByLimitId`, beside the
+/// account, plan and credit fields Keystone never reads.
+fn scripted_rate_limits(percent: u64) -> Value {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let codex = json!({"limitId": "codex", "limitName": null, "normalModelSlug": null,
+        "primary": {"usedPercent": percent, "windowDurationMins": 300, "resetsAt": now + 2 * 3600},
+        "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": now + 4 * 86_400},
+        "credits": {"hasCredits": false, "unlimited": false, "balance": null},
+        "individualLimit": null, "spendControlReached": null, "planType": "pro",
+        "rateLimitReachedType": null});
+    json!({"keystoneFake": "synthetic test data", "accountId": "synthetic-account",
+        "ordinaryUsageAllowed": true, "rateLimitResetCredits": null,
+        "rateLimits": codex, "rateLimitsByLimitId": {"codex": codex}})
 }
 
 /// The percentage a prompt such as "usage 85" asks the fake to report.
