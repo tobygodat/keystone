@@ -359,7 +359,14 @@ impl Keystone {
                     .when(row > 0, |d| d.hairline_t(cx))
                     .child(div().flex_1().min_w_0().child(Label::new(label).truncate()))
                     .child(self.control(page, field, appearance, cx))
-            });
+            })
+            .collect::<Vec<_>>();
+        let custom = match page.section {
+            Section::Accounts => Some(self.accounts_section(page, cx).into_any_element()),
+            Section::Integrations => Some(self.integrations_section(page, cx).into_any_element()),
+            Section::Prompts => Some(self.prompts_section(page, cx).into_any_element()),
+            _ => None,
+        };
         let content = div()
             .id("settings-content")
             .flex_1()
@@ -369,30 +376,32 @@ impl Keystone {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(if page.section == Section::Integrations {
-                        720.
-                    } else {
-                        560.
-                    }))
-                    .p(spacing::XL)
+                    .max_w(px(640.))
+                    .mx_auto()
+                    .px(spacing::LG)
+                    .py(spacing::XL)
                     .child(
-                        div().pb(spacing::SM).child(
+                        div().pb(spacing::LG).child(
                             Label::new(title)
-                                .size(TextSize::Body)
+                                .size(TextSize::Title)
                                 .weight(FontWeight::SEMIBOLD)
                                 .color(Color::Strong),
                         ),
                     )
-                    .children(rows)
-                    .when(page.section == Section::Accounts, |d| {
-                        d.child(self.accounts_section(page, cx))
+                    .when(!rows.is_empty(), |d| {
+                        d.child(
+                            v_flex()
+                                .surface(Elevation::Surface, cx)
+                                .px(spacing::LG)
+                                .children(rows),
+                        )
                     })
-                    .when(page.section == Section::Integrations, |d| {
-                        d.child(self.integrations_section(page, cx))
-                    })
-                    .when(page.section == Section::Prompts, |d| {
-                        d.child(self.prompts_section(page, cx))
-                    })
+                    .children(custom.map(|section| {
+                        v_flex()
+                            .surface(Elevation::Surface, cx)
+                            .p(spacing::LG)
+                            .child(section)
+                    }))
                     .children(self.error_line(cx).map(|error| {
                         div()
                             .pt(spacing::MD)

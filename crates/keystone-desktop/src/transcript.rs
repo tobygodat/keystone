@@ -53,7 +53,7 @@ pub struct RestoreControl {
 }
 
 /// A turn's checkpoint: Restore to here, and how many files the turn changed.
-fn restore_button(index: usize, control: RestoreControl) -> AnyElement {
+fn restore_button(index: usize, control: RestoreControl, quiet: bool) -> AnyElement {
     let files = control
         .files
         .filter(|files| *files > 0)
@@ -64,14 +64,21 @@ fn restore_button(index: usize, control: RestoreControl) -> AnyElement {
     h_flex()
         .gap_1()
         .child(
-            IconButton::new(("restore", index), IconName::Restore)
-                .size(ButtonSize::Compact)
-                .aria_label(control.unavailable.unwrap_or("Restore to here"))
-                .tooltip(Tooltip::text(
-                    control.unavailable.unwrap_or("Restore to here"),
-                ))
-                .debug_selector(move || format!("restore-{index}"))
-                .on_click(move |event, window, cx| (control.on_click)(event, window, cx)),
+            div()
+                .when(
+                    quiet && files.is_none() && control.unavailable.is_none(),
+                    |d| d.opacity(0.).group_hover("agent-reply", |s| s.opacity(1.)),
+                )
+                .child(
+                    IconButton::new(("restore", index), IconName::Restore)
+                        .size(ButtonSize::Compact)
+                        .aria_label(control.unavailable.unwrap_or("Restore to here"))
+                        .tooltip(Tooltip::text(
+                            control.unavailable.unwrap_or("Restore to here"),
+                        ))
+                        .debug_selector(move || format!("restore-{index}"))
+                        .on_click(move |event, window, cx| (control.on_click)(event, window, cx)),
+                ),
         )
         .when_some(files, |d, files| {
             d.child(
@@ -267,6 +274,7 @@ pub fn row(
                     _ => markdown,
                 };
                 v_flex()
+                    .group("agent-reply")
                     .gap_1()
                     .child(markdown)
                     .when(item.status == ItemStatus::Interrupted, |d| {
@@ -280,35 +288,54 @@ pub fn row(
                     .child(
                         h_flex()
                             .when(item.status == ItemStatus::InProgress, |d| d.invisible())
-                            .child(
-                                CopyButton::new(
-                                    ("copy-reply", index),
-                                    "Copy reply",
-                                    item.text.clone(),
-                                )
-                                .keyboard(
-                                    action
-                                        .as_ref()
-                                        .filter(|(n, _)| *n == CopyTarget::Row && row_copy)
-                                        .map(|(_, f)| f),
-                                ),
-                            )
-                            .when_some(fork.filter(|_| row_copy), |d, fork| {
-                                d.child(fork_button(index, fork, &action))
-                            })
-                            .when_some(second_opinion.filter(|_| row_copy), |d, (selector, ask)| {
-                                d.child(
-                                    IconButton::new(("second-opinion", index), IconName::Chat)
-                                        .size(ButtonSize::Compact)
-                                        .aria_label("Ask for a second opinion on this reply")
-                                        .tooltip(Tooltip::with_key("Second opinion…", "Ctrl+Alt+O"))
-                                        .debug_selector(move || selector)
-                                        .on_click(move |event, window, cx| ask(event, window, cx)),
-                                )
-                            })
                             .when_some(restore.filter(|_| row_copy), |d, restore| {
-                                d.child(restore_button(index, restore))
-                            }),
+                                d.child(restore_button(index, restore, !selected))
+                            })
+                            .child(
+                                h_flex()
+                                    .when(!selected, |d| {
+                                        d.opacity(0.).group_hover("agent-reply", |s| s.opacity(1.))
+                                    })
+                                    .child(
+                                        CopyButton::new(
+                                            ("copy-reply", index),
+                                            "Copy reply",
+                                            item.text.clone(),
+                                        )
+                                        .keyboard(
+                                            action
+                                                .as_ref()
+                                                .filter(|(n, _)| *n == CopyTarget::Row && row_copy)
+                                                .map(|(_, f)| f),
+                                        ),
+                                    )
+                                    .when_some(fork.filter(|_| row_copy), |d, fork| {
+                                        d.child(fork_button(index, fork, &action))
+                                    })
+                                    .when_some(
+                                        second_opinion.filter(|_| row_copy),
+                                        |d, (selector, ask)| {
+                                            d.child(
+                                                IconButton::new(
+                                                    ("second-opinion", index),
+                                                    IconName::Chat,
+                                                )
+                                                .size(ButtonSize::Compact)
+                                                .aria_label(
+                                                    "Ask for a second opinion on this reply",
+                                                )
+                                                .tooltip(Tooltip::with_key(
+                                                    "Second opinion…",
+                                                    "Ctrl+Alt+O",
+                                                ))
+                                                .debug_selector(move || selector)
+                                                .on_click(move |event, window, cx| {
+                                                    ask(event, window, cx)
+                                                }),
+                                            )
+                                        },
+                                    ),
+                            ),
                     )
                     .into_any_element()
             }
@@ -355,18 +382,19 @@ pub fn row(
                     CopyButton::new(("copy-command", index), "Copy output", output.to_owned())
                 };
                 v_flex()
-                    .surface(Elevation::Raised, cx)
+                    .bg(colors.surface_raised)
+                    .rounded(radius::PANEL)
                     .overflow_hidden()
                     .child(
                         h_flex()
-                            .min_h(px(38.))
+                            .min_h(px(36.))
                             .pl_3()
                             .pr_1()
                             .py_1()
                             .gap_2()
-                            .hairline_b(cx)
                             .font_mono(cx)
                             .text_size(TextSize::Ui.px())
+                            .text_color(colors.text_muted)
                             .child(div().flex_1().min_w_0().child(format!("$ {command}")))
                             .child(Label::new(status).size(TextSize::Sm).color(color))
                             .child(
@@ -390,10 +418,10 @@ pub fn row(
                             div()
                                 .automation_id(body_selector)
                                 .px_3()
-                                .py_2()
+                                .pb_2p5()
                                 .font_mono(cx)
                                 .text_size(TextSize::Ui.px())
-                                .text_color(colors.text_muted)
+                                .text_color(colors.text)
                                 .child(output.to_owned()),
                         )
                     })
@@ -550,7 +578,8 @@ fn result_row(
     };
     v_flex()
         .automation_id(format!("result-{index}"))
-        .surface(Elevation::Raised, cx)
+        .bg(colors.surface_raised)
+        .rounded(radius::PANEL)
         .overflow_hidden()
         .child(
             h_flex()
@@ -559,7 +588,6 @@ fn result_row(
                 .pr_1()
                 .py_1()
                 .gap_2()
-                .hairline_b(cx)
                 .text_size(TextSize::Ui.px())
                 .child(
                     h_flex()
@@ -595,7 +623,7 @@ fn result_row(
         .child(
             v_flex()
                 .px_3()
-                .py_2()
+                .pb_2p5()
                 .gap_1()
                 .when_some(detail, |d, detail| {
                     d.child(Label::new(detail).size(TextSize::Ui).color(Color::Danger))

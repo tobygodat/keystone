@@ -19,7 +19,7 @@ pub mod radius {
     pub const ROW: Pixels = px(8.);
     pub const PANEL: Pixels = px(10.);
     pub const POPOVER: Pixels = px(12.);
-    pub const COMPOSER: Pixels = px(18.);
+    pub const COMPOSER: Pixels = px(20.);
 }
 
 thread_local! {
@@ -56,12 +56,12 @@ impl TextSize {
     pub fn px(self) -> Pixels {
         TEXT_SCALE.get()
             * px(match self {
-                TextSize::Xs => 10.,
-                TextSize::Sm => 11.,
+                TextSize::Xs => 11.,
+                TextSize::Sm => 12.,
                 TextSize::Ui => 12.,
                 TextSize::Base => 13.,
-                TextSize::Body => 14.,
-                TextSize::Title => 24.,
+                TextSize::Body => 15.,
+                TextSize::Title => 20.,
             })
     }
 
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn line_heights_are_even_whole_pixels() {
         let heights = TextSize::ALL.map(TextSize::line_height);
-        assert_eq!(heights, [14., 16., 16., 18., 20., 30.].map(px));
+        assert_eq!(heights, [16., 16., 16., 18., 22., 26.].map(px));
         set_text_scale(16. / 13.);
         assert_eq!(TextSize::Base.line_height(), px(22.));
         set_text_scale(1.);

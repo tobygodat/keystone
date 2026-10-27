@@ -401,25 +401,18 @@ impl RenderOnce for TabBar {
             .drops
             .target(end, window_id, &id, count, count, (px(MARKER), px(0.)));
 
-        let bar = h_flex()
-            .id(id.clone())
-            .w_full()
-            .h(height)
-            .px(px(6.))
-            .bg(colors.sidebar)
-            .hairline_b(cx)
-            .child(
-                h_flex()
-                    .id((id.clone(), "strip"))
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .gap(px(2.))
-                    .overflow_x_scroll()
-                    .track_scroll(&scroll)
-                    .children(tabs)
-                    .child(end),
-            );
+        let bar = h_flex().id(id.clone()).w_full().h(height).px(px(6.)).child(
+            h_flex()
+                .id((id.clone(), "strip"))
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .gap(px(2.))
+                .overflow_x_scroll()
+                .track_scroll(&scroll)
+                .children(tabs)
+                .child(end),
+        );
         crate::automation::tag(bar, id.to_string())
     }
 }

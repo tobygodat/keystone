@@ -106,7 +106,7 @@ gpui::actions!(
 );
 
 /// The transcript and the composer share one centred column.
-const CONTENT_WIDTH: f32 = 640.;
+const CONTENT_WIDTH: f32 = 720.;
 
 /// Keystone's mark: two muted side stones and the keystone in the accent colour.
 fn arch_mark(size: Pixels) -> impl IntoElement {
@@ -1349,11 +1349,12 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let hover = cx.theme().colors.element_hover;
+        let in_session = session.is_some();
         let bar = h_flex()
             .flex_shrink_0()
-            .h(cx.theme().density.control(px(44.)))
-            .px(px(6.))
-            .gap(px(10.))
+            .h(cx.theme().density.control(px(48.)))
+            .px(px(8.))
+            .gap(px(8.))
             .child(
                 self.own_press(
                     IconButton::new("sidebar-toggle", IconName::Panel)
@@ -1377,17 +1378,19 @@ impl Keystone {
                         .map_or("keystone", |project| project.name())
                         .to_owned(),
                 )
+                .size(TextSize::Ui)
                 .color(Color::Muted),
             )
             .when(self.settings.is_some(), |d| {
-                d.child(Label::new("/").color(Color::Faint)).child(
-                    Label::new("Settings")
-                        .weight(FontWeight::MEDIUM)
-                        .color(Color::Strong),
-                )
+                d.child(Label::new("/").size(TextSize::Ui).color(Color::Faint))
+                    .child(
+                        Label::new("Settings")
+                            .weight(FontWeight::MEDIUM)
+                            .color(Color::Strong),
+                    )
             })
             .when_some(session, |d, (title, settled, branch)| {
-                d.child(Label::new("/").color(Color::Faint))
+                d.child(Label::new("/").size(TextSize::Ui).color(Color::Faint))
                     .child(
                         div()
                             .id("rename-session")
@@ -1414,16 +1417,18 @@ impl Keystone {
                             })),
                     )
                     .when(settled, |d| {
-                        d.child(Label::new("Settled").color(Color::Muted))
+                        d.child(Label::new("Settled").size(TextSize::Ui).color(Color::Muted))
                     })
                     .children(
                         branch.map(|(branch, missing)| worktrees::branch_chip(branch, missing)),
                     )
                     .children(self.pull_request_link(cx))
-                    .child(self.own_press(handoff::button(), cx))
-                    .child(self.own_press(second_opinion::button(), cx))
             })
             .child(div().flex_1())
+            .when(in_session, |d| {
+                d.child(self.own_press(handoff::button(), cx))
+                    .child(self.own_press(second_opinion::button(), cx))
+            })
             .when(self.settings.is_none(), |d| {
                 d.children(self.split_toggle(cx))
                     .child(self.customize_toggle(cx))
@@ -1431,7 +1436,8 @@ impl Keystone {
             .child(
                 self.own_press(
                     h_flex()
-                        .gap(px(10.))
+                        .ml(px(8.))
+                        .gap(px(4.))
                         .child(
                             IconButton::new("minimize", IconName::Minus)
                                 .debug_selector(|| "minimize".into())
@@ -1574,10 +1580,10 @@ impl Keystone {
                 self.drag_window(
                     h_flex()
                         .flex_shrink_0()
-                        .h(density.control(px(44.)))
-                        .pl(px(13.))
+                        .h(density.control(px(48.)))
+                        .pl(px(16.))
                         .pr_2()
-                        .gap(px(10.))
+                        .gap(px(8.))
                         .child(arch_mark(px(20.)))
                         .child(
                             Label::new("keystone")
@@ -1600,7 +1606,7 @@ impl Keystone {
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .pl(px(14.))
+                            .pl(px(16.))
                             .gap_2()
                             .cursor(gpui::CursorStyle::IBeam)
                             .on_click(self.scoped_listener(cx, |this, _, window, cx| {
@@ -1639,7 +1645,6 @@ impl Keystone {
             .pl(px(6.))
             .pr(px(14.))
             .gap_0p5()
-            .hairline_t(cx)
             .child(
                 IconButton::new("settings", IconName::Settings)
                     .size(ButtonSize::Large)
@@ -1830,7 +1835,6 @@ impl Keystone {
                                 )
                             }),
                     )
-                    .child(div().flex_shrink_0().w_px().h(px(14.)).bg(colors.border))
                     .child(project)
                     .when_some(mode, |d, mode| {
                         d.child(self.approval_menu(mode, running, narrow, cx))
@@ -1878,7 +1882,7 @@ impl Keystone {
                 let field = div()
                     .id("composer-field")
                     .automation_id("composer-field")
-                    .min_h(px(44.))
+                    .min_h(px(52.))
                     .pr(px(6.));
                 let field = if self
                     .slash_entries(cx)
@@ -1922,16 +1926,16 @@ impl Keystone {
             .rounded(radius::COMPOSER)
             .shadow(vec![BoxShadow {
                 color: colors.composer_shadow,
-                offset: point(px(0.), px(10.)),
-                blur_radius: px(30.),
+                offset: point(px(0.), px(4.)),
+                blur_radius: px(16.),
                 spread_radius: px(0.),
                 inset: false,
             }])
             .pt(px(16.))
-            .pl(px(18.))
+            .pl(px(20.))
             .pr(px(12.))
             .pb(px(12.))
-            .gap(px(14.))
+            .gap(px(12.))
             .relative()
             .when(current.is_some(), |d| {
                 d.drag_over::<ExternalPaths>(move |style, _, _, _| {
@@ -2652,6 +2656,10 @@ impl Keystone {
             count if index < count => format!("transcript-row-{index}"),
             _ => "transcript-status".to_owned(),
         };
+        let starts_turn = matches!(
+            conversation.rows.get(index),
+            Some(Row::Item(item)) if item.kind == ItemKind::UserMessage
+        );
         let app = cx.weak_entity();
         let activation = self.presentation.activation();
         h_flex()
@@ -2706,7 +2714,7 @@ impl Keystone {
                                 .size_full(),
                             )
                     })
-                    .when(index > 0, |d| d.pt_4())
+                    .when(index > 0, |d| if starts_turn { d.pt_8() } else { d.pt_3() })
                     .text_size(TextSize::Body.px())
                     .line_height(px(22.))
                     .child(content),
@@ -2849,7 +2857,6 @@ impl Keystone {
     ) -> AnyElement {
         use conversation::Recovery;
         let session = key.session;
-        let colors = cx.theme().colors;
         let (message, color, offer_continue, offer_retry) = match recovery {
             Recovery::Loading => ("Loading\u{2026}".to_owned(), Color::Muted, false, false),
             Recovery::Checking => ("Checking\u{2026}".to_owned(), Color::Muted, false, false),
@@ -2892,7 +2899,7 @@ impl Keystone {
             .automation_id(arrangement::selector("recovery", key.view))
             .key_context("Recovery")
             .surface(Elevation::Raised, cx)
-            .border_color(colors.border_strong)
+            .border_color(cx.theme().colors.border_strong)
             .p_3()
             .gap_2()
             .child(Label::new(message).size(TextSize::Ui).color(color))
@@ -3167,7 +3174,10 @@ impl SessionSidebar {
                     .truncate(),
                 )
         });
-        let detail = match attention.filter(|_| !settled) {
+        let attention = attention.filter(|_| !settled);
+        let has_detail =
+            attention.is_some() || account.is_some() || branch.is_some() || !excerpt.is_empty();
+        let detail = match attention {
             Some(attention) => {
                 let (reason, color) = attention_reason(attention);
                 h_flex()
@@ -3177,11 +3187,6 @@ impl SessionSidebar {
             }
             None => h_flex()
                 .gap(px(6.))
-                .child(
-                    Icon::new(provider_icon(provider))
-                        .size(px(14.))
-                        .color(provider_icon_color(provider, cx)),
-                )
                 .children(account.map(|account| {
                     div()
                         .flex_none()
@@ -3252,7 +3257,7 @@ impl SessionSidebar {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .gap(px(4.))
+                            .gap(px(2.))
                             .child(
                                 h_flex()
                                     // A 10 px mark centred in a 12 px state slot.
@@ -3260,6 +3265,11 @@ impl SessionSidebar {
                                     .gap(px(10.))
                                     .child(mark)
                                     .child(div().flex_1().min_w_0().child(title))
+                                    .child(
+                                        Icon::new(provider_icon(provider))
+                                            .size(px(12.))
+                                            .color(Color::Muted),
+                                    )
                                     .when(pull_request_dot, |d| {
                                         d.child(
                                             div()
@@ -3283,7 +3293,7 @@ impl SessionSidebar {
                                     }),
                             )
                             // Under the title, past the 12 px state slot and its gap.
-                            .child(detail.pl(px(21.))),
+                            .when(has_detail, |d| d.child(detail.pl(px(21.)))),
                     )
                     .when(show_settle, |d| {
                         d.child(
@@ -3326,7 +3336,7 @@ impl SessionSidebar {
             .id(section.id())
             .automation_id(section.id())
             .flex_shrink_0()
-            .h(px(26.))
+            .h(px(28.))
             .pl_2()
             .pr(px(6.))
             .gap_2()
@@ -3341,10 +3351,9 @@ impl SessionSidebar {
             .child(
                 Label::new(section.label(count))
                     .size(TextSize::Sm)
-                    .weight(FontWeight::MEDIUM)
                     .color(Color::Faint),
             )
-            .child(div().flex_1().h_px().bg(colors.border))
+            .child(div().flex_1())
             .when(section != Section::Working, |d| {
                 d.child(
                     Icon::new(if open {
@@ -8297,7 +8306,7 @@ mod tests {
         let field = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("composer-field").unwrap();
         let send = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("send").unwrap();
         let (empty, toolbar) = (field(cx), send(cx));
-        assert_eq!(empty.size.height, px(44.));
+        assert_eq!(empty.size.height, px(52.));
 
         let set = |text: String, cx: &mut gpui::VisualTestContext| {
             view.update(cx, |this, cx| {
@@ -8308,7 +8317,7 @@ mod tests {
         };
         set("word ".repeat(60), cx);
         let wrapped = field(cx);
-        assert!(wrapped.size.height > px(44.) && wrapped.size.height < px(160.));
+        assert!(wrapped.size.height > px(52.) && wrapped.size.height < px(160.));
         // The composer grows upward; its toolbar stays docked.
         assert_eq!(wrapped.bottom(), empty.bottom());
         assert_eq!(send(cx), toolbar);
@@ -8398,14 +8407,14 @@ mod tests {
         });
         let toggle_x =
             |cx: &mut gpui::VisualTestContext| cx.debug_bounds("sidebar-toggle").unwrap().origin.x;
-        assert_eq!(toggle_x(cx), px(6.));
+        assert_eq!(toggle_x(cx), px(8.));
         assert!(cx.debug_bounds("search-field").is_some());
 
         click(cx, "sidebar-toggle");
-        assert_eq!(toggle_x(cx), px(6.));
+        assert_eq!(toggle_x(cx), px(8.));
 
         cx.simulate_keystrokes("ctrl-f");
-        assert_eq!(toggle_x(cx), px(6.));
+        assert_eq!(toggle_x(cx), px(8.));
         assert!(cx.debug_bounds("search-field").is_some());
         view.update_in(cx, |this, window, cx| {
             assert!(this.search.focus_handle(cx).is_focused(window))

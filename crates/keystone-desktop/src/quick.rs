@@ -538,7 +538,6 @@ impl Render for QuickComposer {
                     .min_w(model_selector::MIN_WIDTH)
                     .child(self.model_selector(window, cx)),
             )
-            .child(div().flex_shrink_0().w_px().h(px(14.)).bg(colors.border))
             .child(self.project_menu(cx))
             .child(div().flex_1())
             .child(send);

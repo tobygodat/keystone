@@ -224,7 +224,6 @@ impl Keystone {
         };
         let input = self.note_editor(&project, cx);
         let sendable = self.selected(cx).is_some();
-        let colors = cx.theme().colors;
         v_flex()
             // Ctrl+Enter, which sends the composer's message, puts the note in it here.
             .on_action(
@@ -250,8 +249,6 @@ impl Keystone {
                     .justify_end()
                     .px(px(10.))
                     .py(px(6.))
-                    .border_t_1()
-                    .border_color(colors.border)
                     .child(
                         Button::new("notes-send", "Add to draft")
                             .style(ButtonStyle::Subtle)

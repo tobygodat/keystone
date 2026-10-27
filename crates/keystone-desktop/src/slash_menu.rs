@@ -762,7 +762,7 @@ fn command_row(entry: &Entry, highlighted: bool, height: Pixels, cx: &mut App) -
                 .flex_none()
                 .child(Label::new(source_label(item)).size(TextSize::Sm).color(
                     if item.terminal_only() || matches!(item, Item::Saved(s) if s.shadowed) {
-                        Color::Warning
+                        Color::Muted
                     } else {
                         Color::Faint
                     },

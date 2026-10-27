@@ -3,8 +3,8 @@
 //! catalog, the model on the right. Both are fixed once the session has sent.
 
 use gpui::{
-    Anchor, App, Div, ElementId, FontWeight, IntoElement, ParentElement, Pixels, SharedString,
-    Size, Stateful, Styled, Window, div, prelude::*, px,
+    Anchor, App, Div, ElementId, IntoElement, ParentElement, Pixels, SharedString, Size, Stateful,
+    Styled, Window, div, prelude::*, px,
 };
 use keystone_agent::{Catalog, Commands, ModelInfo};
 use keystone_core::{Account, AccountId, Provider, WorkingDirectory};
@@ -358,13 +358,7 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
                 .size(px(16.))
                 .color(provider_icon_color(provider, cx)),
         )
-        .child(
-            Label::new(label)
-                .size(TextSize::Ui)
-                .weight(FontWeight::MEDIUM)
-                .color(color)
-                .truncate(),
-        );
+        .child(Label::new(label).size(TextSize::Ui).color(color).truncate());
     if started {
         return (trigger, tooltip);
     }

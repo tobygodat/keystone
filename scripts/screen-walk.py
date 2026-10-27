@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Screenshot Keystone's surfaces for review, at each width, with the scripted providers.
 
-    python3 scripts/screen-walk.py walk [--width 1920 --width 720] [--height 1080] [--out DIR] [--driver PATH]
+    python3 scripts/screen-walk.py walk [--width 1920 --width 720] [--height 1080] [--theme light] [--out DIR] [--driver PATH]
     python3 scripts/screen-walk.py sheet DIR [AFTER_DIR] [--out DIR]
 
 `walk` launches target/debug/keystone-desktop on a private headless Sway through
@@ -34,6 +34,7 @@ COMMANDS = ROOT / 'crates/keystone-desktop/src/commands.rs'
 OPTIONAL = [
     ('toggle-changes', 'Toggle changes', 'changes', 'changes-branch', True),
     ('toggle-notes', 'Toggle notes', 'notes', 'notes-editor', True),
+    ('toggle-pull-request', 'Toggle pull request', 'pull-request', 'pull-request-empty', True),
     ('insert-prompt', 'Insert prompt…', 'insert-prompt', 'settings-section-prompts', False),
     ('attach-files', 'Attach files…', 'attach-files', 'attach-path', False),
     ('new-worktree-session', 'New session in worktree…', 'worktree-dialog', 'worktree-dialog', False),
@@ -41,13 +42,17 @@ OPTIONAL = [
 ]
 
 
+# The order of the Settings → Appearance theme menu.
+THEMES = ['system', 'light', 'dark']
+
+
 class Skip(Exception):
     pass
 
 
 class Walk:
-    def __init__(self, width, height, out, driver):
-        self.width, self.height = width, height
+    def __init__(self, width, height, out, driver, theme=None):
+        self.width, self.height, self.theme = width, height, theme
         self.results = []
         self.lock = open(Path(tempfile.gettempdir()) / f'keystone-walk-{width}.lock', 'w')
         try:
@@ -224,6 +229,8 @@ class Walk:
                 'KEYSTONE_FAKE_CODEX_DELAY_MS': '5',
                 'CLAUDE_CONFIG_DIR': str(self.homes['claude']), 'CODEX_HOME': str(self.homes['codex'])})
             self.wait('welcome-claude', 30)
+            if self.theme:
+                self.choose_theme()
             self.walk()
         finally:
             try:
@@ -240,6 +247,14 @@ class Walk:
                     self.server.kill()
                 shutil.rmtree(self.scratch, ignore_errors=True)
                 self.lock.close()
+
+    def choose_theme(self):
+        self.key('ctrl', 'comma')
+        self.click('settings-section-appearance')
+        self.click('settings-theme')
+        self.click(f'settings-theme-option-{THEMES.index(self.theme)}')
+        self.key('Escape')
+        self.wait('welcome-claude', 5)
 
     def walk(self):
         step, shot, key = self.step, self.shot, self.key
@@ -510,7 +525,7 @@ def walk(args):
     for width in args.width or [1920, 720]:
         walker = None
         try:
-            walker = Walk(width, args.height, out, args.driver)
+            walker = Walk(width, args.height, out, args.driver, args.theme)
             walker.run()
         except Exception as error:
             results.append({'surface': 'walk', 'width': width, 'status': 'failed', 'reason': str(error)})
@@ -564,6 +579,7 @@ def main():
     walk_parser = sub.add_parser('walk')
     walk_parser.add_argument('--width', type=int, action='append')
     walk_parser.add_argument('--height', type=int, default=1080)
+    walk_parser.add_argument('--theme', choices=THEMES)
     walk_parser.add_argument('--out')
     walk_parser.add_argument('--driver')
     sheet_parser = sub.add_parser('sheet')

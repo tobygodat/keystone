@@ -1067,14 +1067,19 @@ impl Keystone {
                     .flex_none()
                     .w_full()
                     .pr_1()
-                    .bg(colors.sidebar)
-                    .map(|d| {
-                        if sessions && in_front {
-                            d.border_b_2().border_color(colors.accent)
+                    .border_b_2()
+                    .border_color(
+                        if sessions
+                            && in_front
+                            && crate::session_tabs::conversations(c)
+                                .iter()
+                                .any(|view| !views.contains(view))
+                        {
+                            colors.accent
                         } else {
-                            d.hairline_b(cx)
-                        }
-                    })
+                            colors.border.opacity(0.)
+                        },
+                    )
                     .child(div().flex_1().min_w_0().child(bar))
                     .when(sessions, |d| {
                         let view = views[selected];
