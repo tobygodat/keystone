@@ -2,6 +2,7 @@
 //! appearance, one section at a time.
 
 use crate::customization::OpenCustomize;
+use crate::notifications::Alert;
 use crate::settings::{self, DEFAULT_TEXT_SIZE, TEXT_SIZES};
 use crate::{
     FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, RenameSession, SendMessage,
@@ -10,7 +11,7 @@ use crate::{
 use gpui::{
     AnyElement, App, Context, FocusHandle, FontWeight, KeyDownEvent, Window, div, prelude::*, px,
 };
-use keystone_core::{Appearance, Density, Notifications, SidebarWidth, ThemeMode};
+use keystone_core::{Appearance, Density, Notifications, SidebarWidth, Sounds, ThemeMode};
 use keystone_ui::prelude::*;
 
 const THEMES: [(ThemeMode, &str); 3] = [
@@ -37,6 +38,9 @@ enum Field {
     Approval,
     TurnFailed,
     PullRequests,
+    Sounds,
+    Volume,
+    Sound(Alert),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,6 +48,7 @@ enum Section {
     Appearance,
     Fonts,
     Notifications,
+    Sounds,
     Accounts,
     Integrations,
     Prompts,
@@ -53,7 +58,7 @@ enum Section {
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 6] = [
+const SECTIONS: [(Section, &str, &str, Rows); 7] = [
     (
         Section::Appearance,
         "Appearance",
@@ -83,6 +88,18 @@ const SECTIONS: [(Section, &str, &str, Rows); 6] = [
             ("Approval requested", Field::Approval),
             ("Turn failed", Field::TurnFailed),
             ("Pull request checks and reviews", Field::PullRequests),
+        ],
+    ),
+    (
+        Section::Sounds,
+        "Sounds",
+        "settings-section-sounds",
+        &[
+            ("Play sounds", Field::Sounds),
+            ("Volume", Field::Volume),
+            ("Turn finished", Field::Sound(Alert::TurnFinished)),
+            ("Approval requested", Field::Sound(Alert::Approval)),
+            ("Turn failed", Field::Sound(Alert::TurnFailed)),
         ],
     ),
     (
@@ -264,6 +281,35 @@ impl Keystone {
         self.refresh(cx);
     }
 
+    /// Saves the sound settings `change` makes, then plays `preview` at the saved volume
+    /// so the user hears what they chose. Without one, a preview still waiting is
+    /// dropped.
+    fn update_sounds(
+        &mut self,
+        change: impl FnOnce(&mut Sounds),
+        preview: Option<Alert>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut sounds = self
+            .state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .sounds();
+        change(&mut sounds);
+        self.error = match self
+            .state
+            .update(cx, |state, cx| state.set_sounds(sounds, cx))
+        {
+            Ok(applied) => crate::durability_warning(applied.durability),
+            Err(error) => Some(format!("Settings not saved. {error}")),
+        };
+        let preview = preview.filter(|_| self.error.is_none());
+        crate::sounds::SoundPlayer::preview(preview, sounds.volume, cx);
+        self.refresh(cx);
+    }
+
     fn show_section(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(page) = &mut self.settings else {
             return;
@@ -300,14 +346,19 @@ impl Keystone {
             .workspace()
             .preferences()
             .appearance();
-        let rows = rows.iter().enumerate().map(|(row, &(label, field))| {
-            h_flex()
-                .gap(spacing::MD)
-                .py(spacing::MD)
-                .when(row > 0, |d| d.hairline_t(cx))
-                .child(div().flex_1().min_w_0().child(Label::new(label).truncate()))
-                .child(self.control(page, field, appearance, cx))
-        });
+        let audible = crate::sounds::SoundPlayer::available(cx);
+        let rows = rows
+            .iter()
+            .filter(|(_, field)| audible || !matches!(field, Field::Volume | Field::Sound(_)))
+            .enumerate()
+            .map(|(row, &(label, field))| {
+                h_flex()
+                    .gap(spacing::MD)
+                    .py(spacing::MD)
+                    .when(row > 0, |d| d.hairline_t(cx))
+                    .child(div().flex_1().min_w_0().child(Label::new(label).truncate()))
+                    .child(self.control(page, field, appearance, cx))
+            });
         let content = div()
             .id("settings-content")
             .flex_1()
@@ -526,6 +577,7 @@ impl Keystone {
                     }))
                     .into_any_element()
             }
+            Field::Sounds | Field::Volume | Field::Sound(_) => self.sound_control(field, cx),
             Field::TextSize => {
                 let size = saved.text_size.unwrap_or(DEFAULT_TEXT_SIZE);
                 h_flex()
@@ -555,6 +607,88 @@ impl Keystone {
                     .into_any_element()
             }
         }
+    }
+
+    /// A sound setting's control. Without a player, the global row says what to install
+    /// in place of its switch, and the other rows are hidden.
+    fn sound_control(&self, field: Field, cx: &Context<Self>) -> AnyElement {
+        let saved = self
+            .state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .sounds();
+        let available = crate::sounds::SoundPlayer::available(cx);
+        let first_on = [Alert::TurnFinished, Alert::Approval, Alert::TurnFailed]
+            .into_iter()
+            .find(|alert| {
+                alert.sounds(Sounds {
+                    enabled: true,
+                    ..saved
+                })
+            });
+        let (id, on, set, preview): (_, _, fn(&mut Sounds, bool), _) = match field {
+            Field::Sounds if !available => {
+                return Label::new(if cfg!(target_os = "macos") {
+                    "Needs afplay"
+                } else {
+                    "Needs paplay or pw-play"
+                })
+                .color(Color::Muted)
+                .into_any_element();
+            }
+            Field::Sounds => (
+                "settings-sounds",
+                saved.enabled,
+                |s, on| s.enabled = on,
+                first_on,
+            ),
+            Field::Volume => {
+                return div()
+                    .w(px(220.))
+                    .child(
+                        Slider::new(
+                            "settings-sound-volume",
+                            f32::from(saved.volume),
+                            0.0..=100.,
+                            10.,
+                        )
+                        .disabled(!saved.enabled)
+                        .on_change(self.scoped_listener(
+                            cx,
+                            move |this, &volume: &f32, _, cx| {
+                                this.update_sounds(|s| s.volume = volume as u8, first_on, cx)
+                            },
+                        )),
+                    )
+                    .into_any_element();
+            }
+            Field::Sound(Alert::TurnFinished) => (
+                "settings-sound-turn-finished",
+                saved.turn_finished,
+                |s, on| s.turn_finished = on,
+                Some(Alert::TurnFinished),
+            ),
+            Field::Sound(Alert::Approval) => (
+                "settings-sound-approval",
+                saved.approval,
+                |s, on| s.approval = on,
+                Some(Alert::Approval),
+            ),
+            _ => (
+                "settings-sound-turn-failed",
+                saved.turn_failed,
+                |s, on| s.turn_failed = on,
+                Some(Alert::TurnFailed),
+            ),
+        };
+        Switch::new(id, on)
+            .disabled(!matches!(field, Field::Sounds) && !saved.enabled)
+            .on_change(self.scoped_listener(cx, move |this, &on: &bool, _, cx| {
+                this.update_sounds(|s| set(s, on), preview.filter(|_| on), cx)
+            }))
+            .into_any_element()
     }
 
     /// Escape closes the page. Up and Down on a focused section move the selection, and
@@ -1180,9 +1314,9 @@ mod tests {
         keys(cx, "up");
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
-        // Appearance's row holds focus; next come Fonts, Notifications, Accounts,
+        // Appearance's row holds focus; next come Fonts, Notifications, Sounds, Accounts,
         // Integrations, Prompts, Theme, then Compact.
-        keys(cx, "tab tab tab tab tab tab tab");
+        keys(cx, "tab tab tab tab tab tab tab tab");
         press(cx, "space");
         assert_eq!(saved(&path).density, Density::Compact);
         keys(cx, "right");
@@ -1196,11 +1330,11 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, Theme, Prompts, Integrations, Accounts, Notifications,
-        // Fonts, and Appearance to Back.
+        // From Default back past Compact, Theme, Prompts, Integrations, Accounts, Sounds,
+        // Notifications, Fonts, and Appearance to Back.
         keys(
             cx,
-            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
+            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
         );
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
@@ -1213,9 +1347,9 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        // Fonts' row holds focus; Notifications', Accounts', Integrations' and Prompts' rows come
-        // before the first font menu.
-        keys(cx, "ctrl-, down tab tab tab tab tab down");
+        // Fonts' row holds focus; Notifications', Sounds', Accounts', Integrations' and Prompts'
+        // rows come before the first font menu.
+        keys(cx, "ctrl-, down tab tab tab tab tab tab down");
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");

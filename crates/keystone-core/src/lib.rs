@@ -580,6 +580,38 @@ impl QuickDraft {
     }
 }
 
+/// Which events play a sound, and how loud. Off until the user turns them on; each
+/// plays only when a notification for the event would be due.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct Sounds {
+    /// Off plays none, whatever each event's own switch says.
+    pub enabled: bool,
+    /// Percent, 0 to 100.
+    pub volume: u8,
+    pub turn_finished: bool,
+    pub approval: bool,
+    pub turn_failed: bool,
+}
+
+impl Default for Sounds {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            volume: 70,
+            turn_finished: true,
+            approval: true,
+            turn_failed: true,
+        }
+    }
+}
+
+impl Sounds {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -588,6 +620,8 @@ pub struct Preferences {
     appearance: Appearance,
     #[serde(skip_serializing_if = "Notifications::is_default")]
     notifications: Notifications,
+    #[serde(skip_serializing_if = "Sounds::is_default")]
+    sounds: Sounds,
     sidebar_layout: SavedLayout,
     #[serde(skip_serializing_if = "ProjectLayouts::is_empty")]
     project_layouts: ProjectLayouts,
@@ -612,6 +646,10 @@ impl Preferences {
 
     pub fn quick(&self) -> &QuickDraft {
         &self.quick
+    }
+
+    pub fn sounds(&self) -> Sounds {
+        self.sounds
     }
 
     pub fn sidebar_layout(&self) -> &SavedLayout {
@@ -1258,6 +1296,10 @@ impl Store {
 
     pub fn set_quick_draft(&mut self, draft: QuickDraft) -> StoreResult<Applied<()>> {
         self.update_preferences(|preferences| preferences.quick = draft)
+    }
+
+    pub fn set_sounds(&mut self, sounds: Sounds) -> StoreResult<Applied<()>> {
+        self.update_preferences(|preferences| preferences.sounds = sounds)
     }
 
     /// Saves exactly `layout`, readable or not, over the latest preferences, leaving
@@ -2999,6 +3041,44 @@ mod tests {
                 .notifications(),
             Notifications::default(),
             "a new workspace notifies"
+        );
+    }
+
+    #[test]
+    fn sounds_load_as_off_and_save_only_once_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":1,"workspace":{"sessions":[],"preferences":{"sounds":{"enabled":true}}}}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.workspace().preferences().sounds(),
+            Sounds {
+                enabled: true,
+                ..Sounds::default()
+            },
+            "a missing field loads as its default"
+        );
+        assert!(!Sounds::default().enabled, "sounds are off by default");
+
+        store.set_sounds(Sounds::default()).unwrap();
+        assert!(!json(&path).to_string().contains("sounds"));
+        let on = Sounds {
+            enabled: true,
+            volume: 40,
+            approval: false,
+            ..Sounds::default()
+        };
+        store.set_sounds(on).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.workspace().preferences().sounds(), on);
+        assert_eq!(
+            reopened.workspace().preferences().notifications(),
+            Notifications::default(),
+            "sounds leave notifications as they are"
         );
     }
 

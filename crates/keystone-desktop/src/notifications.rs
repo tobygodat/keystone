@@ -3,25 +3,27 @@
 //! turn finished, it asks for approval, or its turn failed. A session is seen while an
 //! active Keystone window shows it, so nothing is sent for it then. Each session sends
 //! each kind once until the user sees it again. Activating one shows its session. A
-//! failed check or a new review on its pull request notifies the same way.
-//! Notifications only read events: attention and Needs action are unchanged.
+//! failed check or a new review on its pull request notifies the same way. Sounds,
+//! when on, follow the same rule. Notifications only read events: attention and
+//! Needs action are unchanged.
 
 use crate::{DesktopApp, Keystone};
 use gpui::{App, Context, SystemNotification, SystemNotificationResponse, Window};
 use keystone_agent::{Event, TurnStatus};
-use keystone_core::{Notifications, WindowId};
+use keystone_core::{Notifications, Sounds, WindowId};
 use std::collections::HashMap;
 
 #[cfg(all(test, feature = "ui-tests"))]
 #[path = "notifications_tests.rs"]
 mod tests;
 
-/// What the user is told about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the user is told about. The turn alerts run least urgent first, so a batch
+/// sounds its most urgent; pull request alerts play no sound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Alert {
     TurnFinished,
-    Approval,
     TurnFailed,
+    Approval,
     /// A check on the session's pull request failed.
     CheckFailed,
     /// A review or review comment on the session's pull request arrived.
@@ -55,6 +57,16 @@ impl Alert {
                 Self::Approval => settings.approval,
                 Self::TurnFailed => settings.turn_failed,
                 Self::CheckFailed | Self::Review => settings.pull_requests,
+            }
+    }
+
+    pub(crate) fn sounds(self, settings: Sounds) -> bool {
+        settings.enabled
+            && match self {
+                Self::TurnFinished => settings.turn_finished,
+                Self::Approval => settings.approval,
+                Self::TurnFailed => settings.turn_failed,
+                Self::CheckFailed | Self::Review => false,
             }
     }
 
@@ -131,18 +143,16 @@ pub(crate) fn install(cx: &mut App) {
     cx.on_system_notification_response(open);
 }
 
-/// Sends what `alerts` call for, after the batch that raised them is applied. Runs
-/// outside the app state's update, because which sessions a window shows reads it.
+/// Sends what `alerts` call for, after the batch that raised them is applied, and
+/// plays the most urgent one's sound. Runs outside the app state's update, because
+/// which sessions a window shows reads it.
 pub(crate) fn offer(alerts: Vec<(u64, Alert)>, cx: &mut App) {
     let Some(state) = cx.try_global::<DesktopApp>().map(|app| app.state.clone()) else {
         return;
     };
-    let settings = state
-        .read(cx)
-        .store()
-        .workspace()
-        .preferences()
-        .notifications();
+    let preferences = state.read(cx).store().workspace().preferences();
+    let (settings, sounds) = (preferences.notifications(), preferences.sounds());
+    let audible = crate::sounds::SoundPlayer::available(cx);
     let active = cx
         .active_window()
         .and_then(|window| window.downcast::<Keystone>())
@@ -150,8 +160,11 @@ pub(crate) fn offer(alerts: Vec<(u64, Alert)>, cx: &mut App) {
     let seen = active.map(|view| view.on_screen(cx)).unwrap_or_default();
     let pull_request_seen =
         active.and_then(|view| state.read(cx).pull_requests.shown(view.window_id));
+    let mut loudest = None;
     for (session, alert) in alerts {
-        if !alert.enabled(settings)
+        let notify = alert.enabled(settings);
+        let sound = audible && alert.sounds(sounds);
+        if !(notify || sound)
             || seen.contains(&session)
             || (alert.pull_request() && pull_request_seen == Some(session))
         {
@@ -164,7 +177,10 @@ pub(crate) fn offer(alerts: Vec<(u64, Alert)>, cx: &mut App) {
         else {
             continue;
         };
-        if state.update(cx, |state, _| state.notifier.record(session, alert)) {
+        if !state.update(cx, |state, _| state.notifier.record(session, alert)) {
+            continue;
+        }
+        if notify {
             cx.show_system_notification(SystemNotification {
                 tag: tag(session, alert).into(),
                 title: title.into(),
@@ -172,6 +188,12 @@ pub(crate) fn offer(alerts: Vec<(u64, Alert)>, cx: &mut App) {
                 actions: Vec::new(),
             });
         }
+        if sound {
+            loudest = loudest.max(Some(alert));
+        }
+    }
+    if let Some(alert) = loudest {
+        crate::sounds::SoundPlayer::play(alert, sounds.volume, cx);
     }
 }
 

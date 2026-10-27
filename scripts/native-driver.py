@@ -489,7 +489,8 @@ class Run:
                  if key == 'HOME' or key not in os.environ}
         for folder in homes.values():
             folder.mkdir(exist_ok=True)
-        self.env = {**{key: str(folder) for key, folder in homes.items()}, **app_env(env)}
+        self.env = {**NO_AUDIO,
+                    **{key: str(folder) for key, folder in homes.items()}, **app_env(env)}
         self.start_bus()
         return {'session': self.session, 'bus': self.bus_address,
                 'launch': self.launch()}
@@ -767,10 +768,16 @@ def read_exit(path):
         return None
 
 
+# No audio server is reachable from a run, so it never reaches the user's speakers, and a
+# debug build plays sounds through `true` unless env names a recorder.
+NO_AUDIO = {'KEYSTONE_TEST_SOUND_COMMAND': 'true', 'PULSE_SERVER': 'unix:/nonexistent',
+            'PIPEWIRE_REMOTE': 'keystone-verify-no-audio'}
+
 # Variables a run may pass to the app. The state and automation paths stay owned by the run.
 APP_ENV = {'KEYSTONE_CODEX_PATH', 'KEYSTONE_CLAUDE_PATH', 'KEYSTONE_PROJECT_DIR',
            'KEYSTONE_FAKE_CODEX_DELAY_MS', 'KEYSTONE_FAKE_CLAUDE_DELAY_MS',
-           'KEYSTONE_VISUAL_FIXTURE', 'KEYSTONE_TEST_CLAUDE_IDLE_MS', 'KEYSTONE_TEST_LOG_BUDGET_BYTES', 'VISUAL', 'EDITOR',
+           'KEYSTONE_VISUAL_FIXTURE', 'KEYSTONE_TEST_CLAUDE_IDLE_MS', 'KEYSTONE_TEST_LOG_BUDGET_BYTES',
+           'KEYSTONE_TEST_SOUND_COMMAND', 'VISUAL', 'EDITOR',
            'KEYSTONE_FAKE_MCP_CONFIG', 'KEYSTONE_FAKE_IMAGE_RECEIPT', 'KEYSTONE_ATTACHMENT_MAX_MB',
            'KEYSTONE_ATTACHMENT_KEEP_DAYS', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'HOME', 'PATH',
            'GH_CONFIG_DIR'}

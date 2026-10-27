@@ -1230,16 +1230,21 @@ crates/keystone-desktop/src/settings_page.rs
 	Integrations
 	Interface font
 	Light
+	Needs afplay
+	Needs paplay or pw-play
 	Notifications
+	Play sounds
 	Prompts
 	Pull request checks and reviews
 	Settings not saved. {error}
+	Sounds
 	Spacious
 	System
 	Text size
 	Theme
 	Turn failed
 	Turn finished
+	Volume
 	{size} px
 
 crates/keystone-desktop/src/settings_prompts.rs

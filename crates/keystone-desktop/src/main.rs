@@ -33,6 +33,7 @@ mod settings_accounts;
 mod settings_page;
 mod settings_prompts;
 mod slash_menu;
+mod sounds;
 mod transcript;
 mod transcript_keyboard;
 mod usage;

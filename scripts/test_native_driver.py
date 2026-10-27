@@ -249,6 +249,34 @@ class PersistenceTest(unittest.TestCase):
         run.stderr.close.assert_called_once()
 
 
+class AudioTest(unittest.TestCase):
+    def started(self, env):
+        run = driver.Run.__new__(driver.Run)
+        run.scratch = Path(self.scratch.name)
+        run.process = Mock()
+        run.request = Mock()
+        run.call = Mock(return_value={})
+        run.start_bus = Mock()
+        run.launch = Mock()
+        run.bus_address = 'unix:path=/bus'
+        driver.Run.start(run, 1920, 1080, True, env)
+        return run.env
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+
+    def test_every_run_is_cut_off_from_audio_and_may_name_only_a_sound_recorder(self):
+        env = self.started({})
+        self.assertEqual(env['KEYSTONE_TEST_SOUND_COMMAND'], 'true')
+        self.assertEqual(env['PULSE_SERVER'], 'unix:/nonexistent')
+        self.assertEqual(env['PIPEWIRE_REMOTE'], 'keystone-verify-no-audio')
+        env = self.started({'KEYSTONE_TEST_SOUND_COMMAND': '/disposable/record-sound'})
+        self.assertEqual(env['KEYSTONE_TEST_SOUND_COMMAND'], '/disposable/record-sound')
+        with self.assertRaises(ValueError):
+            self.started({'PULSE_SERVER': 'unix:/run/user/1000/pulse/native'})
+
+
 class WheelTest(unittest.TestCase):
     def setUp(self):
         self.server = driver.Server(SimpleNamespace())
@@ -292,7 +320,8 @@ class WheelTest(unittest.TestCase):
 
     def test_files_editor_overrides_survive_driver_integration(self):
         env = {'VISUAL': '/disposable/editor --wait', 'EDITOR': '/disposable/fallback',
-               'KEYSTONE_PROJECT_DIR': '/disposable/project'}
+               'KEYSTONE_PROJECT_DIR': '/disposable/project',
+               'KEYSTONE_TEST_SOUND_COMMAND': '/disposable/record-sound'}
         self.assertEqual(driver.app_env(env), env)
         with self.assertRaises(ValueError):
             driver.app_env({'KEYSTONE_STATE_PATH': '/not-owned-by-run'})

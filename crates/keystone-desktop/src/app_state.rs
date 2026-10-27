@@ -927,6 +927,20 @@ impl AppState {
         result
     }
 
+    pub(crate) fn set_sounds(
+        &mut self,
+        sounds: keystone_core::Sounds,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+
+        let result = self.store.set_sounds(sounds);
+        self.publish(cx);
+        result
+    }
+
     pub(crate) fn set_settled(
         &mut self,
         id: u64,
@@ -1466,9 +1480,9 @@ impl AppState {
         // The first pump sends results that were ready when Keystone last closed.
         wake();
         let logs = Logs::with_database(store.database(), wake.clone());
-        let attachments = keystone_core::attachment::Attachments::in_data_dir(
-            store.path().parent().unwrap_or(std::path::Path::new(".")),
-        );
+        let data_dir = store.path().parent().unwrap_or(std::path::Path::new("."));
+        let attachments = keystone_core::attachment::Attachments::in_data_dir(data_dir);
+        crate::sounds::SoundPlayer::install(data_dir, cx);
         sweep_attachments(&store, &attachments, cx);
         cx.set_global(crate::attachments::AttachmentsDir(
             attachments.dir().to_owned(),

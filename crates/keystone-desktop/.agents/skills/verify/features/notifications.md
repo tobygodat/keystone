@@ -30,4 +30,4 @@ To observe them, own `org.freedesktop.Notifications` on `bus` with a fake server
 ## Not covered
 
 - Whether the compositor honours the focus request. On Wayland Keystone asks through xdg-activation with its own last input serial, because the notification service's activation token is not passed on. A compositor may refuse and mark the window urgent instead. The selection changes either way.
-- Sounds (TOB-72). Pull request checks and reviews notify as [pull request](pull-request.md) describes.
+- Sounds, covered in [sounds](sounds.md), and pull request checks and reviews, which notify as [pull request](pull-request.md) describes.

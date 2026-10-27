@@ -5,7 +5,7 @@ Change the theme, fonts, density, and text size, and keep the choice across rest
 ## Sub-features
 
 - `settings-open` opens the page with Ctrl+Comma, the sidebar's cog, or the palette's "Open settings", and closes it with Back, the page's cog, Escape, or Ctrl+Comma again.
-- `settings-sections` switches between the Appearance, Fonts, Notifications and Accounts sections. Notifications is covered in [notifications](notifications.md).
+- `settings-sections` switches between the Appearance, Fonts, Notifications, Sounds and Accounts sections. Notifications is covered in [notifications](notifications.md), Sounds in [sounds](sounds.md).
 - `settings-theme` switches between System, Light, and Dark.
 - `settings-font` picks the interface font and the code font, each with "Default" first.
 - `settings-density` picks Compact, Default, or Spacious, by click or by keyboard.
