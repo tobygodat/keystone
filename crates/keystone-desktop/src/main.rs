@@ -3007,13 +3007,42 @@ impl Keystone {
     fn error_line(&self, cx: &App) -> Option<impl IntoElement> {
         self.status_line(cx).map(|(message, color)| {
             div()
-                .automation_id(if self.state.read(cx).shutdown_error.is_some() {
-                    "shutdown-error"
-                } else {
-                    "workspace-error"
-                })
+                .automation_id(self.status_id(cx))
                 .child(Label::new(message).size(TextSize::Ui).color(color))
         })
+    }
+
+    /// The status line under the composer, in a one-line slot kept while it is empty, so an
+    /// error that comes or goes on its own moves neither the composer nor its menus.
+    fn composer_status(&self, cx: &App) -> impl IntoElement {
+        h_flex()
+            .flex_none()
+            .justify_center()
+            .w(px(CONTENT_WIDTH))
+            .max_w_full()
+            .h(TextSize::Ui.line_height())
+            .children(self.status_line(cx).map(|(message, color)| {
+                let message = message.replace('\n', " · ");
+                div()
+                    .id("composer-status")
+                    .automation_id(self.status_id(cx))
+                    .min_w_0()
+                    .tooltip(Tooltip::text(message.clone()).builder())
+                    .child(
+                        Label::new(message)
+                            .size(TextSize::Ui)
+                            .color(color)
+                            .truncate(),
+                    )
+            }))
+    }
+
+    fn status_id(&self, cx: &App) -> &'static str {
+        if self.state.read(cx).shutdown_error.is_some() {
+            "shutdown-error"
+        } else {
+            "workspace-error"
+        }
     }
 
     fn status_line(&self, cx: &App) -> Option<(String, Color)> {

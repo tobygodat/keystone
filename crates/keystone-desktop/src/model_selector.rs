@@ -3,8 +3,8 @@
 //! catalog, the model on the right. Both are fixed once the session has sent.
 
 use gpui::{
-    Anchor, App, Div, ElementId, IntoElement, ParentElement, Pixels, SharedString, Size, Stateful,
-    Styled, Window, div, prelude::*, px,
+    Anchor, AnyElement, App, Div, ElementId, IntoElement, ParentElement, Pixels, ScrollHandle,
+    SharedString, Size, Stateful, Styled, Window, div, point, prelude::*, px,
 };
 use keystone_agent::{Catalog, Commands, ModelInfo};
 use keystone_core::{Account, AccountId, Provider, WorkingDirectory};
@@ -307,7 +307,9 @@ pub fn render(
                             provider, account, accounts, &on, viewport, cx,
                         ))
                         .child(div().flex_none().w_px().ml(px(7.)).bg(colors.border))
-                        .child(model_column(provider, model, choices, &on, viewport, cx)),
+                        .child(model_column(
+                            provider, account, model, choices, &on, viewport, cx,
+                        )),
                 ),
         )
         .into_any_element()
@@ -441,6 +443,7 @@ fn provider_column(
 
 fn model_column(
     provider: Provider,
+    account: Option<&AccountId>,
     chosen: Option<&str>,
     choices: Choices,
     on: &Handlers,
@@ -455,6 +458,8 @@ fn model_column(
             choose(&(provider, model.clone()), window, cx)
         })
     };
+    let row_height = cx.theme().density.control(px(36.));
+    let height = (row_height * CHOICE_ROWS).min(viewport.height / 3.);
     let column = v_flex()
         .id("model-column")
         .automation_id("model-column")
@@ -469,33 +474,52 @@ fn model_column(
         ));
     let list = v_flex()
         .id("model-list")
+        .automation_id("model-list")
         .flex_1()
         .min_h_0()
         .overflow_y_scroll();
-    let (list, retry) = match choices {
+    let (list, retry): (AnyElement, _) = match choices {
         Choices::Unavailable(reason) => (
-            list.child(note("model-unavailable", reason, Color::Muted)),
+            list.child(note("model-unavailable", reason, Color::Muted))
+                .into_any_element(),
             None,
         ),
         Choices::Loading => (
-            list.child(note("model-loading", "Loading choices…", Color::Muted)),
+            list.child(note("model-loading", "Loading choices…", Color::Muted))
+                .into_any_element(),
             None,
         ),
         Choices::Ready(models) => (
-            list.children(models.iter().enumerate().map(|(index, model)| {
-                row(
-                    ("model", index).into(),
-                    format!("model-{}", model.model),
-                    model.label.clone().into(),
-                    Some(model.model.clone()),
+            ModelList {
+                catalog: format!(
+                    "model-list-{}-{}",
+                    slug(provider),
+                    account.map_or_else(String::new, ToString::to_string)
                 )
-            })),
+                .into(),
+                reveal: models
+                    .iter()
+                    .position(|model| Some(model.model.as_str()) == chosen)
+                    .map_or(px(0.), |at| {
+                        (row_height * (at + 1) as f32 - height).max(px(0.))
+                    }),
+                list: list.children(models.iter().enumerate().map(|(index, model)| {
+                    row(
+                        ("model", index).into(),
+                        format!("model-{}", model.model),
+                        model.label.clone().into(),
+                        Some(model.model.clone()),
+                    )
+                })),
+            }
+            .into_any_element(),
             None,
         ),
         Choices::Failed(message) => {
             let retry = on.retry.clone();
             (
-                list.child(note("model-failed", message.to_owned(), Color::Danger)),
+                list.child(note("model-failed", message.to_owned(), Color::Danger))
+                    .into_any_element(),
                 Some(
                     choice_row(
                         "model-retry",
@@ -514,13 +538,33 @@ fn model_column(
             )
         }
     };
-    column.child(
-        v_flex()
-            .flex_none()
-            .h((cx.theme().density.control(px(36.)) * CHOICE_ROWS).min(viewport.height / 3.))
-            .child(list)
-            .children(retry),
-    )
+    column.child(v_flex().flex_none().h(height).child(list).children(retry))
+}
+
+/// A provider's model choices, scrolled when they first show just far enough to show the
+/// session's model, as `Select` does. Later renders keep wherever the user scrolled.
+#[derive(IntoElement)]
+struct ModelList {
+    /// The provider account whose catalog this is: another one starts its own reveal.
+    catalog: SharedString,
+    list: Stateful<Div>,
+    /// How far down the session's model sits below the fold.
+    reveal: Pixels,
+}
+
+impl RenderOnce for ModelList {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let reveal = self.reveal;
+        let scroll = window
+            .use_keyed_state(self.catalog, cx, |_, _| {
+                let scroll = ScrollHandle::new();
+                scroll.set_offset(point(px(0.), -reveal));
+                scroll
+            })
+            .read(cx)
+            .clone();
+        self.list.track_scroll(&scroll)
+    }
 }
 
 fn choice_row(

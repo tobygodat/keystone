@@ -16,7 +16,9 @@
 //! entry) in two pages, as Codex pages: the first answer holds `fake-default` and
 //! `"nextCursor": "page-2"`, the answer to cursor `page-2` holds the rest with a null
 //! cursor, and any other cursor is an "invalid cursor" error. With
-//! `KEYSTONE_FAKE_CODEX_NO_CATALOG=1` every `model/list` is a JSON-RPC error. `thread/start`
+//! `KEYSTONE_FAKE_CODEX_NO_CATALOG=1` every `model/list` is a JSON-RPC error, and
+//! `KEYSTONE_FAKE_CODEX_EXTRA_MODELS=<n>` adds `fake-extra-1` to `fake-extra-<n>` to
+//! the second page. `thread/start`
 //! and `thread/resume` reply with the thread's model: the `model` they were given, else
 //! `fake-default`, remembered per thread for the process. Each reply ends with it.
 //! `skills/list` answers the skills in `$CODEX_HOME/skills` and the folder's
@@ -394,6 +396,10 @@ fn main() {
     let mut servers: std::collections::HashMap<String, orchestrator::Server> =
         std::collections::HashMap::new();
     let no_catalog = std::env::var("KEYSTONE_FAKE_CODEX_NO_CATALOG").is_ok_and(|v| v == "1");
+    let extra_models: usize = std::env::var("KEYSTONE_FAKE_CODEX_EXTRA_MODELS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
     let mut experimental = false;
     let mut widget_threads: std::collections::HashSet<String> = Default::default();
 
@@ -593,12 +599,24 @@ fn main() {
                     {"id": "fake-default", "model": "fake-default", "displayName": "Fake Default",
                      "description": "Scripted default", "hidden": false, "isDefault": true}
                 ], "nextCursor": "page-2"})),
-                Some("page-2") => reply(json!({"data": [
-                    {"id": "fake-fast", "model": "fake-fast", "displayName": "Fake Fast",
-                     "description": "Scripted second model", "hidden": false, "isDefault": false},
-                    {"id": "fake-hidden", "model": "fake-hidden", "displayName": "Hidden",
-                     "hidden": true, "isDefault": false}
-                ], "nextCursor": null})),
+                Some("page-2") => {
+                    let extra = (1..=extra_models).map(|n| {
+                        json!({"id": format!("fake-extra-{n}"), "model": format!("fake-extra-{n}"),
+                         "displayName": format!("Fake Extra {n}"), "hidden": false,
+                         "isDefault": false})
+                    });
+                    let data: Vec<_> = [
+                        json!({"id": "fake-fast", "model": "fake-fast", "displayName": "Fake Fast",
+                         "description": "Scripted second model", "hidden": false,
+                         "isDefault": false}),
+                        json!({"id": "fake-hidden", "model": "fake-hidden", "displayName": "Hidden",
+                         "hidden": true, "isDefault": false}),
+                    ]
+                    .into_iter()
+                    .chain(extra)
+                    .collect();
+                    reply(json!({"data": data, "nextCursor": null}))
+                }
                 Some(_) => emit(
                     &out,
                     json!({"id": id, "error": {"code": -32600, "message": "invalid cursor"}}),

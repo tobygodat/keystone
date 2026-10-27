@@ -1037,6 +1037,14 @@ fn apply(view: &Entity<Keystone>, cx: &mut VisualTestContext, session: u64, even
     cx.run_until_parked();
 }
 
+fn click(cx: &mut VisualTestContext, id: &'static str) {
+    let bounds = cx
+        .debug_bounds(id)
+        .unwrap_or_else(|| panic!("missing {id}"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+}
+
 fn inside(inner: gpui::Bounds<gpui::Pixels>, outer: gpui::Bounds<gpui::Pixels>) -> bool {
     inner.left() >= outer.left()
         && inner.right() <= outer.right()
@@ -1340,6 +1348,196 @@ fn a_catalog_arriving_mid_click_keeps_the_provider_row_under_the_pointer(cx: &mu
     );
     assert!(cx.debug_bounds("model-loading").is_some());
     assert_eq!(cx.debug_bounds("provider-claude"), Some(claude));
+}
+
+/// A model chosen below the fold is in view when the menu opens. A wheel
+/// back to the top afterwards stays there: the reveal happens once per opening.
+#[gpui::test]
+fn the_model_menu_opens_on_a_chosen_model_below_the_fold(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+    let key = |provider| CatalogKey {
+        provider,
+        account: None,
+        directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+    };
+    view.update(cx, |this, cx| {
+        this.state.update(cx, |state, cx| {
+            let catalogs = state.test_catalogs_mut();
+            catalogs.ask(key(Provider::Codex), 1);
+            catalogs.apply(
+                Provider::Codex,
+                None,
+                1,
+                keystone_agent::Catalog::Ready {
+                    models: (0..16)
+                        .map(|n| keystone_agent::ModelInfo {
+                            model: format!("m{n}"),
+                            label: format!("Model {n}"),
+                            resolved: None,
+                        })
+                        .collect(),
+                    default_model: None,
+                },
+            );
+            state.set_model(1, Some("m12".into()), cx).unwrap();
+        });
+    });
+    cx.run_until_parked();
+    click(cx, "model-selector");
+    cx.run_until_parked();
+    let list = cx.debug_bounds("model-list").unwrap();
+    let chosen = cx.debug_bounds("model-m12").unwrap();
+    assert!(inside(chosen, list), "{chosen:?} outside {list:?}");
+    assert!(
+        cx.debug_bounds("model-m0")
+            .is_none_or(|first| !inside(first, list)),
+        "the list still starts at the top"
+    );
+
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: chosen.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(10000.))),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let first = cx.debug_bounds("model-m0").unwrap();
+    assert!(
+        inside(first, list),
+        "a re-render scrolled the list back to the choice"
+    );
+
+    click(cx, "model-selector");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |this, _cx| this.model_menu), None);
+    click(cx, "model-selector");
+    cx.run_until_parked();
+    let chosen = cx.debug_bounds("model-m12").unwrap();
+    assert!(
+        inside(chosen, list),
+        "reopened: {chosen:?} outside {list:?}"
+    );
+}
+
+/// An error line that arrives or clears on its own while a composer menu is open moves
+/// neither menu nor its button, and a press it splits still lands on the row pressed.
+#[gpui::test]
+fn an_error_arriving_mid_click_keeps_the_menus_under_the_pointer(cx: &mut TestAppContext) {
+    let (dir, view, cx) = open(cx, true);
+    cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+    let directory = WorkingDirectory::new(&dir.path().join("a")).unwrap();
+    view.update(cx, |this, cx| {
+        this.state.update(cx, |state, _cx| {
+            let catalogs = state.test_catalogs_mut();
+            catalogs.ask(
+                CatalogKey {
+                    provider: Provider::Codex,
+                    account: None,
+                    directory: directory.clone(),
+                },
+                1,
+            );
+            catalogs.apply(
+                Provider::Codex,
+                None,
+                1,
+                keystone_agent::Catalog::Ready {
+                    models: ["one", "two", "three"]
+                        .map(|model| keystone_agent::ModelInfo {
+                            model: model.into(),
+                            label: model.into(),
+                            resolved: None,
+                        })
+                        .into(),
+                    default_model: None,
+                },
+            )
+        });
+    });
+    let set_error = |error: Option<&str>, cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            this.state.update(cx, |state, cx| {
+                state.error = error.map(Into::into);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+    };
+    let press = |position, cx: &mut VisualTestContext| {
+        cx.simulate_mouse_down(position, gpui::MouseButton::Left, gpui::Modifiers::none())
+    };
+    let release = |position, cx: &mut VisualTestContext| {
+        cx.simulate_mouse_up(position, gpui::MouseButton::Left, gpui::Modifiers::none())
+    };
+    let error = "Could not save the session. database is locked";
+
+    click(cx, "model-selector");
+    cx.run_until_parked();
+    let selector = cx.debug_bounds("model-selector").unwrap();
+    let three = cx.debug_bounds("model-three").unwrap();
+    press(three.center(), cx);
+    set_error(Some(error), cx);
+    assert!(cx.debug_bounds("workspace-error").is_some());
+    assert_eq!(cx.debug_bounds("model-three"), Some(three));
+    assert_eq!(cx.debug_bounds("model-selector"), Some(selector));
+    release(three.center(), cx);
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |this, cx| this
+            .selected_session(cx)
+            .unwrap()
+            .model()
+            .map(str::to_owned)),
+        Some("three".into())
+    );
+
+    click(cx, "model-selector");
+    cx.run_until_parked();
+    let selector = cx.debug_bounds("model-selector").unwrap();
+    let two = cx.debug_bounds("model-two").unwrap();
+    press(two.center(), cx);
+    set_error(None, cx);
+    assert!(cx.debug_bounds("workspace-error").is_none());
+    assert_eq!(cx.debug_bounds("model-two"), Some(two));
+    assert_eq!(cx.debug_bounds("model-selector"), Some(selector));
+    release(two.center(), cx);
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |this, cx| this
+            .selected_session(cx)
+            .unwrap()
+            .model()
+            .map(str::to_owned)),
+        Some("two".into())
+    );
+
+    let current = view.read_with(cx, |this, cx| {
+        this.selected_session(cx).unwrap().approval_mode()
+    });
+    let mode = ApprovalMode::ALL
+        .into_iter()
+        .find(|mode| *mode != current && *mode != ApprovalMode::FullAccess)
+        .unwrap();
+    let trigger = cx.debug_bounds("approval-mode").unwrap();
+    click(cx, "approval-mode");
+    cx.run_until_parked();
+    let selector = format!("approval-{}", mode.slug()).leak();
+    let option = cx.debug_bounds(selector).unwrap();
+    press(option.center(), cx);
+    set_error(Some(error), cx);
+    assert_eq!(cx.debug_bounds(selector), Some(option));
+    assert_eq!(cx.debug_bounds("approval-mode"), Some(trigger));
+    release(option.center(), cx);
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |this, cx| this
+            .selected_session(cx)
+            .unwrap()
+            .approval_mode()),
+        mode
+    );
 }
 
 /// The model choices keep one height through every catalog state and both providers,

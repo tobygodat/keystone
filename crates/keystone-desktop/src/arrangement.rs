@@ -106,7 +106,10 @@ fn minimum(
     match node {
         Node::View { id } => match c.component(*id).unwrap() {
             Component::Conversation => [CONVERSATION_MIN, 120. + header],
-            Component::Composer => [composer_width, 142. + header],
+            Component::Composer => [
+                composer_width,
+                142. + f32::from(TextSize::Ui.line_height()) + header,
+            ],
             Component::SessionList => {
                 if sidebar {
                     [SESSION_MIN, 160. + header]
@@ -1360,7 +1363,7 @@ impl Keystone {
                     .justify_end()
                     .p_3()
                     .child(self.composer(current, viewport, cx))
-                    .children(self.error_line(cx));
+                    .child(self.composer_status(cx));
             }
             Component::Files => {
                 pane = pane.child(self.file_list(cx));
