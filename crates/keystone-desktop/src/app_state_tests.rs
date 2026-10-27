@@ -394,7 +394,7 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
             assert!(state.send_message(
                 ComposerDraft {
                     session: id,
-                    text: "long reply without a view".into(),
+                    text: "long reply without a view until stopped".into(),
                     attachments: Vec::new(),
                 },
                 cx
@@ -429,10 +429,28 @@ fn dropping_an_attached_view_during_streaming_keeps_both_turns_alive(
     }
     state.read_with(cx, |state, _| {
         assert_eq!(state.phase, Phase::Running);
-        assert!(state.conversations[&2].running);
+        assert!(state.conversations[&1].running && state.conversations[&2].running);
     });
+    for (id, last) in [(1, "`fake-default`"), (2, "word200")] {
+        wait_until(cx, &state, |state| {
+            state.conversations[&id].rows.iter().any(|row| matches!(row,
+                Row::Item(item) if item.kind == ItemKind::AgentMessage && item.text.ends_with(last)
+            ))
+        });
+        state.update(cx, |state, cx| state.stop_turn(id, cx));
+    }
     wait_until(cx, &state, |state| {
-        completed(state, 1) && completed(state, 2)
+        [1, 2].into_iter().all(|id| {
+            let conversation = &state.conversations[&id];
+            !conversation.running
+                && matches!(
+                    conversation.rows.last(),
+                    Some(Row::TurnEnded {
+                        status: TurnStatus::Interrupted,
+                        ..
+                    })
+                )
+        })
     });
     state.update(cx, |state, cx| {
         state.save(Vec::new(), Vec::new(), Vec::new(), cx).unwrap()

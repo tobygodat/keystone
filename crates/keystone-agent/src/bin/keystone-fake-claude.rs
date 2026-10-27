@@ -91,7 +91,7 @@
 //! resumed session never reuses one. A prompt containing "crash" records its whole
 //! reply after the first streamed word, then exits, as a Claude that dies mid-stream
 //! after saving. A prompt containing "until stopped" streams its whole reply, then
-//! holds the turn open until Stop, for at most 15 s.
+//! holds the turn open until Stop or stdin closes.
 //!
 //! An `idle` setting of `1` reports what idle eviction needs, as the published Agent
 //! SDK types describe it: `session_state_changed` (`running` as a turn starts, `idle`
@@ -1579,11 +1579,19 @@ fn answer(
         }
         thread::sleep(delay);
     }
-    if orchestrator::is_child_message(text) || text.contains("until stopped") {
-        orchestrator::hold_child(|| {
+    let child = orchestrator::is_child_message(text);
+    if child || text.contains("until stopped") {
+        let ended = || {
             let state = shared.state.lock().unwrap();
             state.abort.is_some() || state.closed
-        });
+        };
+        if child {
+            orchestrator::hold_child(ended);
+        } else {
+            while !ended() {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
         if let Some(abort) = shared.state.lock().unwrap().abort {
             text_record(&sent);
             return aborted(out, &message, &sent, abort);

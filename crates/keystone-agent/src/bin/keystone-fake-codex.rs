@@ -10,7 +10,7 @@
 //! resumes a thread with its override like real Codex. A turn whose prompt contains
 //! "end on steer" ends 300 ms after a steer arrives and then rejects it, as Codex does
 //! for a steer that reaches a turn that just ended. One whose prompt contains "until
-//! stopped" streams its reply, then stays running until interrupted, for at most 15 s.
+//! stopped" streams its reply, then stays running until interrupted.
 //! `KEYSTONE_FAKE_CODEX_REPLY` replaces the reply text exactly.
 //!
 //! `model/list` returns a scripted catalog (`fake-default`, `fake-fast`, and a hidden
@@ -993,7 +993,9 @@ fn run_turn(
         });
     }
     if text.contains("until stopped") {
-        orchestrator::hold_child(|| turn.interrupt.load(Ordering::Relaxed));
+        while !turn.interrupt.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(5));
+        }
     }
     if turn.silent.load(Ordering::SeqCst) {
         return;
