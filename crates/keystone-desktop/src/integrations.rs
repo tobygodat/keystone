@@ -2,7 +2,8 @@
 //! loads for the window's project, read from the providers' own files, and what
 //! running sessions last reported about each server. Servers are added, edited,
 //! switched and removed here, plugins switched, and skill folders added and removed,
-//! through `keystone_core::integrations::edit`.
+//! through `keystone_core::integrations::edit`, and servers and skill folders copied
+//! to another account through `keystone_core::integrations::copy`.
 
 use crate::Keystone;
 use crate::app_state::ReportedStatus;
@@ -12,6 +13,7 @@ use gpui::{
     AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     KeyDownEvent, Window, div, prelude::*, px,
 };
+use keystone_core::integrations::copy::{self, Drift, Pair, Preview};
 use keystone_core::integrations::edit::{self, Change, Failure, Server, Target};
 use keystone_core::integrations::{
     self, Detail, Health, Inventory, Item, Kind, Location, Scope, State, Transport,
@@ -26,6 +28,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Numbers each read, so only the newest one fills the page that asked for it.
 static READS: AtomicU64 = AtomicU64::new(0);
+/// Numbers each copy preview, so only the newest one fills the panel.
+static PREVIEWS: AtomicU64 = AtomicU64::new(0);
 
 const KINDS: [(Kind, &str, &str); 3] = [
     (Kind::McpServer, "MCP servers", "mcp"),
@@ -45,6 +49,18 @@ pub(crate) struct AccountInventory {
     inventory: Option<Inventory>,
 }
 
+impl AccountInventory {
+    fn id(&self) -> AccountId {
+        self.account
+            .clone()
+            .unwrap_or_else(|| AccountId::new(AccountId::DEFAULT))
+    }
+
+    fn is(&self, provider: Provider, account: &AccountId) -> bool {
+        self.provider == provider && self.id() == *account
+    }
+}
+
 /// What the last change says, above the lists.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Notice {
@@ -61,6 +77,19 @@ enum FormKind {
     /// The server as its file has it, secrets included, for the fields left hidden.
     EditServer(Box<(Item, Server)>),
     AddSkill,
+    Copy(Box<CopyForm>),
+}
+
+/// A copy being previewed: the item, the account in the read it comes from, the
+/// secrets the user included, and what the copy would write, worked out for the
+/// preview numbered `asked` or an earlier one.
+#[derive(Clone, Debug)]
+struct CopyForm {
+    item: Item,
+    from: usize,
+    include: Vec<String>,
+    asked: u64,
+    preview: Option<(u64, Result<Preview, String>)>,
 }
 
 /// The open form: what it makes, and the account (an index into the read) and scope
@@ -82,6 +111,8 @@ pub(crate) struct IntegrationsPage {
     applying: bool,
     pub(crate) notice: Option<Notice>,
     form: Option<Form>,
+    /// Each copy Keystone made, as its two ends compared at the last read.
+    copies: Vec<(Pair, Drift)>,
     name: Entity<TextInput>,
     target: Entity<TextInput>,
     args: Entity<TextInput>,
@@ -107,6 +138,7 @@ impl IntegrationsPage {
             applying: false,
             notice: None,
             form: None,
+            copies: Vec::new(),
             name: field("Name", cx),
             target: field("Command or URL", cx),
             args: field("Arguments", cx),
@@ -127,8 +159,13 @@ impl IntegrationsPage {
 
 /// The scopes a form offers for `provider`.
 fn scopes(provider: Provider, kind: &FormKind) -> &'static [Scope] {
-    match (provider, kind) {
-        (Provider::Claude, FormKind::AddServer) => &[Scope::User, Scope::Local, Scope::Project],
+    let server = match kind {
+        FormKind::AddServer => true,
+        FormKind::Copy(copy) => copy.item.kind() == Kind::McpServer,
+        _ => false,
+    };
+    match provider {
+        Provider::Claude if server => &[Scope::User, Scope::Local, Scope::Project],
         _ => &[Scope::User, Scope::Project],
     }
 }
@@ -293,6 +330,9 @@ fn note(item: &Item) -> Option<String> {
     if let Some(scope) = item.overridden_by {
         return Some(format!("Overridden by {} scope", scope.label()));
     }
+    if item.kind() == Kind::Plugin {
+        return Some(copy::only(item.provider).into());
+    }
     match item.state {
         State::On => None,
         // A server's or plugin's switch already shows it.
@@ -300,6 +340,34 @@ fn note(item: &Item) -> Option<String> {
         State::Off => Some("Off".into()),
         State::Untrusted => Some("Project not trusted by Codex".into()),
     }
+}
+
+/// What a copy says beside an item's name, ahead of [`note`]: that it and its other end
+/// differ, or, on the copy, the secrets it still needs.
+fn copy_note(item: &Item, copies: &[(Pair, Drift)], read: &[AccountInventory]) -> Option<String> {
+    copies.iter().find_map(|(pair, drift)| {
+        let other = if pair.from.is(item) {
+            &pair.to
+        } else if pair.to.is(item) {
+            &pair.from
+        } else {
+            return None;
+        };
+        match drift {
+            Drift::Differs => {
+                let label = read
+                    .iter()
+                    .find(|account| account.is(other.provider, &other.account))
+                    .map_or(other.account.as_str(), |account| account.label.as_str());
+                Some(format!(
+                    "Out of sync with {} · {label}",
+                    provider_name(other.provider)
+                ))
+            }
+            Drift::Needs(needs) if pair.to.is(item) => Some(format!("Needs {}", needs.join(", "))),
+            _ => None,
+        }
+    })
 }
 
 /// The line under an item's name: how a server runs and the names of what it is
@@ -380,8 +448,9 @@ impl Keystone {
             .as_ref()
             .ok()
             .map(|p| p.path().to_owned());
+        let pairs = state.store().database().copies().unwrap_or_default();
         let read = cx.background_executor().spawn(async move {
-            accounts
+            let read = accounts
                 .into_iter()
                 .map(|(provider, account, label, home)| {
                     let location = env.location(provider, home.as_deref());
@@ -403,18 +472,55 @@ impl Keystone {
                         inventory,
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let location = |end: &copy::End| {
+                read.iter()
+                    .find(|account| account.is(end.provider, &end.account))
+                    .and_then(|account| account.location.as_ref())
+            };
+            let copies = pairs
+                .into_iter()
+                .filter_map(|pair| {
+                    let (from, to) = (location(&pair.from)?, location(&pair.to)?);
+                    let drift = copy::drift(&pair, from, to, project.as_deref()?)?;
+                    Some((pair, drift))
+                })
+                .collect::<Vec<_>>();
+            (read, copies)
         });
         cx.spawn(async move |this, cx| {
-            let read = read.await;
+            let (read, copies) = read.await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(page) = this.settings.as_mut()
-                    && page.integrations.ticket == ticket
+                let database = this.state.read(cx).store().database();
+                let Some(page) = this
+                    .integrations_page()
+                    .filter(|page| page.ticket == ticket)
+                else {
+                    return;
+                };
+                // A form holds indexes into the read, so it closes when the accounts move.
+                let accounts = |read: &[AccountInventory]| {
+                    read.iter()
+                        .map(|account| (account.provider, account.account.clone()))
+                        .collect::<Vec<_>>()
+                };
+                if page
+                    .read
+                    .as_deref()
+                    .is_some_and(|old| accounts(old) != accounts(&read))
                 {
-                    page.integrations.read = Some(read);
-                    page.integrations.reading = false;
-                    cx.notify();
+                    page.form = None;
                 }
+                page.read = Some(read);
+                page.copies = copies
+                    .into_iter()
+                    .filter(|(pair, drift)| {
+                        *drift != Drift::Gone || database.forget_copy(pair).is_err()
+                    })
+                    .collect();
+                page.reading = false;
+                this.refresh_copy(cx);
+                cx.notify();
             });
         })
         .detach();
@@ -529,17 +635,27 @@ impl Keystone {
                     )
                 });
                 let actions = self.item_actions(at, item, &id, integrations, cx);
-                rows.entry(item.kind())
-                    .or_default()
-                    .push(Self::integration_row(
-                        &id,
-                        &item.name,
-                        note(item),
-                        (detail(item), item.kind() == Kind::McpServer),
-                        meta,
-                        status.into_iter().chain(Some(actions)),
-                        cx,
-                    ));
+                let copying = match &integrations.form {
+                    Some(Form {
+                        kind: FormKind::Copy(copy),
+                        ..
+                    }) => copy.from == at && same_item(&copy.item, item),
+                    _ => false,
+                };
+                let note = copy_note(item, &integrations.copies, read).or_else(|| note(item));
+                let rows = rows.entry(item.kind()).or_default();
+                rows.push(Self::integration_row(
+                    &id,
+                    &item.name,
+                    note,
+                    (detail(item), item.kind() == Kind::McpServer),
+                    meta,
+                    status.into_iter().chain(Some(actions)),
+                    cx,
+                ));
+                if copying {
+                    rows.push(self.copy_form(integrations, read, home.as_deref(), cx));
+                }
             }
             for (name, status) in reported {
                 let declared = inventory
@@ -753,7 +869,7 @@ impl Keystone {
                 Switch::new(format!("{id}-switch"), item.state == State::On).on_change(
                     self.scoped_listener(cx, move |this, &on: &bool, _, cx| {
                         let item = target.clone();
-                        this.change_integration(at, Change::Switch { item, on }, cx)
+                        this.change_integration(at, Change::Switch { item, on }, None, cx)
                     }),
                 ),
             );
@@ -768,10 +884,14 @@ impl Keystone {
         }
         if item.kind() != Kind::Plugin && !plugin_skill {
             let target = item.clone();
+            actions = actions.child(icon("copy", IconName::Copy, "Copy to…").on_click(
+                self.scoped_listener(cx, move |this, _, _, cx| this.open_copy(at, &target, cx)),
+            ));
+            let target = item.clone();
             actions = actions.child(icon("remove", IconName::Close, "Remove").on_click(
                 self.scoped_listener(cx, move |this, _, _, cx| {
                     let item = target.clone();
-                    this.change_integration(at, Change::Remove { item }, cx)
+                    this.change_integration(at, Change::Remove { item }, None, cx)
                 }),
             ));
         }
@@ -798,7 +918,10 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let form = page.form.as_ref().expect("a form is open");
-        let accounts = Self::form_accounts(read);
+        let mut accounts = Self::form_accounts(read);
+        if let FormKind::Copy(copy) = &form.kind {
+            accounts.retain(|(at, _)| *at != copy.from);
+        }
         let provider = read[form.account].provider;
         let scopes = scopes(provider, &form.kind);
         let choices: Vec<usize> = accounts.iter().map(|(at, _)| *at).collect();
@@ -821,6 +944,7 @@ impl Keystone {
                                 form.account = choices[chosen];
                                 form.scope = 0;
                             }
+                            this.refresh_copy(cx);
                             cx.notify();
                         },
                     )),
@@ -841,6 +965,7 @@ impl Keystone {
                             if let Some(form) = this.integrations_form() {
                                 form.scope = scope;
                             }
+                            this.refresh_copy(cx);
                             cx.notify();
                         },
                     )),
@@ -977,6 +1102,184 @@ impl Keystone {
             .into_any_element()
     }
 
+    /// The copy panel under the row being copied: where to, what it writes there, and
+    /// a switch for each secret.
+    fn copy_form(
+        &self,
+        page: &IntegrationsPage,
+        read: &[AccountInventory],
+        home: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(Form {
+            kind: FormKind::Copy(copy),
+            ..
+        }) = &page.form
+        else {
+            return div().into_any_element();
+        };
+        let body = match &copy.preview {
+            None => div().into_any_element(),
+            Some((_, Ok(preview))) => v_flex()
+                .gap(spacing::SM)
+                .child(
+                    Label::new(shown_path(&preview.to, home))
+                        .size(TextSize::Sm)
+                        .color(Color::Muted)
+                        .truncate(),
+                )
+                .child(
+                    v_flex()
+                        .automation_id("integrations-copy-preview")
+                        .children(
+                            preview
+                                .text
+                                .lines()
+                                .map(|line| Label::new(line.to_owned()).size(TextSize::Sm).mono()),
+                        ),
+                )
+                .children((!preview.secrets.is_empty()).then(|| {
+                    h_flex()
+                        .flex_wrap()
+                        .gap(spacing::MD)
+                        .children(preview.secrets.iter().map(|secret| {
+                            let name = secret.clone();
+                            Switch::new(
+                                format!("integrations-copy-secret-{secret}"),
+                                copy.include.contains(secret),
+                            )
+                            .label(secret.clone())
+                            .on_change(self.scoped_listener(cx, move |this, &on: &bool, _, cx| {
+                                if let Some(Form {
+                                    kind: FormKind::Copy(copy),
+                                    ..
+                                }) = this.integrations_form()
+                                {
+                                    copy.include.retain(|included| *included != name);
+                                    if on {
+                                        copy.include.push(name.clone());
+                                    }
+                                }
+                                this.refresh_copy(cx);
+                                cx.notify();
+                            }))
+                        }))
+                }))
+                .into_any_element(),
+            Some((_, Err(error))) => div()
+                .automation_id("integrations-copy-error")
+                .child(
+                    Label::new(error.clone())
+                        .size(TextSize::Sm)
+                        .color(Color::Warning),
+                )
+                .into_any_element(),
+        };
+        v_flex()
+            .automation_id("integrations-copy-form")
+            .gap(spacing::SM)
+            .py(spacing::SM)
+            .hairline_t(cx)
+            .on_key_down(self.form_keys(cx))
+            .child(self.form_target(page, read, cx))
+            .child(body)
+            .child(self.form_buttons(page, "Copy", cx))
+            .into_any_element()
+    }
+
+    /// Opens the copy panel on `item`, from the account at `at`, to the first other
+    /// account of the other provider, or else of the same one.
+    fn open_copy(&mut self, at: usize, item: &Item, cx: &mut Context<Self>) {
+        let Some(page) = self.integrations_page() else {
+            return;
+        };
+        let Some(read) = &page.read else { return };
+        let accounts = Self::form_accounts(read);
+        let target = accounts
+            .iter()
+            .find(|(to, _)| read[*to].provider != item.provider)
+            .or_else(|| accounts.iter().find(|(to, _)| *to != at));
+        let Some(&(account, _)) = target else {
+            return;
+        };
+        let kind = FormKind::Copy(Box::new(CopyForm {
+            item: item.clone(),
+            from: at,
+            include: Vec::new(),
+            asked: 0,
+            preview: None,
+        }));
+        let scope = scopes(read[account].provider, &kind)
+            .iter()
+            .position(|scope| *scope == item.scope)
+            .unwrap_or(0);
+        page.notice = None;
+        page.form = Some(Form {
+            kind,
+            account,
+            scope,
+        });
+        self.refresh_copy(cx);
+        cx.notify();
+    }
+
+    /// Works out again, off the UI thread, what the open copy would write.
+    fn refresh_copy(&mut self, cx: &mut Context<Self>) {
+        let project = self
+            .presentation
+            .project
+            .as_ref()
+            .ok()
+            .map(|p| p.path().to_owned());
+        let Some(page) = self.integrations_page() else {
+            return;
+        };
+        let (Some(form), Some(read)) = (page.form.as_mut(), page.read.as_ref()) else {
+            return;
+        };
+        let Some(to) = read.get(form.account) else {
+            return;
+        };
+        let scope = scopes(to.provider, &form.kind).get(form.scope).copied();
+        let FormKind::Copy(copy) = &mut form.kind else {
+            return;
+        };
+        let from = read.get(copy.from).and_then(|from| from.location.clone());
+        let (Some(from), Some(location), Some(project), Some(scope)) =
+            (from, to.location.clone(), project, scope)
+        else {
+            return;
+        };
+        let account = to.id();
+        let asked = PREVIEWS.fetch_add(1, Ordering::Relaxed) + 1;
+        copy.asked = asked;
+        let (item, include) = (copy.item.clone(), copy.include.clone());
+        let task = cx.background_executor().spawn(async move {
+            copy::preview(
+                &item,
+                &from,
+                (&location, &account, scope),
+                &project,
+                &include,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let preview = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(Form {
+                    kind: FormKind::Copy(copy),
+                    ..
+                }) = this.integrations_form()
+                    && copy.asked == asked
+                {
+                    copy.preview = Some((asked, preview));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn integrations_page(&mut self) -> Option<&mut IntegrationsPage> {
         self.settings.as_mut().map(|page| &mut page.integrations)
     }
@@ -1097,6 +1400,19 @@ impl Keystone {
         let (Some(form), Some(read)) = (&page.form, &page.read) else {
             return;
         };
+        if let FormKind::Copy(copy) = &form.kind {
+            // Only the preview of what the panel shows now, for the account it names.
+            if let Some((asked, Ok(preview))) = copy.preview.clone()
+                && asked == copy.asked
+                && read
+                    .get(form.account)
+                    .is_some_and(|to| to.is(preview.pair.to.provider, &preview.pair.to.account))
+            {
+                let at = form.account;
+                self.change_integration(at, preview.change, Some(preview.pair), cx);
+            }
+            return;
+        }
         let value = |input: &Entity<TextInput>| input.read(cx).value().trim().to_owned();
         let provider = read[form.account].provider;
         let scope = scopes(provider, &form.kind).get(form.scope).copied();
@@ -1133,11 +1449,11 @@ impl Keystone {
                 scope,
                 folder: expand_home(&value(&page.folder), home.as_deref()),
             }),
-            (_, None) => return,
+            (FormKind::Copy(_), _) | (_, None) => return,
         };
         let at = form.account;
         match change {
-            Ok(change) => self.change_integration(at, change, cx),
+            Ok(change) => self.change_integration(at, change, None, cx),
             Err(error) => {
                 if let Some(page) = self.integrations_page() {
                     page.notice = Some(Notice::Failed(error));
@@ -1148,8 +1464,15 @@ impl Keystone {
     }
 
     /// Makes `change` to the account at `at` in the read off the UI thread, against the
-    /// files as that read found them, then reads them again.
-    fn change_integration(&mut self, at: usize, change: Change, cx: &mut Context<Self>) {
+    /// files as that read found them, then reads them again. A change that makes a
+    /// copy remembers it as `copied`.
+    fn change_integration(
+        &mut self,
+        at: usize,
+        change: Change,
+        copied: Option<Pair>,
+        cx: &mut Context<Self>,
+    ) {
         let project = self
             .presentation
             .project
@@ -1187,9 +1510,9 @@ impl Keystone {
             Change::Switch { item, .. } | Change::Edit { item, .. } | Change::Remove { item } => {
                 item.scope == Scope::Project
             }
-            Change::AddServer { scope, .. } | Change::AddSkill { scope, .. } => {
-                *scope == Scope::Project
-            }
+            Change::AddServer { scope, .. }
+            | Change::AddSkill { scope, .. }
+            | Change::AddDefinition { scope, .. } => *scope == Scope::Project,
         };
         let running = state.has_running_session(provider, id.as_ref(), project_scope);
         let profile = state.profile(provider, id.as_ref());
@@ -1211,6 +1534,12 @@ impl Keystone {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                let recorded = match (&result, copied) {
+                    (Ok(()), Some(pair)) => {
+                        this.state.read(cx).store().database().record_copy(&pair)
+                    }
+                    _ => Ok(()),
+                };
                 let Some(page) = this.integrations_page() else {
                     return;
                 };
@@ -1220,6 +1549,9 @@ impl Keystone {
                     Err(Failure::Conflict(_)) => Some(Notice::Conflict),
                     Err(Failure::Failed(error)) => Some(Notice::Failed(error.clone())),
                 };
+                if let Err(error) = recorded {
+                    page.notice = Some(Notice::Failed(error.to_string()));
+                }
                 if result.is_ok() {
                     page.form = None;
                 }
@@ -1257,7 +1589,9 @@ impl Keystone {
                             .gap_2()
                             .child(Label::new(name.to_owned()).truncate())
                             .children(note.map(|note| {
-                                Label::new(note).size(TextSize::Sm).color(Color::Faint)
+                                div()
+                                    .automation_id(format!("{id}-note"))
+                                    .child(Label::new(note).size(TextSize::Sm).color(Color::Faint))
                             })),
                     )
                     .when(!detail.is_empty(), |d| {

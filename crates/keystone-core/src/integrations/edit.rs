@@ -49,6 +49,13 @@ pub enum Change {
     },
     /// Copy a skill folder in.
     AddSkill { scope: Scope, folder: PathBuf },
+    /// Add an MCP server as the provider's own definition: Claude's JSON, or Codex's
+    /// table as JSON.
+    AddDefinition {
+        scope: Scope,
+        name: String,
+        definition: Value,
+    },
 }
 
 /// The provider CLI's arguments, and the folder it runs in.
@@ -163,7 +170,11 @@ pub fn plan(
     Ok(plan)
 }
 
-fn skills_root(location: &Location, project: &Path, scope: Scope) -> Result<PathBuf, String> {
+pub(super) fn skills_root(
+    location: &Location,
+    project: &Path,
+    scope: Scope,
+) -> Result<PathBuf, String> {
     Ok(match (location, scope) {
         (Location::Claude { config_dir, .. }, Scope::User) => config_dir.join("skills"),
         (Location::Claude { .. }, Scope::Project) => project.join(".claude/skills"),
@@ -186,6 +197,18 @@ fn claude(
     let cwd = |item: &Item| match item.scope {
         Scope::Project => item.source.parent().unwrap_or(project).to_owned(),
         _ => project.to_owned(),
+    };
+    let change = match change {
+        Change::AddServer {
+            scope,
+            name,
+            server,
+        } => Change::AddDefinition {
+            scope,
+            name,
+            definition: claude_json(&server, None)?,
+        },
+        change => change,
     };
     match change {
         Change::Switch { item, on } if item.kind() == Kind::Plugin => {
@@ -247,8 +270,9 @@ fn claude(
             }
         }
         Change::Edit { item, server } => {
-            let existing = claude_server(global_file, project, &item)
-                .ok_or_else(|| format!("{} is no longer there.", item.name))?;
+            let existing =
+                claude_server(global_file, project, &item.source, item.scope, &item.name)
+                    .ok_or_else(|| format!("{} is no longer there.", item.name))?;
             let new = claude_json(&server, Some(&existing))?;
             let scope = claude_scope(item.scope);
             let (name, cwd) = (item.name.clone(), cwd(&item));
@@ -277,12 +301,12 @@ fn claude(
             plan.guards.push(item.source);
             plan.steps.push(Step::Cli(Cli { args: remove, cwd }));
         }
-        Change::AddServer {
+        Change::AddDefinition {
             scope,
             name,
-            server,
+            definition,
         } => {
-            let definition = canonical(&claude_json(&server, None)?);
+            let definition = canonical(&definition);
             plan.guards.push(match scope {
                 Scope::Project => project.join(".mcp.json"),
                 _ => global_file.to_owned(),
@@ -299,6 +323,7 @@ fn claude(
                 cwd: project.to_owned(),
             }));
         }
+        Change::AddServer { .. } => unreachable!("made an AddDefinition above"),
         Change::AddSkill { .. } => unreachable!("planned for every provider"),
     }
     Ok(())
@@ -389,11 +414,30 @@ fn codex(plan: &mut Plan, home: &Path, project: &Path, change: Change) -> Result
                 edit: Box::new(move |text| toml_put_server(text, &name, &server, true)),
             });
         }
-        Change::AddServer { .. } => return Err("Codex has no local scope.".into()),
+        Change::AddServer { .. } => return Err(NO_LOCAL.into()),
+        Change::AddDefinition {
+            scope,
+            name,
+            definition,
+        } => {
+            let path = match scope {
+                Scope::User => config,
+                Scope::Project => project.join(".codex/config.toml"),
+                Scope::Local => return Err(NO_LOCAL.into()),
+            };
+            let table = codex_text(&name, &definition)?;
+            plan.guards.push(path.clone());
+            plan.steps.push(Step::Edit {
+                path,
+                edit: Box::new(move |text| toml_append(text, &name, &table)),
+            });
+        }
         Change::AddSkill { .. } => unreachable!("planned for every provider"),
     }
     Ok(())
 }
+
+pub(super) const NO_LOCAL: &str = "Codex has no local scope.";
 
 fn taken(name: &str) -> String {
     format!("A server named {name} is already there.")
@@ -437,18 +481,30 @@ fn claude_project_key(global: &Value, project: &Path) -> String {
         })
 }
 
-/// `item`'s definition as Claude keeps it, secrets included.
-fn claude_server(global_file: &Path, project: &Path, item: &Item) -> Option<Value> {
-    let file = read_json(&item.source).ok()?;
-    let server = match item.scope {
-        Scope::User => &file["mcpServers"][&item.name],
+/// The server `name` at `scope` in `source` as Claude keeps it, secrets included.
+pub(super) fn claude_server(
+    global_file: &Path,
+    project: &Path,
+    source: &Path,
+    scope: Scope,
+    name: &str,
+) -> Option<Value> {
+    let file = read_json(source).ok()?;
+    let server = match scope {
+        Scope::User | Scope::Project => &file["mcpServers"][name],
         Scope::Local => {
             let key = claude_project_key(&read_json(global_file).ok()?, project);
-            &file["projects"][&key]["mcpServers"][&item.name]
+            &file["projects"][&key]["mcpServers"][name]
         }
-        Scope::Project => &file["mcpServers"][&item.name],
     };
     server.is_object().then(|| server.clone())
+}
+
+/// The server `name` in the Codex config `source`, secrets included, as JSON.
+pub(super) fn codex_server(source: &Path, name: &str) -> Option<Value> {
+    let config: toml::Table = toml::from_str(&fs::read_to_string(source).ok()?).ok()?;
+    let server = config.get("mcp_servers")?.get(name)?.as_table()?;
+    serde_json::to_value(server).ok()
 }
 
 /// `item`'s definition for a form, its environment variables named but not given.
@@ -457,7 +513,7 @@ pub fn server(location: &Location, project: &Path, item: &Item) -> Option<Server
     let env = |names: Vec<String>| names.into_iter().map(|name| (name, None)).collect();
     match location {
         Location::Claude { global_file, .. } => {
-            let server = claude_server(global_file, project, item)?;
+            let server = claude_server(global_file, project, &item.source, item.scope, &item.name)?;
             let target = match server["url"].as_str() {
                 Some(url) if server["command"].is_null() => Target::Url(url.to_owned()),
                 _ => Target::Command {
@@ -762,32 +818,11 @@ fn toml_put_server(
     server: &Server,
     adding: bool,
 ) -> Result<String, String> {
-    let mut doc = toml_doc(text)?;
     if adding {
-        let taken = doc
-            .get("mcp_servers")
-            .and_then(toml_edit::Item::as_table_like)
-            .is_some_and(|servers| servers.contains_key(name));
-        if taken {
-            return Err(self::taken(name));
-        }
-        let mut new = toml_edit::DocumentMut::new();
-        let mut servers = toml_edit::Table::new();
-        servers.set_implicit(true);
-        servers.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
-        new.insert("mcp_servers", toml_edit::Item::Table(servers));
-        let table = toml_table(&mut new, "mcp_servers", name)?;
-        put_server(table, server, &BTreeMap::new())?;
-        let gap = match text {
-            "" => "",
-            text if text.ends_with("\n\n") => "",
-            text if text.ends_with('\n') => "\n",
-            _ => "\n\n",
-        };
-        let joined = format!("{text}{gap}{new}");
-        toml_doc(&joined)?;
-        return Ok(joined);
+        let table = toml_server(name, |table| put_server(table, server, &BTreeMap::new()))?;
+        return toml_append(text, name, &table);
     }
+    let mut doc = toml_doc(text)?;
     let table = toml_table(&mut doc, "mcp_servers", name)?;
     let old_env: BTreeMap<String, toml_edit::Item> = table
         .get("env")
@@ -796,6 +831,92 @@ fn toml_put_server(
         .unwrap_or_default();
     put_server(table, server, &old_env)?;
     Ok(doc.to_string())
+}
+
+/// `[mcp_servers.<name>]` as `fill` makes it, alone.
+fn toml_server(
+    name: &str,
+    fill: impl FnOnce(&mut dyn toml_edit::TableLike) -> Result<(), String>,
+) -> Result<String, String> {
+    let mut new = toml_edit::DocumentMut::new();
+    let mut servers = toml_edit::Table::new();
+    servers.set_implicit(true);
+    servers.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
+    new.insert("mcp_servers", toml_edit::Item::Table(servers));
+    fill(toml_table(&mut new, "mcp_servers", name)?)?;
+    Ok(new.to_string())
+}
+
+/// `text` with `table`, the server `name` alone, after the rest of it.
+fn toml_append(text: &str, name: &str, table: &str) -> Result<String, String> {
+    let taken = toml_doc(text)?
+        .get("mcp_servers")
+        .and_then(toml_edit::Item::as_table_like)
+        .is_some_and(|servers| servers.contains_key(name));
+    if taken {
+        return Err(self::taken(name));
+    }
+    let gap = match text {
+        "" => "",
+        text if text.ends_with("\n\n") => "",
+        text if text.ends_with('\n') => "\n",
+        _ => "\n\n",
+    };
+    let joined = format!("{text}{gap}{table}");
+    toml_doc(&joined)?;
+    Ok(joined)
+}
+
+/// The server `name` as the text a copy appends to a Codex config: `definition`'s
+/// objects become tables and its lists arrays.
+pub(super) fn codex_text(name: &str, definition: &Value) -> Result<String, String> {
+    fn value(json: &Value) -> Option<toml_edit::Value> {
+        Some(match json {
+            Value::String(text) => text.as_str().into(),
+            Value::Bool(on) => (*on).into(),
+            Value::Number(number) => match number.as_i64() {
+                Some(whole) => whole.into(),
+                None => number.as_f64()?.into(),
+            },
+            Value::Array(list) => list
+                .iter()
+                .filter_map(value)
+                .collect::<toml_edit::Array>()
+                .into(),
+            Value::Object(object) => {
+                let mut table = toml_edit::InlineTable::new();
+                for (key, json) in object {
+                    table.extend(value(json).map(|v| (key.as_str(), v)));
+                }
+                table.into()
+            }
+            Value::Null => return None,
+        })
+    }
+    let object: BTreeMap<_, _> = definition
+        .as_object()
+        .ok_or("not a server")?
+        .iter()
+        .collect();
+    toml_server(name, |server| {
+        for (key, json) in object {
+            let item = match json {
+                Value::Object(inner) => {
+                    let mut table = toml_edit::Table::new();
+                    for (key, json) in inner.iter().collect::<BTreeMap<_, _>>() {
+                        table.extend(value(json).map(|v| (key.as_str(), v)));
+                    }
+                    toml_edit::Item::Table(table)
+                }
+                json => match value(json) {
+                    Some(v) => toml_edit::Item::Value(v),
+                    None => continue,
+                },
+            };
+            server.insert(key, item);
+        }
+        Ok(())
+    })
 }
 
 fn put_server(
@@ -1103,8 +1224,13 @@ fn copy_folder(from: &Path, to: &Path) -> io::Result<()> {
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
             copy_folder(&entry.path(), &target)?;
+        } else if kind.is_symlink() && cfg!(unix) {
+            // A link stays a link: following one can copy a secret it points at.
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(fs::read_link(entry.path())?, &target)?;
         } else {
             fs::copy(entry.path(), target)?;
         }

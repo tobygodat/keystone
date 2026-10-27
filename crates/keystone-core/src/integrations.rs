@@ -11,11 +11,14 @@
 //! items, as each provider's own `mcp`/`plugin` commands treat them, and the one the
 //! provider does not use names the scope that wins over it. The file layouts were
 //! observed on Claude Code 2.1.301 and Codex 0.163.0; see
-//! `docs/research/integrations-probe.md`. [`edit`] changes them.
+//! `docs/research/integrations-probe.md`. [`edit`] changes them, and [`copy`] copies
+//! servers and skills from one account to another.
 
+pub mod copy;
 pub mod edit;
 
 use crate::{AccountId, Provider};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -24,7 +27,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// What kind of thing an item is.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum Kind {
     McpServer,
     Skill,
@@ -32,7 +35,7 @@ pub enum Kind {
 }
 
 /// Where a declaration applies, in the providers' own terms.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum Scope {
     /// Every project the account opens.
     User,

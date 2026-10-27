@@ -352,6 +352,26 @@ crates/keystone-core/src/delivery.rs
 	invalid or duplicate delivery
 	session {child} has no delivery
 
+crates/keystone-core/src/integrations/copy.rs
+	: {scheme}
+	A server named {} is already there.
+	A skill named {} is already there.
+	Argument {}
+	Authorization
+	Bearer ${{{variable}}}
+	Choose a skill folder.
+	Claude has no {key}.
+	Claude needs a command or a URL.
+	Claude only
+	Claude would expand the ${{…}} in {field}.
+	Codex can't expand the reference in {field}.
+	Codex can't use SSE servers.
+	Codex needs a command or a URL.
+	Codex only
+	{} is no longer there.
+	{} links outside its folder.
+	{}={MASK}
+
 crates/keystone-core/src/integrations/edit.rs
 	A server named {name} is already there.
 	A skill named {name} is already there.
@@ -366,6 +386,7 @@ crates/keystone-core/src/integrations/edit.rs
 	env is not a table
 	expected a list
 	no folder to copy into
+	not a server
 	{error} Putting it back failed too: {undo} The old file is in {}.
 	{error} The old folder is in {}.
 	{key} is not inside an object
@@ -890,6 +911,8 @@ crates/keystone-desktop/src/integrations.rs
 	Close the quote in Arguments.
 	Close the quote in Environment.
 	Command or URL
+	Copy
+	Copy to…
 	Default
 	Edit
 	Edited outside Keystone
@@ -898,8 +921,10 @@ crates/keystone-desktop/src/integrations.rs
 	MCP servers
 	Name
 	Name it with letters, digits, - and _.
+	Needs {}
 	Not running
 	Off
+	Out of sync with {} · {label}
 	Overridden by {} scope
 	Plugins
 	Project not trusted by Codex

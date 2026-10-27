@@ -7,12 +7,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Where a copy is remembered: by its copy, and by its project when either end is a
+/// `Local` server, which every project keeps in the same file.
+fn copy_key(pair: &crate::integrations::copy::Pair) -> io::Result<String> {
+    let local = [&pair.from, &pair.to]
+        .iter()
+        .any(|end| end.scope == crate::integrations::Scope::Local);
+    let project = local.then_some(&pair.project);
+    Ok(format!(
+        "{COPY_PREFIX}{}",
+        serde_json::to_string(&(&pair.to, project))?
+    ))
+}
+
 pub(crate) const SCHEMA_VERSION: u32 = 6;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
 /// The `metadata` keys that hold each folder's unfinished commit message.
 const COMMIT_DRAFT_PREFIX: &str = "commit_draft/";
+/// The `metadata` keys that hold each copy Settings → Integrations made, by its copy.
+const COPY_PREFIX: &str = "integration_copy/";
 const SCHEMA: &str = "
 CREATE TABLE events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -669,6 +684,69 @@ impl Database {
                         serde_json::from_str(&value).ok()?,
                     ))
                 })
+                .collect())
+        })
+    }
+
+    /// Remembers a copy of an MCP server or skill: an `integration.copied` event and
+    /// its projection in `metadata`, keyed by the copy, so copying over it again
+    /// replaces it.
+    pub fn record_copy(&self, pair: &crate::integrations::copy::Pair) -> io::Result<()> {
+        self.connection(false, |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_error)?;
+            let key = copy_key(pair)?;
+            let payload = serde_json::to_string(pair)?;
+            tx.execute(
+                "INSERT INTO events(kind, entity_id, payload) VALUES ('integration.copied', ?1, ?2)",
+                params![key, payload],
+            )
+            .map_err(sql_error)?;
+            tx.execute(
+                "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, payload],
+            )
+            .map_err(sql_error)?;
+            tx.commit().map_err(sql_error)
+        })
+    }
+
+    /// Forgets a copy [`Database::record_copy`] remembered.
+    pub fn forget_copy(&self, pair: &crate::integrations::copy::Pair) -> io::Result<()> {
+        self.connection(false, |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_error)?;
+            let key = copy_key(pair)?;
+            tx.execute(
+                "INSERT INTO events(kind, entity_id, payload) VALUES ('integration.copy_forgotten', ?1, '{}')",
+                [&key],
+            )
+            .map_err(sql_error)?;
+            tx.execute("DELETE FROM metadata WHERE key=?1", [&key])
+                .map_err(sql_error)?;
+            tx.commit().map_err(sql_error)
+        })
+    }
+
+    /// Every copy [`Database::record_copy`] remembered. One that no longer parses is
+    /// skipped.
+    pub fn copies(&self) -> io::Result<Vec<crate::integrations::copy::Pair>> {
+        self.connection(true, |connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT value FROM metadata WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([COPY_PREFIX], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            Ok(rows
+                .iter()
+                .filter_map(|value| serde_json::from_str(value).ok())
                 .collect())
         })
     }

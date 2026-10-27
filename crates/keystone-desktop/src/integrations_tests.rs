@@ -2,10 +2,11 @@
 //! and the scripted providers. The app's own environment is never consulted: tests
 //! start with an empty [`keystone_agent::ConfigEnv`] and name the fixture folders.
 
-use super::{Notice, detail, note};
+use super::{Notice, copy_note, detail, note};
 use crate::*;
 use keystone_agent::{ConfigEnv, ItemStatus};
 use keystone_core::integrations::Health;
+use keystone_core::integrations::copy;
 use std::os::unix::fs::PermissionsExt;
 
 fn write(path: &Path, text: &str) {
@@ -704,4 +705,235 @@ fn the_default_claude_accounts_switch_is_off_limits_and_a_skill_folder_comes_and
     assert!(vcx.debug_bounds(row).is_none());
     assert!(!fixture.claude.join("skills/new-skill").exists());
     assert!(folder.join("SKILL.md").is_file());
+}
+
+/// The text the open copy panel previews, and the secrets it offers.
+fn copy_preview(
+    view: &Entity<Keystone>,
+    cx: &mut gpui::VisualTestContext,
+) -> (String, Vec<String>) {
+    view.read_with(cx, |view, _| {
+        match &view.settings.as_ref().unwrap().integrations.form {
+            Some(super::Form {
+                kind: super::FormKind::Copy(copy),
+                ..
+            }) => {
+                let (asked, preview) = copy.preview.as_ref().expect("the preview is ready");
+                assert_eq!(*asked, copy.asked, "the preview is current");
+                let preview = preview.as_ref().unwrap();
+                (preview.text.clone(), preview.secrets.clone())
+            }
+            _ => panic!("the copy panel is open"),
+        }
+    })
+}
+
+/// What each row of `name` says beside it, by row.
+fn notes(
+    view: &Entity<Keystone>,
+    cx: &mut gpui::VisualTestContext,
+    name: &str,
+) -> Vec<Option<String>> {
+    view.read_with(cx, |view, _| {
+        let page = &view.settings.as_ref().unwrap().integrations;
+        let read = page.read.as_ref().unwrap();
+        read.iter()
+            .flat_map(|account| account.inventory.iter().flat_map(|i| &i.items))
+            .filter(|item| item.name == name)
+            .map(|item| copy_note(item, &page.copies, read).or_else(|| note(item)))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn a_claude_server_and_skill_copy_to_codex_as_previewed_and_a_later_edit_is_flagged(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = fixture();
+    let config = fixture.codex.join("config.toml");
+    let before = std::fs::read_to_string(&config).unwrap();
+    let (view, vcx, receipt) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    let plugin = "integration-claude-default-plugin-user-fixture-plugin@fixture-market";
+    assert!(
+        vcx.debug_bounds(format!("{plugin}-copy").leak()).is_none(),
+        "a plugin offers no copy"
+    );
+    assert_eq!(
+        notes(&view, vcx, "fixture-plugin@fixture-market"),
+        [Some("Claude only".into())]
+    );
+
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-copy");
+    assert!(vcx.debug_bounds("integrations-copy-form").is_some());
+    let (text, secrets) = copy_preview(&view, vcx);
+    assert_eq!(secrets, ["FIXTURE_TOKEN", "--api-key"]);
+    assert!(!text.contains("fixture-secret-value"), "{text}");
+    assert!(
+        !text.contains("FIXTURE_TOKEN"),
+        "left out until included: {text}"
+    );
+    click(vcx, "integrations-copy-secret-FIXTURE_TOKEN");
+    let (text, _) = copy_preview(&view, vcx);
+    assert!(
+        text.contains(&format!("FIXTURE_TOKEN = \"{}\"", copy::MASK)),
+        "{text}"
+    );
+    assert!(!text.contains("fixture-secret-value"), "{text}");
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        format!(
+            "{before}\n{}",
+            text.replace(copy::MASK, "fixture-secret-value")
+        ),
+        "config.toml changes exactly as previewed"
+    );
+    let ran = std::fs::read_to_string(&receipt).unwrap_or_default();
+    assert!(!ran.contains("\"mcp\""), "Codex copies need no CLI: {ran}");
+    assert!(
+        vcx.debug_bounds("integration-codex-default-mcp-user-fixture-ok")
+            .is_some()
+    );
+    assert_eq!(
+        notes(&view, vcx, "fixture-ok"),
+        [None, Some("Needs --api-key".into())],
+        "the copy names the secret left out"
+    );
+
+    click(
+        vcx,
+        "integration-claude-default-skill-user-fixture-skill-copy",
+    );
+    assert_eq!(copy_preview(&view, vcx).0, "SKILL.md");
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    assert_eq!(
+        std::fs::read(fixture.codex.join("skills/fixture-skill/SKILL.md")).unwrap(),
+        std::fs::read(fixture.claude.join("skills/fixture-skill/SKILL.md")).unwrap()
+    );
+    assert_eq!(notes(&view, vcx, "fixture-skill"), [None, None]);
+
+    let global = fixture.claude.join(".claude.json");
+    write(
+        &global,
+        &std::fs::read_to_string(&global)
+            .unwrap()
+            .replace("server.py", "server2.py"),
+    );
+    write(
+        &fixture.claude.join("skills/fixture-skill/SKILL.md"),
+        "---\nname: fixture-skill\ndescription: Edited\n---\n",
+    );
+    click(vcx, "integrations-refresh");
+    settle(&view, vcx);
+    let out_of_sync = |with: &str| Some(format!("Out of sync with {with} · Default"));
+    assert_eq!(
+        notes(&view, vcx, "fixture-ok"),
+        [out_of_sync("Codex"), out_of_sync("Claude Code")]
+    );
+    assert_eq!(
+        notes(&view, vcx, "fixture-skill"),
+        [out_of_sync("Codex"), out_of_sync("Claude Code")]
+    );
+    assert!(
+        vcx.debug_bounds("integration-claude-default-mcp-user-fixture-ok-note")
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn a_copy_from_codex_to_claude_runs_claude_mcp_add_json(cx: &mut gpui::TestAppContext) {
+    let fixture = fixture();
+    let (view, vcx, receipt) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(vcx, "integration-codex-default-mcp-user-fixture-codex-copy");
+    click(vcx, "integrations-copy-secret-CODEX_TOKEN");
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    assert_eq!(notice(&view, vcx), None);
+    let calls: Vec<serde_json::Value> = std::fs::read_to_string(&receipt)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|call| call["argv"][0] == "mcp")
+        .collect();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call["argv"].clone())
+            .collect::<Vec<_>>(),
+        [serde_json::json!([
+            "mcp",
+            "add-json",
+            "-s",
+            "user",
+            "fixture-codex",
+            r#"{"command":"python3","env":{"CODEX_TOKEN":"fixture-secret-value"},"type":"stdio"}"#
+        ])]
+    );
+    assert!(
+        vcx.debug_bounds("integration-claude-default-mcp-user-fixture-codex")
+            .is_some()
+    );
+    assert_eq!(notes(&view, vcx, "fixture-codex"), [None, None]);
+}
+
+#[gpui::test]
+fn the_copy_panel_closes_when_the_accounts_move_and_a_removed_copy_is_forgotten(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = fixture();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(
+        vcx,
+        "integration-claude-default-skill-user-fixture-skill-copy",
+    );
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    let remembered = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+        view.read_with(cx, |view, cx| {
+            view.state
+                .read(cx)
+                .store()
+                .database()
+                .copies()
+                .unwrap()
+                .len()
+        })
+    };
+    assert_eq!(remembered(&view, vcx), 1);
+
+    click(vcx, "integration-claude-default-mcp-user-fixture-ok-copy");
+    assert!(vcx.debug_bounds("integrations-copy-form").is_some());
+    let work = fixture.root.join("codex-work");
+    std::fs::create_dir_all(&work).unwrap();
+    view.update(vcx, |view, cx| {
+        view.state.update(cx, |state, cx| {
+            state
+                .add_account(Provider::Codex, "Work", work.to_str().unwrap(), cx)
+                .unwrap();
+        })
+    });
+    click(vcx, "integrations-refresh");
+    settle(&view, vcx);
+    assert!(
+        vcx.debug_bounds("integrations-copy-form").is_none(),
+        "a copy aimed by position must not land on another account"
+    );
+
+    click(
+        vcx,
+        "integration-codex-default-skill-user-fixture-skill-remove",
+    );
+    settle(&view, vcx);
+    assert_eq!(
+        remembered(&view, vcx),
+        0,
+        "a copy that is gone is forgotten"
+    );
 }
