@@ -177,10 +177,7 @@ impl AppState {
             if id == parent {
                 return true;
             }
-            current = self
-                .session(id)
-                .filter(|s| !s.second_opinion())
-                .and_then(|s| s.handed_off_from());
+            current = self.session(id).and_then(|s| s.handed_off_from());
         }
         false
     }

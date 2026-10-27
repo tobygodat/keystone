@@ -277,7 +277,7 @@ impl AppState {
     fn reviews(&self, id: u64) -> bool {
         let mut current = self.session(id);
         while let Some(session) = current {
-            if session.second_opinion() {
+            if session.second_opinion_on().is_some() {
                 return true;
             }
             current = session
@@ -657,8 +657,9 @@ impl AppState {
                 let read: Read = decode(arguments)?;
                 self.target(read.session, caller.session, project)?;
                 let handed_off_from = self.session(read.session).and_then(|session| {
-                    let from = session.handed_off_from()?;
-                    Some(json!({"session":from,"second_opinion":session.second_opinion()}))
+                    let opinion = session.second_opinion_on();
+                    let from = opinion.or(session.handed_off_from())?;
+                    Some(json!({"session":from,"second_opinion":opinion.is_some()}))
                 });
                 let conversation = self.conversation(read.session);
                 if conversation.is_loading() {

@@ -101,8 +101,8 @@ fn a_second_opinion_opens_read_only_beside_its_source_and_its_reply_waits_there(
         assert_eq!(workspace.sessions().len(), 2, "{:?}", v.error);
         assert_eq!(workspace.selected(), Some(2));
         let new = &workspace.sessions()[1];
-        assert!(new.second_opinion());
-        assert_eq!(new.handed_off_from(), Some(1));
+        assert_eq!(new.second_opinion_on(), Some(1));
+        assert_eq!(new.handed_off_from(), None);
         assert_eq!(new.provider(), Provider::Claude);
         assert_eq!(new.approval_mode(), ApprovalMode::ReadOnly);
         assert_eq!(new.title(), "Second opinion: Fix the login bug");
@@ -398,4 +398,147 @@ fn use_in_conversation_reads_the_answer_when_pressed(cx: &mut gpui::TestAppConte
             v.error
         );
     });
+}
+
+/// Session 2, a sent second opinion on session 1 whose log holds `turn`, the entries a
+/// lost turn left, then a recovery that found the provider completed it with "Recovered
+/// answer.". Its turn is saved as failed when `failed`, else as still running.
+fn recovered_opinion(dir: &Path, turn: Vec<keystone_agent::log::Entry>, failed: bool) -> PathBuf {
+    use keystone_agent::log::{Entry, SessionLog};
+    use keystone_agent::recovery::{
+        Operation, Outcome, RecoveryBatch, RecoveryReport, TurnEvidence,
+    };
+    let path = dir.join("workspace.json");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .create(Provider::Codex, &working_directory(), 1)
+        .unwrap();
+    store.record_message(1, "Why does login fail?", 2).unwrap();
+    let opinion = store
+        .second_opinion(
+            1,
+            Provider::Claude,
+            "What do you think?".into(),
+            3,
+            keystone_core::WindowId::FIRST,
+            None,
+        )
+        .unwrap()
+        .value;
+    assert_eq!(opinion, 2);
+    store.lock_model(opinion).unwrap();
+    store
+        .record_message(opinion, "What do you think?", 4)
+        .unwrap();
+    if failed {
+        store.record_turn_end(opinion, true, 5).unwrap();
+    }
+    drop(store);
+    let mut log = SessionLog::open(&dir.join("sessions"), opinion).unwrap();
+    let user = Entry::Item {
+        item: Item {
+            id: "u1".into(),
+            kind: ItemKind::UserMessage,
+            text: "What do you think?".into(),
+            status: ItemStatus::Completed,
+        },
+        seq: Some(0),
+        run: Some(1),
+    };
+    let recovery = Entry::Recovery {
+        batch: RecoveryBatch {
+            id: "recovery-1".into(),
+            operations: vec![Operation::Insert {
+                after: "u1".into(),
+                item: Item {
+                    id: "m1".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "Recovered answer.".into(),
+                    status: ItemStatus::Completed,
+                },
+            }],
+            report: RecoveryReport {
+                outcome: Outcome::Recovered,
+                messages: 1,
+                tools: 0,
+                extended: 0,
+                turn: TurnEvidence::Recorded(TurnStatus::Completed),
+                limits: Vec::new(),
+            },
+            report_after: Some("m1".into()),
+            closes_turn: true,
+        },
+    };
+    for entry in std::iter::once(user)
+        .chain(turn)
+        .chain(std::iter::once(recovery))
+    {
+        log.append(&entry).unwrap();
+    }
+    log.sync().unwrap();
+    path
+}
+
+/// Opens `path` from [`recovered_opinion`], reads the second opinion's history as
+/// opening it does, then checks that its source offers the recovered answer.
+fn offers_the_recovered_answer(path: &Path, cx: &mut gpui::TestAppContext) {
+    let (view, cx) = open_window(path, cx);
+    loaded(&view, cx, 2);
+    view.read_with(cx, |v, cx| {
+        assert_eq!(v.state.read(cx).conversations()[&2].recovery, None);
+    });
+    click(cx, "session-1");
+    cx.run_until_parked();
+    assert!(shows(&view, cx, "opinion-2"));
+    assert!(shows(&view, cx, "opinion-use-2"));
+    press(&view, cx, "opinion-use-2");
+    view.read_with(cx, |v, cx| {
+        assert_eq!(v.selected(cx), Some(1));
+        assert_eq!(
+            v.composer.read(cx).value(),
+            "Second opinion from Claude Code (Keystone session 2):\n\nRecovered answer."
+        );
+    });
+}
+
+/// Keystone closed while a second opinion's turn ran, and crash recovery found that the
+/// provider finished it. Its turn stays saved as running.
+#[gpui::test]
+fn a_second_opinion_whose_turn_recovery_completed_offers_its_answer(
+    cx: &mut gpui::TestAppContext,
+) {
+    use keystone_agent::log::Entry;
+    let dir = tempfile::tempdir().unwrap();
+    let path = recovered_opinion(dir.path(), vec![Entry::TurnStarted], false);
+    assert_eq!(
+        Store::open(&path).unwrap().workspace().sessions()[1].last_turn(),
+        Some(keystone_core::LastTurn::Running)
+    );
+    offers_the_recovered_answer(&path, cx);
+}
+
+/// The provider exited while Keystone ran, so the turn ended as failed, and crash
+/// recovery then found that the provider had completed it.
+#[gpui::test]
+fn a_second_opinion_whose_failed_turn_recovery_completed_offers_its_answer(
+    cx: &mut gpui::TestAppContext,
+) {
+    use keystone_agent::log::Entry;
+    let dir = tempfile::tempdir().unwrap();
+    let path = recovered_opinion(
+        dir.path(),
+        vec![
+            Entry::TurnStarted,
+            Entry::ProviderExited,
+            Entry::TurnEnded {
+                status: TurnStatus::Failed,
+                error: Some("Codex stopped with exit code 3".into()),
+                limit: None,
+                seq: Some(1),
+                run: Some(1),
+            },
+        ],
+        true,
+    );
+    offers_the_recovered_answer(&path, cx);
 }

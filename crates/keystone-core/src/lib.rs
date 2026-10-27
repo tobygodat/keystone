@@ -238,9 +238,15 @@ pub struct Session {
     /// handoff text instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_point: Option<ForkPoint>,
-    /// Whether this session is a second opinion on [`Session::handed_off_from`]: it
-    /// carries that session's conversation with a question, starts read-only, and its
-    /// replies wait for the user there, never starting a turn on their own.
+    /// The session this one is a second opinion on: it carries that session's
+    /// conversation with a question, starts read-only, and its replies wait for the
+    /// user there, never starting a turn on their own. Saved apart from
+    /// [`Session::handed_off_from`], so a build from before second opinions never
+    /// takes one for a continuation of its source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    second_opinion_on: Option<u64>,
+    /// Saved with [`Session::second_opinion_on`] for earlier builds, which know a
+    /// second opinion by this flag and read its link from `handed_off_from`.
     #[serde(default, skip_serializing_if = "is_default")]
     second_opinion: bool,
     #[serde(flatten)]
@@ -343,6 +349,7 @@ impl Session {
             pull_request_watch: None,
             forked_from: None,
             fork_point: None,
+            second_opinion_on: None,
             second_opinion: false,
             unknown: Map::new(),
         }
@@ -433,9 +440,9 @@ impl Session {
         self.fork_point.as_ref()
     }
 
-    /// Whether this session is a second opinion on the one it was handed off from.
-    pub fn second_opinion(&self) -> bool {
-        self.second_opinion
+    /// The session this one is a second opinion on, if it is one.
+    pub fn second_opinion_on(&self) -> Option<u64> {
+        self.second_opinion_on
     }
 
     /// Whether the session has sent anything to its provider. The provider and model
@@ -815,7 +822,7 @@ impl Store {
     pub fn from_database(database: Database) -> StoreResult<Self> {
         let (mut snapshot, database_revision) = database.snapshot()?;
         snapshot.workspace.forget_closed_tabs();
-        Ok(Self {
+        let mut store = Self {
             path: database.path().to_path_buf(),
             database,
             database_revision,
@@ -826,7 +833,30 @@ impl Store {
             writes: 0,
             #[cfg(any(test, feature = "test-support"))]
             sync_directory: File::sync_all,
-        })
+        };
+        store.relink_second_opinions()?;
+        Ok(store)
+    }
+
+    /// Moves each second opinion's link out of `handed_off_from`, where earlier builds
+    /// saved it, and saves the result. Opening fails if that save does, so no later
+    /// save can skip a session whose saved link was never moved.
+    fn relink_second_opinions(&mut self) -> StoreResult<()> {
+        let mut next = self.workspace.clone();
+        let mut moved = false;
+        for session in &mut next.sessions {
+            if session.second_opinion
+                && session.second_opinion_on.is_none()
+                && let Some(on) = session.handed_off_from.take()
+            {
+                session.second_opinion_on = Some(on);
+                moved = true;
+            }
+        }
+        if moved {
+            self.commit(next, self.next_id)?;
+        }
+        Ok(())
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -977,8 +1007,9 @@ impl Store {
     }
 
     /// Creates a second opinion on `source` as [`Store::hand_off`] creates a
-    /// continuation, linked the same way and marked as a second opinion. It is titled
-    /// as one and starts read-only, which the user can change before sending.
+    /// continuation, linked through [`Session::second_opinion_on`] instead of
+    /// `handed_off_from`. It is titled as one and starts read-only, which the user can
+    /// change before sending.
     pub fn second_opinion(
         &mut self,
         source: u64,
@@ -1030,11 +1061,13 @@ impl Store {
                 session.title = title;
                 session.title_source = TitleSource::FirstMessage;
                 session.draft = draft;
-                session.handed_off_from = Some(source);
                 session.pull_request = pull_request;
                 if second_opinion {
+                    session.second_opinion_on = Some(source);
                     session.second_opinion = true;
                     session.approval_mode = ApprovalMode::ReadOnly;
+                } else {
+                    session.handed_off_from = Some(source);
                 }
                 session
             },
@@ -4077,10 +4110,10 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         let sessions = reopened.workspace().sessions();
         assert_eq!(sessions[0], before);
-        assert!(!sessions[0].second_opinion());
+        assert_eq!(sessions[0].second_opinion_on(), None);
         let new = &sessions[1];
-        assert!(new.second_opinion());
-        assert_eq!(new.handed_off_from(), Some(source));
+        assert_eq!(new.second_opinion_on(), Some(source));
+        assert_eq!(new.handed_off_from(), None);
         assert_eq!(new.provider(), Provider::Codex);
         assert_eq!(new.approval_mode(), ApprovalMode::ReadOnly);
         assert_eq!(new.draft(), "context and a question");
@@ -4096,7 +4129,7 @@ mod tests {
         let new = store.workspace().sessions().last().unwrap();
         assert_eq!(new.approval_mode(), ApprovalMode::ReadOnly);
         assert_eq!(new.title(), "Second opinion: Fix the login bug");
-        assert!(new.second_opinion());
+        assert_eq!(new.second_opinion_on(), Some(source));
 
         let placeholder = store.create(Provider::Codex, &folder, 7).unwrap().value;
         store
@@ -4130,8 +4163,65 @@ mod tests {
             .iter()
             .find(|s| s.id() == handed)
             .unwrap();
-        assert!(!handed.second_opinion());
+        assert_eq!(handed.second_opinion_on(), None);
         assert_eq!(handed.approval_mode(), ApprovalMode::Provider);
+    }
+
+    /// Builds from before second opinions read `handed_off_from` as a continuation, and
+    /// would send a delegated result for the source to its second opinion. The second
+    /// half edits the saved row back to how earlier builds saved it.
+    #[test]
+    fn a_second_opinion_is_saved_without_a_continuation_link_and_old_saves_move_theirs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        let source = store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap()
+            .value;
+        store
+            .record_message(source, "Fix the login bug", 2)
+            .unwrap();
+        let opinion = store
+            .second_opinion(
+                source,
+                Provider::Codex,
+                String::new(),
+                3,
+                WindowId::FIRST,
+                None,
+            )
+            .unwrap()
+            .value;
+        let saved = &store.saved_snapshot().unwrap()["workspace"]["sessions"][1];
+        assert_eq!(saved["id"], opinion);
+        assert_eq!(saved.get("handed_off_from"), None);
+        assert_eq!(saved["second_opinion_on"], source);
+        assert_eq!(saved["second_opinion"], true);
+
+        drop(store);
+        let connection = rusqlite::Connection::open(database_path(&path)).unwrap();
+        let changed = connection
+            .execute(
+                "UPDATE sessions SET payload = json_set(json_remove(payload, '$.second_opinion_on'), \
+                 '$.handed_off_from', ?1) WHERE id = ?2",
+                rusqlite::params![source as i64, opinion.to_string()],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        drop(connection);
+        let store = Store::open(&path).unwrap();
+        let saved = &store.saved_snapshot().unwrap()["workspace"]["sessions"][1];
+        assert_eq!(saved.get("handed_off_from"), None);
+        assert_eq!(saved["second_opinion_on"], source);
+        assert_eq!(saved["second_opinion"], true);
+        let writes = store.writes();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let relinked = &reopened.workspace().sessions()[1];
+        assert_eq!(relinked.second_opinion_on(), Some(source));
+        assert_eq!(relinked.handed_off_from(), None);
+        assert_eq!((writes, reopened.writes()), (1, 0), "moved once");
     }
 
     #[test]

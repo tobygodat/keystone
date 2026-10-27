@@ -504,7 +504,7 @@ impl Keystone {
             from.and_then(|from| sessions.iter().find(|s| s.id() == from))
                 .map(describe)
         };
-        let from = source(shown.handed_off_from().filter(|_| !shown.second_opinion()))
+        let from = source(shown.handed_off_from())
             .map(|link| ("Continued from", "handoff-from".to_owned(), link))
             .into_iter()
             .chain(
@@ -512,7 +512,7 @@ impl Keystone {
                     .map(|link| ("Forked from", "fork-from".to_owned(), link)),
             );
         let to = sessions.iter().filter(|s| s.started()).filter_map(|s| {
-            if s.handed_off_from() == Some(key.session) && !s.second_opinion() {
+            if s.handed_off_from() == Some(key.session) {
                 let selector = format!("handoff-to-{}", s.id());
                 Some(("Continued in", selector, describe(s)))
             } else if s.forked_from() == Some(key.session) {

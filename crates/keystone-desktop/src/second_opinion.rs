@@ -13,7 +13,8 @@ use crate::{Keystone, arrangement, now_ms};
 use gpui::{
     AnyElement, Context, Focusable, IntoElement, ParentElement, Styled, Window, div, prelude::*,
 };
-use keystone_agent::{ItemKind, ItemStatus};
+use keystone_agent::recovery::{Outcome, TurnEvidence};
+use keystone_agent::{ItemKind, ItemStatus, TurnStatus};
 use keystone_core::{LastTurn, Session};
 use keystone_ui::prelude::*;
 
@@ -58,30 +59,55 @@ pub(crate) fn text(source: Source, rows: &[Row], reply: Option<usize>) -> String
     )
 }
 
-/// The reply that answers a conversation's latest message: the last finished reply
-/// after it, once its turn completed. `None` while a turn runs, when the turn was
-/// stopped, failed or cut off (each leaves a row after the message), or when it
-/// produced no finished reply.
-fn answer(conversation: &Conversation) -> Option<&str> {
+/// The rows after a conversation's latest message, once no turn runs or loads.
+fn latest_turn(conversation: &Conversation) -> Option<&[Row]> {
     if conversation.running || conversation.is_loading() {
         return None;
     }
-    let mut reply = None;
-    for row in conversation.rows.iter().rev() {
-        match row {
-            Row::Item(item) if item.kind == ItemKind::UserMessage => return reply,
-            Row::Item(item)
-                if reply.is_none()
-                    && item.kind == ItemKind::AgentMessage
-                    && item.status == ItemStatus::Completed =>
-            {
-                reply = Some(item.text.as_str());
-            }
-            Row::TurnEnded { .. } | Row::Recovery(_) => return None,
-            _ => {}
-        }
+    let rows = &conversation.rows;
+    let message = rows
+        .iter()
+        .rposition(|row| matches!(row, Row::Item(item) if item.kind == ItemKind::UserMessage))?;
+    Some(&rows[message + 1..])
+}
+
+/// Whether crash recovery found `turn` completed and recovered all of it, and no turn
+/// ended after that report. It supersedes the failure Keystone saw when the provider
+/// exited, which sits above it, and any partial report a retry followed.
+fn completed_by_recovery(turn: &[Row]) -> bool {
+    turn.iter()
+        .rposition(|row| {
+            matches!(row, Row::Recovery(report)
+                if report.outcome == Outcome::Recovered
+                    && report.turn == TurnEvidence::Recorded(TurnStatus::Completed))
+        })
+        .is_some_and(|whole| {
+            !turn[whole..]
+                .iter()
+                .any(|row| matches!(row, Row::TurnEnded { .. }))
+        })
+}
+
+/// The reply that answers a conversation's latest message: the last finished reply
+/// after it, once its turn completed. `None` while a turn runs, when the turn was
+/// stopped, failed or cut off (each leaves a row after the message) unless crash
+/// recovery found it completed, or when it produced no finished reply.
+fn answer(conversation: &Conversation) -> Option<&str> {
+    let turn = latest_turn(conversation)?;
+    let ended = turn
+        .iter()
+        .any(|row| matches!(row, Row::TurnEnded { .. } | Row::Recovery(_)));
+    if ended && !completed_by_recovery(turn) {
+        return None;
     }
-    None
+    turn.iter().rev().find_map(|row| match row {
+        Row::Item(item)
+            if item.kind == ItemKind::AgentMessage && item.status == ItemStatus::Completed =>
+        {
+            Some(item.text.as_str())
+        }
+        _ => None,
+    })
 }
 
 /// How far a second opinion has got, as its source shows it.
@@ -93,7 +119,9 @@ enum Progress {
     Waiting,
     /// Its turn ended and its history is still being read.
     Loading,
-    /// Its latest turn completed with a reply to use.
+    /// Its latest turn completed with a reply to use. A turn cut off when Keystone
+    /// closed stays saved as running, and one whose provider exited stays saved as
+    /// failed, so this also covers either once crash recovery found it completed.
     Done,
     Failed,
     /// Its turn was stopped, cut off when Keystone closed, or ended without a reply.
@@ -114,9 +142,13 @@ impl Progress {
                 Self::Running
             };
         }
+        let recovered = live
+            .and_then(latest_turn)
+            .is_some_and(completed_by_recovery);
         match (session.last_turn(), live) {
+            (Some(LastTurn::Failed), _) if !recovered => Self::Failed,
+            (_, Some(live)) if answer(live).is_some() => Self::Done,
             (Some(LastTurn::Failed), _) => Self::Failed,
-            (Some(LastTurn::Finished), Some(live)) if answer(live).is_some() => Self::Done,
             (Some(LastTurn::Finished), Some(live)) if !live.is_loading() => Self::Stopped,
             (Some(LastTurn::Finished), _) => Self::Loading,
             (Some(LastTurn::Running) | None, _) => Self::Stopped,
@@ -227,8 +259,7 @@ impl Keystone {
         };
         let mut rows = Vec::new();
         if let Some(on) = shown
-            .handed_off_from()
-            .filter(|_| shown.second_opinion())
+            .second_opinion_on()
             .and_then(|on| sessions.iter().find(|s| s.id() == on))
         {
             rows.push(self.link_row(
@@ -243,9 +274,7 @@ impl Keystone {
         }
         let opinions: Vec<_> = sessions
             .iter()
-            .filter(|s| {
-                s.second_opinion() && s.handed_off_from() == Some(key.session) && s.started()
-            })
+            .filter(|s| s.second_opinion_on() == Some(key.session) && s.started())
             .map(|s| (s.id(), provider_label(s, workspace.accounts())))
             .collect();
         for (id, provider) in opinions {
@@ -310,7 +339,7 @@ impl Keystone {
         let state = self.state.read(cx);
         let Some(session) = state
             .session(opinion)
-            .filter(|s| s.second_opinion() && s.handed_off_from() == Some(key.session))
+            .filter(|s| s.second_opinion_on() == Some(key.session))
         else {
             return;
         };
@@ -423,6 +452,133 @@ mod tests {
                 text.contains("on this conversation, especially"),
                 "{not_a_reply:?}"
             );
+        }
+    }
+
+    #[test]
+    fn only_a_recovery_that_found_the_whole_turn_completed_leaves_its_answer() {
+        use keystone_agent::recovery::RecoveryReport;
+        let report = |outcome, turn| RecoveryReport {
+            outcome,
+            messages: 1,
+            tools: 0,
+            extended: 0,
+            turn,
+            limits: Vec::new(),
+        };
+        let completed = TurnEvidence::Recorded(TurnStatus::Completed);
+        for (report, answered) in [
+            (report(Outcome::Recovered, completed), true),
+            (report(Outcome::Partial, completed), false),
+            (report(Outcome::Conflict, completed), false),
+            (
+                report(
+                    Outcome::Recovered,
+                    TurnEvidence::Recorded(TurnStatus::Interrupted),
+                ),
+                false,
+            ),
+            (
+                report(
+                    Outcome::Recovered,
+                    TurnEvidence::Recorded(TurnStatus::Failed),
+                ),
+                false,
+            ),
+            (report(Outcome::Partial, TurnEvidence::Unknown), false),
+        ] {
+            let mut conversation = Conversation::default();
+            conversation.rows = vec![
+                item(ItemKind::UserMessage, "Thoughts?", ItemStatus::Completed),
+                item(
+                    ItemKind::AgentMessage,
+                    "Recovered answer.",
+                    ItemStatus::Completed,
+                ),
+                Row::Recovery(report.clone()),
+            ];
+            assert_eq!(
+                answer(&conversation),
+                answered.then_some("Recovered answer."),
+                "{report:?}"
+            );
+        }
+
+        let failed = Row::TurnEnded {
+            status: TurnStatus::Failed,
+            error: Some("exit code 3".into()),
+            limit: None,
+        };
+        let partial = report(Outcome::Partial, TurnEvidence::Unknown);
+        let whole = report(Outcome::Recovered, completed);
+        let user = item(ItemKind::UserMessage, "Thoughts?", ItemStatus::Completed);
+        let reply = item(
+            ItemKind::AgentMessage,
+            "Recovered answer.",
+            ItemStatus::Completed,
+        );
+        for (rows, why) in [
+            (
+                vec![
+                    user.clone(),
+                    reply.clone(),
+                    failed.clone(),
+                    Row::Recovery(whole.clone()),
+                ],
+                "the provider exited, then recovery found the turn completed",
+            ),
+            (
+                vec![
+                    user.clone(),
+                    reply.clone(),
+                    Row::Recovery(whole.clone()),
+                    Row::Recovery(partial.clone()),
+                ],
+                "a retry inserted the reply and its report above the partial one",
+            ),
+        ] {
+            let mut conversation = Conversation::default();
+            conversation.rows = rows;
+            assert_eq!(answer(&conversation), Some("Recovered answer."), "{why}");
+        }
+        let later = item(
+            ItemKind::AgentMessage,
+            "Started on its own.",
+            ItemStatus::Completed,
+        );
+        for (rows, why) in [
+            (
+                vec![
+                    user.clone(),
+                    reply.clone(),
+                    failed.clone(),
+                    Row::Recovery(partial.clone()),
+                ],
+                "a partial recovery decides nothing",
+            ),
+            (
+                vec![
+                    user.clone(),
+                    reply.clone(),
+                    Row::Recovery(whole.clone()),
+                    later.clone(),
+                    failed.clone(),
+                    Row::Recovery(partial),
+                ],
+                "a later turn failed and was recovered in part",
+            ),
+            (
+                vec![user.clone(), reply.clone(), failed.clone()],
+                "a failed turn with no recovery",
+            ),
+            (
+                vec![user, reply, Row::Recovery(whole), later, failed],
+                "a turn the provider started itself failed after the recovered one",
+            ),
+        ] {
+            let mut conversation = Conversation::default();
+            conversation.rows = rows;
+            assert_eq!(answer(&conversation), None, "{why}");
         }
     }
 }
