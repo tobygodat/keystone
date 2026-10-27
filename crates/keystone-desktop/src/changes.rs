@@ -2405,9 +2405,10 @@ mod ui_tests {
     }
 
     /// This repository's gh: it records each call's arguments, one per line, then
-    /// runs `script`.
+    /// runs `script`. It replaces the old script by renaming over it, as a gh call
+    /// still running it would make writing to it fail.
     fn script_gh(repo: &Path, script: &str) {
-        let path = repo.join(".git/fake-gh");
+        let path = repo.join(".git/fake-gh.new");
         fs::write(
             &path,
             format!(
@@ -2416,6 +2417,7 @@ mod ui_tests {
         )
         .unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&path, repo.join(".git/fake-gh")).unwrap();
     }
 
     /// `fixture` with its first commit on a bare `origin`, whose HEAD is `main`, and

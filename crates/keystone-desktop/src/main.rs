@@ -7797,7 +7797,7 @@ mod tests {
         });
 
         // Stop ends a long reply and keeps what streamed.
-        cx.simulate_input("a long one");
+        cx.simulate_input("a long one until stopped");
         cx.simulate_keystrokes("secondary-enter");
         wait_until(cx, &view, |view, cx| {
             view.state.read(cx).conversations()[&1]
@@ -7850,7 +7850,7 @@ mod tests {
             assert!(rows.iter().any(
                 |row| matches!(row, Row::Item(item) if item.text.contains("You wrote: hello"))
             ));
-            // Claude completes the cut-off block itself, so the partial reply is kept.
+            // Claude completes the cut-off block itself, so what streamed is kept.
             assert!(rows.iter().any(|row| matches!(row, Row::Item(item)
                 if item.kind == ItemKind::AgentMessage && item.text.contains("word1"))));
         });
@@ -9422,7 +9422,7 @@ mod tests {
         wait_until(cx, &view, |view, cx| {
             surface_row(view, cx).is_some_and(|(_, surface)| surface.waiting())
         });
-        press_keys(cx, "ctrl-shift-t end");
+        press_keys(cx, "secondary-shift-t end");
         assert_eq!(focused_control(&view, cx), None);
         press_keys(cx, "tab");
         assert_eq!(focused_control(&view, cx), Some(0), "Docs updated");
@@ -9491,7 +9491,7 @@ mod tests {
             assert_eq!(focused_control(&view, cx), None, "generic Tab, step {step}");
         }
 
-        press_keys(cx, "ctrl-shift-t end shift-tab");
+        press_keys(cx, "secondary-shift-t end shift-tab");
         assert_eq!(focused_control(&view, cx), Some(9), "File bug");
         view.update(cx, |v, cx| {
             v.state.update(cx, |state, _| {
@@ -9528,7 +9528,7 @@ mod tests {
         wait_until(cx, &view, |view, cx| {
             surface_row(view, cx).is_some_and(|(_, surface)| surface.waiting())
         });
-        press_keys(cx, "ctrl-shift-t end tab");
+        press_keys(cx, "secondary-shift-t end tab");
         assert_eq!(focused_control(&view, cx), Some(0), "Summary");
         cx.simulate_input("Sidebar flickers");
         press_keys(cx, "tab tab tab space");

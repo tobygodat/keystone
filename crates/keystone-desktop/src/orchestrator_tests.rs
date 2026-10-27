@@ -693,7 +693,7 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
         assert!(state.send_message(
             ComposerDraft {
                 session: 1,
-                text: "long".into(),
+                text: "long until stopped".into(),
                 attachments: Vec::new(),
             },
             cx
@@ -704,7 +704,7 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
     wait_until(&state, cx, |state| {
         state.started(1).is_some_and(|c| c.is_running(1))
             && state.conversations[&1].rows.iter().any(|row| {
-                matches!(row, Row::Item(item) if item.text == "long" && !item.id.starts_with("local:"))
+                matches!(row, Row::Item(item) if item.text == "long until stopped" && !item.id.starts_with("local:"))
             })
     });
     let caller = state.read_with(cx, |state, _| {

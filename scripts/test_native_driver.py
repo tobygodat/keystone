@@ -256,6 +256,7 @@ class AudioTest(unittest.TestCase):
         run.process = Mock()
         run.request = Mock()
         run.call = Mock(return_value={})
+        run.atspi_version = None
         run.start_bus = Mock()
         run.launch = Mock()
         run.bus_address = 'unix:path=/bus'

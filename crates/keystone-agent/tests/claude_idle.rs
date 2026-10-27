@@ -164,7 +164,10 @@ impl Rig {
             std::thread::sleep(Duration::from_millis(5));
         }
         for child in own {
-            assert!(!alive(child.parse().unwrap()), "child {child} survived");
+            while alive(child.parse().unwrap()) {
+                assert!(Instant::now() < deadline, "child {child} survived");
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
     }
 }
@@ -174,6 +177,18 @@ fn parent(pid: u32) -> Option<u32> {
 }
 
 impl Rig {
+    /// Has the scripted Claude in `dir` report a usage reading after everything it wrote
+    /// so far, and waits until the connection read it, and with it all of that.
+    fn settle(&mut self, session: u64, dir: &Path) {
+        inject(
+            dir,
+            &[
+                r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","utilization":0.1,"resetsAt":1800000000},"session_id":"$SESSION"}"#,
+            ],
+        );
+        self.until(session, |e| matches!(e, Event::Usage(_)));
+    }
+
     /// How many times `session` was offered so far.
     fn candidates(&mut self, session: u64) -> usize {
         std::thread::sleep(Duration::from_millis(150));
@@ -646,12 +661,14 @@ fn anything_at_any_boundary_of_an_eviction_needs_a_new_proof_and_a_full_interval
             match boundary {
                 Boundary::Refresh => wait_for(holding, &case),
                 Boundary::Confirm => {
+                    rig.settle(1, &dir);
                     rig.residency(1, "armed");
                     hold();
                     rig.clock.advance(TEN_MINUTES);
                     wait_for(holding, &case);
                 }
                 Boundary::Checkpoint => {
+                    rig.settle(1, &dir);
                     rig.residency(1, "armed");
                     rig.clock.advance(TEN_MINUTES);
                     stale = Some(rig.candidate(1));
@@ -690,6 +707,8 @@ fn anything_at_any_boundary_of_an_eviction_needs_a_new_proof_and_a_full_interval
                 _ => (&[], &[]),
             };
             inject(&dir, lines);
+            rig.settle(1, &dir);
+            let before = rig.conn.activity(1);
             match arrival {
                 Stop => rig.conn.command(Command::Interrupt { session: 1 }),
                 Answer => rig.conn.command(Command::Answer {
@@ -702,6 +721,9 @@ fn anything_at_any_boundary_of_an_eviction_needs_a_new_proof_and_a_full_interval
                     approval: PROVIDER,
                 }),
                 _ => {}
+            }
+            if matches!(arrival, Stop | Answer | Configure) {
+                wait_for(|| rig.conn.activity(1) > before, &case);
             }
             if let Some(stale) = stale.clone() {
                 // The arrival reached the connection before the app confirms.
@@ -733,6 +755,7 @@ fn anything_at_any_boundary_of_an_eviction_needs_a_new_proof_and_a_full_interval
                 "{case}"
             );
             inject(&dir, release);
+            rig.settle(1, &dir);
 
             rig.residency(1, "armed");
             rig.clock.advance(TEN_MINUTES - Duration::from_secs(1));

@@ -1303,6 +1303,14 @@ impl ClaudeConnection {
         })
     }
 
+    /// How much the session's process has done, as idle eviction counts it, once the
+    /// connection has taken it. `None` with no process.
+    #[doc(hidden)]
+    pub fn activity(&self, session: u64) -> Option<u64> {
+        let shared = self.starter.shared.lock().unwrap();
+        Some(shared.live.get(&session)?.driver.activity())
+    }
+
     /// The session's process ID while it runs.
     pub fn pid(&self, session: u64) -> Option<u32> {
         let shared = self.starter.shared.lock().unwrap();

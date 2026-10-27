@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Where a copy is remembered: by its copy, and by its project when either end is a
 /// `Local` server, which every project keeps in the same file.
@@ -22,6 +22,9 @@ fn copy_key(pair: &crate::integrations::copy::Pair) -> io::Result<String> {
 
 pub(crate) const SCHEMA_VERSION: u32 = 6;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+/// How long a write waits for this process's other writers, each finishing one
+/// transaction, before reporting the gate busy: a hang guard, not a latency budget.
+const WRITER_WAIT: Duration = Duration::from_secs(2);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
 /// The `metadata` keys that hold each folder's unfinished commit message.
@@ -200,9 +203,8 @@ impl Database {
             supplied.to_path_buf()
         };
         let write_gate = Arc::new(parking_lot::Mutex::new(()));
-        let started = Instant::now();
         let guard = write_gate
-            .try_lock_for(BUSY_TIMEOUT)
+            .try_lock_for(WRITER_WAIT)
             .ok_or_else(writer_busy)?;
         let mut file = fs::OpenOptions::new();
         file.write(true).create_new(true);
@@ -218,7 +220,7 @@ impl Database {
         }
         let mut connection = Connection::open(&path).map_err(sql_error)?;
         require_writable(&connection)?;
-        configure(&connection, busy_remaining(started))?;
+        configure(&connection, BUSY_TIMEOUT)?;
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(sql_error)?;
@@ -242,9 +244,6 @@ impl Database {
                 )
                 .map_err(sql_error)?;
         if !initialized {
-            connection
-                .busy_timeout(busy_remaining(started))
-                .map_err(sql_error)?;
             Self::initialize(&mut connection, Some(&legacy))?;
         }
         drop(connection);
@@ -393,13 +392,12 @@ impl Database {
                 .map_err(|_| io::Error::other("SQLite connection lock poisoned"))?;
             return f(&mut connection);
         }
-        let started = Instant::now();
         let _writer = if read_only {
             None
         } else {
             Some(
                 self.write_gate
-                    .try_lock_for(BUSY_TIMEOUT)
+                    .try_lock_for(WRITER_WAIT)
                     .ok_or_else(writer_busy)?,
             )
         };
@@ -412,12 +410,7 @@ impl Database {
         if !read_only {
             require_writable(&connection)?;
         }
-        configure(&connection, busy_remaining(started))?;
-        if !read_only {
-            connection
-                .busy_timeout(busy_remaining(started))
-                .map_err(sql_error)?;
-        }
+        configure(&connection, BUSY_TIMEOUT)?;
         f(&mut connection)
     }
 
@@ -789,12 +782,6 @@ impl Database {
     }
 }
 
-fn busy_remaining(started: Instant) -> Duration {
-    BUSY_TIMEOUT
-        .saturating_sub(started.elapsed())
-        .max(Duration::from_millis(5))
-}
-
 fn writer_busy() -> io::Error {
     io::Error::new(
         io::ErrorKind::WouldBlock,
@@ -1146,6 +1133,7 @@ fn import_error(path: &Path, error: io::Error) -> io::Error {
 mod tests {
     use super::*;
     use crate::{Provider, Store, WorkingDirectory};
+    use std::time::Instant;
 
     fn directory() -> WorkingDirectory {
         WorkingDirectory::new(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -1538,11 +1526,49 @@ mod tests {
         );
     }
 
+    /// Holds the write gate for `hold`, as a write whose commit stalls does, and returns
+    /// once it holds it.
+    fn slow_write(database: &Database, hold: Duration) -> std::thread::JoinHandle<()> {
+        let (held, wait) = std::sync::mpsc::channel();
+        let database = database.clone();
+        let writer = std::thread::spawn(move || {
+            database
+                .connection(false, |_| {
+                    held.send(()).unwrap();
+                    std::thread::sleep(hold);
+                    Ok(())
+                })
+                .unwrap();
+        });
+        wait.recv().unwrap();
+        writer
+    }
+
     #[test]
-    fn an_exhausted_gate_wait_keeps_a_sqlite_busy_retry() {
-        let started = Instant::now() - Duration::from_secs(1);
-        assert!(busy_remaining(started) >= Duration::from_millis(1));
-        assert!(busy_remaining(Instant::now()) <= BUSY_TIMEOUT);
+    fn a_save_waits_for_a_slow_write_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        store.create(Provider::Claude, &directory(), 1).unwrap();
+        let writer = slow_write(&store.database(), Duration::from_millis(300));
+        store.set_draft(1, "saved after it".into()).unwrap();
+        writer.join().unwrap();
+        assert_eq!(store.workspace().sessions()[0].draft(), "saved after it");
+    }
+
+    #[test]
+    fn a_gate_wait_leaves_sqlite_its_whole_busy_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Database::open(dir.path().join("workspace.sqlite3")).unwrap();
+        let writer = slow_write(&database, Duration::from_millis(150));
+        let busy: i64 = database
+            .connection(false, |connection| {
+                connection
+                    .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                    .map_err(sql_error)
+            })
+            .unwrap();
+        writer.join().unwrap();
+        assert_eq!(busy, BUSY_TIMEOUT.as_millis() as i64);
     }
 
     #[test]
@@ -1584,7 +1610,7 @@ mod tests {
             error.downcast_ref::<io::Error>().unwrap().kind(),
             io::ErrorKind::WouldBlock
         );
-        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(start.elapsed() < WRITER_WAIT + Duration::from_secs(1));
         assert_eq!(store.workspace().sessions()[0].draft(), "");
         drop(gate);
         store.set_draft(1, "retained for retry".into()).unwrap();

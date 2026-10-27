@@ -1071,9 +1071,11 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
         sh(root, &["switch", "-q", "-c", "feature"]);
         commit_file(root, "f.txt", "feature");
         sh(root, &["tag", "-a", "-m", "v1", "v1"]);
-        let output = push(root, "feature").unwrap();
-        assert!(!output.contains("v1"), "{output}");
-        assert_eq!(sh(origin.path(), &["tag", "--list"]), "");
+        push(root, "feature").unwrap();
+        assert_eq!(
+            sh(origin.path(), &["for-each-ref", "--format=%(refname)"]),
+            "refs/heads/feature\nrefs/heads/main\n"
+        );
     }
 
     #[test]

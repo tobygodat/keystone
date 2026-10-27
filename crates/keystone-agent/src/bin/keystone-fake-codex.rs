@@ -9,8 +9,9 @@
 //! `KEYSTONE_FAKE_CODEX_STATE` naming a file, they are kept there, so a later process
 //! resumes a thread with its override like real Codex. A turn whose prompt contains
 //! "end on steer" ends 300 ms after a steer arrives and then rejects it, as Codex does
-//! for a steer that reaches a turn that just ended. `KEYSTONE_FAKE_CODEX_REPLY`
-//! replaces the reply text exactly.
+//! for a steer that reaches a turn that just ended. One whose prompt contains "until
+//! stopped" streams its reply, then stays running until interrupted, for at most 15 s.
+//! `KEYSTONE_FAKE_CODEX_REPLY` replaces the reply text exactly.
 //!
 //! `model/list` returns a scripted catalog (`fake-default`, `fake-fast`, and a hidden
 //! entry) in two pages, as Codex pages: the first answer holds `fake-default` and
@@ -990,6 +991,9 @@ fn run_turn(
             }
             turn.interrupt.load(Ordering::Relaxed)
         });
+    }
+    if text.contains("until stopped") {
+        orchestrator::hold_child(|| turn.interrupt.load(Ordering::Relaxed));
     }
     if turn.silent.load(Ordering::SeqCst) {
         return;

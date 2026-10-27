@@ -90,7 +90,8 @@
 //! result, chained by `parentUuid`. Message and tool IDs include the process ID, so a
 //! resumed session never reuses one. A prompt containing "crash" records its whole
 //! reply after the first streamed word, then exits, as a Claude that dies mid-stream
-//! after saving.
+//! after saving. A prompt containing "until stopped" streams its whole reply, then
+//! holds the turn open until Stop, for at most 15 s.
 //!
 //! An `idle` setting of `1` reports what idle eviction needs, as the published Agent
 //! SDK types describe it: `session_state_changed` (`running` as a turn starts, `idle`
@@ -104,7 +105,9 @@
 //! `.fake-claude-release-snapshot` exists, removing both, so a test can act between
 //! the two. Also in this mode, the lines of a
 //! `.fake-claude-emit` file are written out as they are, `$SESSION` replaced by the
-//! session ID, as soon as the file appears, and the file is removed. In this
+//! session ID, as soon as the file appears, and the file is removed once they are. A
+//! `background_tasks_changed` line among them becomes the task set later snapshots
+//! report. In this
 //! mode a prompt containing "background task" or "ambient task" starts a task that a
 //! foreground Bash call hands to the background and that runs until
 //! `.fake-claude-release-background` (or `-ambient`) exists in the working directory;
@@ -667,16 +670,21 @@ fn main() {
         thread::spawn(move || work(&out, &shared, &session, delay, signed_out, tools, skip_init))
     };
     if shared.idle {
-        let (out, session) = (out.clone(), session.clone());
+        let (out, shared, session) = (out.clone(), shared.clone(), session.clone());
         thread::spawn(move || {
             let file = PathBuf::from(".fake-claude-emit");
             loop {
                 if let Ok(text) = std::fs::read_to_string(&file) {
-                    let _ = std::fs::remove_file(&file);
                     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                        let line = line.replace("$SESSION", &session);
-                        emit(&out, serde_json::from_str(&line).unwrap());
+                        let line: Value =
+                            serde_json::from_str(&line.replace("$SESSION", &session)).unwrap();
+                        if line["subtype"] == "background_tasks_changed" {
+                            *shared.tasks.lock().unwrap() =
+                                line["tasks"].as_array().cloned().unwrap_or_default();
+                        }
+                        emit(&out, line);
                     }
+                    let _ = std::fs::remove_file(&file);
                 }
                 thread::sleep(Duration::from_millis(5));
             }
@@ -1571,7 +1579,7 @@ fn answer(
         }
         thread::sleep(delay);
     }
-    if orchestrator::is_child_message(text) {
+    if orchestrator::is_child_message(text) || text.contains("until stopped") {
         orchestrator::hold_child(|| {
             let state = shared.state.lock().unwrap();
             state.abort.is_some() || state.closed
