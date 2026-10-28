@@ -2,8 +2,8 @@
 """Repeatable native typing stress on the private headless desktop (KS-005, KS-009).
 
 Each run starts its own nested Sway through native-driver.py, creates a Claude
-session with a named click, and types a long draft with `wtype` at a fixed
-per-character delay against that desktop's Wayland socket. It then quits with
+session with Ctrl+N through the driver, and types a long draft with `wtype` at a
+fixed per-character delay against that desktop's Wayland socket. It then quits with
 `wtype` Ctrl+Q, so the temporary virtual keyboard is the last one the
 compositor saw, and relaunches. That is the ordering that crashed GPUI in
 KS-009. `--no-prime` skips the driver's pre-launch keyboard event to show the
@@ -98,14 +98,14 @@ class Stress:
             raise RuntimeError(f'{label}: app PID {pid} {self.ended(pid)}; '
                                f'see {self.run.app_logs[pid].name}')
 
-    def launched(self, label):
+    def launched(self, label, ready):
         pid = self.app()
         try:
             wait(f'{label} window', lambda: not alive(pid) or self.window(), 20)
             if not alive(pid):
                 raise RuntimeError(f'{label}: app PID {pid} {self.ended(pid)} before its '
                                    f'window appeared; see {self.run.app_logs[pid].name}')
-            self.run.wait_for('composer-field', True, 20000)
+            self.run.wait_for(ready, True, 20000)
         except Exception:
             if not alive(pid):
                 raise RuntimeError(f'{label}: app PID {pid} {self.ended(pid)}; '
@@ -117,12 +117,12 @@ class Stress:
         started = self.run.start(self.args.width, self.args.height, True)
         self.socket = started['session']['wayland_socket']
         result['wayland_socket'] = self.socket
-        self.launched('first launch')
-        self.run.wait_for('welcome-claude', True, 20000)
-        target = self.run.find('welcome-claude')['center']
-        self.run.call('input', {'actions': [{'action': 'click', 'button': 'left', **target}]})
+        # The welcome screen shows provider pills and no composer field.
+        self.launched('first launch', 'welcome-claude')
+        self.run.call('input', {'actions': [{'action': 'keypress', 'keys': ['ctrl', 'n']}]})
+        self.run.wait_for('composer-field', True, 20000)
         wait('Claude session', lambda: self.draft() is not None, 10)
-        self.check('Claude session created by named click')
+        self.check('Claude session created by Ctrl+N')
         self.grim('01-created')
 
         text = DRAFT + SENTENCE * self.args.repeat
@@ -170,7 +170,7 @@ class Stress:
         wait('empty window list', lambda: not self.window(), 10)
         self.check('Ctrl+Q through wtype quit the app with exit code 0')
         self.run.launch()
-        self.launched('relaunch after wtype')
+        self.launched('relaunch after wtype', 'composer-field')
         time.sleep(1)
         if not alive(self.app()):
             raise RuntimeError(f'Relaunched app {self.ended(self.app())} within a second '

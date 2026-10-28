@@ -61,7 +61,7 @@ The saved state snapshot recorded `{"theme": "Light", "density": "Compact", "ui_
 
 ## Stability runs, 2026-10-15
 
-`scripts/native-stress.py` drives the same server code without MCP. Each run gets a fresh headless desktop. It clicks **Start with Claude Code** by name and types a long draft with `wtype -d 10` on the nested socket. It quits with a `wtype` Ctrl+Q and relaunches, then quits through the driver. It asserts the exact saved draft and captures `grim` screenshots after creation, typing, and restore.
+`scripts/native-stress.py` drives the same server code without MCP. Each run gets a fresh headless desktop. It presses Ctrl+N through the driver to create a Claude session and types a long draft with `wtype -d 10` on the nested socket. It quits with a `wtype` Ctrl+Q and relaunches, then quits through the driver. It asserts the exact saved draft and captures `grim` screenshots after creation, typing, and restore.
 
 | Batch | Runs | Result |
 | --- | --- | --- |
