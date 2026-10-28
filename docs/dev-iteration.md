@@ -76,11 +76,11 @@ python3 scripts/dev-timing.py run --label "native typing and restart" --cache-st
 
 A smoke run preserved the full 1,093-character workload, passed both graceful quits and restart, and retained screenshots and state evidence with no cleanup errors. This is a reusable correctness workflow, not a measured native speedup. It covers typing and restart, not all UI interactions. Keep the full stress workload for its regression gate; a shorter feature-specific journey must name its narrower coverage.
 
-See [workflow research and follow-up experiments](dev-workflow-research.md) for the Grok CLI search findings and remaining hypotheses.
+See [workflow research and follow-up experiments](research/dev-workflow.md) for the Grok CLI search findings and remaining hypotheses.
 
 ## Keep the edit loop small
 
-Run formatting and the tests for the changed crate while editing. For a focused core test, record `cargo test -p keystone-core <test-name> --locked` with this wrapper. Run the full required checks on the integrated change. Use native checks for affected desktop behavior and live providers at the integration gate described in [testing](testing.md).
+Run formatting and the tests for the changed crate while editing. For a focused core test, record `cargo test -p keystone-core <test-name> --locked` with this wrapper. Run the full required checks on the integrated change. Use native checks for affected desktop behavior and live providers at the integration gate described in [the conventions](CONVENTIONS.md#tests).
 
 Keep separate Cargo target directories for worktrees that build concurrently. Reuse the existing compiler cache and the implementation worktree's incremental artifacts. For a native check, reuse a binary only when it represents the exact source being verified. Do not clean caches as part of ordinary iteration.
 

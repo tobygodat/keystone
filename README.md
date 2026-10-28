@@ -51,32 +51,10 @@ The window opens on the laptop. `scripts/preview.py` follows the worktree that c
 
 The preview keeps its own workspace in `~/.local/share/keystone-preview/workspace.sqlite3` (the preview script still names the legacy import path), so it doesn't conflict with a copy running on the desktop. Its Claude Code and Codex sessions run in the checkout the script lives in, not in the worktree being previewed. Set `KEYSTONE_PROJECT_DIR` to choose another directory. Pressing Ctrl+Q in the app or Ctrl+C in the terminal, closing the terminal, or dropping the connection stops everything on both machines.
 
-## Native verification driver
+## Write in the composer
 
-Use the [desktop verification skill](crates/keystone-desktop/.agents/skills/verify/SKILL.md) for a separate Sway desktop with screenshots, mouse clicks, keyboard input, and disposable state. It includes a four-feature verification map and exact launch, doctor, drive, and cleanup instructions. Run it from the desktop crate context to discover the package-local Codex skill, or read the linked file directly from the workspace root.
+The composer supports multiline drafts. Enter and Shift+Enter insert a new line. Text wraps to the available width, grows to eight visible rows, and scrolls vertically for longer drafts. Home and End move within a visual row. Ctrl+Home and Ctrl+End move to the beginning and end of the draft. Search is single-line.
 
-The driver was proved against the actual GPUI binary. It runs as the `keystone-verify` MCP server and renders headless by default, so the host window does not need to stay visible. See [the verification report](docs/verification-driver.md) for the tested journey and remaining coverage.
+## Develop
 
-## Run checks
-
-- Run `bash scripts/check.sh` for formatting, the theme color check, and core behavior tests. Every lane first checks that [docs/ui-strings.txt](docs/ui-strings.txt), the inventory of interface text, matches the sources. After changing interface text, run `python3 scripts/ui-strings.py` and review the diff.
-- Run `bash scripts/check.sh ui` for GPUI simulated-input tests of the app and its components.
-- Run `python3 scripts/screen-walk.py walk` to screenshot each surface at 1920×1080 and 720 px wide on a private headless desktop with the scripted providers. See [docs/verification/screen-walk.md](docs/verification/screen-walk.md).
-- Run `bash scripts/check.sh core-fast` for the same core checks with the nextest runner. Opt-in; see [docs/dev-iteration.md](docs/dev-iteration.md).
-- Run `bash scripts/check.sh build` to compile the native application and the component gallery.
-- Run `bash scripts/check.sh apple` to type-check every crate for Apple Silicon macOS from Linux, and `python3 scripts/macos-smoke.py` on a Mac for the native smoke journey. See [Keystone on macOS](docs/macos.md).
-- Run `python scripts/perf.py --note "what changed"` to record build and render timings. See [performance](docs/performance.md).
-- Install sccache and mold (`sudo pacman -S --needed sccache mold`) to share dependency builds across worktrees and link faster. Builds still work without them. See [performance](docs/performance.md#decisions).
-- Run `python scripts/native-smoke.py` on Hyprland with the Lua dispatcher API to exercise native keyboard creation, settlement, draft entry, and restart with isolated state. It captures empty, populated, and restored screenshots. It restores the previous window focus and stops its own preview process.
-
-Set `KEYSTONE_VISUAL_FIXTURE=1` to show a labeled sample transcript, written in Markdown, with a list, a table, and a code block. It uses the same window and layout as the normal preview. Set `KEYSTONE_CAPTURE_DIR` to choose a separate native evidence directory. On the current Hyprland Lua profile, `KEYSTONE_TEST_CLOSE=1` also checks that failed storage blocks a compositor close request. Native typing defaults to 100 ms per character. `KEYSTONE_KEY_DELAY_MS=10` runs the rapid-typing case, and `KEYSTONE_LONG_REPEAT` lengthens the long draft. `scripts/native-stress.py` repeats that case on headless desktops (KS-005, closed).
-
-The composer supports multiline drafts. Enter and Shift+Enter insert a new line. Text wraps to the available width, grows to eight visible rows, and scrolls vertically for longer drafts. Home and End move within a visual row. Ctrl+Home and Ctrl+End move to the beginning and end of the draft. Search remains single-line. Live providers and attachments remain future work.
-
-GPUI input tests do not establish native rendering correctness. Native window checks and live provider checks are separate.
-
-GPUI comes from gpui-pre 0.3.9, the Zed snapshot that gpui-kit 0.7.3 pins. It no longer depends on xattr, so libc is no longer pinned.
-
-The interface is built from the `keystone-ui` component library. Run `cargo run -p keystone-ui --example gallery` to see every component. See [the design system](docs/design-system.md).
-
-See [the accepted product scope](docs/scope.md) and [the test strategy](docs/testing.md). Most accepted features are not implemented yet.
+Keystone is a Rust workspace on a pinned GPUI fork. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) maps the code, [docs/CONVENTIONS.md](docs/CONVENTIONS.md) covers building, checks and native verification, and [AGENTS.md](AGENTS.md) lists the checks a change must pass. [PRODUCT.md](PRODUCT.md) says what Keystone is for, and [DESIGN.md](DESIGN.md) holds the visual system. Planned work and known bugs are in [Linear](the issue tracker).

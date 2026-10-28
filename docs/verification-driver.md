@@ -72,7 +72,7 @@ The saved state snapshot recorded `{"theme": "Light", "density": "Compact", "ui_
 
 The 4 missed clicks used the app's first frame. GPUI drew that frame at its default 1100 by 720 before Sway configured the window to 1280 by 900. The button then moved. `elements` now reports not ready until the frame's viewport matches the window rect, within an 8-pixel inset tolerance. It records each rejection as `elements_not_ready` in `actions.jsonl`. In the 12-run batch, 6 of 24 launches had that early frame, and every click waited it out.
 
-`launch` now sends F24 through the driver's keyboard before starting the app, because of KS-009. Every primed run that reached the relaunch after `wtype` survived it, 31 of 31, counting short check runs not tabled here. See KS-005 and KS-009 in [issues.md](issues.md).
+`launch` now sends F24 through the driver's keyboard before starting the app, because of KS-009. Every primed run that reached the relaunch after `wtype` survived it, 31 of 31, counting short check runs not tabled here. KS-009 is now TOB-212. The KS-005 record is in git history (`git log -- docs/issues.md`).
 
 ## Maintenance
 

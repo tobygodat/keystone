@@ -52,6 +52,8 @@ It catches code that does not compile on macOS: a `cfg(target_os = "linux")` ite
 
 ## Not done yet
 
-- A `.app` bundle, which notifications need, then code signing, notarization, a DMG and auto-update.
-- Intel Macs.
-- A global shortcut for the quick composer. macOS has no compositor binding, so bind `keystone-desktop --quick` in a hotkey tool such as Shortcuts or Raycast. Inside Keystone it is ⌥⌘Space, which macOS gives to Finder's search window unless that shortcut is turned off in System Settings → Keyboard → Keyboard Shortcuts → Spotlight; the palette's **Quick composer** always works.
+An `.app` bundle, which notifications need, then signing, notarization, a DMG and auto-update are TOB-220. Intel Macs are not tested.
+
+## Quick composer shortcut
+
+There is no global shortcut for the quick composer. macOS has no compositor binding, so bind `keystone-desktop --quick` in a hotkey tool such as Shortcuts or Raycast. Inside Keystone it is ⌥⌘Space, which macOS gives to Finder's search window unless that shortcut is turned off in System Settings → Keyboard → Keyboard Shortcuts → Spotlight; the palette's **Quick composer** always works.

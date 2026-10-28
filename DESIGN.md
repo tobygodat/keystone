@@ -1,4 +1,4 @@
-# Design system
+# Design system: Keystone
 
 `crates/keystone-ui` holds Keystone's theme, tokens, icons, and shared controls. The desktop app builds its controls from these components. Layout containers in the app still use GPUI styling, with colors taken from theme tokens.
 
@@ -162,8 +162,4 @@ The tree's structure, a tree state that owns the rows beside a styled `Tree` ele
 
 ## Known limits
 
-GPUI 0.2.2's `text_ellipsis` truncates to the first width it measured, so `Label::truncate` uses its own element. It measures the text on every layout and cuts it to its final width with a trailing "…". See KS-010 in [the issue list](issues.md).
-
-Text sizes do not change with density or font choice yet. The default fonts, Inter and GeistMono Nerd Font Mono, are not bundled. GPUI falls back to a system font when they are missing. The desktop picks the first installed monospace font from a short list, so code stays monospace. The interface font has no such list: on a machine without Inter, GPUI's fallback showed no bold or italic, so Markdown emphasis was invisible until an installed font such as Liberation Sans was chosen in settings.
-
-A copy click before any key press in the window copies nothing on Wayland. See KS-013.
+Known limits are Linear issues: the `Label::truncate` ellipsis workaround and click-only copy on Wayland are in TOB-212, and text size, font and System theme gaps are in TOB-216. The visual direction behind these rules is [ADR 0009](docs/adr/0009-visual-direction.md), and the component choices are [ADR 0008](docs/adr/0008-ui-component-choices.md).

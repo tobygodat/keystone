@@ -1,6 +1,6 @@
 # Diagrams and agent-built UI
 
-Researched on 2026-10-17 for TOB-33. The [scope](../scope.md) asks for interactive charts, diagrams, forms, and tools in chat, and says the rendering approach is unproven. This note proposes one, in three steps. TOB-34 covers step 1 and TOB-35 step 2.
+Researched on 2026-10-17 for TOB-33. The [scope](../adr/0001-product-scope.md) asks for interactive charts, diagrams, forms, and tools in chat, and says the rendering approach is unproven. This note proposes one, in three steps. TOB-34 covers step 1 and TOB-35 step 2.
 
 ## Pele renders Mermaid without a browser
 

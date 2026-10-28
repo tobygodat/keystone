@@ -1,6 +1,6 @@
 # Native product polish verification — 2026-10-17
 
-This pass covers streaming presentation, session controls and visual polish. It does not complete the product scope in `docs/scope.md`. The editable [Paper file]() distinguishes current screens from future concepts.
+This pass covers streaming presentation, session controls and visual polish. It does not complete the product scope in `docs/adr/0001-product-scope.md`. The editable [Paper file]() distinguishes current screens from future concepts.
 
 ## Artifact and environment
 

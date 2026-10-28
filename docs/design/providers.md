@@ -6,7 +6,7 @@ Keystone drives the user's own installed `claude` and `codex` programs. This doc
 
 ## What Keystone needs
 
-From [scope.md](../scope.md): local execution, provider-native capabilities and configuration, steering-only messages during active work, native compaction, approvals that settlement never grants, detailed agent activity, checkpoints and rollback, cross-provider handoff and second opinions, recovery of interrupted work, and import of existing provider sessions. From the working preferences: low build time, measured performance, and native verification.
+From [the product scope](../adr/0001-product-scope.md): local execution, provider-native capabilities and configuration, steering-only messages during active work, native compaction, approvals that settlement never grants, detailed agent activity, checkpoints and rollback, cross-provider handoff and second opinions, recovery of interrupted work, and import of existing provider sessions. From the working preferences: low build time, measured performance, and native verification.
 
 Keystone is one local process with one window owner. It does not need multi-device sync, a mobile client, or an RPC layer between its own parts.
 
@@ -50,7 +50,7 @@ trait Driver {
 }
 ```
 
-One `ProcessHost` owns every child process: spawning, line framing, stdin writes, stderr draining into a bounded tail, and process-tree teardown. Drivers are tested by replaying recorded transcripts, so the edit loop never starts a provider. This is the "scripted providers exercise the same protocol boundary" rule in [testing.md](../testing.md).
+One `ProcessHost` owns every child process: spawning, line framing, stdin writes, stderr draining into a bounded tail, and process-tree teardown. Drivers are tested by replaying recorded transcripts, so the edit loop never starts a provider. This is the "scripted providers exercise the same protocol boundary" rule in [the conventions](../CONVENTIONS.md#tests).
 
 Zeron's drivers combine all of these concerns with fallback timers. Most of its documented bugs (doubled input requests, stale completions, mis-tagged task notifications) sit where IO and protocol state meet.
 

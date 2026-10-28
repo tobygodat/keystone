@@ -26,7 +26,7 @@ No Zed, Zeron, Codex, or MonoCode source was copied for this pass. No claim is m
 
 ## Remaining product work
 
-The accepted scope in [scope.md](../scope.md) is larger than this polish pass. TOB-28 tracks remaining product journeys and links them to existing component work. TOB-29 tracks partial transcript selection and collapsible activity.
+The accepted scope in [ADR 0001](../adr/0001-product-scope.md) is larger than this polish pass. TOB-28 tracks remaining product journeys and links them to existing component work. TOB-29 tracks partial transcript selection and collapsible activity.
 
 Native screenshots, action logs, and exact-binary checks are the acceptance evidence. Unit tests cover pacing and persistence boundaries. A fake provider proves UI handling of its protocol events, not a live provider integration.
 
