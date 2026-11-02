@@ -4,6 +4,8 @@
 
 Keystone is one local process with one GPUI application that owns every window. It drives the user's installed `claude` and `codex` CLIs as child processes, keeps workspace state and a neutral copy of each conversation in one SQLite database, and serves a local MCP server so sessions can launch and read each other. There is no server, sync, or RPC between its own parts. It runs on Linux (Wayland and X11) and Apple Silicon macOS.
 
+This describes what is built. [ADR 0010](adr/0010-terminal-browser-scheduling-editor-diffs-remote-devices.md) brings seven unbuilt features into scope, and some will change it. Remote environments (TOB-306) will run sessions on another machine, so a remote host process and a protocol between it and the app will end the single-process, no-RPC rule. The browser preview (TOB-302) and device panel (TOB-307) will add orchestrator MCP tools. The terminal (TOB-301) and editor (TOB-304) are bound by ADR 0003: permissive crates only. Whether scheduled tasks (TOB-303) need a background process is open. Each design lands here when it's built.
+
 ## Code map
 
 - `crates/keystone-core`: GPUI-free domain and storage. Sessions, projects, accounts, tabs, windows and layout, prompts, notes, attachments, worktrees, pull requests, usage, and integrations inventory and sync. `database.rs` is the SQLite store. Its tests never compile the graphics stack.

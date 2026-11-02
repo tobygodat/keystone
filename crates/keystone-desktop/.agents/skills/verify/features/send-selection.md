@@ -20,6 +20,6 @@ Text selected in a Files view or in a reply goes into the composer of the sessio
 
 ## Not covered
 
-- Changes has no diff to select from: the local Git diff viewer is out of scope (docs/adr/0001-product-scope.md).
+- Changes has no diff to select from yet. The diff viewer is in scope (docs/adr/0010-terminal-browser-scheduling-editor-diffs-remote-devices.md) but not built (TOB-305).
 - Selections in tool output, user messages and Notes (Notes has its own Add to draft).
 - A drag past the view's edge does not scroll it.

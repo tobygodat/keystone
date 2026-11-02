@@ -10,7 +10,9 @@ Keystone is a native desktop workspace for Claude Code and Codex. It drives the 
 
 ## Positioning
 
-Keystone aims for t3code-grade orchestration and backend reliability, implemented natively in Rust and GPUI with its own interface. It doesn't adopt t3code's interface, sidebar or workflow opinions, and it doesn't promise full CLI parity: an external terminal covers interactive CLI features it doesn't support. The full scope, with what is deferred and removed, is [ADR 0001](docs/adr/0001-product-scope.md).
+Keystone aims for t3code-grade orchestration and backend reliability, implemented natively in Rust and GPUI with its own interface. It doesn't adopt t3code's interface, sidebar or workflow opinions, and it doesn't promise full CLI parity: an external terminal covers interactive CLI features it doesn't support. The full scope, with what is deferred and removed, is [ADR 0001](docs/adr/0001-product-scope.md) as amended by [ADR 0010](docs/adr/0010-terminal-browser-scheduling-editor-diffs-remote-devices.md).
+
+ADR 0010 brings seven features into scope that aren't built yet: an integrated terminal, a browser preview panel that agents can drive, scheduled tasks, a built-in file editor, a diff viewer, remote environments over SSH or Tailscale, and a device panel for the iOS Simulator and Android Emulator. Side conversations (`/btw`), follow-up queues, the dedicated plan-mode UI, Monos, session snoozing, project command buttons and session export stay out.
 
 ## Principles
 
