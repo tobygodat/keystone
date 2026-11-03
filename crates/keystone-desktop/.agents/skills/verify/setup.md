@@ -10,7 +10,7 @@ The nvidia patch passes `--unsupported-gpu` to the windowed Sway that `headless:
 
 The atspi patch adds an `a11y_flag` option to `session_start`. at-spi2-core 2.61 removed at-spi-bus-launcher's `--a11y=1` argument, and from that version the launcher aborts on it, so the private desktop cannot start its accessibility bus. `native-driver.py` reads the installed version from libatspi and sends `a11y_flag:false` only on 2.61 and later. A driver without the patch rejects the field, and `start` says to rebuild it.
 
-This machine has Sway 1.12, Bubblewrap, D-Bus, AT-SPI (at-spi2-core 2.62), libxkbcommon, Xwayland, grim and ffmpeg installed. Sway installation also added wlroots0.20 and libliftoff. No Hyprland configuration was changed.
+The driver needs Sway, Bubblewrap, D-Bus, AT-SPI, libxkbcommon, Xwayland, grim and ffmpeg. Known working: the Hyprland machine with Sway 1.12, wlroots 0.20 and at-spi2-core 2.62 (its Hyprland configuration unchanged), and the Ubuntu GNOME agent box with Sway 1.11, wlroots 0.19 and at-spi2-core 2.60.
 
 If the executable is missing, use a new temporary checkout and the pinned commit. Run from the Keystone workspace root:
 
