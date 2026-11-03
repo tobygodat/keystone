@@ -55,5 +55,5 @@ Native verification notes:
 
 - An agent shell may not inherit the Hyprland session. Set `HYPRLAND_INSTANCE_SIGNATURE` from `/run/user/1000/hypr/` and `WAYLAND_DISPLAY=wayland-1` before running non-headless checks.
 - Find a nested Sway window with `pgrep -x sway`, then match that PID in `hyprctl clients -j`. `pgrep -f` matches your own shell.
-- Driver mouse actions need `"button":"left"`. If driver screenshots fail with `unsupported SHM pixel format`, capture with `grim` against the run's Wayland socket (TOB-214).
+- Driver mouse actions need `"button":"left"`. A driver built without `computer-use-mcp-packed-rgb.patch` can't read the headless output's 24-bit buffers (TOB-214); `screenshot` then captures with `grim` and reports `capture: "grim"`. Rebuild the driver as the verify skill's setup describes.
 - `native-smoke.py` env: `KEYSTONE_CAPTURE_DIR` picks the evidence directory, `KEYSTONE_TEST_CLOSE=1` checks that failed storage blocks a compositor close, `KEYSTONE_KEY_DELAY_MS` sets typing speed (default 100 ms), and `KEYSTONE_LONG_REPEAT` lengthens the long draft.

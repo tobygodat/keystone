@@ -1,8 +1,12 @@
 # Build the native verification driver
 
-The driver is [computer-use-mcp](https://github.com/ALLLLLL703/computer-use-mcp) at commit `7acd4518c0028f034e33dfd20bb5b159adf15be5`, version 0.3.2, with `scripts/patches/computer-use-mcp-headless.patch`, `scripts/patches/computer-use-mcp-wheel.patch` and `scripts/patches/computer-use-mcp-atspi.patch` applied. Its local executable is `.audit/tools/computer-use-mcp` relative to the Keystone workspace root. It is a tool dependency, not part of the application. An older headless-only executable must be rebuilt for wheel verification; the wrapper cannot repair its wire events.
+The driver is [computer-use-mcp](https://github.com/ALLLLLL703/computer-use-mcp) at commit `7acd4518c0028f034e33dfd20bb5b159adf15be5`, version 0.3.2, with `scripts/patches/computer-use-mcp-headless.patch`, `scripts/patches/computer-use-mcp-wheel.patch`, `scripts/patches/computer-use-mcp-atspi.patch`, `scripts/patches/computer-use-mcp-packed-rgb.patch` and `scripts/patches/computer-use-mcp-nvidia.patch` applied. Its local executable is `.audit/tools/computer-use-mcp` relative to the Keystone workspace root. It is a tool dependency, not part of the application. An older headless-only executable must be rebuilt for wheel verification; the wrapper cannot repair its wire events.
 
 The patch adds a `headless` option to `session_start`. It starts the private Sway on wlroots' headless backend with the GLES2 renderer instead of as a window on the host compositor. Capture and input use the same screencopy and virtual input protocols. Without it, `start` fails because the driver rejects the unknown field.
+
+The packed-rgb patch lets `screenshot` read 24-bit BGR888 and RGB888 buffers. wlroots' headless GLES2 output offers BGR888 to screencopy, which the unpatched driver rejects with "unsupported SHM pixel format" (TOB-214).
+
+The nvidia patch passes `--unsupported-gpu` to the windowed Sway that `headless:false` starts. Without it Sway exits at once on a host using the proprietary Nvidia driver. The headless Sway starts either way. A windowed run still stalls whenever the host does not show its window (KS-006, see SKILL.md).
 
 The atspi patch adds an `a11y_flag` option to `session_start`. at-spi2-core 2.61 removed at-spi-bus-launcher's `--a11y=1` argument, and from that version the launcher aborts on it, so the private desktop cannot start its accessibility bus. `native-driver.py` reads the installed version from libatspi and sends `a11y_flag:false` only on 2.61 and later. A driver without the patch rejects the field, and `start` says to rebuild it.
 
@@ -17,6 +21,8 @@ git -C "$checkout" checkout --detach 7acd4518c0028f034e33dfd20bb5b159adf15be5
 git -C "$checkout" apply "$PWD/scripts/patches/computer-use-mcp-headless.patch"
 git -C "$checkout" apply "$PWD/scripts/patches/computer-use-mcp-wheel.patch"
 git -C "$checkout" apply "$PWD/scripts/patches/computer-use-mcp-atspi.patch"
+git -C "$checkout" apply "$PWD/scripts/patches/computer-use-mcp-packed-rgb.patch"
+git -C "$checkout" apply "$PWD/scripts/patches/computer-use-mcp-nvidia.patch"
 cargo test --manifest-path "$checkout/Cargo.toml" --locked -j 2
 cargo build --manifest-path "$checkout/Cargo.toml" --locked -j 2
 mkdir -p .audit/tools
@@ -31,6 +37,6 @@ Headless runs need only GPU access, through a DRM render node. They need no host
 
 The driver uses host access for the app so GPUI can access the GPU. A separate input desktop is not a filesystem or network sandbox. The server sets an isolated Keystone state file and element geometry file, and removes `KEYSTONE_VISUAL_FIXTURE`. Provider execution is not implemented in this preview.
 
-`screenshot` falls back to `grim` when the driver rejects the output's pixel format (TOB-214). Recording needs `wf-recorder`, or `grim` and `ffmpeg`, plus `ffprobe` to check the result. All of them are run by name from `PATH`. wf-recorder reads the headless output directly. Without it, the server captures with grim up to 30 times a second and pipes the frames to ffmpeg.
+`screenshot` falls back to `grim` when a driver without the packed-rgb patch rejects the output's pixel format (TOB-214). Recording needs `wf-recorder`, or `grim` and `ffmpeg`, plus `ffprobe` to check the result. All of them are run by name from `PATH`. wf-recorder reads the headless output directly. Without it, the server captures with grim up to 30 times a second and pipes the frames to ffmpeg.
 
 The `keystone-verify` server in `.mcp.json` is the only registration needed. It needs no browser extension, exposed HTTP port, or access to host input devices.

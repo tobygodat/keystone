@@ -1,6 +1,6 @@
 # Native wheel and maximize acceptance
 
-Build the pinned driver with the headless, wheel and atspi patches in [setup](../setup.md). Run `python3 scripts/test_native_driver.py` for wrapper regressions and the driver's own test suite (setup's `cargo test`, whose wheel test comes from the wheel patch) for signed, fractional and accumulated axis distances. Launch the exact app build through `native-driver.py --driver PATH --binary PATH --trace-wayland`; retain doctor, SHA/hash, requests, traces, state and native screenshots. Never replace an executable another owner is using.
+Build the pinned driver with the headless, wheel, atspi, packed-rgb and nvidia patches in [setup](../setup.md). Run `python3 scripts/test_native_driver.py` for wrapper regressions and the driver's own test suite (setup's `cargo test`, whose wheel test comes from the wheel patch) for signed, fractional and accumulated axis distances. Launch the exact app build through `native-driver.py --driver PATH --binary PATH --trace-wayland`; retain doctor, SHA/hash, requests, traces, state and native screenshots. Never replace an executable another owner is using.
 
 ## Two occurrences
 

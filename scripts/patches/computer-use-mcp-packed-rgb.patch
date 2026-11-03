@@ -1,0 +1,114 @@
+diff --git a/src/desktop.rs b/src/desktop.rs
+index d22f1c5..27d58b1 100644
+--- a/src/desktop.rs
++++ b/src/desktop.rs
+@@ -690,17 +690,8 @@ impl Layout {
+             (1..=3840).contains(&self.width) && (1..=2160).contains(&self.height),
+             "capture dimensions out of bounds"
+         );
+-        ensure!(
+-            matches!(
+-                self.format,
+-                wl_shm::Format::Argb8888
+-                    | wl_shm::Format::Xrgb8888
+-                    | wl_shm::Format::Abgr8888
+-                    | wl_shm::Format::Xbgr8888
+-            ),
+-            "unsupported SHM pixel format"
+-        );
+-        let row = self.width.checked_mul(4).context("row overflow")?;
++        let pixel = bytes_per_pixel(self.format).context("unsupported SHM pixel format")?;
++        let row = self.width.checked_mul(pixel).context("row overflow")?;
+         ensure!(
+             self.stride >= row && self.stride <= row + 4096,
+             "invalid or excessive SHM stride"
+@@ -716,7 +707,36 @@ impl Layout {
+         Ok(size as usize)
+     }
+ }
++/// Bytes per pixel of the SHM formats a capture accepts: the 32-bit ones, and the
++/// packed 24-bit ones wlroots' headless GLES2 output offers.
++fn bytes_per_pixel(format: wl_shm::Format) -> Option<u32> {
++    match format {
++        wl_shm::Format::Argb8888
++        | wl_shm::Format::Xrgb8888
++        | wl_shm::Format::Abgr8888
++        | wl_shm::Format::Xbgr8888 => Some(4),
++        wl_shm::Format::Bgr888 | wl_shm::Format::Rgb888 => Some(3),
++        _ => None,
++    }
++}
+ fn rgb_row(source: &[u8], destination: &mut [u8], format: wl_shm::Format) {
++    // DRM formats name channels from the high bit of a little-endian word, so
++    // BGR888 stores R, G, B in memory order and RGB888 stores B, G, R.
++    match format {
++        wl_shm::Format::Bgr888 => return destination.copy_from_slice(source),
++        wl_shm::Format::Rgb888 => {
++            for (pixel, rgb) in source
++                .as_chunks::<3>()
++                .0
++                .iter()
++                .zip(destination.as_chunks_mut::<3>().0.iter_mut())
++            {
++                rgb.copy_from_slice(&[pixel[2], pixel[1], pixel[0]]);
++            }
++            return;
++        }
++        _ => {}
++    }
+     for (pixel, rgb) in source
+         .as_chunks::<4>()
+         .0
+@@ -759,8 +779,9 @@ fn encode_png(source: &[u8], layout: Layout, flipped: bool) -> Result<Capture> {
+         for y in 0..layout.height {
+             let y = if flipped { layout.height - 1 - y } else { y };
+             let offset = y as usize * layout.stride as usize;
++            let pixel = bytes_per_pixel(layout.format).unwrap() as usize;
+             rgb_row(
+-                &source[offset..offset + layout.width as usize * 4],
++                &source[offset..offset + layout.width as usize * pixel],
+                 &mut row,
+                 layout.format,
+             );
+@@ -1305,6 +1326,41 @@ mod tests {
+         }
+     }
+     #[test]
++    fn packed_24_bit_capture_formats() {
++        let packed = Layout {
++            format: wl_shm::Format::Bgr888,
++            width: 2,
++            height: 2,
++            stride: 6,
++        };
++        assert_eq!(packed.validate().unwrap(), 12);
++        assert!(Layout { stride: 5, ..packed }.validate().is_err());
++        for (format, expected) in [
++            (wl_shm::Format::Bgr888, [0x44, 0x55, 0x66, 0x11, 0x22, 0x33]),
++            (wl_shm::Format::Rgb888, [0x66, 0x55, 0x44, 0x33, 0x22, 0x11]),
++        ] {
++            // One padded row per pixel, read bottom-up, as a flipped frame is.
++            let bytes = [0x11, 0x22, 0x33, 0, 0x44, 0x55, 0x66, 0];
++            let capture = encode_png(
++                &bytes,
++                Layout {
++                    format,
++                    width: 1,
++                    height: 2,
++                    stride: 4,
++                },
++                true,
++            )
++            .unwrap();
++            let mut reader = png::Decoder::new(io::Cursor::new(capture.png))
++                .read_info()
++                .unwrap();
++            let mut decoded = [0; 6];
++            reader.next_frame(&mut decoded).unwrap();
++            assert_eq!(decoded, expected);
++        }
++    }
++    #[test]
+     fn input_bounds() {
+         assert!(
+             validate_action(

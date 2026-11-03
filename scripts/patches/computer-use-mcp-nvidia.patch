@@ -1,0 +1,15 @@
+diff --git a/src/session.rs b/src/session.rs
+index b72d8f6..b049e45 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -282,7 +282,9 @@ impl Session {
+             command
+                 .env("WAYLAND_DISPLAY", host_wayland_socket()?)
+                 .env("WLR_BACKENDS", "wayland")
+-                .env("WLR_WL_OUTPUTS", "1");
++                .env("WLR_WL_OUTPUTS", "1")
++                // Sway refuses a host on the proprietary Nvidia driver without it.
++                .arg("--unsupported-gpu");
+         }
+         let compositor = OwnedProcess::spawn(command)?;
+         self.info.compositor_pid = compositor.child.id().context("missing compositor PID")?;
