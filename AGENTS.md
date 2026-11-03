@@ -37,5 +37,6 @@ Put cargo on `PATH` first: `export PATH=$HOME/.cargo/bin:$PATH`.
 - Call `Keystone::refresh`, not `cx.notify()`, for anything the sidebar shows (ADR 0007).
 - After a change that could affect build or render speed, run `python scripts/perf.py --note "..."` and commit the log row.
 - After changing the composer or text layout, run `python3 scripts/native-stress.py --runs 10`.
+- After changing how Keystone quits, closes its last window, pumps provider events, delivers launched sessions' results or starts scheduled runs, follow the quit-model skill (`crates/keystone-desktop/.agents/skills/quit-model/SKILL.md`). `check.sh --drift` there says whether a change touches the code it models.
 - Each worktree keeps its own `target/`. Don't share one or point another worktree at it.
 - Remaining work and known bugs go in Linear, not in repo files.
