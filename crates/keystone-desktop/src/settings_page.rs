@@ -52,13 +52,14 @@ enum Section {
     Accounts,
     Integrations,
     Prompts,
+    Scheduled,
 }
 
 /// A section's rows, each a label and its control.
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 7] = [
+const SECTIONS: [(Section, &str, &str, Rows); 8] = [
     (
         Section::Appearance,
         "Appearance",
@@ -115,6 +116,12 @@ const SECTIONS: [(Section, &str, &str, Rows); 7] = [
         &[],
     ),
     (Section::Prompts, "Prompts", "settings-section-prompts", &[]),
+    (
+        Section::Scheduled,
+        "Scheduled",
+        "settings-section-scheduled",
+        &[],
+    ),
 ];
 
 /// The open settings page: the section it shows and a focus handle per tab stop. Only
@@ -131,6 +138,7 @@ pub(crate) struct SettingsPage {
     pub(crate) accounts: crate::settings_accounts::AccountsPage,
     pub(crate) integrations: crate::integrations::IntegrationsPage,
     pub(crate) prompts: crate::settings_prompts::PromptsPage,
+    pub(crate) scheduled: crate::settings_scheduled::ScheduledPage,
 }
 
 impl SettingsPage {
@@ -148,6 +156,7 @@ impl SettingsPage {
             accounts: crate::settings_accounts::AccountsPage::new(cx),
             integrations: crate::integrations::IntegrationsPage::new(cx),
             prompts: crate::settings_prompts::PromptsPage::new(cx),
+            scheduled: crate::settings_scheduled::ScheduledPage::new(cx),
         }
     }
 
@@ -366,6 +375,7 @@ impl Keystone {
             Section::Accounts => Some(self.accounts_section(page, cx).into_any_element()),
             Section::Integrations => Some(self.integrations_section(page, cx).into_any_element()),
             Section::Prompts => Some(self.prompts_section(page, cx).into_any_element()),
+            Section::Scheduled => Some(self.scheduled_section(page, cx).into_any_element()),
             _ => None,
         };
         let content = div()
@@ -1328,8 +1338,8 @@ mod tests {
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
         // Appearance's row holds focus; next come Fonts, Notifications, Sounds, Accounts,
-        // Integrations, Prompts, Theme, then Compact.
-        keys(cx, "tab tab tab tab tab tab tab tab");
+        // Integrations, Prompts, Scheduled, Theme, then Compact.
+        keys(cx, "tab tab tab tab tab tab tab tab tab");
         press(cx, "space");
         assert_eq!(saved(&path).density, Density::Compact);
         keys(cx, "right");
@@ -1343,11 +1353,11 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, Theme, Prompts, Integrations, Accounts, Sounds,
-        // Notifications, Fonts, and Appearance to Back.
+        // From Default back past Compact, Theme, Scheduled, Prompts, Integrations, Accounts,
+        // Sounds, Notifications, Fonts, and Appearance to Back.
         keys(
             cx,
-            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
+            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
         );
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
@@ -1360,9 +1370,9 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        // Fonts' row holds focus; Notifications', Sounds', Accounts', Integrations' and Prompts'
-        // rows come before the first font menu.
-        keys(cx, "secondary-, down tab tab tab tab tab tab down");
+        // Fonts' row holds focus; Notifications', Sounds', Accounts', Integrations', Prompts'
+        // and Scheduled's rows come before the first font menu.
+        keys(cx, "secondary-, down tab tab tab tab tab tab tab down");
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");

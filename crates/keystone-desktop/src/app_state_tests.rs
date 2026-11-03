@@ -1153,6 +1153,9 @@ mod idle;
 #[path = "delivery_tests.rs"]
 mod delivery;
 
+#[path = "scheduled_tests.rs"]
+mod scheduled;
+
 #[gpui::test]
 fn an_account_never_shows_usage_left_under_its_id(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

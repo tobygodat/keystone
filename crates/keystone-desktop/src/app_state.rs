@@ -25,6 +25,9 @@ pub(crate) mod delivery;
 #[path = "checkpoints.rs"]
 pub(crate) mod checkpoints;
 
+#[path = "scheduled.rs"]
+pub(crate) mod scheduled;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Phase {
     Running,
@@ -51,6 +54,8 @@ enum SendKind {
     Widget,
     /// A launched session's result. Only ever a new turn, never a steer.
     Result,
+    /// A scheduled task's prompt. Only ever a new turn, and the draft stays.
+    Scheduled,
 }
 
 #[derive(Default)]
@@ -182,6 +187,7 @@ pub(crate) struct AppState {
     pub(crate) pull_requests: crate::pull_request::Monitor,
     /// Where attached images are copied, beside the workspace database.
     pub(crate) attachments: keystone_core::attachment::Attachments,
+    scheduler: scheduled::Scheduler,
 }
 impl EventEmitter<RuntimeChanged> for AppState {}
 
@@ -1595,8 +1601,10 @@ impl AppState {
             notifier: Default::default(),
             pull_requests: Default::default(),
             attachments,
+            scheduler: Default::default(),
             store,
         };
+        state.load_scheduled_tasks(cx);
         // A continue scheduled before a restart still goes once it is due. One that came
         // due while Keystone was closed is not sent: it waits for the user on the card.
         let now = now_ms();
@@ -3280,7 +3288,7 @@ impl AppState {
             }
         }
         // A result waits for a turn that started meanwhile rather than steering it.
-        if kind == SendKind::Result
+        if matches!(kind, SendKind::Result | SendKind::Scheduled)
             && (self.conversations.get(&id).is_some_and(|c| c.running)
                 || self.started(id).is_some_and(|c| c.is_running(id)))
         {

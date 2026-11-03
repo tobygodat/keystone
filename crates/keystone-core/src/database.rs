@@ -31,6 +31,8 @@ const USAGE_PREFIX: &str = "usage/";
 const COMMIT_DRAFT_PREFIX: &str = "commit_draft/";
 /// The `metadata` keys that hold each copy Settings → Integrations made, by its copy.
 const COPY_PREFIX: &str = "integration_copy/";
+/// The `metadata` keys that hold each scheduled task, by its ID.
+const SCHEDULED_TASK_PREFIX: &str = "scheduled_task/";
 const SCHEMA: &str = "
 CREATE TABLE events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -756,6 +758,69 @@ impl Database {
                 .iter()
                 .filter_map(|value| serde_json::from_str(value).ok())
                 .collect())
+        })
+    }
+
+    /// Saves a scheduled task: a `scheduled_task.upserted` event and its projection in
+    /// `metadata`, which older builds leave alone.
+    pub fn save_scheduled_task(&self, task: &crate::ScheduledTask) -> io::Result<()> {
+        self.connection(false, |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_error)?;
+            let id = task.id().to_string();
+            let payload = serde_json::to_string(task)?;
+            tx.execute(
+                "INSERT INTO events(kind, entity_id, payload) VALUES ('scheduled_task.upserted', ?1, ?2)",
+                params![id, payload],
+            )
+            .map_err(sql_error)?;
+            tx.execute(
+                "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![format!("{SCHEDULED_TASK_PREFIX}{id}"), payload],
+            )
+            .map_err(sql_error)?;
+            tx.commit().map_err(sql_error)
+        })
+    }
+
+    /// Removes the scheduled task `id`, with a `scheduled_task.removed` event.
+    pub fn remove_scheduled_task(&self, id: u64) -> io::Result<()> {
+        self.connection(false, |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_error)?;
+            tx.execute(
+                "INSERT INTO events(kind, entity_id, payload) VALUES ('scheduled_task.removed', ?1, '{}')",
+                [id.to_string()],
+            )
+            .map_err(sql_error)?;
+            tx.execute(
+                "DELETE FROM metadata WHERE key=?1",
+                [format!("{SCHEDULED_TASK_PREFIX}{id}")],
+            )
+            .map_err(sql_error)?;
+            tx.commit().map_err(sql_error)
+        })
+    }
+
+    /// Every saved scheduled task, by ID. One that no longer parses is skipped.
+    pub fn scheduled_tasks(&self) -> io::Result<Vec<crate::ScheduledTask>> {
+        self.connection(true, |connection| {
+            let mut statement = connection
+                .prepare("SELECT value FROM metadata WHERE substr(key, 1, length(?1)) = ?1")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([SCHEDULED_TASK_PREFIX], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            let mut tasks: Vec<crate::ScheduledTask> = rows
+                .iter()
+                .filter_map(|value| serde_json::from_str(value).ok())
+                .collect();
+            tasks.sort_by_key(crate::ScheduledTask::id);
+            Ok(tasks)
         })
     }
 

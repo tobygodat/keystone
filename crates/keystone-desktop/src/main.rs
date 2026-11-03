@@ -37,6 +37,7 @@ mod settings;
 mod settings_accounts;
 mod settings_page;
 mod settings_prompts;
+mod settings_scheduled;
 mod slash_menu;
 mod sounds;
 mod transcript;

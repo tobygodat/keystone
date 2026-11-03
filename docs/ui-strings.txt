@@ -498,6 +498,10 @@ crates/keystone-core/src/pull_request.rs
 	comment {}
 	review {}
 
+crates/keystone-core/src/schedule.rs
+	Keystone stopped during this run.
+	a day set names at least one of the seven weekdays
+
 crates/keystone-core/src/windows.rs
 	a tab moves between two windows
 	saved windows are from a newer version of Keystone
@@ -1251,6 +1255,23 @@ crates/keystone-desktop/src/restore.rs
 	Restore to here
 	Restoring…
 
+crates/keystone-desktop/src/scheduled.rs
+	A turn was running in the session.
+	Crash recovery holds the session.
+	Files were being restored in its repository.
+	No session was created. {error}
+	Scheduled tasks could not be read. {error}
+	The project folder could not be opened. {error}
+	The prompt was not sent.
+	The session is settled.
+	The session no longer exists.
+	The session waits for an approval or an answer.
+	The session waits to continue after its usage limit.
+	The session's history did not load in time.
+	The task was deleted.
+	“{}” did not run and tries again shortly. {error}
+	“{}” ran, but its run was not saved. {error}
+
 crates/keystone-desktop/src/screenshot.rs
 	Check Keystone's Screen Recording permission in System Settings.
 	Install grim and slurp.
@@ -1339,6 +1360,7 @@ crates/keystone-desktop/src/settings_page.rs
 	Play sounds
 	Prompts
 	Pull request checks and reviews
+	Scheduled
 	Settings not saved. {error}
 	Sounds
 	Spacious
@@ -1367,6 +1389,52 @@ crates/keystone-desktop/src/settings_prompts.rs
 	Text
 	Title
 	{name} also has /{shortcut}.
+
+crates/keystone-desktop/src/settings_scheduled.rs
+	, due {}
+	15 or 09:30
+	Add
+	Choose a project.
+	Choose where the task runs in this project.
+	Chosen days
+	Delete
+	Enter a time as HH:MM, such as 09:30.
+	Enter the minutes between runs, from 1 to 10080.
+	Every N minutes
+	Every day
+	Every day at
+	Every hour
+	Every minute
+	Every {minutes} minutes
+	Every {} hours
+	Failed. {reason}
+	Give the task a title.
+	In a deleted session
+	In “{}”
+	New Claude session
+	New Codex session
+	Next {}
+	Open
+	Pause
+	Paused
+	Project
+	Prompt
+	Resume
+	Run now
+	Skipped. {reason}
+	Started
+	Task not changed. {e}
+	Task not deleted. {e}
+	Task not saved. {error}
+	Tasks run while Keystone is open. One that came due while it was closed runs when it next opens.
+	Title
+	Weekdays
+	Weekdays at
+	Write the prompt the task sends.
+	{days} at {hour:02}:{minute:02}
+	{when}, run now: {}
+	{when}{late}: {}
+	{} · {} · {} · {next}
 
 crates/keystone-desktop/src/slash_menu.rs
 	Choose a conversation folder to list commands.

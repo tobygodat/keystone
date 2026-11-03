@@ -25,6 +25,7 @@ mod prompt;
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
 mod pull_request;
+mod schedule;
 mod session_context;
 mod tabs;
 mod usage;
@@ -49,6 +50,9 @@ pub use prompt::{Prompt, PromptFields};
 pub use pull_request::{
     Check, CheckState, MergeState, PullRequestAlert, PullRequestReport, PullRequestState,
     PullRequestWatch, Review, ReviewComment, ReviewDecision, ReviewState,
+};
+pub use schedule::{
+    Days, INTERRUPTED, KEPT_RUNS, Outcome, Run, Schedule, ScheduledTask, Target, TaskFields,
 };
 use session_context::SavedSessionContext;
 pub use session_context::{ContextOrigin, SessionContext, WorkingDirectory, WorktreeContext};
