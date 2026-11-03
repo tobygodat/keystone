@@ -1,6 +1,6 @@
 # Native wheel and maximize acceptance
 
-Build the pinned driver with both patches in [setup](../setup.md). Run `python3 scripts/test_native_driver.py` for wrapper regressions and the focused Rust test in setup for signed, fractional and accumulated axis distances. Launch the exact app build through `native-driver.py --driver PATH --binary PATH --trace-wayland`; retain doctor, SHA/hash, requests, traces, state and native screenshots. Never replace an executable another owner is using.
+Build the pinned driver with the headless, wheel and atspi patches in [setup](../setup.md). Run `python3 scripts/test_native_driver.py` for wrapper regressions and the driver's own test suite (setup's `cargo test`, whose wheel test comes from the wheel patch) for signed, fractional and accumulated axis distances. Launch the exact app build through `native-driver.py --driver PATH --binary PATH --trace-wayland`; retain doctor, SHA/hash, requests, traces, state and native screenshots. Never replace an executable another owner is using.
 
 ## Two occurrences
 
@@ -10,7 +10,7 @@ Read each occurrence's fresh named center. Run `wheel` upward and downward over 
 
 Click each earlier occurrence and require persisted `viewed_at` to remain below `updated_at`. Focus one occurrence last, click the composer, and explicitly Send through the scripted provider. Require only that last-focused visible occurrence to jump; the other's rows and bounds must remain unchanged through completion. A completed reply with composer focus stays unread. Earlier focus still does not acknowledge it; focused latest observation does. Record the actual timestamps and resulting sidebar state.
 
-Separately exercise keyboard Tab/Shift+Tab and Enter/Space activation of **Jump to latest**, observing the visible focus and target pane. If the current button cannot receive keyboard focus, preserve that failure as an application accessibility defect rather than calling a mouse click a keyboard pass. Do not expand driver work into application focus changes without a separate owner.
+Separately exercise keyboard Tab/Shift+Tab and Enter/Space activation of **Jump to latest**, observing the visible focus and target pane. The button takes keyboard focus: Tab reaches it after the rows' actions, and Alt+End in the transcript focuses it, so Enter returns to the latest row. Never call a mouse click a keyboard pass. Do not expand driver work into application focus changes without a separate owner.
 
 For the composer, type a multiline draft long enough to overflow its viewport. Move the pointer inside the observed text viewport and wheel in both directions. Compare native screenshots for text movement while both transcript panes retain their offsets. Confirm the saved draft is unchanged. This is separate from transcript scrolling.
 

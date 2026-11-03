@@ -5,7 +5,7 @@ One note per project, written in a Notes surface of the layout. Notes are Keysto
 ## Sub-features
 
 - `notes-store` saves each project's note in the `notes` projection (schema 6, after `deliveries` in schema 5), keyed by the project's canonical folder, with a `note.upserted` event per change. Emptying a note removes its row with `note.removed`. The driver's `workspace` lists them under `workspace.notes` as `{"project": ..., "text": ...}`.
-- `notes-surface` is a layout component like Files: at most one per project, beside a conversation or as a tab with one. Its strip is `notes-tab-0` when alone. The editor is `notes-editor`, the composer's multiline text input filling the pane; the footer shows the project's name and `notes-send`.
+- `notes-surface` is a layout component like Files: at most one per project, beside a conversation or as a tab with one. Its strip is `notes-tab-0` when alone. The editor is `notes-editor`, the composer's multiline text input filling the pane; the footer holds only `notes-send` (**Add to draft**), and the tab reads Notes.
 - `notes-autosave` saves 250 ms after typing stops, the composer's draft timer. Quit and closing a window save whatever the timer has not.
 - `notes-project` shows the window's project's note. Switching project (Ctrl+O) shows the other project's note; typing not yet saved still saves to the project it was typed for. Two windows on one project show the same text.
 - `notes-send` ("Add to draft", or Ctrl+Enter in the editor) puts the selection, or the whole note when nothing is selected, into the composer at its cursor, saves the draft and focuses the composer. It never sends. Without a selected session the button is disabled and Ctrl+Enter does nothing.

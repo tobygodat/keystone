@@ -29,7 +29,7 @@ Steps:
 - Press Enter. Require the draft to read `@src/pkg-00/mod-03/file-0000.txt ` with the path in the accent colour, `mention-menu` gone, and the saved draft (`workspace`) the same.
 - Press Backspace twice. Require the draft to be empty: the first removes the space and the second the whole token.
 - Type `@mod-03`, press Escape. Require `mention-menu` gone; type a character and require it back.
-- Choose a file again, type ` please`, press Ctrl+Enter. Require the last line of `.fake-claude-messages` to be the exact text with `@src/...`.
+- Choose a file again, type ` please`, press Ctrl+Enter. Require the last line of `.fake-claude-messages`, a JSON string, to decode to the exact text with `@src/...`.
 - Press Ctrl+Shift+E. Highlight `README.md` with Down. `click` `mention-file` (or press Ctrl+Shift+M). Require the draft to end with `@README.md ` and the composer focused.
 - Quit with Ctrl+Q and relaunch. Require the draft back with its token in the accent colour; Backspace at its end removes it whole.
 

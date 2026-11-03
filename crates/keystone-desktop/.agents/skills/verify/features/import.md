@@ -21,7 +21,7 @@ Import sessions… brings a conversation Claude Code or Codex already keeps for 
 
 ## Native journey
 
-Give the run fixture homes as `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, with `KEYSTONE_FAKE_ENV_RECEIPT`, `KEYSTONE_FAKE_CLAUDE_ARGV_LOG` and `KEYSTONE_FAKE_CODEX_THREAD_LOG` set and `KEYSTONE_PROJECT_DIR` naming the folder the fixtures ran in. The Claude home holds two labelled sessions in that folder (one past 50 turns) and one elsewhere; the Codex home holds `keystone-fake-threads/<id>.json` files with a `thread` record (`name`, `preview`, `cwd`, `updatedAt`) beside their `turns`. Hash every fixture file first.
+Give the run fixture homes as `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, with `KEYSTONE_FAKE_ENV_RECEIPT`, `KEYSTONE_FAKE_CLAUDE_ARGV_LOG` and `KEYSTONE_FAKE_CODEX_THREAD_LOG` set in wrapper scripts that exec the fakes (`start`'s `env` refuses them), passed as `KEYSTONE_CLAUDE_PATH` and `KEYSTONE_CODEX_PATH`, and `KEYSTONE_PROJECT_DIR` naming the folder the fixtures ran in. The Claude home holds two labelled sessions in that folder (one past 50 turns) and one elsewhere; the Codex home holds `keystone-fake-threads/<id>.json` files with a `thread` record (`name`, `preview`, `cwd`, `updatedAt`) beside their `turns`. Hash every fixture file first.
 
 - Open the list from the palette, choose Claude Code: two rows with titles, times and counts. Import the long one: the older-history line and the newest 50 turns render.
 - Open it from the new-session menu, choose Codex: import the thread; its rows render.

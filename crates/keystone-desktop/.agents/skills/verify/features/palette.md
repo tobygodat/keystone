@@ -8,9 +8,9 @@ Open the palette, filter the app's commands by typing, and run one with Enter or
 - `palette-filter` keeps the commands whose label fuzzy-matches the query, best match first. Up and Down, or Tab and Shift+Tab, move the highlight.
 - `palette-run` runs the highlighted command with Enter, or any row with a click. The palette closes first and focus returns to where it was, so the command acts as its shortcut would.
 - `palette-dismiss` closes it with Escape or a press outside the card. Focus returns to where it was and nothing else changes.
-- `palette-kbd` shows each row's shortcut. Rows and bindings come from one table in `src/commands.rs`, so a hint cannot drift from its binding.
+- `palette-kbd` shows each row's shortcut. Rows and their bindings come from one table in `src/commands.rs`, so a hint cannot drift from its binding. The palette's own Ctrl+K and Ctrl+Shift+P are bound in `main.rs`.
 
-The rows, in order: New Codex session, New Claude session, Toggle sidebar, Focus search, Focus composer, Rename session, Settle session, Open settings, Customize layout, Quit.
+The palette lists every command in that table, about fifty, eight rows at a time; only drawn rows have `palette-row-N` ids. With an empty query it starts: New Codex session, New Claude session, Toggle sidebar, Toggle files, Toggle notes, Toggle changes, Toggle pull request, Copy pull request link, then Focus search and the rest.
 
 ## How to get to it (user POV)
 
@@ -41,6 +41,6 @@ Preconditions:
 - The card is 560 px wide and narrows with the window, so it fits at 800 by 600.
 - Ctrl+K inside the palette closes it. It does not reach the input.
 - While the palette is open, the app's other shortcuts do nothing (Ctrl+N, Ctrl+Enter, Tab focus moves, and the Customize keys), so nothing changes behind it and focus cannot leave it. Ctrl+Q still quits.
-- Escape with the palette open closes only the palette. Menus and the customize panel underneath stay as they were.
+- Escape with the palette open closes only the palette. The customize panel underneath stays as it was. Opening the palette closes the new-session, filter, approval, attach and model menus.
 - Settle session refuses a session waiting for approval and shows the reason under the composer. See [Settlement](settlement.md).
 - Open settings (`open-settings`, Ctrl+Comma) closes the palette and opens the settings page, or closes the page when it is open. See [Settings](settings.md).

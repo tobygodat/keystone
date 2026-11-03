@@ -24,7 +24,7 @@ Start with both scripted providers and a disposable project, as in [conversation
 
 - Idle: `click` `welcome-codex`, type `orchestrator test: delegate claude`, `click` `send`. Wait for the parent's "Scripted delegation started" reply and `turn-status` gone, then `wait_for` the `result-<row>` card. Screenshot it. `workspace` shows `deliveries: [{child: 2, parent: 1, state: "delivered"}]`.
 - Busy: send `orchestrator test: delegate claude while busy`. While `turn-status` is present, `wait_for` `result-waiting-<child>` and screenshot the "arrives when this turn ends" line. Then wait for the result card after the parent's streamed reply.
-- Settled: send `orchestrator test: delegate claude`, then at once press Ctrl+Shift+S to settle the selected parent. After the launched session finishes, `result-waiting-<child>` says the session is settled and `workspace` shows the delivery `ready`. Quit with Ctrl+Q, `launch`, select the parent from **Settled**, and require the same line and state. Un-settle with Ctrl+Shift+S and require the result card, then `delivered`.
+- Settled: send `orchestrator test: delegate claude`, then at once press Ctrl+Shift+S to settle the selected parent. After the launched session finishes, `result-waiting-<child>` says the session is settled and `workspace` shows the delivery `ready`. Quit with Ctrl+Q, `launch`, select the parent from **Settled** (collapsed by default: `click` `settled-section` first), and require the same line and state. Un-settle with Ctrl+Shift+S and require the result card, then `delivered`.
 - After a delivery, Quit and relaunch: the parent's transcript has exactly one result card and no new turn starts.
 
 ## Gotchas

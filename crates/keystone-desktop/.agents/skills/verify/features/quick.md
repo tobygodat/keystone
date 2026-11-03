@@ -13,9 +13,9 @@ A small window, titled "Quick composer", that starts a session in one step. It h
 
 ## Driving it with keystone-verify
 
-- With the app running, call `launch` with `args` `["--quick"]`. Require `doctor` to list the new PID as exited with code 0, `windows_list` to show "Keystone" and "Quick composer" under the app's PID, and no other live process.
+- With the app running, call `launch` with `args` `["--quick"]`. Require `doctor` to list the new PID as exited with code 0, `call` `{"tool":"windows_list"}` to show "Keystone" and "Quick composer" under the app's PID, and no other live process.
 - Click `quick-field` in window "Quick composer", type, press Return. Require the window gone, `workspace` to list a new session with the chosen provider, the fake Claude's `.fake-claude-messages` in the project to hold the text, and `session-N` in the main window's sidebar.
-- Launch `--quick` again, type, press Escape. Require the window gone and `workspace` `preferences.quick.text` to hold the text; launch `--quick` again and require it shown.
+- Launch `--quick` again, type, press Escape. Require the window gone and `workspace`'s `workspace.preferences.quick.text` to hold the text; launch `--quick` again and require it shown.
 - Quit with Ctrl+Q, then `launch` with `["--quick"]`: require both windows under the new PID.
 - Sway tiles the window unless told otherwise; the README's rule, `for_window [app_id="keystone" title="^Quick composer$"] floating enable`, can be sent to the private compositor with `swaymsg -s <sway_socket>` from `start`'s session.
 

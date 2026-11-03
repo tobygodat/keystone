@@ -31,6 +31,6 @@ Headless runs need only GPU access, through a DRM render node. They need no host
 
 The driver uses host access for the app so GPUI can access the GPU. A separate input desktop is not a filesystem or network sandbox. The server sets an isolated Keystone state file and element geometry file, and removes `KEYSTONE_VISUAL_FIXTURE`. Provider execution is not implemented in this preview.
 
-Recording needs `wf-recorder`, or `grim` and `ffmpeg`, plus `ffprobe` to check the result. All of them are run by name from `PATH`. wf-recorder reads the headless output directly. Without it, the server captures with grim up to 30 times a second and pipes the frames to ffmpeg.
+`screenshot` falls back to `grim` when the driver rejects the output's pixel format (TOB-214). Recording needs `wf-recorder`, or `grim` and `ffmpeg`, plus `ffprobe` to check the result. All of them are run by name from `PATH`. wf-recorder reads the headless output directly. Without it, the server captures with grim up to 30 times a second and pipes the frames to ffmpeg.
 
 The `keystone-verify` server in `.mcp.json` is the only registration needed. It needs no browser extension, exposed HTTP port, or access to host input devices.

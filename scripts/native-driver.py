@@ -688,6 +688,43 @@ class Run:
         self.record('state_snapshot', result)
         return result
 
+    def screenshot(self):
+        """The driver's capture, else grim's of the same output. The pinned driver takes
+        only 8-bit ARGB, XRGB, ABGR and XBGR buffers, and some headless outputs offer
+        another format (TOB-214)."""
+        try:
+            result = self.call('screenshot')
+        except RuntimeError as error:
+            if 'unsupported SHM pixel format' not in str(error):
+                raise
+            return self.grim_screenshot()
+        image = next(c for c in result['content'] if c.get('type') == 'image')
+        saved = next(c for c in result['_evidence']['content'] if c.get('type') == 'image')
+        width, height = png_size(saved['path'])
+        return {**result.get('structuredContent', {}), 'path': saved['path'],
+                'width': width, 'height': height, 'capture': 'driver'}, image
+
+    def grim_screenshot(self):
+        grim = shutil.which('grim')
+        if grim is None:
+            raise RuntimeError('The driver cannot read this output\'s pixel format and grim '
+                               'is not installed; see verify/setup.md')
+        env = {**os.environ, 'WAYLAND_DISPLAY': str(self.session['wayland_socket'])}
+        capture = subprocess.run([grim, '-t', 'png', '-'], env=env, capture_output=True,
+                                 timeout=30)
+        if capture.returncode != 0:
+            raise RuntimeError(f'grim capture failed: {capture.stderr.decode(errors="replace")}')
+        self.images += 1
+        path = self.evidence / f'{self.images:04d}.png'
+        path.write_bytes(capture.stdout)
+        width, height = png_size(path)
+        result = {'path': str(path), 'sha256': digest(path), 'width': width, 'height': height,
+                  'capture': 'grim'}
+        self.record('screenshot', result)
+        image = {'type': 'image', 'mimeType': 'image/png',
+                 'data': base64.b64encode(capture.stdout).decode()}
+        return result, image
+
     def record_start(self):
         if self.recording is not None:
             raise RuntimeError('A recording is running; call record_stop first')
@@ -876,12 +913,7 @@ class Server:
         if name == 'doctor':
             return run.doctor(), None
         if name == 'screenshot':
-            result = run.call('screenshot')
-            image = next(c for c in result['content'] if c.get('type') == 'image')
-            saved = next(c for c in result['_evidence']['content'] if c.get('type') == 'image')
-            width, height = png_size(saved['path'])
-            return {**result.get('structuredContent', {}), 'path': saved['path'],
-                    'width': width, 'height': height}, image
+            return run.screenshot()
         if name == 'record_start':
             return run.record_start(), None
         if name == 'record_stop':

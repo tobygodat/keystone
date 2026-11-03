@@ -6,7 +6,7 @@ Keystone sends a desktop notification when a session's turn finishes, it asks fo
 
 - `notify-events` sends one notification per event for a session no active window shows, titled with the session's title. The body reads "Turn finished", "Approval requested" or "Turn failed". A turn the user stopped, or ended with a denial, sends none.
 - `notify-coalesce` sends a session's event once until an active window shows that session. Two approval requests, or two finished turns, in one unseen stretch send one notification.
-- `notify-open` selects the session from its notification, in the window showing it, else the window used last, else the first, leaves the settings page there and asks the compositor to focus the window.
+- `notify-open` selects the session from its notification, in the window showing it, else a window already on the session's project (the one used last), else the window used last, else the first, switching that window to the session's project if needed and closing Customize, leaves the settings page there and asks the compositor to focus the window.
 - `notify-settings` turns all notifications, or each event, off in Settings → Notifications. Every switch is on by default, and the event switches are disabled while the global one is off.
 - Attention, Needs action and settling are unchanged: notifications only read events.
 
@@ -24,7 +24,7 @@ To observe them, own `org.freedesktop.Notifications` on `bus` with a fake server
 
 - Send a message containing "long" in a scripted Claude session, press Ctrl+N, and wait for the first session's turn to end. Expect one `Notify` with the session's title as its summary and "Turn finished" as its body.
 - Emit `ActionInvoked(<id>, "default")`. The workspace's `selected` becomes that session.
-- `click` `settings`, `settings-section-notifications`, then `settings-notify-turn-finished`. The workspace's `preferences.notifications.turn_finished` becomes `false`. The global switch is `settings-notifications`; the others are `settings-notify-approval` and `settings-notify-turn-failed`.
+- `click` `settings`, `settings-section-notifications`, then `settings-notify-turn-finished`. The workspace's `preferences.notifications.turn_finished` becomes `false`. The global switch is `settings-notifications`; the others are `settings-notify-approval`, `settings-notify-turn-failed` and `settings-notify-pull-requests` (Pull request checks and reviews, see [pull request](pull-request.md)). `preferences.notifications` is absent from `workspace` until a switch differs from its default, all on.
 - For an approval request out of sight, start the scripted Claude through a wrapper that sleeps a few seconds before `exec`, send a message containing "run", and select another session before the request arrives. Expect one `Notify` with "Approval requested".
 
 ## Not covered

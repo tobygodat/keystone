@@ -33,5 +33,5 @@ Preconditions:
 - A row's Settle button exists only while that row is hovered or selected. `elements` lists it only when it is drawn, so hover before clicking.
 - Settling the selected session keeps it selected. With the section collapsed, its row is hidden while its conversation stays open.
 - The section header counts the settled sessions that match the current search.
-- Settling a session waiting for approval is refused from every entry point (row button, Ctrl+Shift+S, and the palette), including a request that arrived while the session's history was still loading. The session stays active and the reason shows under the composer. Un-settling is always allowed.
+- Settling a session waiting for approval, or for an answer to an agent widget ("Answer the widget before settling this session."), is refused from every entry point (row button, Ctrl+Shift+S, and the palette), including a request that arrived while the session's history was still loading. The session stays active and the reason shows under the composer. Un-settling is always allowed.
 - A settled session stays in Settled even when it needs action, such as a failed turn. Settling is how the user puts a session away.

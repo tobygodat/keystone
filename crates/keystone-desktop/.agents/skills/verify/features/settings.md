@@ -5,7 +5,7 @@ Change the theme, fonts, density, and text size, and keep the choice across rest
 ## Sub-features
 
 - `settings-open` opens the page with Ctrl+Comma, the sidebar's cog, or the palette's "Open settings", and closes it with Back, the page's cog, Escape, or Ctrl+Comma again.
-- `settings-sections` switches between the Appearance, Fonts, Notifications, Sounds and Accounts sections. Notifications is covered in [notifications](notifications.md), Sounds in [sounds](sounds.md).
+- `settings-sections` switches between the Appearance, Fonts, Notifications, Sounds, Accounts, Integrations, Prompts and Scheduled sections. Notifications is covered in [notifications](notifications.md), Sounds in [sounds](sounds.md), Accounts in [usage](usage.md), Integrations in [integrations](integrations.md), Prompts in [prompts](prompts.md) and Scheduled in [scheduled](scheduled.md). The app menu's **Settings…** opens the page too.
 - `settings-theme` switches between System, Light, and Dark.
 - `settings-font` picks the interface font and the code font, each with "Default" first.
 - `settings-density` picks Compact, Default, or Spacious, by click or by keyboard.
@@ -23,7 +23,7 @@ Change the theme, fonts, density, and text size, and keep the choice across rest
 
 - Call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","comma"]}]}`. `wait_for` `{"id":"settings-page"}`. Close it with `click` `{"id":"settings-back"}`, reopen with `click` `{"id":"settings"}`, and require the cog to show selected and keep its place.
 - `click` `{"id":"settings-theme"}`, then `{"id":"settings-theme-option-1"}` for Light. Capture and require the light palette. Option 0 is System, option 2 Dark.
-- `click` `{"id":"density-compact"}`. Require the cog to shrink at once (28 px compact, 32 px default), and the sidebar rows after closing.
+- `click` `{"id":"density-compact"}`. Require the cog to shrink at once (24 px compact, 28 px default, 32 px spacious), and the sidebar rows after closing.
 - `click` the right end of `{"id":"settings-text-size"}` for 16 px. Require larger text and no clipped rows.
 - `click` `{"id":"settings-section-fonts"}`. `click` `{"id":"settings-ui-font"}` or `{"id":"settings-mono-font"}`, then `{"id":"settings-ui-font-option-N"}`. Option 0 is Default. Require page text, or inline code in a reply for the code font, to change.
 - Read `workspace` and require `preferences` to hold `theme`, `density`, `ui_font`, `mono_font`, and `text_size`. Restart the app and require the same look.

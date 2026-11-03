@@ -7,7 +7,7 @@ Write a multiline draft, switch sessions, and reopen Keystone without losing the
 - `draft-focus` focuses the composer by clicking or Ctrl+L.
 - `draft-autosave` persists typed text after the debounce.
 - `draft-switch` keeps each session's draft separately.
-- `draft-excerpt` shows each draft's first line under its sidebar title once the debounced save lands. A line too long for the row ends with "…".
+- `draft-excerpt` shows each draft's first non-blank line under its sidebar title once the debounced save lands, unless the row needs action, when the reason takes that line. A line too long for the row ends with "…".
 - `draft-restart` restores saved text and selection after a normal quit.
 - `draft-multiline` accepts Enter and multiline paste, wraps long lines at the composer's width, grows the composer upward with each wrapped row, and scrolls after eight visible rows.
 

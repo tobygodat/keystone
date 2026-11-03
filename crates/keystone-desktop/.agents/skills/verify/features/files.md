@@ -5,7 +5,7 @@ Browse the selected session's project folder in a Files view of the project layo
 ## Sub-features
 
 - `files-surface` is a layout component like a conversation: at most one per project, placed beside a conversation or as a tab with one. Opening or closing it saves the project layout at once, outside Customize. Inside Customize it edits the draft instead.
-- `files-strip` is the tab strip above a Files view, or above any tab group. Each tab has a close button on hover, and **+** opens the "Open a surface" menu listing what the layout still allows: **Files** when none is open, and **Conversation**. A lone conversation keeps its plain chrome and has no strip.
+- `files-strip` is the tab strip above a Files view, or above any tab group. The selected tab shows its close button unless it shows a status dot, and other tabs show theirs on hover. **+** opens the "Open a surface" menu listing what the layout still allows: **Files**, **Notes**, **Changes** and **Pull request**, each only while the layout has none, and **Conversation**. A lone conversation keeps its plain chrome and has no strip.
 - `files-root` shows the selected session's recorded folder as the top row. A session without one falls back to the current project; with neither, the list explains why.
 - `files-expand` lists one folder level at a time, folders first, without hidden files or anything the repository's `.gitignore` excludes. Expanding a folder again re-reads it.
 - `files-open` opens a file with `$VISUAL`, then `$EDITOR`, then `xdg-open` (`open` on macOS). Terminal editors (vi, vim, nvim, nano, helix, `emacs -nw`, and others) are skipped because a detached editor has no terminal.
@@ -51,7 +51,7 @@ Preconditions:
 - Restart. Require the Files view back from the saved layout.
 - Add a file under an expanded folder on disk. Collapse and expand the folder. Require the new file.
 
-Named elements: `files-tab-0` and `files-tab-0-close` (a lone Files view), `surface-tabs-N-tab-M` and `surface-tabs-N-tab-M-close` (a tab group whose first view is N; the close shows on the selected tab or on hover), `surface-add`, `surface-add-files`, `surface-add-conversation`, `component-add-files` (Customize), `files-tree-row-N`, `files-tree-chevron-N`, `copy-path` (only on the highlighted row), `mention-file` and `view-file` (only on a highlighted file row), `files-notice`, `files-empty`.
+Named elements: `files-tab-0` and `files-tab-0-close` (a lone Files view), `surface-tabs-N-tab-M` and `surface-tabs-N-tab-M-close` (a tab group whose first view is N; the close shows on the selected tab or on hover), `surface-add`, `surface-add-files`, `surface-add-conversation`, `component-add-files` (Customize), `files-tree-row-N`, `files-tree-chevron-N`, `copy-path` (only on the highlighted row), `mention-file` (only on a highlighted file row inside the selected session's recorded folder, so never while the tree falls back to the project folder) and `view-file` (only on a highlighted file row), `files-notice`, `files-empty`.
 
 ## Perf
 
@@ -59,4 +59,4 @@ Named elements: `files-tab-0` and `files-tab-0-close` (a lone Files view), `surf
 
 ## Not covered
 
-- A copy click before any key press in the run copies nothing (KS-013). Press any key first and record it.
+- A copy click before any key press in the run copies nothing (KS-013, now TOB-212). Press any key first and record it.

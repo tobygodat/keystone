@@ -17,7 +17,7 @@ cargo build -p keystone-desktop --locked --offline -j 2
 
 The driver must exist at `.audit/tools/computer-use-mcp` and include the headless, wheel and atspi patches. See [setup](setup.md) if it is missing or predates any of them.
 
-The server launches `target/debug/keystone-desktop` from its own checkout. Pass `--binary PATH`, or set `KEYSTONE_BINARY`, to launch another build. In a git worktree, `.audit/` is not shared. When the worktree has no driver, the server uses the main checkout's, so do not build it again. To choose one explicitly, pass `--driver ~/keystone/.audit/tools/computer-use-mcp`. If `start` says that driver predates a patch, build your own as [setup](setup.md) describes and leave the shared copy alone. Build the worktree's own app first, or point `--binary` at a build of the same commit. `doctor` reports the hash of the binary that actually ran.
+The server launches `target/debug/keystone-desktop` from its own checkout. Pass `--binary PATH`, or set `KEYSTONE_BINARY`, to launch another build. In a git worktree, `.audit/` is not shared. When the worktree has no driver, the server uses the main checkout's, so do not build it again. To choose one explicitly, pass `--driver <main checkout>/.audit/tools/computer-use-mcp`. If `start` says that driver predates a patch, build your own as [setup](setup.md) describes and leave the shared copy alone. Build the worktree's own app first, or point `--binary` at a build of the same commit. `doctor` reports the hash of the binary that actually ran.
 
 Verification runs through the `keystone-verify` MCP server, registered in the workspace `.mcp.json`. It is `scripts/native-driver.py`. Approve it once if the harness asks. If MCP tools are unavailable, speak the same JSON-RPC to `python3 scripts/native-driver.py` over stdio.
 
@@ -29,7 +29,7 @@ For anything that moves or happens over time, record it with `record_start` and 
 
 The desktop is headless by default. It renders offscreen on the GPU at exactly the requested size, so host focus, workspaces, and visibility do not affect capture or input. Several agents can verify at once. Pass `headless:false` only to watch the run as a host window. That mode reintroduces KS-006: Hyprland stops drawing a hidden nested window.
 
-A successful `start` proves only process creation. Run `doctor`, then `screenshot`. Readiness requires a native Keystone window showing the welcome composer, no error, and an empty sidebar.
+A successful `start` proves only process creation, and the window can map a moment later, so `wait_for` `{"id":"welcome-claude"}` before the first `doctor`, then `screenshot`. Readiness requires a native Keystone window showing the welcome composer, no error, and an empty sidebar.
 
 ## Doctor
 
@@ -45,7 +45,7 @@ If the window is absent, inspect the evidence directory, capture the desktop, an
 {"id":"welcome-claude","bounds":{"x":893,"y":503,"w":172,"h":28},"visible":{"x":893,"y":503,"w":172,"h":28},"center":{"x":979,"y":517}}
 ```
 
-The app writes this itself. Until a frame's viewport matches the window, which can take a moment after launch, `elements` reports not ready and `wait_for` keeps waiting. Names are the GPUI debug selectors used by simulated tests, so they match the test suite. `visible` is the part inside its clip. An open menu covering an element is not subtracted, so check the screenshot when menus are open. Unnamed controls, such as the window controls, still need screenshot coordinates. Name a control with `debug_selector` on a component or `automation_id` on a div when a journey needs it.
+The app writes this itself. Until a frame's viewport matches the window, which can take a moment after launch, `elements` reports not ready and `wait_for` keeps waiting. Names are the GPUI debug selectors used by simulated tests, so they match the test suite. `visible` is the part inside its clip. An open menu covering an element is not subtracted, so check the screenshot when menus are open. The window controls are named `minimize`, `maximize` and `close` (drawn off macOS only). Unnamed controls still need screenshot coordinates. Name a control with `debug_selector` on a component or `automation_id` on a div when a journey needs it.
 
 Prefer names and waits over coordinates and sleeps:
 
@@ -54,7 +54,9 @@ Prefer names and waits over coordinates and sleeps:
 - `input` takes driver actions: `{"actions":[{"action":"keypress","keys":["ctrl","l"]}]}`, `{"action":"type","text":"Verification draft"}`, and `{"action":"wait","duration_ms":500}`.
 - `wheel` takes a fresh named target and signed whole notch counts: `{"id":"conversation","vertical":-3}` scrolls upward three notches. Positive vertical scrolls down; positive horizontal scrolls right. It uses the same upstream `input` path as raw `scroll`, whose units remain axis distances (15 per notch). Read actual row/pixel movement, not only a successful input response. See [wheel and maximize](features/wheel-and-maximize.md) for the native acceptance journey.
 - With several windows, every element names its `window` title, and `elements`, `click`, `wait_for` and `wheel` take `window` to choose one when a name repeats. See [windows](features/windows.md).
-- `screenshot` returns the PNG and saves it as evidence.
+- `screenshot` returns the PNG and saves it as evidence. When the driver rejects the output's pixel format ("unsupported SHM pixel format", TOB-214, seen on the headless backend), the server captures the same output with `grim` instead; `capture` in the result says which did.
+- Outside the main conversation view, ids carry the view's suffix: `approve-view-14`, `transcript-row-0-view-10`, `handoff-from-view-13`. Read `elements` rather than guessing it.
+- An `input` `wait` action takes at most 3000 ms. Use `wait_for` for anything longer.
 - `workspace` reads saved SQLite workspace and session projections in one read-only transaction. `snapshot` uses SQLite's backup API, including committed WAL contents, and preserves both the database and a matching JSON projection in the evidence directory. Its `path` remains the JSON export; `database_path` names the self-contained backup.
 - `call` reaches any upstream tool, such as `{"tool":"windows_list"}`.
 
