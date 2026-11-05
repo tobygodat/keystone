@@ -1212,7 +1212,16 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
     view.update(cx, |this, cx| {
         claude_from(this, claude, cx);
         this.state
-            .update(cx, |state, cx| state.set_model(2, Some(LONG.into()), cx))
+            .update(cx, |state, cx| {
+                state.set_choice(
+                    2,
+                    keystone_core::ModelChoice {
+                        model: Some(LONG.into()),
+                        ..Default::default()
+                    },
+                    cx,
+                )
+            })
             .unwrap();
         this.select(2, cx);
     });
@@ -1248,6 +1257,7 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
                         model: LONG.into(),
                         label: "A catalog label far longer than the provider default label".into(),
                         resolved: None,
+                        ..Default::default()
                     }],
                     default_model: None,
                 },
@@ -1329,6 +1339,7 @@ fn a_catalog_arriving_mid_click_keeps_the_provider_row_under_the_pointer(cx: &mu
                             model: model.into(),
                             label: model.into(),
                             resolved: None,
+                            ..Default::default()
                         })
                         .into(),
                     default_model: None,
@@ -1379,12 +1390,22 @@ fn the_model_menu_opens_on_a_chosen_model_below_the_fold(cx: &mut TestAppContext
                             model: format!("m{n}"),
                             label: format!("Model {n}"),
                             resolved: None,
+                            ..Default::default()
                         })
                         .collect(),
                     default_model: None,
                 },
             );
-            state.set_model(1, Some("m12".into()), cx).unwrap();
+            state
+                .set_choice(
+                    1,
+                    keystone_core::ModelChoice {
+                        model: Some("m12".into()),
+                        ..Default::default()
+                    },
+                    cx,
+                )
+                .unwrap();
         });
     });
     cx.run_until_parked();
@@ -1453,6 +1474,7 @@ fn an_error_arriving_mid_click_keeps_the_menus_under_the_pointer(cx: &mut TestAp
                             model: model.into(),
                             label: model.into(),
                             resolved: None,
+                            ..Default::default()
                         })
                         .into(),
                     default_model: None,
@@ -1579,6 +1601,7 @@ fn the_model_choices_keep_one_height_and_retry_stays_in_view(cx: &mut TestAppCon
             model: format!("model-{n}"),
             label: format!("Model {n}"),
             resolved: None,
+            ..Default::default()
         })
         .collect();
     for (width, height, spacious) in [

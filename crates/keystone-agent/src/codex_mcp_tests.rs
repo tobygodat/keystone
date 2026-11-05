@@ -30,7 +30,6 @@ fn open(driver: &mut CodexDriver, resume: bool, out: &mut Outputs) -> u64 {
             session: SESSION,
             cwd: "/synthetic".into(),
             resume: resume.then(|| "thread".into()),
-            model: None,
         },
         out,
     );

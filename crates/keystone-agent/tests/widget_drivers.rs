@@ -368,7 +368,6 @@ fn codex(widgets: bool) -> (CodexDriver, Value) {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -499,7 +498,6 @@ fn codex_starts_the_thread_without_the_tool_when_it_is_refused() {
             session: SESSION + 1,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -623,7 +621,6 @@ fn codex_keeps_the_tool_after_an_unrelated_thread_start_error() {
             session: SESSION + 1,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -745,7 +742,7 @@ mod scripted {
             1,
             dir.to_str().unwrap(),
             None,
-            None,
+            &keystone_core::ModelChoice::default(),
             ApprovalState::default(),
             prompt.into(),
             Vec::new(),
@@ -865,7 +862,7 @@ mod scripted {
             1,
             dir.path().to_str().unwrap(),
             None,
-            None,
+            &keystone_core::ModelChoice::default(),
             ApprovalState::default(),
             "show a widget checklist".into(),
             Vec::new(),

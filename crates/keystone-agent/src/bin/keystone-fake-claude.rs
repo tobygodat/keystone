@@ -45,9 +45,17 @@
 //! in plan mode. Approved, the mode returns to the one before plan mode, as Claude
 //! 2.1.300 does; denied, the reply says so.
 //!
-//! The `initialize` answer lists scripted models (`default`, `fake-opus`, `fake-haiku`).
-//! `--model <value>` chooses one; `init` reports the resolved model (`fake-opus` when
-//! none is given), and each reply ends with it.
+//! The `initialize` answer lists scripted models (`default`, `fake-opus`, `fake-haiku`);
+//! `fake-opus` and the default list efforts and fast mode, as Claude Code 2.1.316's
+//! Opus does. `--model <value>` chooses one; `init` reports the resolved model
+//! (`fake-opus` when none is given), and each reply ends with it. `set_model` switches
+//! it and answers with the resolved model, unless a `set-model` setting of `error`
+//! refuses it. `--effort <level>` and `apply_flag_settings` with `effortLevel` set the
+//! effort, and `--settings '{"fastMode":true}'` or `apply_flag_settings` with
+//! `fastMode` turn fast mode on or off; a reply names the effort when one is set and
+//! says when fast mode is on. `init` reports `fast_mode_state`: `on` when asked, unless
+//! a `fast-mode` setting of `disabled` turns it `off` for the account
+//! (`extra_usage_disabled`).
 //!
 //! An answer applies only to the approval it names, and an approval Claude withdrew
 //! takes no answer. Request IDs restart in each process, as a stale answer from an
@@ -362,7 +370,12 @@ struct Shared {
     bypass: bool,
     wake: Condvar,
     /// The resolved model the process runs on.
-    model: String,
+    model: Mutex<String>,
+    /// The effort level asked for, and whether fast mode was asked for.
+    effort: Mutex<Option<String>>,
+    fast: Mutex<bool>,
+    /// The account turned fast mode off (the `fast-mode` setting).
+    fast_disabled: bool,
     /// Whether to send `command_lifecycle` frames.
     lifecycle: bool,
     /// Where a reply pauses after its first word until this file exists. Only set
@@ -559,6 +572,15 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .map_or("fake-opus", |value| resolve_model(value))
         .to_owned();
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1).cloned())
+    };
+    let effort = flag("--effort");
+    let fast = flag("--settings")
+        .and_then(|settings| serde_json::from_str::<Value>(&settings).ok())
+        .is_some_and(|settings| settings["fastMode"] == true);
     // Settings from a file in the working directory apply to that directory alone.
     let setting = |name: &str| {
         std::fs::read_to_string(format!(".fake-claude-{name}"))
@@ -646,7 +668,10 @@ fn main() {
         plan_file,
         mode: Mutex::new(String::new()),
         wake: Condvar::new(),
-        model,
+        model: Mutex::new(model),
+        effort: Mutex::new(effort),
+        fast: Mutex::new(fast),
+        fast_disabled: setting("fast-mode").as_deref() == Some("disabled"),
         lifecycle: frames,
         release_file: if frames {
             None
@@ -726,9 +751,16 @@ fn main() {
                         }
                         let mut answer = json!({"claude_code_version": VERSION,
                             "current_permission_mode": *shared.mode.lock().unwrap(),
-                            "models": MODELS.iter().map(|(value, name, description, resolved)| json!({
-                                "value": value, "displayName": name, "description": description,
-                                "resolvedModel": resolved})).collect::<Vec<_>>()});
+                            "models": MODELS.iter().map(|(value, name, description, resolved)| {
+                                let mut model = json!({"value": value, "displayName": name,
+                                    "description": description, "resolvedModel": resolved});
+                                if *resolved == "fake-opus" {
+                                    model["supportsEffort"] = json!(true);
+                                    model["supportedEffortLevels"] = json!(["low", "medium", "high", "max"]);
+                                    model["supportsFastMode"] = json!(true);
+                                }
+                                model
+                            }).collect::<Vec<_>>()});
                         if let Some(commands) = &commands {
                             answer["commands"] = commands.clone();
                         }
@@ -834,6 +866,27 @@ fn main() {
                                        "permissionMode": mode, "session_id": session}),
                             );
                         }
+                    }
+                    Some("set_model") if setting("set-model").as_deref() == Some("error") => emit(
+                        &out,
+                        json!({"type": "control_response", "response":
+                            {"subtype": "error", "request_id": id, "error": "Scripted set_model refusal"}}),
+                    ),
+                    Some("set_model") => {
+                        let value = message["request"]["model"].as_str().unwrap_or("default");
+                        let model = resolve_model(value).to_owned();
+                        *shared.model.lock().unwrap() = model.clone();
+                        reply(json!({"model": model}));
+                    }
+                    Some("apply_flag_settings") => {
+                        let settings = &message["request"]["settings"];
+                        if let Some(effort) = settings.get("effortLevel") {
+                            *shared.effort.lock().unwrap() = effort.as_str().map(str::to_owned);
+                        }
+                        if let Some(fast) = settings["fastMode"].as_bool() {
+                            *shared.fast.lock().unwrap() = fast;
+                        }
+                        reply(Value::Null);
                     }
                     Some("get_usage") => match setting("get-usage") {
                         Some(usage) if usage == "error" => emit(
@@ -1102,10 +1155,18 @@ fn work(
             &[]
         };
         let mode = shared.mode.lock().unwrap().clone();
+        let model = shared.model.lock().unwrap().clone();
         let mut init = json!({"type": "system", "subtype": "init", "session_id": session,
                "capabilities": capabilities, "permissionMode": mode, "mcp_servers": mcp_servers(),
                "slash_commands": [], "skills": [], "claude_code_version": VERSION,
-               "model": shared.model});
+               "model": model});
+        let (state, reason) = match (*shared.fast.lock().unwrap(), shared.fast_disabled) {
+            (true, false) => ("on", Value::Null),
+            (true, true) => ("off", json!("extra_usage_disabled")),
+            (false, _) => ("off", json!("sdk_opt_in_required")),
+        };
+        init["fast_mode_state"] = json!(state);
+        init["fast_mode_disabled_reason"] = reason;
         if let Some(tools) = &tools {
             init["tools"] = tools.clone();
         }
@@ -1395,13 +1456,20 @@ fn answer(
         }
     }
     let mode = mode.as_str();
-    let model = &shared.model;
+    let model = shared.model.lock().unwrap().clone();
+    let mut settings = String::new();
+    if let Some(effort) = &*shared.effort.lock().unwrap() {
+        settings += &format!(" **Effort:** `{effort}`");
+    }
+    if *shared.fast.lock().unwrap() {
+        settings += " **Fast:** `on`";
+    }
     let server = shared.mcp.lock().unwrap().clone();
     let request = format!("{}-{turn}-{request}", std::process::id());
     let scripted = orchestrator::reply(text, server.as_ref(), &request);
     let mut reply = scripted.or_else(|| std::env::var("KEYSTONE_FAKE_CLAUDE_REPLY").ok()).unwrap_or_else(|| {
         format!(
-            "Claude test reply (test data): You wrote: {prompt} **Mode:** `{mode}`{left_plan} **Model:** `{model}`{images}"
+            "Claude test reply (test data): You wrote: {prompt} **Mode:** `{mode}`{left_plan} **Model:** `{model}`{settings}{images}"
         )
     });
     edit_files(text);

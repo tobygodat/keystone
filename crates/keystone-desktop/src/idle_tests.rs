@@ -59,7 +59,15 @@ fn idle_app(
         .value;
     let id = store.create(Provider::Claude, &directory, 1).unwrap().value;
     store.set_account(id, Some(work)).unwrap();
-    store.set_model(id, Some("fake-haiku".into())).unwrap();
+    store
+        .set_choice(
+            id,
+            keystone_core::ModelChoice {
+                model: Some("fake-haiku".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     store.set_approval_mode(id, ApprovalMode::Ask).unwrap();
     cx.executor().allow_parking();
     let state = cx.new(|cx| AppState::new(store, cx));

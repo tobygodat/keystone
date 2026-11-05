@@ -2,7 +2,7 @@
 //! produces. Drivers are state machines with no IO; see `docs/design/providers.md`.
 
 use crate::item::{Event, RequestId};
-use keystone_core::ApprovalMode;
+use keystone_core::{ApprovalMode, ModelChoice};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,14 +18,12 @@ pub struct ApprovalState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    /// Open the session's conversation in `cwd`, resuming `resume` when given. `model`
-    /// is the provider-native model the session asked for; `None` leaves the choice to
-    /// the provider.
+    /// Open the session's conversation in `cwd`, resuming `resume` when given, with the
+    /// model the session's latest [`Command::Choose`] asked for.
     Open {
         session: u64,
         cwd: String,
         resume: Option<String>,
-        model: Option<String>,
     },
     /// Start a turn, or steer the running one.
     Send {
@@ -53,6 +51,12 @@ pub enum Command {
     Configure {
         session: u64,
         approval: ApprovalState,
+    },
+    /// Sets the model, effort and speed for the session's next turns, including a
+    /// message that waits to start one. A running turn keeps what it started with.
+    Choose {
+        session: u64,
+        choice: ModelChoice,
     },
 }
 

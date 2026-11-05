@@ -6,6 +6,7 @@
 use keystone_agent::{
     ApprovalState, ClaudeConnection, CodexConnection, Connection, Event, LaunchProfile, TurnStatus,
 };
+use keystone_core::ModelChoice;
 use keystone_core::{ApprovalMode, ForkPoint, Provider};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -126,8 +127,15 @@ fn a_claude_fork_resumes_the_source_at_the_turn_s_last_record_and_leaves_it_unch
     let mut points = Vec::new();
     let mut source = None;
     for text in ["first", "second", "third"] {
-        conn.send(1, cwd_text, None, None, PROVIDER, text.into())
-            .unwrap();
+        conn.send(
+            1,
+            cwd_text,
+            None,
+            &ModelChoice::default(),
+            PROVIDER,
+            text.into(),
+        )
+        .unwrap();
         let events = turn(&conn, &rx, 1);
         source = source.or(thread(&events, 1));
         points.push(fork_point(&events, 1));
@@ -152,8 +160,15 @@ fn a_claude_fork_resumes_the_source_at_the_turn_s_last_record_and_leaves_it_unch
     );
 
     conn.set_fork(2, points[1].clone());
-    conn.send(2, cwd_text, None, None, PROVIDER, "fork".into())
-        .unwrap();
+    conn.send(
+        2,
+        cwd_text,
+        None,
+        &ModelChoice::default(),
+        PROVIDER,
+        "fork".into(),
+    )
+    .unwrap();
     let events = turn(&conn, &rx, 2);
     let fork = thread(&events, 2).unwrap();
     assert_ne!(fork, source);
@@ -183,8 +198,15 @@ fn a_claude_fork_resumes_the_source_at_the_turn_s_last_record_and_leaves_it_unch
     assert_eq!(std::fs::read(&source_file).unwrap(), before);
 
     // Later messages go to the fork's own process, not a new fork.
-    conn.send(2, cwd_text, None, None, PROVIDER, "again".into())
-        .unwrap();
+    conn.send(
+        2,
+        cwd_text,
+        None,
+        &ModelChoice::default(),
+        PROVIDER,
+        "again".into(),
+    )
+    .unwrap();
     turn(&conn, &rx, 2);
     let launched = std::fs::read_to_string(&argv).unwrap().lines().count();
     assert_eq!(launched, launches.len());
@@ -218,7 +240,7 @@ fn a_claude_fork_of_a_conversation_claude_lacks_fails_without_starting_a_fresh_o
         2,
         dir.path().to_str().unwrap(),
         None,
-        None,
+        &ModelChoice::default(),
         PROVIDER,
         "fork".into(),
     )
@@ -273,7 +295,7 @@ fn a_codex_fork_keeps_the_source_s_turns_through_its_point_and_leaves_it_unchang
     let mut points = Vec::new();
     let mut source = None;
     for text in ["first", "second", "third"] {
-        conn.send(1, cwd, None, None, PROVIDER, text.into());
+        conn.send(1, cwd, None, &ModelChoice::default(), PROVIDER, text.into());
         let events = turn(&conn, &rx, 1);
         source = source.or(thread(&events, 1));
         points.push(fork_point(&events, 1));
@@ -298,7 +320,14 @@ fn a_codex_fork_keeps_the_source_s_turns_through_its_point_and_leaves_it_unchang
     );
 
     conn.set_fork(2, points[1].clone());
-    conn.send(2, cwd, None, None, PROVIDER, "fork".into());
+    conn.send(
+        2,
+        cwd,
+        None,
+        &ModelChoice::default(),
+        PROVIDER,
+        "fork".into(),
+    );
     let events = turn(&conn, &rx, 2);
     let fork = thread(&events, 2).unwrap();
     assert_ne!(fork, source);
@@ -317,7 +346,14 @@ fn a_codex_fork_keeps_the_source_s_turns_through_its_point_and_leaves_it_unchang
     assert_eq!(methods.lines().filter(|m| *m == "thread/fork").count(), 1);
 
     // The fork's own thread is the one its later turns run in.
-    conn.send(2, cwd, None, None, PROVIDER, "again".into());
+    conn.send(
+        2,
+        cwd,
+        None,
+        &ModelChoice::default(),
+        PROVIDER,
+        "again".into(),
+    );
     let events = turn(&conn, &rx, 2);
     assert_eq!(fork_point(&events, 2).thread, fork);
     assert_eq!(stored(&fork).len(), 4);

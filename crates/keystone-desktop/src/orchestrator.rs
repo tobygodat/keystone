@@ -609,8 +609,11 @@ impl AppState {
                         .map_err(|e| e.to_string())?;
                     self.set_approval_mode(id, selected_mode, cx)
                         .map_err(|e| e.to_string())?;
-                    self.set_model(id, launch.model, cx)
-                        .map_err(|e| e.to_string())?;
+                    let choice = keystone_core::ModelChoice {
+                        model: launch.model,
+                        ..Default::default()
+                    };
+                    self.set_choice(id, choice, cx).map_err(|e| e.to_string())?;
                     Ok(())
                 })();
                 if let Err(error) = setup {
@@ -710,6 +713,7 @@ impl AppState {
                         Row::OlderNotImported => {
                             json!({"position":index,"older_not_imported":true,"truncated":false})
                         }
+                        Row::Note(text) => json!({"position":index,"note":text,"truncated":false}),
                         Row::Attachments(attachments) => json!({"position":index,
                             "attachments":attachments.iter().map(|a| json!({
                                 "name":a.name,"media_type":a.media_type,"sha256":a.sha256

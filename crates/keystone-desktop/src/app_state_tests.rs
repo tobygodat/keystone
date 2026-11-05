@@ -5,6 +5,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// A choice of `model` alone.
+fn chosen(model: &str) -> ModelChoice {
+    ModelChoice {
+        model: Some(model.into()),
+        ..ModelChoice::default()
+    }
+}
+
 fn runtime(dir: &Path, cx: &mut gpui::TestAppContext) -> Entity<AppState> {
     let mut store = Store::open(dir.join("workspace.json")).unwrap();
     let directory = WorkingDirectory::new(dir).unwrap();
@@ -265,7 +273,7 @@ fn global_runtime_loads_sends_answers_and_logs_both_providers_without_a_view(
             (1, "fake-fast", "please run codex"),
             (2, "fake-haiku", "please run claude"),
         ] {
-            state.set_model(id, Some(model.into()), cx).unwrap();
+            state.set_choice(id, chosen(model), cx).unwrap();
             state.set_approval_mode(id, ApprovalMode::Ask, cx).unwrap();
             assert!(state.send_message(
                 ComposerDraft {

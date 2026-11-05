@@ -68,7 +68,7 @@ pub struct Approval {
 }
 
 /// One model a provider offers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModelInfo {
     /// What is sent to run it: Claude's `value`, Codex's `model`.
     pub model: String,
@@ -76,6 +76,20 @@ pub struct ModelInfo {
     /// The model ID the provider says `model` runs as, when it says: Claude's
     /// `resolvedModel`, `None` for Codex. Reports of a running model use this form.
     pub resolved: Option<String>,
+    /// The effort levels the catalog lists for the model, in its order. Empty when the
+    /// model takes no effort.
+    pub efforts: Vec<String>,
+    /// The effort the model runs at when none is sent, when the provider says.
+    pub default_effort: Option<String>,
+    /// The speeds the model offers, standard first. Empty when there is no choice.
+    pub speeds: Vec<Speed>,
+}
+
+/// A speed a model offers: the value its driver sends and the catalog's label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Speed {
+    pub value: String,
+    pub label: String,
 }
 
 /// The models a provider reports it can run, or why it could not say.

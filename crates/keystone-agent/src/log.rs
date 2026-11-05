@@ -104,6 +104,16 @@ pub enum Entry {
         first: String,
         last: String,
     },
+    /// A line Keystone showed in the transcript, such as the model, effort and speed
+    /// the next turns run with. `seq` and `run` place its row as for an item. Builds
+    /// before notes skip it.
+    Note {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<u64>,
+    },
     /// An agent-built widget, whole, saved each time it changes. The latest entry for
     /// a `call` replaces earlier ones; `seq` and `run` place its row as for an item.
     Surface {

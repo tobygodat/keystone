@@ -6,9 +6,9 @@
 
 use keystone_agent::claude::ClaudeDriver;
 use keystone_agent::{
-    Catalog, Command, Event, ItemKind, ItemStatus, ModelInfo, Outputs, TurnStatus,
+    Catalog, Command, Event, ItemKind, ItemStatus, ModelInfo, Outputs, Speed, TurnStatus,
 };
-use keystone_core::ApprovalMode;
+use keystone_core::{ApprovalMode, ModelChoice};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -1513,7 +1513,8 @@ fn the_initialize_answer_lists_models_with_the_default_folded_out() {
     use keystone_agent::claude::initialize_catalog;
     let line = br#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-catalog","response":{"commands":[],"current_permission_mode":"default","models":[
         {"value":"default","displayName":"Default (recommended)","description":"Opus for most tasks","resolvedModel":"claude-opus-5-5"},
-        {"value":"opus","displayName":"Opus","description":"","resolvedModel":"claude-opus-5-5"},
+        {"value":"opus","displayName":"Opus","description":"","resolvedModel":"claude-opus-5-5","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"],"supportsFastMode":true},
+        {"value":"sonnet","displayName":"Sonnet","description":"","resolvedModel":"claude-sonnet-5-5","supportsEffort":false,"supportedEffortLevels":["low"]},
         {"value":"haiku","displayName":"Haiku","description":"Fast","resolvedModel":"claude-haiku-5-5"}]}}}"#;
     assert_eq!(
         initialize_catalog(line),
@@ -1523,11 +1524,33 @@ fn the_initialize_answer_lists_models_with_the_default_folded_out() {
                     model: "opus".into(),
                     label: "Opus".into(),
                     resolved: Some("claude-opus-5-5".into()),
+                    efforts: ["low", "medium", "high", "xhigh", "max"]
+                        .map(String::from)
+                        .into(),
+                    default_effort: None,
+                    speeds: vec![
+                        Speed {
+                            value: "standard".into(),
+                            label: "Standard".into(),
+                        },
+                        Speed {
+                            value: "fast".into(),
+                            label: "Fast".into(),
+                        },
+                    ],
+                },
+                // Levels listed without `supportsEffort` are not offered.
+                ModelInfo {
+                    model: "sonnet".into(),
+                    label: "Sonnet".into(),
+                    resolved: Some("claude-sonnet-5-5".into()),
+                    ..Default::default()
                 },
                 ModelInfo {
                     model: "haiku".into(),
                     label: "Haiku".into(),
                     resolved: Some("claude-haiku-5-5".into()),
+                    ..Default::default()
                 },
             ],
             default_model: Some("claude-opus-5-5".into()),
@@ -1566,4 +1589,244 @@ fn init_reports_the_model_once_per_process() {
             model: "claude-opus-5-5".into()
         }]
     );
+}
+
+fn model_choice(model: Option<&str>, effort: Option<&str>, speed: Option<&str>) -> ModelChoice {
+    ModelChoice {
+        model: model.map(str::to_owned),
+        effort: effort.map(str::to_owned),
+        speed: speed.map(str::to_owned),
+    }
+}
+
+fn choose(driver: &mut ClaudeDriver, out: &mut Outputs, choice: ModelChoice) {
+    driver.command(
+        Command::Choose {
+            session: SESSION,
+            choice,
+        },
+        out,
+    );
+}
+
+/// The control requests written with `subtype`, by their `request` body.
+fn requests(out: &Outputs, subtype: &str) -> Vec<Value> {
+    out.writes
+        .iter()
+        .map(|w| parse(w))
+        .filter(|w| w["request"]["subtype"] == subtype)
+        .map(|w| w["request"].clone())
+        .collect()
+}
+
+fn reply_to(out: &Outputs, subtype: &str, result: &str) -> String {
+    let request = out
+        .writes
+        .iter()
+        .map(|w| parse(w))
+        .rfind(|w| w["request"]["subtype"] == subtype)
+        .unwrap()["request_id"]
+        .clone();
+    format!(r#"{{"type":"control_response","response":{{"request_id":{request},{result}}}}}"#)
+}
+
+#[test]
+fn launch_args_carry_the_model_effort_and_fast_mode_setting() {
+    use keystone_agent::claude::choice_args;
+    assert!(choice_args(&ModelChoice::default()).is_empty());
+    assert_eq!(
+        choice_args(&model_choice(Some("opus"), Some("max"), Some("fast"))),
+        [
+            "--model",
+            "opus",
+            "--effort",
+            "max",
+            "--settings",
+            r#"{"fastMode":true}"#
+        ]
+    );
+    assert_eq!(
+        choice_args(&model_choice(None, None, Some("standard"))),
+        ["--settings", r#"{"fastMode":false}"#]
+    );
+    // A speed the Claude catalog never lists passes nothing.
+    assert!(choice_args(&model_choice(None, None, Some("priority"))).is_empty());
+}
+
+/// A change waits for the next turn: before its first message, Claude is asked to
+/// switch, and the message is written only once every request is answered. Steers go
+/// into the running turn unheld, and only what differs from the process is asked.
+#[test]
+fn a_changed_choice_is_applied_before_the_next_turn_and_its_message_waits() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    driver.set_launch_choice(model_choice(Some("opus"), Some("low"), None));
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    let mut out = Outputs::default();
+    driver.command(send(1), &mut out);
+    assert_eq!(user_writes(&out), 1, "launched with the choice already");
+    assert!(requests(&out, "set_model").is_empty());
+    end_turn(&mut driver, &mut out, 1, 1);
+
+    let mut out = Outputs::default();
+    choose(
+        &mut driver,
+        &mut out,
+        model_choice(Some("sonnet"), Some("high"), Some("fast")),
+    );
+    assert!(out.writes.is_empty(), "nothing is asked between turns");
+    driver.command(send(2), &mut out);
+    assert_eq!(
+        requests(&out, "set_model"),
+        [serde_json::json!({"subtype": "set_model", "model": "sonnet"})]
+    );
+    assert_eq!(
+        requests(&out, "apply_flag_settings"),
+        [serde_json::json!({"subtype": "apply_flag_settings",
+            "settings": {"effortLevel": "high", "fastMode": true}})]
+    );
+    assert_eq!(user_writes(&out), 0);
+    let model = reply_to(
+        &out,
+        "set_model",
+        r#""subtype":"success","response":{"model":"claude-sonnet-5-5"}"#,
+    );
+    feed(&mut driver, &mut out, &[model]);
+    assert_eq!(user_writes(&out), 0, "the settings are still unanswered");
+    assert!(out.events.iter().any(|(_, e)| *e
+        == Event::ModelReported {
+            model: "claude-sonnet-5-5".into()
+        }));
+    let settings = reply_to(&out, "apply_flag_settings", r#""subtype":"success""#);
+    feed(&mut driver, &mut out, &[settings]);
+    assert_eq!(user_writes(&out), 1);
+    feed(&mut driver, &mut out, &[lifecycle(2, "queued")]);
+
+    // A change during the turn holds no steer and asks nothing until the next turn.
+    choose(
+        &mut driver,
+        &mut out,
+        model_choice(Some("sonnet"), Some("max"), Some("fast")),
+    );
+    driver.command(send(3), &mut out);
+    assert_eq!(user_writes(&out), 2);
+    assert_eq!(requests(&out, "apply_flag_settings").len(), 1);
+    end_turn(&mut driver, &mut out, 2, 3);
+
+    let mut out = Outputs::default();
+    driver.command(send(4), &mut out);
+    assert!(requests(&out, "set_model").is_empty());
+    assert_eq!(
+        requests(&out, "apply_flag_settings"),
+        [serde_json::json!({"subtype": "apply_flag_settings",
+            "settings": {"effortLevel": "max"}})]
+    );
+    assert_eq!(user_writes(&out), 0);
+
+    // Back to Default sends nothing: the process keeps what it has.
+    let settings = reply_to(&out, "apply_flag_settings", r#""subtype":"success""#);
+    feed(&mut driver, &mut out, &[settings]);
+    end_turn(&mut driver, &mut out, 4, 4);
+    let mut out = Outputs::default();
+    choose(&mut driver, &mut out, ModelChoice::default());
+    driver.command(send(5), &mut out);
+    assert_eq!(
+        (out.writes.len(), user_writes(&out)),
+        (1, 1),
+        "{:?}",
+        out.writes
+    );
+}
+
+#[test]
+fn a_refused_change_fails_the_turn_with_nothing_written() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    let mut out = Outputs::default();
+    choose(
+        &mut driver,
+        &mut out,
+        model_choice(Some("mythos"), None, None),
+    );
+    driver.command(send(1), &mut out);
+    let refused = reply_to(
+        &out,
+        "set_model",
+        r#""subtype":"error","error":"model not available""#,
+    );
+    feed(&mut driver, &mut out, &[refused]);
+    assert_eq!(user_writes(&out), 0);
+    assert!(out.events.iter().any(|(_, e)| *e
+        == Event::TurnCompleted {
+            status: TurnStatus::Failed,
+            error: Some("Claude Code refused the model change: model not available. Choose another model, effort or speed.".into()),
+            stopped: false
+        }));
+    assert!(!driver.is_running());
+}
+
+#[test]
+fn an_unanswered_change_fails_the_turn_and_marks_the_process() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+    ready(&mut driver, &mut out, ApprovalMode::Provider);
+    let mut out = Outputs::default();
+    choose(
+        &mut driver,
+        &mut out,
+        model_choice(None, Some("high"), None),
+    );
+    driver.command(send(1), &mut out);
+    let [_initialize, request] = &driver.take_timed_requests()[..] else {
+        panic!("two requests to time")
+    };
+    driver.request_timed_out(request, &mut out);
+    assert_eq!(user_writes(&out), 0);
+    assert!(out.events.iter().any(|(_, e)| *e
+        == Event::TurnCompleted {
+            status: TurnStatus::Failed,
+            error: Some("Claude Code did not confirm the model change in time. Send again.".into()),
+            stopped: false
+        }));
+    assert!(driver.needs_restart());
+}
+
+/// The account decides whether fast mode runs, and `init` says so: Keystone warns once
+/// per process instead of showing Fast as running.
+#[test]
+fn fast_mode_the_account_turned_off_is_warned_about_once() {
+    let init = |state: &str| {
+        format!(
+            r#"{{"type":"system","subtype":"init","session_id":"{CONVERSATION}","capabilities":["msg_lifecycle_v1"],"model":"claude-opus-5-5","fast_mode_state":"{state}","fast_mode_disabled_reason":"extra_usage_disabled"}}"#
+        )
+    };
+    let warnings = |out: &Outputs| -> Vec<String> {
+        out.events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::Warning { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    for (speed, state, warned) in [
+        ("fast", "off", true),
+        ("fast", "on", false),
+        ("fast", "cooldown", false),
+        ("standard", "off", false),
+    ] {
+        let mut out = Outputs::default();
+        let mut driver = ClaudeDriver::new(SESSION, false, SEED, ApprovalMode::Provider, &mut out);
+        driver.set_launch_choice(model_choice(None, None, Some(speed)));
+        ready(&mut driver, &mut out, ApprovalMode::Provider);
+        driver.command(send(1), &mut out);
+        feed(&mut driver, &mut out, &[init(state), init(state)]);
+        let expected: Vec<String> = if warned {
+            vec!["Claude Code did not turn on fast mode (extra_usage_disabled).".into()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(warnings(&out), expected, "{speed} {state}");
+    }
 }

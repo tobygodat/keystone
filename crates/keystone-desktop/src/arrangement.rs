@@ -545,7 +545,10 @@ impl Keystone {
                 account: None,
                 accounts: &[],
                 model: None,
+                effort: None,
+                speed: None,
                 reported_model: None,
+                default_model: None,
                 started: false,
                 choices: model_selector::Choices::Loading,
             };

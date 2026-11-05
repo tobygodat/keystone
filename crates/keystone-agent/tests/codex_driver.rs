@@ -5,9 +5,9 @@ use keystone_agent::codex::CodexDriver;
 use keystone_agent::{ApprovalState, Command, Outputs};
 use keystone_agent::{
     Catalog, CommandSource, Commands, Event, ItemKind, ItemStatus, ModelInfo, RequestId,
-    SlashCommand, TurnStatus,
+    SlashCommand, Speed, TurnStatus,
 };
-use keystone_core::ApprovalMode;
+use keystone_core::{ApprovalMode, ModelChoice};
 use serde_json::Value;
 
 const THREAD: &str = "01a1418d-549d-7553-bd08-4183fac44aa7";
@@ -41,7 +41,6 @@ fn opened() -> CodexDriver {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -444,7 +443,6 @@ fn messages_and_a_stop_sent_during_startup_are_kept_in_order() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -502,7 +500,6 @@ fn a_stop_while_opening_ends_the_turn_and_drops_the_message() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -589,7 +586,6 @@ fn a_thread_that_cannot_resume_reports_it_instead_of_starting_fresh() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: Some("gone".into()),
-            model: None,
         },
         &mut out,
     );
@@ -620,12 +616,12 @@ fn a_thread_that_cannot_resume_reports_it_instead_of_starting_fresh() {
 fn an_exit_loses_the_model_of_every_session_the_process_hosted() {
     let mut driver = opened();
     let mut out = Outputs::default();
+    driver.command(choose_model(8, "gpt-6-astra"), &mut out);
     driver.command(
         Command::Open {
             session: 8,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: Some("gpt-6-astra".into()),
         },
         &mut out,
     );
@@ -725,7 +721,6 @@ fn returning_to_the_default_restores_the_settings_a_new_thread_reported() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -768,7 +763,6 @@ fn a_resumed_overridden_thread_waits_for_the_users_settings() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: Some(THREAD.into()),
-            model: None,
         },
         &mut out,
     );
@@ -813,7 +807,6 @@ fn unreadable_settings_fail_the_message_instead_of_keeping_the_override() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: Some(THREAD.into()),
-            model: None,
         },
         &mut out,
     );
@@ -897,7 +890,6 @@ fn a_rejected_restore_is_retried_with_the_users_settings() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -942,7 +934,6 @@ fn a_rejected_restore_after_reading_the_settings_is_retried_with_them() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: Some(THREAD.into()),
-            model: None,
         },
         &mut out,
     );
@@ -1161,12 +1152,14 @@ fn a_chosen_model_opens_the_thread_with_it_and_the_reply_reports_the_model() {
     driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
     let open = |driver: &mut CodexDriver, session, resume: Option<&str>, model: Option<&str>| {
         let mut out = Outputs::default();
+        if let Some(model) = model {
+            driver.command(choose_model(session, model), &mut out);
+        }
         driver.command(
             Command::Open {
                 session,
                 cwd: "/tmp/repo".into(),
                 resume: resume.map(str::to_owned),
-                model: model.map(str::to_owned),
             },
             &mut out,
         );
@@ -1249,7 +1242,10 @@ fn the_model_list_becomes_a_catalog_across_its_pages_without_hidden_entries() {
     let out = page(
         &mut driver,
         id,
-        r#"{"id":"entry-7","model":"gpt-x","displayName":"GPT X","description":"","hidden":false,"isDefault":false}"#,
+        r#"{"id":"entry-7","model":"gpt-x","displayName":"GPT X","description":"","hidden":false,"isDefault":false,
+            "supportedReasoningEfforts":[{"reasoningEffort":"low","description":"Quick"},{"reasoningEffort":"high","description":"Deep"}],
+            "defaultReasoningEffort":"high","serviceTiers":[{"id":"priority","name":"Fast","description":"Faster"}],
+            "defaultServiceTier":null,"additionalSpeedTiers":["fast"]}"#,
         "null",
     );
     assert!(out.writes.is_empty());
@@ -1263,11 +1259,25 @@ fn the_model_list_becomes_a_catalog_across_its_pages_without_hidden_entries() {
                         model: "gpt-6.1-sol".into(),
                         label: "GPT-6.1 Sol".into(),
                         resolved: None,
+                        ..Default::default()
                     },
                     ModelInfo {
                         model: "gpt-x".into(),
                         label: "GPT X".into(),
                         resolved: None,
+                        efforts: vec!["low".into(), "high".into()],
+                        default_effort: Some("high".into()),
+                        // `default` is Codex's standard tier, listed first.
+                        speeds: vec![
+                            Speed {
+                                value: "default".into(),
+                                label: "Standard".into(),
+                            },
+                            Speed {
+                                value: "priority".into(),
+                                label: "Fast".into(),
+                            },
+                        ],
                     },
                 ],
                 // Codex's `isDefault` is not the user's configured default.
@@ -1276,12 +1286,12 @@ fn the_model_list_becomes_a_catalog_across_its_pages_without_hidden_entries() {
         )]
     );
     let mut out = Outputs::default();
+    driver.command(choose_model(8, "gpt-x"), &mut out);
     driver.command(
         Command::Open {
             session: 8,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: Some("gpt-x".into()),
         },
         &mut out,
     );
@@ -1527,7 +1537,6 @@ fn a_fork_opens_codex_s_fork_of_the_source_through_its_turn_and_names_each_turn_
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -1598,7 +1607,6 @@ fn a_fork_codex_refuses_fails_with_the_handoff_way_on_and_no_new_thread() {
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -1642,7 +1650,6 @@ fn an_initialized_app_server_is_asked_its_rate_limits_after_the_waiting_requests
             session: SESSION,
             cwd: "/tmp/repo".into(),
             resume: None,
-            model: None,
         },
         &mut out,
     );
@@ -1803,4 +1810,156 @@ fn a_rate_limits_answer_during_a_turn_leaves_the_turn_alone() {
             )])
         )]
     );
+}
+
+fn choose(
+    driver: &mut CodexDriver,
+    model: Option<&str>,
+    effort: Option<&str>,
+    speed: Option<&str>,
+) {
+    driver.command(
+        Command::Choose {
+            session: SESSION,
+            choice: ModelChoice {
+                model: model.map(str::to_owned),
+                effort: effort.map(str::to_owned),
+                speed: speed.map(str::to_owned),
+            },
+        },
+        &mut Outputs::default(),
+    );
+}
+
+fn settings_updated(model: &str) -> String {
+    format!(
+        r#"{{"method":"thread/settings/updated","params":{{"threadId":"{THREAD}","threadSettings":{{"model":"{model}","effort":"high","serviceTier":"priority"}}}}}}"#
+    )
+}
+
+/// Codex keeps a `turn/start` override for the thread's later turns, and `null` resets
+/// it, so each turn sends exactly the fields chosen and leaves the rest out.
+#[test]
+fn a_turn_start_carries_only_the_chosen_fields_and_never_null() {
+    let mut driver = opened();
+    let plain = send(&mut driver, "plain");
+    for field in ["model", "effort", "serviceTier"] {
+        assert!(plain["params"].get(field).is_none(), "{plain}");
+    }
+    finish_turn(&mut driver, "T1");
+
+    choose(&mut driver, None, Some("high"), None);
+    let effort = send(&mut driver, "effort");
+    assert_eq!(effort["params"]["effort"], "high");
+    assert!(effort["params"].get("model").is_none(), "{effort}");
+    assert!(effort["params"].get("serviceTier").is_none(), "{effort}");
+    finish_turn(&mut driver, "T2");
+
+    choose(&mut driver, Some("gpt-x"), Some("low"), Some("priority"));
+    let all = send(&mut driver, "all");
+    assert_eq!(all["params"]["model"], "gpt-x");
+    assert_eq!(all["params"]["effort"], "low");
+    assert_eq!(all["params"]["serviceTier"], "priority");
+}
+
+/// A change during a turn never reaches it: a steer carries no settings, and the next
+/// `turn/start` carries the change.
+#[test]
+fn a_choice_changed_during_a_turn_reaches_only_the_next_turn() {
+    let mut driver = opened();
+    send(&mut driver, "first");
+    feed(&mut driver, &[started("T1")]);
+    choose(&mut driver, Some("gpt-x"), Some("high"), None);
+    let steer = send(&mut driver, "steer");
+    assert_eq!(steer["method"], "turn/steer");
+    for field in ["model", "effort", "serviceTier"] {
+        assert!(steer["params"].get(field).is_none(), "{steer}");
+    }
+    feed(&mut driver, &[completed("T1")]);
+    let next = send(&mut driver, "next");
+    assert_eq!(next["method"], "turn/start");
+    assert_eq!(next["params"]["model"], "gpt-x");
+    assert_eq!(next["params"]["effort"], "high");
+}
+
+/// The thread's reported model is lost before a turn that asks for another one, and
+/// `thread/settings/updated` reports the model the thread runs on now.
+#[test]
+fn a_model_change_loses_the_old_report_and_the_settings_update_reports_the_new_one() {
+    let mut out = Outputs::default();
+    let mut driver = CodexDriver::new("0.0.0-test", &mut out);
+    driver.on_line(br#"{"id":1,"result":{}}"#, &mut out);
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Open {
+            session: SESSION,
+            cwd: "/tmp/repo".into(),
+            resume: None,
+        },
+        &mut out,
+    );
+    let start: Value = serde_json::from_str(&out.writes[0]).unwrap();
+    let reply = format!(
+        r#"{{"id":{},"result":{{"thread":{{"id":"{THREAD}"}},"model":"gpt-6-luna"}}}}"#,
+        start["id"]
+    );
+    let out = feed(&mut driver, &[reply]);
+    assert!(out.events.contains(&(
+        SESSION,
+        Event::ModelReported {
+            model: "gpt-6-luna".into()
+        }
+    )));
+
+    // The same model again loses nothing.
+    choose(&mut driver, Some("gpt-6-luna"), None, None);
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "same".into(),
+            images: Vec::new(),
+        },
+        &mut out,
+    );
+    assert!(out.events.is_empty(), "{:?}", out.events);
+    finish_turn(&mut driver, "T1");
+
+    choose(&mut driver, Some("gpt-x"), None, None);
+    let mut out = Outputs::default();
+    driver.command(
+        Command::Send {
+            session: SESSION,
+            text: "switch".into(),
+            images: Vec::new(),
+        },
+        &mut out,
+    );
+    assert_eq!(out.events, [(SESSION, Event::ModelLost)]);
+    assert_eq!(methods(&out), ["turn/start"]);
+
+    let out = feed(&mut driver, &[settings_updated("gpt-x"), started("T2")]);
+    assert_eq!(
+        out.events.first(),
+        Some(&(
+            SESSION,
+            Event::ModelReported {
+                model: "gpt-x".into()
+            }
+        ))
+    );
+    // A repeat of the model it reported already says nothing new.
+    let out = feed(&mut driver, &[settings_updated("gpt-x")]);
+    assert!(out.events.is_empty(), "{:?}", out.events);
+}
+
+/// The [`Command::Choose`] that asks for `model` alone.
+fn choose_model(session: u64, model: &str) -> Command {
+    Command::Choose {
+        session,
+        choice: keystone_core::ModelChoice {
+            model: Some(model.into()),
+            ..Default::default()
+        },
+    }
 }

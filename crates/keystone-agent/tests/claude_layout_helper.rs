@@ -3,6 +3,7 @@ use keystone_agent::{
     Wake, claude,
 };
 use keystone_core::ApprovalMode;
+use keystone_core::ModelChoice;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
@@ -147,7 +148,7 @@ fn every_helper_process_is_restricted_in_plan_mode_and_never_resumes_or_probes()
         1,
         cwd,
         Some("saved-conversation"),
-        None,
+        &ModelChoice::default(),
         provider,
         "first".into(),
     )
@@ -165,7 +166,7 @@ fn every_helper_process_is_restricted_in_plan_mode_and_never_resumes_or_probes()
         1,
         cwd,
         Some("saved-conversation"),
-        None,
+        &ModelChoice::default(),
         full,
         "run second".into(),
     )
@@ -195,7 +196,7 @@ fn every_helper_process_is_restricted_in_plan_mode_and_never_resumes_or_probes()
         1,
         cwd,
         Some("saved-conversation"),
-        None,
+        &ModelChoice::default(),
         full,
         "third".into(),
     )
@@ -253,7 +254,7 @@ fn the_helper_fails_when_claude_reports_or_leaves_out_what_its_flags_turn_off() 
             1,
             cwd,
             None,
-            None,
+            &ModelChoice::default(),
             mode(ApprovalMode::ReadOnly),
             "a layout".into(),
         )
@@ -290,7 +291,7 @@ fn a_claude_that_rejects_a_helper_flag_fails_with_its_reason() {
         1,
         cwd,
         None,
-        None,
+        &ModelChoice::default(),
         mode(ApprovalMode::ReadOnly),
         "a layout".into(),
     )
@@ -310,7 +311,7 @@ fn chat_is_launched_and_answered_as_before() {
         1,
         cwd,
         None,
-        None,
+        &ModelChoice::default(),
         mode(ApprovalMode::ReadOnly),
         "hello".into(),
     )
@@ -338,7 +339,7 @@ fn a_success_without_system_init_cannot_confirm_helper_capabilities() {
             1,
             dir.path().to_str().unwrap(),
             None,
-            None,
+            &ModelChoice::default(),
             mode(ApprovalMode::ReadOnly),
             "a layout".into(),
         )
@@ -397,7 +398,7 @@ fn scripted_turn(
         1,
         dir.path().to_str().unwrap(),
         None,
-        None,
+        &ModelChoice::default(),
         mode(ApprovalMode::ReadOnly),
         "a layout".into(),
     )

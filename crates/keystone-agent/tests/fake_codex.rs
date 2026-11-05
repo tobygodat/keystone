@@ -4,7 +4,8 @@ mod gate;
 use gate::Gate;
 use keystone_agent::ApprovalState;
 use keystone_agent::Command;
-use keystone_agent::{Catalog, CodexConnection, Event, ItemKind, ModelInfo, TurnStatus};
+use keystone_agent::{Catalog, CodexConnection, Event, ItemKind, ModelInfo, Speed, TurnStatus};
+use keystone_core::ModelChoice;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
@@ -53,7 +54,6 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
         session: 1,
         cwd: "/tmp".into(),
         resume: None,
-        model: None,
     });
     conn.command(Command::Send {
         session: 1,
@@ -134,7 +134,6 @@ fn two_sessions_share_one_process() {
             session,
             cwd: "/tmp".into(),
             resume: None,
-            model: None,
         });
         conn.command(Command::Send {
             session,
@@ -161,7 +160,14 @@ fn two_sessions_share_one_process() {
 #[test]
 fn dropping_the_connection_stops_codex() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, None, NO_MODE, "hello".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "hello".into(),
+    );
     until(&conn, &wake, |e| matches!(e, Event::ThreadReady { .. }));
     let pid = conn.pid().expect("app-server running");
     drop(conn);
@@ -175,7 +181,14 @@ fn dropping_the_connection_stops_codex() {
 #[test]
 fn after_a_crash_the_latest_thread_is_resumed_even_if_the_caller_has_none() {
     let (conn, wake) = connect();
-    conn.send(1, "/tmp", None, None, NO_MODE, "hello".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "hello".into(),
+    );
     let events = until(&conn, &wake, completed);
     let Some(Event::ThreadReady { thread_id: first }) = events.first() else {
         panic!("expected a thread first, got {events:?}");
@@ -193,7 +206,14 @@ fn after_a_crash_the_latest_thread_is_resumed_even_if_the_caller_has_none() {
         conn.drain();
     }
     // The caller passes no saved thread, as if the ID never reached its storage.
-    conn.send(1, "/tmp", None, None, NO_MODE, "again".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "again".into(),
+    );
     let events = until(&conn, &wake, completed);
     assert!(
         events.contains(&Event::ThreadReady {
@@ -213,7 +233,14 @@ fn a_codex_that_cannot_start_fails_the_session_that_needed_it() {
             let _ = tx.send(());
         }),
     );
-    conn.send(7, "/tmp", None, None, NO_MODE, "hello".into());
+    conn.send(
+        7,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "hello".into(),
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     let events = loop {
         let events = conn.drain();
@@ -236,7 +263,14 @@ fn dropping_gives_up_on_a_stuck_start() {
     let (conn, _wake) = connect();
     let gate = Gate::new(None);
     conn.hold_starts(gate.hook());
-    conn.send(1, "/tmp", None, None, NO_MODE, "hello".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "hello".into(),
+    );
     gate.reached(1);
     let started = Instant::now();
     drop(conn);
@@ -322,29 +356,52 @@ fn a_chosen_model_reaches_codex_on_start_and_resume_and_the_catalog_is_listed() 
                 model: "fake-default".into(),
                 label: "Fake Default".into(),
                 resolved: None,
+                ..scripted_options()
             },
             ModelInfo {
                 model: "fake-fast".into(),
                 label: "Fake Fast".into(),
                 resolved: None,
+                ..scripted_options()
             },
         ],
         default_model: None,
     })));
 
-    conn.send(1, "/tmp", None, Some("fake-fast"), NO_MODE, "hello".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &chosen("fake-fast"),
+        NO_MODE,
+        "hello".into(),
+    );
     let events = until(&conn, &wake, completed);
     assert!(events.contains(&Event::ModelReported {
         model: "fake-fast".into()
     }));
     assert_eq!(model_of(&events), "fake-fast");
-    conn.send(2, "/tmp", None, None, NO_MODE, "plain".into());
+    conn.send(
+        2,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "plain".into(),
+    );
     let events = until(&conn, &wake, completed);
     assert_eq!(model_of(&events), "fake-default");
 
     // A new process resumes the thread with the same model.
     kill_codex(&conn, &wake);
-    conn.send(1, "/tmp", None, Some("fake-fast"), NO_MODE, "again".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &chosen("fake-fast"),
+        NO_MODE,
+        "again".into(),
+    );
     let events = until(&conn, &wake, completed);
     assert_eq!(model_of(&events), "fake-fast");
 }
@@ -412,13 +469,27 @@ fn a_mode_chosen_before_codex_restarts_reaches_the_new_process() {
     use keystone_core::ApprovalMode::{FullAccess, ReadOnly};
     let dir = tempfile::tempdir().unwrap();
     let (conn, wake) = connect_keeping_overrides(dir.path());
-    conn.send(1, "/tmp", None, None, approval(FullAccess), "first".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        approval(FullAccess),
+        "first".into(),
+    );
     let events = until(&conn, &wake, completed);
     assert_eq!(policy_of(&events), "never / dangerFullAccess");
 
     conn.set_approval(1, approval(ReadOnly));
     kill_codex(&conn, &wake);
-    conn.send(1, "/tmp", None, None, approval(ReadOnly), "second".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        approval(ReadOnly),
+        "second".into(),
+    );
     let events = until(&conn, &wake, completed);
     assert_eq!(policy_of(&events), "on-request / readOnly");
 }
@@ -430,7 +501,14 @@ fn provider_settings_after_a_restart_restore_the_users_own() {
     use keystone_core::ApprovalMode::{FullAccess, Provider};
     let dir = tempfile::tempdir().unwrap();
     let (conn, wake) = connect_keeping_overrides(dir.path());
-    conn.send(1, "/tmp", None, None, approval(FullAccess), "first".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        approval(FullAccess),
+        "first".into(),
+    );
     let events = until(&conn, &wake, completed);
     let Some(Event::ThreadReady { thread_id }) = events.first().cloned() else {
         panic!("expected a thread first, got {events:?}");
@@ -442,7 +520,7 @@ fn provider_settings_after_a_restart_restore_the_users_own() {
         1,
         "/tmp",
         Some(&thread_id),
-        None,
+        &ModelChoice::default(),
         approval(Provider),
         "again".into(),
     );
@@ -460,12 +538,19 @@ fn a_rejected_steer_retried_as_a_turn_uses_the_mode_chosen_since() {
         1,
         "/tmp",
         None,
-        None,
+        &ModelChoice::default(),
         approval(FullAccess),
         "end on steer".into(),
     );
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
-    conn.send(1, "/tmp", None, None, approval(FullAccess), "late".into());
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        approval(FullAccess),
+        "late".into(),
+    );
     // Codex holds the steer for 300 ms. Choose the mode once it has gone out, so the
     // change must reach the running driver, not only the queued send.
     std::thread::sleep(Duration::from_millis(100));
@@ -526,7 +611,6 @@ fn an_app_server_reports_its_rate_limits_read_as_the_first_turn_runs() {
             session: 1,
             cwd: "/tmp".into(),
             resume: None,
-            model: None,
         });
         conn.command(Command::Send {
             session: 1,
@@ -568,5 +652,93 @@ fn an_app_server_reports_its_rate_limits_read_as_the_first_turn_runs() {
                 ..
             })
         ));
+    }
+}
+
+/// A model, effort and speed changed between turns reach the next `turn/start`
+/// through the real connection, which Codex keeps for the thread: the old model's
+/// report is lost first, and `thread/settings/updated` reports the new one.
+#[test]
+fn a_choice_changed_between_turns_runs_the_next_turn_on_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("codex");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nexport KEYSTONE_FAKE_CODEX_DELAY_MS=1 KEYSTONE_FAKE_CODEX_VERSION=0.166.0\nexec '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_keystone-fake-codex")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (tx, wake) = channel();
+    let conn = CodexConnection::new(
+        Some(program),
+        "0.0.0-test",
+        Arc::new(move || {
+            let _ = tx.send(());
+        }),
+    );
+    let cwd = dir.path().to_str().unwrap();
+    conn.send(
+        1,
+        cwd,
+        None,
+        &chosen("fake-default"),
+        NO_MODE,
+        "first".into(),
+    );
+    let events = until(&conn, &wake, completed);
+    assert_eq!(model_of(&events), "fake-default");
+    assert!(!reply(&events).contains("**Effort:**"));
+
+    let choice = ModelChoice {
+        model: Some("fake-fast".into()),
+        effort: Some("low".into()),
+        speed: Some("priority".into()),
+    };
+    conn.set_choice(1, choice.clone());
+    conn.send(1, cwd, None, &choice, NO_MODE, "second".into());
+    let events = until(&conn, &wake, completed);
+    let lost = events.iter().position(|e| *e == Event::ModelLost);
+    let report = events.iter().position(|e| {
+        *e == Event::ModelReported {
+            model: "fake-fast".into(),
+        }
+    });
+    assert!(
+        lost.is_some() && lost < report,
+        "the old model is lost before the new one is reported: {events:?}"
+    );
+    assert_eq!(model_of(&events), "fake-fast");
+    assert_eq!(reported(&events, "**Effort:**"), "low");
+    assert_eq!(reported(&events, "**Tier:**"), "priority");
+}
+
+/// The efforts and speeds every model in the scripted catalog lists.
+fn scripted_options() -> ModelInfo {
+    ModelInfo {
+        efforts: vec!["low".into(), "high".into()],
+        default_effort: Some("high".into()),
+        speeds: vec![
+            Speed {
+                value: "default".into(),
+                label: "Standard".into(),
+            },
+            Speed {
+                value: "priority".into(),
+                label: "Fast".into(),
+            },
+        ],
+        ..ModelInfo::default()
+    }
+}
+
+/// A choice of `model` alone.
+fn chosen(model: &str) -> ModelChoice {
+    ModelChoice {
+        model: Some(model.into()),
+        ..ModelChoice::default()
     }
 }

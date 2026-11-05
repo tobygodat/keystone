@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use keystone_agent::{ApprovalState, CodexConnection, Event};
+use keystone_core::ModelChoice;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -23,7 +24,7 @@ fn incompatible_codex_is_refused_before_a_thread_or_turn_starts() {
         1,
         dir.path().to_str().unwrap(),
         None,
-        None,
+        &ModelChoice::default(),
         ApprovalState::default(),
         "hello".into(),
     );

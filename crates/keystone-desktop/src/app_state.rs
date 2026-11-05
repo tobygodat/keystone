@@ -7,8 +7,9 @@ use keystone_agent::recovery::{self, RecoveryBatch, Snapshot, TurnEvidence};
 use keystone_agent::{Catalog, Commands, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{
-    AccountId, AccountUsage, Applied, Composition, LimitWindow, Placement, ProjectColor, ProjectId,
-    SavedComposition, SessionTabs, ViewId, WindowId, WindowView, WorkingDirectory,
+    AccountId, AccountUsage, Applied, Composition, LimitWindow, ModelChoice, Placement,
+    ProjectColor, ProjectId, SavedComposition, SessionTabs, ViewId, WindowId, WindowView,
+    WorkingDirectory,
 };
 use std::collections::BTreeMap;
 
@@ -698,17 +699,33 @@ impl AppState {
         result
     }
 
-    pub(crate) fn set_model(
+    /// Saves the model, effort and speed the session's next turns run with, then gives
+    /// them to its connection if it started. A change after the first send is noted in
+    /// the transcript, which keeps it across a restart.
+    pub(crate) fn set_choice(
         &mut self,
         id: u64,
-        model: Option<String>,
+        choice: ModelChoice,
         cx: &mut Context<Self>,
     ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
         if self.phase == Phase::Exiting {
             return Err(std::io::Error::other("Keystone is exiting.").into());
         }
 
-        let result = self.store.set_model(id, model);
+        let changed = self
+            .session(id)
+            .is_some_and(|s| s.started() && s.choice() != choice);
+        let result = self.store.set_choice(id, choice.clone());
+        if result.is_ok() {
+            if let Some(connection) = self.started(id) {
+                connection.set_choice(id, choice);
+            }
+            if changed && let Some(provider) = self.provider(id) {
+                let note = self.model_selection(id, provider).note();
+                self.conversation(id).push_note(note);
+                self.commit(id);
+            }
+        }
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -1703,13 +1720,16 @@ impl AppState {
         provider: Provider,
     ) -> model_selector::Selection<'_> {
         let saved = self.session(session);
+        let mut default_model = None;
         let choices = match self.conversation_folder(session) {
             Some(presentation::ConversationFolder::Recorded(directory)) => {
-                self.catalogs.choices(&CatalogKey {
+                let key = CatalogKey {
                     provider,
                     account: self.catalog_account(session, provider),
                     directory,
-                })
+                };
+                default_model = self.catalogs.default_model(&key);
+                self.catalogs.choices(&key)
             }
             Some(presentation::ConversationFolder::LegacyMissing) => {
                 Choices::Unavailable("Choose a conversation folder to load choices.")
@@ -1725,10 +1745,13 @@ impl AppState {
                 .and_then(|s| s.account()),
             accounts: self.store.workspace().accounts(),
             model: saved.and_then(|s| s.model()),
+            effort: saved.and_then(|s| s.effort()),
+            speed: saved.and_then(|s| s.speed()),
             reported_model: self
                 .conversations
                 .get(&session)
                 .and_then(|c| c.reported_model.as_deref()),
+            default_model,
             started: saved.is_none_or(|s| s.started()),
             choices,
         }
@@ -3399,7 +3422,7 @@ impl AppState {
                         id,
                         cwd,
                         resume.as_deref(),
-                        session.model(),
+                        &session.choice(),
                         approval,
                         text.clone(),
                         caller,
@@ -3408,7 +3431,7 @@ impl AppState {
                         id,
                         cwd,
                         resume.as_deref(),
-                        session.model(),
+                        &session.choice(),
                         approval,
                         text.clone(),
                         images,

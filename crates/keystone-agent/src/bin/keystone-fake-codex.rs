@@ -62,6 +62,13 @@
 //! an unknown turn fails with "turn not found"; in store mode a source with no stored
 //! history is an unknown thread.
 //!
+//! Catalog entries list scripted efforts (`low`, `high`, default `high`) and service
+//! tiers (`priority`, "Fast"). `turn/start` takes `model`, `effort` and `serviceTier`
+//! for that turn and the thread's later ones, as Codex does, and `serviceTier: null`
+//! resets the tier to `default`. When a turn changes any of them and `initialize`
+//! opted into `experimentalApi`, the thread's settings follow as
+//! `thread/settings/updated`. A reply names the effort and tier once a turn set them.
+//!
 //! `thread/start`, `thread/resume` and `thread/fork` are followed by `mcpServer/startupStatus/updated`
 //! for each MCP server the thread gets (see [`start_mcp_servers`]).
 //!
@@ -396,6 +403,8 @@ fn main() {
         .unwrap_or_default();
     let defaults = || (json!("on-request"), json!({"type": "workspaceWrite"}));
     let mut models: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut efforts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut tiers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut servers: std::collections::HashMap<String, orchestrator::Server> =
         std::collections::HashMap::new();
     let no_catalog = std::env::var("KEYSTONE_FAKE_CODEX_NO_CATALOG").is_ok_and(|v| v == "1");
@@ -600,7 +609,9 @@ fn main() {
             "model/list" => match params["cursor"].as_str() {
                 None => reply(json!({"data": [
                     {"id": "fake-default", "model": "fake-default", "displayName": "Fake Default",
-                     "description": "Scripted default", "hidden": false, "isDefault": true}
+                     "description": "Scripted default", "hidden": false, "isDefault": true,
+                     "supportedReasoningEfforts": scripted_efforts(), "defaultReasoningEffort": "high",
+                     "serviceTiers": scripted_tiers(), "defaultServiceTier": null}
                 ], "nextCursor": "page-2"})),
                 Some("page-2") => {
                     let extra = (1..=extra_models).map(|n| {
@@ -611,7 +622,9 @@ fn main() {
                     let data: Vec<_> = [
                         json!({"id": "fake-fast", "model": "fake-fast", "displayName": "Fake Fast",
                          "description": "Scripted second model", "hidden": false,
-                         "isDefault": false}),
+                         "isDefault": false, "supportedReasoningEfforts": scripted_efforts(),
+                         "defaultReasoningEffort": "high", "serviceTiers": scripted_tiers(),
+                         "defaultServiceTier": null}),
                         json!({"id": "fake-hidden", "model": "fake-hidden", "displayName": "Hidden",
                          "hidden": true, "isDefault": false}),
                     ]
@@ -679,10 +692,40 @@ fn main() {
                     policy.0.as_str().unwrap_or("?"),
                     policy.1["type"].as_str().unwrap_or("?")
                 );
+                let before = (
+                    models.get(&thread).cloned(),
+                    efforts.get(&thread).cloned(),
+                    tiers.get(&thread).cloned(),
+                );
+                if let Some(model) = params["model"].as_str() {
+                    models.insert(thread.clone(), model.to_owned());
+                }
+                if let Some(effort) = params["effort"].as_str() {
+                    efforts.insert(thread.clone(), effort.to_owned());
+                }
+                match params.get("serviceTier") {
+                    Some(Value::String(tier)) => {
+                        tiers.insert(thread.clone(), tier.clone());
+                    }
+                    Some(Value::Null) => {
+                        tiers.insert(thread.clone(), "default".into());
+                    }
+                    _ => {}
+                }
                 let model = models
                     .get(&thread)
                     .cloned()
                     .unwrap_or_else(|| "fake-default".into());
+                let (effort, tier) = (efforts.get(&thread).cloned(), tiers.get(&thread).cloned());
+                let changed =
+                    before != (models.get(&thread).cloned(), effort.clone(), tier.clone());
+                let mut settings = String::new();
+                if let Some(effort) = &effort {
+                    settings += &format!(" **Effort:** `{effort}`");
+                }
+                if let Some(tier) = &tier {
+                    settings += &format!(" **Tier:** `{tier}`");
+                }
                 let server = servers.get(&thread).cloned();
                 let widgets = widget_threads.contains(&thread);
                 // Unique per process, like real Codex IDs, so a restart never reuses one.
@@ -692,6 +735,14 @@ fn main() {
                     next.fetch_add(1, Ordering::Relaxed)
                 );
                 reply(json!({"turn": {"id": turn_id, "status": "inProgress"}}));
+                if changed && experimental {
+                    notify(
+                        &out,
+                        "thread/settings/updated",
+                        json!({"threadId": thread, "threadSettings": {"model": model,
+                            "effort": effort, "serviceTier": tier.as_deref().unwrap_or("default")}}),
+                    );
+                }
                 let turn = Arc::new(Turn {
                     interrupt: AtomicBool::new(false),
                     silent: AtomicBool::new(false),
@@ -711,6 +762,7 @@ fn main() {
                         &images,
                         &policy,
                         &model,
+                        &settings,
                         server.as_ref(),
                         widgets,
                         &turn,
@@ -781,6 +833,17 @@ fn main() {
     }
 }
 
+/// The efforts every scripted catalog model lists.
+fn scripted_efforts() -> Value {
+    json!([{"reasoningEffort": "low", "description": "Scripted quick effort"},
+           {"reasoningEffort": "high", "description": "Scripted deep effort"}])
+}
+
+/// The service tiers every scripted catalog model lists.
+fn scripted_tiers() -> Value {
+    json!([{"id": "priority", "name": "Fast", "description": "Scripted fast tier"}])
+}
+
 fn steer_gate() -> Option<std::path::PathBuf> {
     std::env::var_os("KEYSTONE_FAKE_CODEX_STEER_GATE").map(Into::into)
 }
@@ -837,6 +900,7 @@ fn run_turn(
     images: &str,
     policy: &str,
     model: &str,
+    settings: &str,
     server: Option<&orchestrator::Server>,
     widgets: bool,
     turn: &Turn,
@@ -994,7 +1058,7 @@ fn run_turn(
         format!(
             "Scripted Codex reply (test data, no model call). You wrote: {text}. \
              This reply streams one word at a time so streaming, steering, and stopping can be checked. \
-             **Approvals:** `{policy}` **Model:** `{model}`{images}"
+             **Approvals:** `{policy}` **Model:** `{model}`{settings}{images}"
         )
     });
     let mut steer = None;

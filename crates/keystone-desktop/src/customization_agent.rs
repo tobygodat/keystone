@@ -181,7 +181,7 @@ impl Worker {
             SESSION,
             cwd,
             None,
-            None,
+            &keystone_core::ModelChoice::default(),
             approval,
             instruction(&ask),
             Vec::new(),
@@ -577,7 +577,7 @@ mod tests {
             _: u64,
             _: &str,
             _: Option<&str>,
-            _: Option<&str>,
+            _: &keystone_core::ModelChoice,
             _: ApprovalState,
             _: String,
             _: Vec<keystone_agent::Image>,
@@ -588,6 +588,7 @@ mod tests {
         }
         fn request_catalog(&self, _: u64, _: &str) {}
         fn set_approval(&self, _: u64, _: ApprovalState) {}
+        fn set_choice(&self, _: u64, _: keystone_core::ModelChoice) {}
         fn set_fork(&self, _: u64, _: keystone_core::ForkPoint) {}
         fn run_in_order(&self, _: u64, job: Box<dyn FnOnce() + Send>) {
             job();

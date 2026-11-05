@@ -66,8 +66,8 @@ use keystone_core::ViewId;
 #[cfg(test)]
 use keystone_core::WorkingDirectory;
 use keystone_core::{
-    AccountId, Appearance, ApprovalMode, Attention, Durability, Provider, Revision, SidebarSide,
-    Store,
+    AccountId, Appearance, ApprovalMode, Attention, Durability, ModelChoice, Provider, Revision,
+    SidebarSide, Store,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
@@ -2070,7 +2070,7 @@ impl Keystone {
     }
 
     /// The session's provider and model as one button, with the menu that chooses
-    /// them while the session has not sent.
+    /// them, and the model's effort and speed.
     fn model_selector(
         &self,
         session: u64,
@@ -2100,6 +2100,20 @@ impl Keystone {
                     this.choose_model(session, *provider, model.clone(), window, cx)
                 },
             )),
+            choose_options: Some(model_selector::OptionListeners {
+                effort: Rc::new(
+                    cx.listener(move |this, effort: &Option<String>, window, cx| {
+                        this.choose_option(session, |choice| choice.effort = effort.clone(), cx);
+                        this.close_model_menu(window, cx);
+                    }),
+                ),
+                speed: Rc::new(
+                    cx.listener(move |this, speed: &Option<String>, window, cx| {
+                        this.choose_option(session, |choice| choice.speed = speed.clone(), cx);
+                        this.close_model_menu(window, cx);
+                    }),
+                ),
+            }),
             retry: Rc::new(cx.listener(move |this, provider: &Provider, _, cx| {
                 this.retry_catalog(session, *provider, cx)
             })),
@@ -2168,9 +2182,10 @@ impl Keystone {
         self.refresh(cx);
     }
 
-    /// A model chosen in the model menu, saved for the session's first Send. The row
-    /// was rendered for `provider`'s catalog: a choice from a catalog the session has
-    /// left since is dropped.
+    /// A model chosen in the model menu, for the session's next turns. The effort and
+    /// speed follow it as far as the new model offers them. The row was rendered for
+    /// `provider`'s catalog: a choice from a catalog the session has left since is
+    /// dropped.
     fn choose_model(
         &mut self,
         session: u64,
@@ -2179,20 +2194,79 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(current) = self
+        let selection = self.model_selection(session, provider, cx);
+        let choice = (self
             .session(session, cx)
-            .filter(|s| !s.started() && s.provider() == provider)
-            && current.model() != model.as_deref()
-        {
-            self.error = match self
-                .state
-                .update(cx, |state, cx| state.set_model(session, model, cx))
-            {
-                Ok(applied) => durability_warning(applied.durability),
-                Err(error) => Some(format!("Model not saved. {error}")),
+            .is_some_and(|s| s.provider() == provider)
+            && selection.model != model.as_deref())
+        .then(|| {
+            let next = match selection.choices {
+                Choices::Ready(models) => model_selector::entry(
+                    models,
+                    model.as_deref(),
+                    selection.reported_model,
+                    selection.default_model,
+                ),
+                _ => None,
             };
+            model_selector::switch_model(&selection, model, next)
+        });
+        if let Some(choice) = choice {
+            self.save_choice(session, choice, cx);
         }
         self.close_model_menu(window, cx);
+    }
+
+    /// An effort or speed chosen for the session's next turns.
+    fn choose_option(
+        &mut self,
+        session: u64,
+        change: impl FnOnce(&mut ModelChoice),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut choice) = self.session(session, cx).map(|s| s.choice()) else {
+            return;
+        };
+        change(&mut choice);
+        self.save_choice(session, choice, cx);
+    }
+
+    /// The menu's and the keyboard's one way to change a session's choice: saved first,
+    /// and only then given to its provider.
+    fn save_choice(&mut self, session: u64, choice: ModelChoice, cx: &mut Context<Self>) {
+        if self
+            .session(session, cx)
+            .is_none_or(|s| s.choice() == choice)
+        {
+            return;
+        }
+        self.error = match self
+            .state
+            .update(cx, |state, cx| state.set_choice(session, choice, cx))
+        {
+            Ok(applied) => durability_warning(applied.durability),
+            Err(error) => Some(format!("Model not saved. {error}")),
+        };
+    }
+
+    /// The next effort, fast mode, or the next model, for the selected session.
+    fn step_choice(&mut self, step: model_selector::Step, cx: &mut Context<Self>) {
+        let Some(session) = self.selected(cx) else {
+            return;
+        };
+        let Some(provider) = self.session(session, cx).map(|s| s.provider()) else {
+            return;
+        };
+        match self.model_selection(session, provider, cx).step(step) {
+            Ok(choice) => self.save_choice(session, choice, cx),
+            Err(reason) => {
+                if reason == model_selector::NOT_LOADED {
+                    self.request_catalog(session, provider, cx);
+                }
+                self.error = Some(reason.into());
+            }
+        }
+        cx.notify();
     }
 
     fn close_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3985,6 +4059,22 @@ impl Render for Keystone {
             .on_action(
                 self.scoped_listener(cx, |this, _: &handoff::HandOff, window, cx| {
                     this.hand_off(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &model_selector::NextEffort, _, cx| {
+                    this.step_choice(model_selector::Step::NextEffort, cx)
+                }),
+            )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &model_selector::ToggleFastMode, _, cx| {
+                    this.step_choice(model_selector::Step::ToggleFast, cx)
+                },
+            ))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &model_selector::NextModel, _, cx| {
+                    this.step_choice(model_selector::Step::NextModel, cx)
                 }),
             )
             .on_action(self.scoped_listener(
@@ -7420,10 +7510,119 @@ mod tests {
                 Some("fake-fast")
             );
         });
-        // Fixed now: the button opens nothing.
+        // The provider is fixed now: the menu offers the model and its options only.
+        click(cx, "model-selector");
+        assert!(view.read_with(cx, |view, _cx| view.model_menu.is_some()));
+        assert!(cx.debug_bounds("provider-claude").is_none());
+        assert!(cx.debug_bounds("model-fake-fast").is_some());
+    }
+
+    /// After the first send the menu and the shortcuts change the model, effort and
+    /// speed. Each change is saved, noted in the transcript, and runs the next turn; a
+    /// value once chosen has no Default to go back to; and a restart keeps all of it.
+    #[gpui::test]
+    fn after_the_first_send_the_menu_and_shortcuts_change_the_next_turns_choice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _env = codex_env();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let (view, cx) = open_window(&path, cx);
+        click(cx, "welcome-codex");
+        send_text(&view, cx, "hello");
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "**Model:** `fake-default`", cx).is_some()
+        });
+        let notes = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, cx| {
+                view.state.read(cx).conversations()[&1]
+                    .rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        Row::Note(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
         click(cx, "model-selector");
         assert!(cx.debug_bounds("provider-claude").is_none());
-        assert!(view.read_with(cx, |view, _cx| view.model_menu.is_none()));
+        wait_for(cx, "model-fake-fast");
+        // Still at Default, so Default is offered, with the default model's options.
+        assert!(cx.debug_bounds("model-default").is_some());
+        assert!(cx.debug_bounds("effort-high").is_some());
+        click(cx, "model-fake-fast");
+        assert_eq!(saved_session(&path).model(), Some("fake-fast"));
+        assert!(composer_focused(&view, cx));
+        click(cx, "model-selector");
+        assert!(cx.debug_bounds("model-default").is_none());
+        assert!(cx.debug_bounds("effort-default").is_some());
+        click(cx, "effort-high");
+        assert_eq!(saved_session(&path).effort(), Some("high"));
+        click(cx, "model-selector");
+        assert!(cx.debug_bounds("effort-default").is_none());
+        assert!(cx.debug_bounds("speed-default").is_some());
+        cx.simulate_keystrokes("escape");
+
+        cx.simulate_keystrokes("secondary-alt-e");
+        assert_eq!(saved_session(&path).effort(), Some("low"));
+        cx.simulate_keystrokes("secondary-alt-f");
+        assert_eq!(saved_session(&path).speed(), Some("priority"));
+        assert_eq!(
+            notes(&view, cx),
+            [
+                "Next turns: Fake Fast",
+                "Next turns: Fake Fast · effort high",
+                "Next turns: Fake Fast · effort low",
+                "Next turns: Fake Fast · effort low · Fast",
+            ]
+        );
+        let label = view.read_with(cx, |view, cx| {
+            let selection = view.model_selection(1, Provider::Codex, cx);
+            model_selector::trigger(selection, false, cx).1
+        });
+        assert!(label.contains("· low · Fast"), "{label}");
+
+        send_text(&view, cx, "second");
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "You wrote: second", cx).is_some()
+        });
+        let reply = view.read_with(cx, |view, cx| {
+            reply_with(view, "You wrote: second", cx).unwrap()
+        });
+        for ran in [
+            "**Model:** `fake-fast`",
+            "**Effort:** `low`",
+            "**Tier:** `priority`",
+        ] {
+            assert!(reply.contains(ran), "{reply}");
+        }
+
+        view.update(cx, |view, cx| view.flush_logs(cx));
+        let store = Store::open(&path).unwrap();
+        cx.executor().allow_parking();
+        let (restored, cx) = cx.add_window_view(|window, cx| {
+            Keystone::new(
+                cx.new(|cx| crate::AppState::new(store, cx)),
+                false,
+                window,
+                cx,
+            )
+        });
+        wait_until(cx, &restored, |view, cx| {
+            view.state
+                .read(cx)
+                .conversations()
+                .get(&1)
+                .is_some_and(|c| !c.is_loading())
+        });
+        let session = saved_session(&path);
+        assert_eq!(
+            (session.model(), session.effort(), session.speed()),
+            (Some("fake-fast"), Some("low"), Some("priority"))
+        );
+        assert_eq!(notes(&restored, cx).len(), 4);
     }
 
     #[gpui::test]
@@ -7598,7 +7797,7 @@ mod tests {
                     1,
                     cwd.as_str(),
                     None,
-                    None,
+                    &keystone_core::ModelChoice::default(),
                     ApprovalState::default(),
                     "first".into(),
                 )
@@ -8761,7 +8960,6 @@ mod tests {
                     session: 1,
                     cwd: "/tmp".into(),
                     resume: None,
-                    model: None,
                 },
                 &mut out,
             );

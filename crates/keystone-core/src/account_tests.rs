@@ -336,16 +336,36 @@ fn another_account_returns_the_model_to_the_default_and_a_provider_move_saves_on
         .create(Provider::Claude, &working_directory(), 1)
         .unwrap()
         .value;
-    store.set_model(id, Some("only-on-default".into())).unwrap();
+    store
+        .set_choice(
+            id,
+            ModelChoice {
+                model: Some("only-on-default".into()),
+                effort: Some("high".into()),
+                speed: None,
+            },
+        )
+        .unwrap();
     store.set_account(id, None).unwrap();
     assert_eq!(
         store.workspace().sessions()[0].model(),
         Some("only-on-default")
     );
     store.set_account(id, Some(work.clone())).unwrap();
-    assert_eq!(store.workspace().sessions()[0].model(), None);
+    assert_eq!(
+        store.workspace().sessions()[0].choice(),
+        ModelChoice::default()
+    );
 
-    store.set_model(id, Some("work-model".into())).unwrap();
+    store
+        .set_choice(
+            id,
+            ModelChoice {
+                model: Some("work-model".into()),
+                ..ModelChoice::default()
+            },
+        )
+        .unwrap();
     let before = last_sequence(&store);
     store
         .set_provider_account(id, Provider::Codex, Some(codex.clone()))

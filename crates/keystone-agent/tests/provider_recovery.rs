@@ -8,6 +8,7 @@ use keystone_agent::{
     ApprovalState, ClaudeConnection, CodexConnection, Event, Item, ItemKind, ItemStatus,
     LaunchProfile, TurnStatus,
 };
+use keystone_core::ModelChoice;
 use keystone_core::{ApprovalMode, Provider};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -435,7 +436,7 @@ fn a_provider_that_exits_mid_turn_asks_for_recovery_and_its_store_is_ahead() {
             1,
             cwd.to_str().unwrap(),
             None,
-            None,
+            &ModelChoice::default(),
             PROVIDER,
             "please crash".into(),
         )

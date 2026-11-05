@@ -6,6 +6,7 @@ use keystone_agent::{
     ApprovalState, ClaudeConnection, Command, Connection, Event, RequestId, TurnStatus,
 };
 use keystone_core::ApprovalMode;
+use keystone_core::ModelChoice;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
@@ -79,12 +80,16 @@ impl Rig {
         approval: ApprovalState,
         text: &str,
     ) {
+        let choice = ModelChoice {
+            model: model.map(str::to_owned),
+            ..ModelChoice::default()
+        };
         self.conn
             .send(
                 session,
                 dir.to_str().unwrap(),
                 None,
-                model,
+                &choice,
                 approval,
                 text.into(),
             )

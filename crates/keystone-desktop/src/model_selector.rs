@@ -1,16 +1,19 @@
-//! The composer's model selector: one button that reads `<Provider> · <model>`, and a
-//! two-column menu that chooses the provider on the left and, from that provider's own
-//! catalog, the model on the right. Both are fixed once the session has sent.
+//! The composer's model selector: one button that reads `<Provider> · <model>`, with the
+//! effort and speed when chosen, and a menu that chooses the provider on the left and,
+//! from that provider's own catalog, the model and then its effort and speed. The
+//! provider and account are fixed once the session has sent; the rest can change.
 
 use gpui::{
     Anchor, AnyElement, App, Div, ElementId, IntoElement, ParentElement, Pixels, ScrollHandle,
     SharedString, Size, Stateful, Styled, Window, div, point, prelude::*, px,
 };
 use keystone_agent::{Catalog, Commands, ModelInfo};
-use keystone_core::{Account, AccountId, Provider, WorkingDirectory};
+use keystone_core::{Account, AccountId, ModelChoice, Provider, WorkingDirectory};
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+gpui::actions!(model_selector, [NextEffort, ToggleFastMode, NextModel]);
 
 /// The narrowest the button gets: its provider icon, still a target to hover and press.
 pub const MIN_WIDTH: Pixels = px(28.);
@@ -25,10 +28,15 @@ const MENU_INSET: Pixels = px(26.);
 /// keeps at most a third of its height for them, and for the providers and accounts.
 const CHOICE_ROWS: f32 = 6.5;
 
+/// The rows of height the effort and speed column may take: two titles, a Default and
+/// six levels, and a Default and two speeds.
+const OPTION_ROWS: f32 = 13.;
+
 /// What is known about one catalog in this run of the app.
 pub enum CatalogState {
     Loading,
-    Ready(Vec<ModelInfo>),
+    /// The models, and the model ID the provider's default resolves to, when it says.
+    Ready(Vec<ModelInfo>, Option<String>),
     Failed(String),
 }
 
@@ -56,8 +64,16 @@ impl Catalogs {
     pub fn choices(&self, key: &CatalogKey) -> Choices<'_> {
         match self.states.get(key) {
             None | Some(CatalogState::Loading) => Choices::Loading,
-            Some(CatalogState::Ready(models)) => Choices::Ready(models),
+            Some(CatalogState::Ready(models, _)) => Choices::Ready(models),
             Some(CatalogState::Failed(message)) => Choices::Failed(message),
+        }
+    }
+
+    /// The model ID the provider's default resolves to in `key`'s catalog, when known.
+    pub fn default_model(&self, key: &CatalogKey) -> Option<&str> {
+        match self.states.get(key) {
+            Some(CatalogState::Ready(_, default)) => default.as_deref(),
+            _ => None,
         }
     }
 
@@ -110,8 +126,11 @@ impl Catalogs {
             return;
         };
         let state = match catalog {
-            // What the default resolves to is not shown: rows are names only.
-            Catalog::Ready { models, .. } => CatalogState::Ready(models),
+            // What the default resolves to is not shown, but its efforts and speeds are.
+            Catalog::Ready {
+                models,
+                default_model,
+            } => CatalogState::Ready(models, default_model),
             Catalog::Failed(message) => {
                 // Claude lists commands only in a ready catalog's answer.
                 if provider == Provider::Claude {
@@ -162,7 +181,7 @@ impl Choices<'_> {
     /// The label the catalog gives a model, asked for by what it is launched as or by
     /// what the provider reports it runs as, or the ID itself when the catalog does not
     /// know it.
-    fn label(self, model: &str) -> String {
+    pub fn label(self, model: &str) -> String {
         match self {
             Choices::Ready(models) => models
                 .iter()
@@ -184,14 +203,256 @@ pub struct Selection<'a> {
     pub accounts: &'a [Account],
     /// The provider-native model the session asked for; `None` is the provider's default.
     pub model: Option<&'a str>,
+    /// The effort and speed the session asked for, from the model's catalog entry.
+    pub effort: Option<&'a str>,
+    pub speed: Option<&'a str>,
     /// The model the provider has reported for this session, in this run of the app.
     pub reported_model: Option<&'a str>,
-    /// Whether the session has sent, which fixes its provider and model.
+    /// What the provider's default resolves to, when its catalog says.
+    pub default_model: Option<&'a str>,
+    /// Whether the session has sent, which fixes its provider and account.
     pub started: bool,
     pub choices: Choices<'a>,
 }
 
+impl<'a> Selection<'a> {
+    pub fn choice(&self) -> ModelChoice {
+        ModelChoice {
+            model: self.model.map(str::to_owned),
+            effort: self.effort.map(str::to_owned),
+            speed: self.speed.map(str::to_owned),
+        }
+    }
+
+    /// The catalog entry the session's effort and speed are chosen from: its model's, or
+    /// on the provider's default, the one the provider reported or the default resolves
+    /// to. `None` before the catalog arrives, or when no entry is known.
+    pub fn entry(&self) -> Option<&'a ModelInfo> {
+        let Choices::Ready(models) = self.choices else {
+            return None;
+        };
+        entry(models, self.model, self.reported_model, self.default_model)
+    }
+
+    /// The catalog's label for the session's speed, or the value itself.
+    fn speed_label(&self, speed: &str) -> String {
+        self.entry()
+            .and_then(|entry| entry.speeds.iter().find(|s| s.value == speed))
+            .map_or(speed, |s| s.label.as_str())
+            .to_owned()
+    }
+
+    /// Whether `speed` is the entry's standard speed, its first, which the button leaves
+    /// out.
+    fn standard_speed(&self, speed: &str) -> bool {
+        self.entry().and_then(|entry| entry.speeds.first()).map_or(
+            speed == keystone_agent::standard_speed(self.provider),
+            |first| first.value == speed,
+        )
+    }
+
+    /// The transcript line for the choice the next turns run with, from the catalog's
+    /// labels.
+    pub fn note(&self) -> String {
+        let mut note = format!(
+            "Next turns: {}",
+            self.model
+                .map_or_else(|| "Provider default".to_owned(), |m| self.choices.label(m))
+        );
+        if let Some(effort) = self.shown_effort() {
+            note += &format!(" · effort {effort}");
+        }
+        if let Some(speed) = self.shown_speed() {
+            note += &format!(" · {}", self.speed_label(speed));
+        }
+        note
+    }
+
+    /// The effort and speed the composer button shows after the model: like the note,
+    /// leaving out the standard speed as well.
+    pub fn options(&self) -> String {
+        let mut options = String::new();
+        if let Some(effort) = self.shown_effort() {
+            options += &format!(" · {effort}");
+        }
+        if let Some(speed) = self
+            .shown_speed()
+            .filter(|speed| !self.standard_speed(speed))
+        {
+            options += &format!(" · {}", self.speed_label(speed));
+        }
+        options
+    }
+
+    /// The speed to show: none for one the model does not list, such as the standard
+    /// speed a model without speeds is sent.
+    fn shown_speed(&self) -> Option<&'a str> {
+        self.speed.filter(|speed| {
+            self.entry()
+                .is_none_or(|entry| entry.speeds.iter().any(|s| s.value == *speed))
+        })
+    }
+
+    /// The effort to show: none for a model that lists no levels, which keeps a chosen
+    /// effort it does not use.
+    fn shown_effort(&self) -> Option<&'a str> {
+        self.effort
+            .filter(|_| self.entry().is_none_or(|entry| !entry.efforts.is_empty()))
+    }
+
+    /// The choice a keyboard command makes, or why it makes none.
+    pub fn step(&self, step: Step) -> Result<ModelChoice, &'static str> {
+        let Choices::Ready(models) = self.choices else {
+            return Err(NOT_LOADED);
+        };
+        let choice = self.choice();
+        let entry = || {
+            self.entry()
+                .ok_or("Choose a model to set its effort and speed.")
+        };
+        Ok(match step {
+            Step::NextModel => {
+                let at = self
+                    .entry()
+                    .and_then(|current| models.iter().position(|m| m == current));
+                let next = models
+                    .get(at.map_or(0, |at| (at + 1) % models.len()))
+                    .ok_or("No models to choose from.")?;
+                switch_model(self, Some(next.model.clone()), Some(next))
+            }
+            Step::NextEffort => {
+                let levels = &entry()?.efforts;
+                if levels.is_empty() {
+                    return Err("This model has no effort levels.");
+                }
+                let at = self.effort.and_then(|e| levels.iter().position(|l| l == e));
+                ModelChoice {
+                    effort: Some(levels[at.map_or(0, |at| (at + 1) % levels.len())].clone()),
+                    ..choice
+                }
+            }
+            // Between the standard speed and the one after it.
+            Step::ToggleFast => {
+                let [standard, fast, ..] = &entry()?.speeds[..] else {
+                    return Err("This model has no fast mode.");
+                };
+                let next = if self.speed == Some(fast.value.as_str()) {
+                    standard
+                } else {
+                    fast
+                };
+                ModelChoice {
+                    speed: Some(next.value.clone()),
+                    ..choice
+                }
+            }
+        })
+    }
+}
+
+/// A keyboard command that changes the session's choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    NextEffort,
+    ToggleFast,
+    NextModel,
+}
+
+/// Why a keyboard command chose nothing while the catalog is not loaded.
+pub const NOT_LOADED: &str = "Model choices are not loaded yet. Try again in a moment.";
+
+const NO_ENTRY: &str = "Choose a model to set its effort and speed";
+
+/// The catalog entry for `model`, or for the provider's default, the one the provider
+/// reported or the one the default resolves to.
+pub fn entry<'a>(
+    models: &'a [ModelInfo],
+    model: Option<&str>,
+    reported: Option<&str>,
+    default_model: Option<&str>,
+) -> Option<&'a ModelInfo> {
+    match model {
+        Some(model) => models.iter().find(|m| m.model == model),
+        None => reported
+            .and_then(|reported| {
+                models
+                    .iter()
+                    .find(|m| m.model == reported || m.resolved.as_deref() == Some(reported))
+            })
+            .or_else(|| {
+                let default = default_model?;
+                models
+                    .iter()
+                    .find(|m| m.resolved.as_deref() == Some(default))
+            }),
+    }
+}
+
+/// The choice after the session moves to `model`, whose catalog entry is `next`.
+///
+/// Before the first send, a chosen effort stays when `next` lists it, else becomes its
+/// default effort, and a chosen speed stays only when `next` lists it; anything else
+/// returns to Default. After the first send a field with a value never returns to
+/// Default, since sending nothing would leave the provider on the old value: an
+/// unlisted effort becomes the default effort, else the nearest lower level `next`
+/// lists, and an unlisted speed becomes the provider's standard speed. A catalog model
+/// that lists no efforts keeps the effort, which it does not use (Claude Code launched
+/// on Haiku 4.5 with `--effort` sends the API none), and a model the catalog does not
+/// know keeps both, since nothing can be checked.
+pub fn switch_model(
+    selection: &Selection,
+    model: Option<String>,
+    next: Option<&ModelInfo>,
+) -> ModelChoice {
+    let choice = selection.choice();
+    let started = selection.started;
+    let effort = choice.effort.and_then(|effort| match next {
+        Some(next) if next.efforts.contains(&effort) => Some(effort),
+        Some(next) if next.default_effort.is_some() => next.default_effort.clone(),
+        Some(next) if started && next.efforts.is_empty() => Some(effort),
+        Some(next) if started => {
+            // Levels ranked as the catalog model that lists the most of them ranks
+            // them, since the current model may list none.
+            let before = match selection.choices {
+                Choices::Ready(models) => models
+                    .iter()
+                    .filter(|m| m.efforts.contains(&effort))
+                    .max_by_key(|m| m.efforts.len())
+                    .map_or(&[][..], |m| &m.efforts[..]),
+                _ => &[][..],
+            };
+            let below = before
+                .iter()
+                .position(|level| *level == effort)
+                .map_or(&[][..], |at| &before[..at]);
+            let lower = below
+                .iter()
+                .rev()
+                .find(|level| next.efforts.contains(level));
+            lower.or(next.efforts.first()).cloned()
+        }
+        Some(_) => None,
+        None => started.then_some(effort),
+    });
+    let speed = choice.speed.and_then(|speed| match next {
+        Some(next) if next.speeds.iter().any(|s| s.value == speed) => Some(speed),
+        Some(_) if started => Some(keystone_agent::standard_speed(selection.provider).to_owned()),
+        None if started => Some(speed),
+        _ => None,
+    });
+    ModelChoice {
+        model,
+        effort,
+        speed,
+    }
+}
+
 type Listener<T> = Rc<dyn Fn(&T, &mut Window, &mut App) + 'static>;
+
+pub struct OptionListeners {
+    pub effort: Listener<Option<String>>,
+    pub speed: Listener<Option<String>>,
+}
 
 /// What the selector does for the user.
 pub struct Handlers {
@@ -202,6 +463,9 @@ pub struct Handlers {
     /// A model from the named provider's catalog; `None` chooses that provider's
     /// default.
     pub choose_model: Listener<(Provider, Option<String>)>,
+    /// An effort or a speed value from the model's catalog entry; `None` chooses
+    /// Default. Without them the menu offers models only.
+    pub choose_options: Option<OptionListeners>,
     pub retry: Listener<Provider>,
 }
 
@@ -278,18 +542,15 @@ pub fn render(
 ) -> impl IntoElement {
     let (trigger, tooltip) = trigger(selection, open, cx);
     let trigger = trigger.tooltip(Tooltip::text(tooltip).builder());
-    if selection.started {
-        return trigger.into_any_element();
-    }
     let colors = cx.theme().colors;
     let Selection {
         provider,
         account,
         accounts,
-        model,
-        choices,
+        started,
         ..
     } = selection;
+    let separator = || div().flex_none().w_px().ml(px(7.)).bg(colors.border);
     let open_change = on.open_change.clone();
     div()
         .min_w(MIN_WIDTH)
@@ -303,13 +564,20 @@ pub fn render(
                         .flex()
                         .flex_row()
                         .max_w(viewport.width - MENU_INSET)
-                        .child(provider_column(
-                            provider, account, accounts, &on, viewport, cx,
-                        ))
-                        .child(div().flex_none().w_px().ml(px(7.)).bg(colors.border))
-                        .child(model_column(
-                            provider, account, model, choices, &on, viewport, cx,
-                        )),
+                        // The provider and account are fixed once the session sent.
+                        .when(!started, |d| {
+                            d.child(provider_column(
+                                provider, account, accounts, &on, viewport, cx,
+                            ))
+                            .child(separator())
+                        })
+                        .child(model_column(selection, &on, viewport, cx))
+                        // Shown in every catalog state, so a catalog arriving resizes
+                        // no column.
+                        .when_some(on.choose_options.as_ref(), |d, choose| {
+                            d.child(separator())
+                                .child(options_column(selection, choose, viewport, cx))
+                        }),
                 ),
         )
         .into_any_element()
@@ -324,6 +592,7 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
         reported_model,
         started,
         choices,
+        ..
     } = selection;
     let colors = cx.theme().colors;
     let name = match account_label(provider, account, accounts) {
@@ -342,10 +611,16 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
         (false, _) => (requested, Color::Default),
     };
     let label = format!("{name} · {shown}");
-    let tooltip = if started {
-        format!("{label} · fixed after the first message")
-    } else {
-        label.clone()
+    let options = selection.options();
+    // Effort and speed are what the session asks for, never what the provider
+    // reported, so once it has sent they stay muted like an unreported model.
+    let options_color = if started { Color::Muted } else { color };
+    let tooltip = match (started, options.is_empty()) {
+        (true, true) => format!("{label} · provider and account fixed after the first message"),
+        (true, false) => format!(
+            "{label}{options} · effort and speed as asked for the next turns · provider and account fixed after the first message"
+        ),
+        (false, _) => format!("{label}{options}"),
     };
     let trigger = h_flex()
         .id("model-selector")
@@ -360,10 +635,20 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
                 .size(px(16.))
                 .color(provider_icon_color(provider, cx)),
         )
-        .child(Label::new(label).size(TextSize::Ui).color(color).truncate());
-    if started {
-        return (trigger, tooltip);
-    }
+        .child(
+            // The model name truncates first; the options are clipped only after it.
+            h_flex()
+                .min_w_0()
+                .overflow_hidden()
+                .child(Label::new(label).size(TextSize::Ui).color(color).truncate())
+                .when(!options.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .child(Label::new(options).size(TextSize::Ui).color(options_color)),
+                    )
+                }),
+        );
     let hover = colors.element_hover;
     let trigger = trigger
         .cursor_pointer()
@@ -442,14 +727,18 @@ fn provider_column(
 }
 
 fn model_column(
-    provider: Provider,
-    account: Option<&AccountId>,
-    chosen: Option<&str>,
-    choices: Choices,
+    selection: Selection,
     on: &Handlers,
     viewport: Size<Pixels>,
     cx: &App,
 ) -> impl IntoElement {
+    let Selection {
+        provider,
+        account,
+        model: chosen,
+        choices,
+        ..
+    } = selection;
     let row = |id: ElementId, selector: String, label: SharedString, model: Option<String>| {
         let choose = on.choose_model.clone();
         let selected = chosen == model.as_deref();
@@ -466,12 +755,16 @@ fn model_column(
         .w(px(282.))
         .min_w_0()
         .pl(px(8.))
-        .child(row(
-            "model-default".into(),
-            "model-default".into(),
-            "Provider default".into(),
-            None,
-        ));
+        // Once a sent session has a model, the provider keeps an override, so its own
+        // default cannot be offered again.
+        .when(offers_default(selection, chosen), |d| {
+            d.child(row(
+                "model-default".into(),
+                "model-default".into(),
+                "Provider default".into(),
+                None,
+            ))
+        });
     let list = v_flex()
         .id("model-list")
         .automation_id("model-list")
@@ -539,6 +832,115 @@ fn model_column(
         }
     };
     column.child(v_flex().flex_none().h(height).child(list).children(retry))
+}
+
+/// Whether a field's Default row is offered: before the first send, or while the field
+/// is still at Default.
+fn offers_default(selection: Selection, value: Option<&str>) -> bool {
+    !selection.started || value.is_none()
+}
+
+/// The effort and speed the session's model offers, each with its Default row while
+/// that can be chosen.
+fn options_column(
+    selection: Selection,
+    on: &OptionListeners,
+    viewport: Size<Pixels>,
+    cx: &App,
+) -> impl IntoElement {
+    let row_height = cx.theme().density.control(px(36.));
+    // A narrow window takes room from this column before the models'.
+    let column = v_flex()
+        .id("choice-column")
+        .automation_id("choice-column")
+        .w(px(176.))
+        .min_w(px(96.))
+        .flex_shrink(4.)
+        .pl(px(8.))
+        // Every level and speed fits without scrolling in a usual window: the menu
+        // opens upward from the composer, so it can take more height than the models.
+        .max_h((row_height * OPTION_ROWS).min(viewport.height * 0.6))
+        .overflow_y_scroll();
+    if !matches!(selection.choices, Choices::Ready(_)) {
+        return column;
+    }
+    let Some(entry) = selection.entry() else {
+        return column.child(note("choice-unknown", NO_ENTRY, Color::Muted));
+    };
+    let section = |kind: &'static str,
+                   title: &'static str,
+                   current: Option<&str>,
+                   values: Vec<(String, String)>,
+                   choose: &Listener<Option<String>>| {
+        let rows = offers_default(selection, current)
+            .then(|| (None, "Default".to_owned()))
+            .into_iter()
+            .chain(
+                values
+                    .into_iter()
+                    .map(|(value, label)| (Some(value), label)),
+            )
+            .enumerate()
+            .map(|(at, (value, label))| {
+                let choose = choose.clone();
+                let selector = match &value {
+                    Some(value) => format!("{kind}-{value}"),
+                    None => format!("{kind}-default"),
+                };
+                let selected = current == value.as_deref();
+                choice_row((kind, at), selector, None, label, selected, false, cx).on_click(
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        choose(&value, window, cx)
+                    },
+                )
+            });
+        v_flex()
+            .child(
+                div()
+                    .px(px(8.))
+                    .pt(px(6.))
+                    .pb(px(2.))
+                    .child(Label::new(title).size(TextSize::Ui).color(Color::Muted)),
+            )
+            .children(rows)
+    };
+    let efforts = entry
+        .efforts
+        .iter()
+        .map(|effort| (effort.clone(), effort.clone()))
+        .collect::<Vec<_>>();
+    let speeds = entry
+        .speeds
+        .iter()
+        .map(|speed| (speed.value.clone(), speed.label.clone()))
+        .collect::<Vec<_>>();
+    if efforts.is_empty() && speeds.is_empty() {
+        return column.child(note(
+            "choice-none",
+            "This model has no effort or speed choices",
+            Color::Muted,
+        ));
+    }
+    column
+        .when(!efforts.is_empty(), |d| {
+            d.child(section(
+                "effort",
+                "Effort",
+                selection.effort,
+                efforts,
+                &on.effort,
+            ))
+        })
+        .when(!speeds.is_empty(), |d| {
+            d.child(section(
+                "speed",
+                "Speed",
+                selection.speed,
+                speeds,
+                &on.speed,
+            ))
+        })
 }
 
 /// A provider's model choices, scrolled when they first show just far enough to show the
@@ -648,5 +1050,166 @@ fn slug(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keystone_agent::Speed;
+
+    fn model(name: &str, efforts: &[&str], default_effort: Option<&str>, fast: bool) -> ModelInfo {
+        ModelInfo {
+            model: name.into(),
+            label: name.into(),
+            efforts: efforts.iter().map(|e| (*e).into()).collect(),
+            default_effort: default_effort.map(Into::into),
+            speeds: if fast {
+                ["standard", "fast"]
+                    .map(|value| Speed {
+                        value: value.into(),
+                        label: value.into(),
+                    })
+                    .into()
+            } else {
+                Vec::new()
+            },
+            ..ModelInfo::default()
+        }
+    }
+
+    fn switched(
+        provider: Provider,
+        models: &[ModelInfo],
+        from: &str,
+        effort: &str,
+        speed: &str,
+        to: &str,
+        started: bool,
+    ) -> ModelChoice {
+        let selection = Selection {
+            provider,
+            account: None,
+            accounts: &[],
+            model: Some(from),
+            effort: Some(effort),
+            speed: Some(speed),
+            reported_model: None,
+            default_model: None,
+            started,
+            choices: Choices::Ready(models),
+        };
+        let next = models.iter().find(|m| m.model == to);
+        switch_model(&selection, Some(to.into()), next)
+    }
+
+    #[test]
+    fn after_the_first_send_a_chosen_effort_or_speed_never_returns_to_default() {
+        let claude = Provider::Claude;
+        let all = ["low", "medium", "high", "xhigh", "max"];
+        let models = [
+            model("opus", &all, None, true),
+            model("older", &["low", "medium", "high", "max"], None, false),
+            model("haiku-4-5", &[], None, false),
+            model("codexish", &["low", "high"], Some("high"), true),
+        ];
+        let choice = |effort: &str, speed: &str| ModelChoice {
+            model: None,
+            effort: Some(effort.into()),
+            speed: Some(speed.into()),
+        };
+        let without_model = |c: ModelChoice| ModelChoice { model: None, ..c };
+
+        // A level the new model lacks becomes the nearest lower one it lists, and an
+        // unlisted Fast becomes standard speed, which the provider is told.
+        let after = switched(claude, &models, "opus", "xhigh", "fast", "older", true);
+        assert_eq!(without_model(after), choice("high", "standard"));
+        // A model without effort levels keeps the effort, which it does not use, and
+        // the next model that lists levels ranks it as the catalog does.
+        let after = switched(claude, &models, "opus", "xhigh", "fast", "haiku-4-5", true);
+        assert_eq!(without_model(after), choice("xhigh", "standard"));
+        let after = switched(
+            claude,
+            &models,
+            "haiku-4-5",
+            "xhigh",
+            "standard",
+            "older",
+            true,
+        );
+        assert_eq!(without_model(after), choice("high", "standard"));
+        // A listed default effort wins over the nearest level.
+        let after = switched(claude, &models, "opus", "xhigh", "fast", "codexish", true);
+        assert_eq!(without_model(after), choice("high", "fast"));
+        // Codex's standard tier is its own `default`.
+        let after = switched(
+            Provider::Codex,
+            &models,
+            "codexish",
+            "high",
+            "fast",
+            "older",
+            true,
+        );
+        assert_eq!(without_model(after), choice("high", "default"));
+        // A model the catalog does not know keeps everything.
+        let after = switched(claude, &models, "opus", "xhigh", "fast", "unknown", true);
+        assert_eq!(without_model(after), choice("xhigh", "fast"));
+
+        // Before the first send nothing was sent, so Default is still the honest answer.
+        let after = switched(claude, &models, "opus", "xhigh", "fast", "older", false);
+        assert_eq!((after.effort, after.speed), (None, None));
+    }
+
+    #[test]
+    fn the_button_and_the_note_show_only_what_the_model_uses() {
+        let models = [
+            model("opus", &["low", "high"], None, true),
+            model("haiku-4-5", &[], None, false),
+        ];
+        let shown = |model: &str, effort: &str, speed: &str| {
+            let selection = Selection {
+                provider: Provider::Claude,
+                account: None,
+                accounts: &[],
+                model: Some(model),
+                effort: Some(effort),
+                speed: Some(speed),
+                reported_model: None,
+                default_model: None,
+                started: true,
+                choices: Choices::Ready(&models),
+            };
+            (selection.options(), selection.note())
+        };
+        assert_eq!(
+            shown("opus", "high", "fast"),
+            (
+                " · high · fast".into(),
+                "Next turns: opus · effort high · fast".into()
+            )
+        );
+        // Standard speed is left out of the button, not the note.
+        assert_eq!(
+            shown("opus", "high", "standard"),
+            (
+                " · high".into(),
+                "Next turns: opus · effort high · standard".into()
+            )
+        );
+        // A model without levels or speeds shows neither the kept effort nor the
+        // standard speed it is sent.
+        assert_eq!(
+            shown("haiku-4-5", "high", "standard"),
+            (String::new(), "Next turns: haiku-4-5".into())
+        );
+        // A model the catalog does not know shows what was chosen.
+        assert_eq!(
+            shown("unknown", "high", "fast"),
+            (
+                " · high · fast".into(),
+                "Next turns: unknown · effort high · fast".into()
+            )
+        );
     }
 }

@@ -41,6 +41,8 @@ pub enum Row {
     Attachments(Vec<keystone_core::Attachment>),
     /// The session was imported without the provider's older turns.
     OlderNotImported,
+    /// A line Keystone adds, such as a change to the model the next turns run with.
+    Note(String),
 }
 
 /// The rows of one turn the provider can fork the conversation through, and where.
@@ -199,6 +201,7 @@ impl Default for Run {
 
 enum Pending {
     Local(String, Vec<keystone_core::Attachment>),
+    Note(String),
     Event(Event),
 }
 
@@ -305,6 +308,7 @@ impl Conversation {
         for pending in pending {
             match pending {
                 Pending::Local(text, attachments) => self.push_sent(&text, attachments),
+                Pending::Note(text) => self.push_note(text),
                 Pending::Event(event) => {
                     self.apply(event);
                 }
@@ -359,6 +363,7 @@ impl Conversation {
                 | Entry::Approval { seq, run, .. }
                 | Entry::TurnEnded { seq, run, .. }
                 | Entry::Attachments { seq, run, .. }
+                | Entry::Note { seq, run, .. }
                 | Entry::Surface { seq, run, .. } => (*seq, *run),
             };
             match &entry {
@@ -414,6 +419,7 @@ impl Conversation {
                 Entry::Approval { .. }
                 | Entry::Surface { .. }
                 | Entry::Attachments { .. }
+                | Entry::Note { .. }
                 | Entry::OlderNotImported => {}
             }
             if entry_run.is_some() && entry_run != run {
@@ -449,6 +455,7 @@ impl Conversation {
                 } => Some(Row::Decision { action, allowed }),
                 Entry::OlderNotImported => Some(Row::OlderNotImported),
                 Entry::Attachments { attachments, .. } => Some(Row::Attachments(attachments)),
+                Entry::Note { text, .. } => Some(Row::Note(text)),
                 Entry::Surface { mut surface, .. } => {
                     // The tool call that waited for it ended with the run that showed it.
                     if surface.status == Status::Waiting {
@@ -808,6 +815,7 @@ impl Conversation {
                     run,
                 },
                 Row::OlderNotImported => Entry::OlderNotImported,
+                Row::Note(text) => Entry::Note { text, seq, run },
                 Row::Recovery(_) => continue,
             };
             writes.push(Write { entry, sync: false });
@@ -1012,17 +1020,35 @@ impl Conversation {
         self.error = None;
     }
 
+    /// Shows and logs a line Keystone adds to the transcript, after what is shown.
+    pub fn push_note(&mut self, text: String) {
+        if let Some(pending) = &mut self.pending {
+            return pending.push(Pending::Note(text));
+        }
+        let index = self.push(Row::Note(text.clone()));
+        let (seq, run) = (Some(self.seq(index)), Some(self.run.0));
+        self.write(Entry::Note { text, seq, run }, false);
+    }
+
     /// The usage limit that refused the latest turn, while nothing came after it.
     pub fn usage_limit(&self) -> Option<&UsageLimit> {
         if self.running || self.is_loading() {
             return None;
         }
-        match self.rows.last()? {
+        match &self.rows[self.last_but_notes()?] {
             Row::TurnEnded {
                 limit: Some(limit), ..
             } => Some(limit),
             _ => None,
         }
+    }
+
+    /// The last row that is not a note: a model change noted after a refused turn
+    /// leaves the turn's end the latest thing that happened.
+    fn last_but_notes(&self) -> Option<usize> {
+        self.rows
+            .iter()
+            .rposition(|row| !matches!(row, Row::Note(_)))
     }
 
     /// Whether row `index` takes a place in the transcript. The turn end that the usage
@@ -1031,7 +1057,7 @@ impl Conversation {
     pub fn shows(&self, index: usize) -> bool {
         self.rows.get(index).is_some_and(|row| {
             visible(row)
-                && !(index + 1 == self.rows.len()
+                && !(Some(index) == self.last_but_notes()
                     && self.recovery.is_none()
                     && self.usage_limit().is_some_and(|limit| {
                         !limit.inferred && limit.label.is_some() && limit.resets_at.is_some()
@@ -2915,6 +2941,38 @@ mod tests {
     }
 
     #[test]
+    fn a_model_change_noted_after_a_refused_turn_keeps_the_usage_limit_card() {
+        let mut live = Conversation::default();
+        let limit = UsageLimit {
+            label: Some("5-hour".into()),
+            resets_at: Some(1),
+            ..UsageLimit::default()
+        };
+        for event in [
+            Event::TurnStarted,
+            Event::ItemCompleted(user("u1", "go")),
+            Event::UsageLimit(limit.clone()),
+            Event::TurnCompleted {
+                status: TurnStatus::Failed,
+                error: Some("You've hit your usage limit.".into()),
+                stopped: false,
+            },
+        ] {
+            live.apply(event);
+        }
+        let ended = live.rows.len() - 1;
+        live.push_note("Next turns: Sonnet".into());
+        assert_eq!(live.usage_limit(), Some(&limit));
+        assert!(
+            !live.shows(ended),
+            "the card still stands for the turn's end"
+        );
+        assert!(live.shows(ended + 1), "the note shows");
+        let restored = Log(live.take_writes().into_iter().map(|w| w.entry).collect()).restore();
+        assert_eq!(restored.usage_limit(), Some(&limit));
+    }
+
+    #[test]
     fn a_fork_leaves_the_usage_limit_card_with_its_source() {
         let mut live = Conversation::default();
         for event in [
@@ -3258,7 +3316,6 @@ mod tests {
                 session: 12,
                 cwd: "/tmp/repo".into(),
                 resume: None,
-                model: None,
             },
             &mut out,
         );

@@ -32,15 +32,18 @@ crates/keystone-agent/src/claude.rs
 	Claude Code did not accept the approval mode: {error}
 	Claude Code did not configure Keystone tools in time. Send again.
 	Claude Code did not confirm the approval mode in time. Send again.
+	Claude Code did not confirm the model change in time. Send again.
 	Claude Code did not report its pending {what}
 	Claude Code did not report the session state
 	Claude Code did not start
 	Claude Code did not start a conversation: {}
 	Claude Code did not start in time. Send again.
+	Claude Code did not turn on fast mode ({reason}).
 	Claude Code dropped the message without running it
 	Claude Code has {what} pending
 	Claude Code is not signed in ({text}). Run `claude` in a terminal to sign in, then send again.
 	Claude Code is not signed in ({text}). {sign_in}, then send again.
+	Claude Code refused the model change: {error}. Choose another model, effort or speed.
 	Claude Code refused the quiescence check: {}
 	Claude Code reports it is not idle
 	Claude Code reports the session {state}
@@ -53,12 +56,14 @@ crates/keystone-agent/src/claude.rs
 	Edit
 	Exit code 
 	Extra usage
+	Fast
 	Keystone does not support {} yet
 	Keystone hosts no SDK MCP server named {}
 	Keystone tools are being configured
 	Keystone's approval mode is Read only, so Claude Code stays in plan mode and cannot make changes. Present the plan and stop; the user can choose another approval mode to carry it out.
 	MCP servers
 	Method not found
+	Standard
 	The launching agent no longer has permission to send this message
 	The user denied this in Keystone.
 	This Claude Code version cannot steer a running turn (it lacks interrupt_cancel_queued_v1). Send after the turn ends.
@@ -128,6 +133,7 @@ crates/keystone-agent/src/codex.rs
 	Primary
 	Run a command
 	Secondary
+	Standard
 	The agent message could not steer the running turn; it was not retried
 	The launching agent no longer has permission to send this message
 	This conversation is not open in Codex
@@ -460,7 +466,7 @@ crates/keystone-core/src/lib.rs
 	session ID exhausted
 	session ID space exhausted
 	session execution directory cannot be replaced
-	the provider, account and model are fixed once a session has sent
+	the provider and account are fixed once a session has sent
 	this conversation is already in Keystone
 	unknown account {account}
 	unknown account {id}
@@ -731,6 +737,8 @@ crates/keystone-desktop/src/commands.rs
 	New session in worktree…
 	New tab
 	New window
+	Next effort level
+	Next model
 	Next tab
 	No session open.
 	Open folder as project
@@ -748,6 +756,7 @@ crates/keystone-desktop/src/commands.rs
 	Split right
 	Switch project
 	Toggle changes
+	Toggle fast mode
 	Toggle files
 	Toggle notes
 	Toggle pull request
@@ -1084,13 +1093,26 @@ crates/keystone-desktop/src/mentions.rs
 	No matching files
 
 crates/keystone-desktop/src/model_selector.rs
+	 · effort {effort}
+	 · {effort}
+	Choose a model to set its effort and speed
+	Choose a model to set its effort and speed.
 	Claude Code
 	Codex
 	Default
+	Effort
 	Loading choices…
+	Model choices are not loaded yet. Try again in a moment.
+	Next turns: {}
+	No models to choose from.
 	Provider default
 	Retry
-	{label} · fixed after the first message
+	Speed
+	This model has no effort levels.
+	This model has no effort or speed choices
+	This model has no fast mode.
+	{label} · provider and account fixed after the first message
+	{label}{options} · effort and speed as asked for the next turns · provider and account fixed after the first message
 	{name} · {shown}
 	{} · {label}
 

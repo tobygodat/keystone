@@ -1,0 +1,2046 @@
+{
+ "claude_version": "2.1.316 (Claude Code)",
+ "codex_version": "codex-cli 0.166.0-alpha.5.1",
+ "claude": [
+  {
+   "launch": {
+    "argv_extra": [
+     "--model",
+     "haiku",
+     "--effort",
+     "low"
+    ],
+    "initialize": {
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "current_permission_mode": "default",
+     "claude_code_version": "2.1.316",
+     "models": [
+      {
+       "value": "default",
+       "resolvedModel": "claude-opus-5-5",
+       "displayName": "Default (recommended)",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsFastMode": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "opus",
+       "resolvedModel": "claude-opus-5-5",
+       "displayName": "Opus",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsFastMode": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "claude-fable-5-1[1m]",
+       "resolvedModel": "claude-fable-5-1",
+       "displayName": "Fable",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "sonnet",
+       "resolvedModel": "claude-sonnet-5-5",
+       "displayName": "Sonnet",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "haiku",
+       "resolvedModel": "claude-haiku-5-5",
+       "displayName": "Haiku",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      }
+     ]
+    }
+   }
+  },
+  {
+   "turn_1": {
+    "assistant_models": [
+     "claude-haiku-5-5"
+    ],
+    "init": {
+     "model": "claude-haiku-5-5",
+     "permissionMode": "default",
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "additional_directories",
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "memory_paths",
+      "messaging_socket_path",
+      "model",
+      "original_cwd",
+      "output_style",
+      "per_turn_effort_active",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "ultrathink_available",
+      "uuid",
+      "view_mode"
+     ]
+    },
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "result": "one",
+     "modelUsage": [
+      "claude-haiku-5-5"
+     ],
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "model_usage_since_last_result",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "safety_stops",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+     ]
+    },
+    "status": [
+     {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting"
+     }
+    ],
+    "other": [],
+    "session_id": "986a9b8f-a5af-415f-b7c2-01a705345b14",
+    "api_calls": [
+     {
+      "model": "claude-haiku-5-5",
+      "effort": "low",
+      "structured": false,
+      "thinking": {
+       "type": "adaptive",
+       "display": "updates"
+      },
+      "speed": null
+     }
+    ]
+   }
+  },
+  {
+   "get_settings_1": {
+    "sent": {
+     "subtype": "get_settings"
+    },
+    "subtype": "success",
+    "error": null,
+    "response": {
+     "effective": {
+      "model": null,
+      "effortLevel": null,
+      "fastMode": null
+     }
+    },
+    "other_frames": []
+   }
+  },
+  {
+   "set_model_sonnet": {
+    "sent": {
+     "subtype": "set_model",
+     "model": "sonnet"
+    },
+    "subtype": "success",
+    "error": null,
+    "response": {
+     "model": "claude-sonnet-5-5"
+    },
+    "other_frames": [
+     {
+      "type": "user",
+      "subtype": null
+     }
+    ]
+   }
+  },
+  {
+   "turn_2": {
+    "assistant_models": [
+     "claude-sonnet-5-5"
+    ],
+    "init": {
+     "model": "claude-sonnet-5-5",
+     "permissionMode": "default",
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "additional_directories",
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "memory_paths",
+      "messaging_socket_path",
+      "model",
+      "original_cwd",
+      "output_style",
+      "per_turn_effort_active",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "ultrathink_available",
+      "uuid",
+      "view_mode"
+     ]
+    },
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "result": "two",
+     "modelUsage": [
+      "claude-haiku-5-5",
+      "claude-sonnet-5-5"
+     ],
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "model_usage_since_last_result",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "safety_stops",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+     ]
+    },
+    "status": [
+     {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting"
+     }
+    ],
+    "other": [
+     {
+      "subtype": "commands_changed"
+     },
+     {
+      "subtype": "commands_changed"
+     },
+     {
+      "subtype": "commands_changed"
+     }
+    ],
+    "session_id": "986a9b8f-a5af-415f-b7c2-01a705345b14",
+    "api_calls": [
+     {
+      "model": "claude-sonnet-5-5",
+      "effort": "low",
+      "structured": false,
+      "thinking": {
+       "type": "adaptive",
+       "display": "updates"
+      },
+      "speed": null
+     }
+    ]
+   }
+  },
+  {
+   "apply_effort_high": {
+    "sent": {
+     "subtype": "apply_flag_settings",
+     "settings": {
+      "effortLevel": "high"
+     }
+    },
+    "subtype": "success",
+    "error": null,
+    "response": null,
+    "other_frames": []
+   }
+  },
+  {
+   "get_settings_2": {
+    "sent": {
+     "subtype": "get_settings"
+    },
+    "subtype": "success",
+    "error": null,
+    "response": {
+     "effective": {
+      "model": null,
+      "effortLevel": "high",
+      "fastMode": null
+     }
+    },
+    "other_frames": []
+   }
+  },
+  {
+   "apply_effort_max": {
+    "sent": {
+     "subtype": "apply_flag_settings",
+     "settings": {
+      "effortLevel": "max"
+     }
+    },
+    "subtype": "success",
+    "error": null,
+    "response": null,
+    "other_frames": []
+   }
+  },
+  {
+   "get_settings_3": {
+    "sent": {
+     "subtype": "get_settings"
+    },
+    "subtype": "success",
+    "error": null,
+    "response": {
+     "effective": {
+      "model": null,
+      "effortLevel": null,
+      "fastMode": null
+     }
+    },
+    "other_frames": []
+   }
+  },
+  {
+   "turn_3_after_max": {
+    "assistant_models": [
+     "claude-sonnet-5-5"
+    ],
+    "init": {
+     "model": "claude-sonnet-5-5",
+     "permissionMode": "default",
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "additional_directories",
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "memory_paths",
+      "messaging_socket_path",
+      "model",
+      "original_cwd",
+      "output_style",
+      "per_turn_effort_active",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "ultrathink_available",
+      "uuid",
+      "view_mode"
+     ]
+    },
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "result": "three",
+     "modelUsage": [
+      "claude-haiku-5-5",
+      "claude-sonnet-5-5"
+     ],
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "model_usage_since_last_result",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "safety_stops",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+     ]
+    },
+    "status": [
+     {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting"
+     }
+    ],
+    "other": [],
+    "session_id": "986a9b8f-a5af-415f-b7c2-01a705345b14",
+    "api_calls": [
+     {
+      "model": "claude-sonnet-5-5",
+      "effort": "max",
+      "structured": false,
+      "thinking": {
+       "type": "adaptive",
+       "display": "updates"
+      },
+      "speed": null
+     }
+    ]
+   }
+  },
+  {
+   "apply_effort_null": {
+    "sent": {
+     "subtype": "apply_flag_settings",
+     "settings": {
+      "effortLevel": null
+     }
+    },
+    "subtype": "success",
+    "error": null,
+    "response": null,
+    "other_frames": []
+   }
+  },
+  {
+   "turn_3b_after_null": {
+    "assistant_models": [
+     "claude-sonnet-5-5"
+    ],
+    "init": {
+     "model": "claude-sonnet-5-5",
+     "permissionMode": "default",
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "additional_directories",
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "memory_paths",
+      "messaging_socket_path",
+      "model",
+      "original_cwd",
+      "output_style",
+      "per_turn_effort_active",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "ultrathink_available",
+      "uuid",
+      "view_mode"
+     ]
+    },
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "result": "three",
+     "modelUsage": [
+      "claude-haiku-5-5",
+      "claude-sonnet-5-5"
+     ],
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "model_usage_since_last_result",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "safety_stops",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+     ]
+    },
+    "status": [
+     {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting"
+     }
+    ],
+    "other": [],
+    "session_id": "986a9b8f-a5af-415f-b7c2-01a705345b14",
+    "api_calls": [
+     {
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "structured": false,
+      "thinking": {
+       "type": "adaptive",
+       "display": "updates"
+      },
+      "speed": null
+     }
+    ]
+   }
+  },
+  {
+   "apply_fast_on_sonnet": {
+    "sent": {
+     "subtype": "apply_flag_settings",
+     "settings": {
+      "fastMode": true
+     }
+    },
+    "subtype": "success",
+    "error": null,
+    "response": null,
+    "other_frames": []
+   }
+  },
+  {
+   "set_model_opus": {
+    "sent": {
+     "subtype": "set_model",
+     "model": "opus"
+    },
+    "subtype": "success",
+    "error": null,
+    "response": {
+     "model": "claude-opus-5-5"
+    },
+    "other_frames": [
+     {
+      "type": "user",
+      "subtype": null
+     }
+    ]
+   }
+  },
+  {
+   "turn_4_opus_fast": {
+    "assistant_models": [
+     "claude-opus-5-5"
+    ],
+    "init": {
+     "model": "claude-opus-5-5",
+     "permissionMode": "default",
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "extra_usage_disabled",
+     "keys": [
+      "additional_directories",
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "memory_paths",
+      "messaging_socket_path",
+      "model",
+      "original_cwd",
+      "output_style",
+      "per_turn_effort_active",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "ultrathink_available",
+      "uuid",
+      "view_mode"
+     ]
+    },
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "result": "four",
+     "modelUsage": [
+      "claude-haiku-5-5",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5"
+     ],
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "extra_usage_disabled",
+     "keys": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "model_usage_since_last_result",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "safety_stops",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+     ]
+    },
+    "status": [
+     {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting"
+     }
+    ],
+    "other": [],
+    "session_id": "986a9b8f-a5af-415f-b7c2-01a705345b14",
+    "api_calls": [
+     {
+      "model": "claude-opus-5-5",
+      "effort": "medium",
+      "structured": false,
+      "thinking": {
+       "type": "adaptive",
+       "display": "updates"
+      },
+      "speed": null
+     }
+    ]
+   }
+  },
+  {
+   "apply_fast_off": {
+    "sent": {
+     "subtype": "apply_flag_settings",
+     "settings": {
+      "fastMode": false
+     }
+    },
+    "subtype": "success",
+    "error": null,
+    "response": null,
+    "other_frames": []
+   }
+  },
+  {
+   "set_model_default": {
+    "sent": {
+     "subtype": "set_model",
+     "model": "default"
+    },
+    "subtype": "success",
+    "error": null,
+    "response": {
+     "model": "claude-opus-5-5"
+    },
+    "other_frames": []
+   }
+  },
+  {
+   "set_model_haiku": {
+    "sent": {
+     "subtype": "set_model",
+     "model": "haiku"
+    },
+    "subtype": "success",
+    "error": null,
+    "response": {
+     "model": "claude-haiku-5-5"
+    },
+    "other_frames": [
+     {
+      "type": "user",
+      "subtype": null
+     }
+    ]
+   }
+  },
+  {
+   "turn_5": {
+    "assistant_models": [
+     "claude-haiku-5-5"
+    ],
+    "init": {
+     "model": "claude-haiku-5-5",
+     "permissionMode": "default",
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "additional_directories",
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "memory_paths",
+      "messaging_socket_path",
+      "model",
+      "original_cwd",
+      "output_style",
+      "per_turn_effort_active",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "ultrathink_available",
+      "uuid",
+      "view_mode"
+     ]
+    },
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "result": "five",
+     "modelUsage": [
+      "claude-haiku-5-5",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5"
+     ],
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "model_usage_since_last_result",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "safety_stops",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+     ]
+    },
+    "status": [
+     {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting"
+     }
+    ],
+    "other": [],
+    "api_calls": [
+     {
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "structured": false,
+      "thinking": {
+       "type": "adaptive",
+       "display": "updates"
+      },
+      "speed": null
+     }
+    ]
+   }
+  },
+  {
+   "exit": 0,
+   "stderr_tail": ""
+  },
+  {
+   "resume_launch": {
+    "argv_extra": [
+     "--resume",
+     "986a9b8f-a5af-415f-b7c2-01a705345b14",
+     "--model",
+     "sonnet",
+     "--effort",
+     "medium",
+     "--settings",
+     "{\"fastMode\": false}"
+    ],
+    "initialize": {
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "current_permission_mode": "default",
+     "claude_code_version": "2.1.316",
+     "models": [
+      {
+       "value": "default",
+       "resolvedModel": "claude-opus-5-5",
+       "displayName": "Default (recommended)",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsFastMode": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "opus",
+       "resolvedModel": "claude-opus-5-5",
+       "displayName": "Opus",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsFastMode": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "claude-fable-5-1[1m]",
+       "resolvedModel": "claude-fable-5-1",
+       "displayName": "Fable",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "sonnet",
+       "resolvedModel": "claude-sonnet-5-5",
+       "displayName": "Sonnet",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "haiku",
+       "resolvedModel": "claude-haiku-5-5",
+       "displayName": "Haiku",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      }
+     ]
+    }
+   }
+  },
+  {
+   "resume_turn": {
+    "assistant_models": [
+     "claude-sonnet-5-5"
+    ],
+    "init": {
+     "model": "claude-sonnet-5-5",
+     "permissionMode": "default",
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "additional_directories",
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "memory_paths",
+      "messaging_socket_path",
+      "model",
+      "original_cwd",
+      "output_style",
+      "per_turn_effort_active",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "ultrathink_available",
+      "uuid",
+      "view_mode"
+     ]
+    },
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "result": "six",
+     "modelUsage": [
+      "claude-haiku-5-5",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5"
+     ],
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "model_usage_since_last_result",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "safety_stops",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+     ]
+    },
+    "status": [
+     {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting"
+     }
+    ],
+    "other": [
+     {
+      "subtype": "commands_changed"
+     },
+     {
+      "subtype": "commands_changed"
+     },
+     {
+      "subtype": "commands_changed"
+     }
+    ],
+    "session_id": "986a9b8f-a5af-415f-b7c2-01a705345b14",
+    "api_calls": [
+     {
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "structured": false,
+      "thinking": {
+       "type": "adaptive",
+       "display": "updates"
+      },
+      "speed": null
+     }
+    ]
+   }
+  },
+  {
+   "resume_exit": 0,
+   "stderr_tail": ""
+  },
+  {
+   "max_flag_launch": {
+    "argv_extra": [
+     "--model",
+     "haiku",
+     "--effort",
+     "max"
+    ],
+    "initialize": {
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "current_permission_mode": "default",
+     "claude_code_version": "2.1.316",
+     "models": [
+      {
+       "value": "default",
+       "resolvedModel": "claude-opus-5-5",
+       "displayName": "Default (recommended)",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsFastMode": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "opus",
+       "resolvedModel": "claude-opus-5-5",
+       "displayName": "Opus",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsFastMode": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "claude-fable-5-1[1m]",
+       "resolvedModel": "claude-fable-5-1",
+       "displayName": "Fable",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "sonnet",
+       "resolvedModel": "claude-sonnet-5-5",
+       "displayName": "Sonnet",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "haiku",
+       "resolvedModel": "claude-haiku-5-5",
+       "displayName": "Haiku",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      }
+     ]
+    }
+   }
+  },
+  {
+   "max_flag_turn": {
+    "assistant_models": [
+     "claude-haiku-5-5"
+    ],
+    "init": {
+     "model": "claude-haiku-5-5",
+     "permissionMode": "default",
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "additional_directories",
+      "agents",
+      "analytics_disabled",
+      "apiKeySource",
+      "capabilities",
+      "claude_code_version",
+      "cwd",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "mcp_servers",
+      "memory_paths",
+      "messaging_socket_path",
+      "model",
+      "original_cwd",
+      "output_style",
+      "per_turn_effort_active",
+      "permissionMode",
+      "plugins",
+      "product_feedback_disabled",
+      "session_id",
+      "skills",
+      "slash_commands",
+      "subtype",
+      "terminal_slash_commands",
+      "tools",
+      "type",
+      "ultrathink_available",
+      "uuid",
+      "view_mode"
+     ]
+    },
+    "result": {
+     "subtype": "success",
+     "is_error": false,
+     "result": "seven",
+     "modelUsage": [
+      "claude-haiku-5-5"
+     ],
+     "fast_mode_state": "off",
+     "fast_mode_disabled_reason": "sdk_opt_in_required",
+     "keys": [
+      "api_error_status",
+      "duration_api_ms",
+      "duration_ms",
+      "fast_mode_disabled_reason",
+      "fast_mode_state",
+      "first_content_frame_ms",
+      "is_error",
+      "modelUsage",
+      "model_usage_since_last_result",
+      "num_turns",
+      "permission_denials",
+      "queued_turn_count",
+      "result",
+      "result_index",
+      "safety_stops",
+      "session_id",
+      "stop_reason",
+      "subagent_stats",
+      "subtype",
+      "terminal_reason",
+      "time_to_request_ms",
+      "total_cost_usd",
+      "ttft_ms",
+      "ttft_stream_ms",
+      "type",
+      "usage",
+      "uuid"
+     ]
+    },
+    "status": [
+     {
+      "type": "system",
+      "subtype": "status",
+      "status": "requesting"
+     }
+    ],
+    "other": [
+     {
+      "subtype": "commands_changed"
+     },
+     {
+      "subtype": "commands_changed"
+     },
+     {
+      "subtype": "commands_changed"
+     },
+     {
+      "subtype": "thinking_tokens"
+     },
+     {
+      "subtype": "thinking_tokens"
+     }
+    ],
+    "session_id": "4d9194d8-8952-47b9-963c-86c621b62cb8",
+    "api_calls": [
+     {
+      "model": "claude-haiku-5-5",
+      "effort": "max",
+      "structured": false,
+      "thinking": {
+       "type": "adaptive",
+       "display": "updates"
+      },
+      "speed": null
+     }
+    ]
+   }
+  },
+  {
+   "fast_flag_launch": {
+    "argv_extra": [
+     "--model",
+     "opus",
+     "--settings",
+     "{\"fastMode\": true}"
+    ],
+    "initialize": {
+     "fast_mode_state": "on",
+     "fast_mode_disabled_reason": null,
+     "current_permission_mode": "default",
+     "claude_code_version": "2.1.316",
+     "models": [
+      {
+       "value": "default",
+       "resolvedModel": "claude-opus-5-5",
+       "displayName": "Default (recommended)",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsFastMode": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "opus",
+       "resolvedModel": "claude-opus-5-5",
+       "displayName": "Opus",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsFastMode": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "claude-fable-5-1[1m]",
+       "resolvedModel": "claude-fable-5-1",
+       "displayName": "Fable",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "sonnet",
+       "resolvedModel": "claude-sonnet-5-5",
+       "displayName": "Sonnet",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      },
+      {
+       "value": "haiku",
+       "resolvedModel": "claude-haiku-5-5",
+       "displayName": "Haiku",
+       "supportsEffort": true,
+       "supportedEffortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+       ],
+       "supportsAdaptiveThinking": true,
+       "supportsAutoMode": true,
+       "supportsThinkingOff": false
+      }
+     ]
+    }
+   }
+  },
+  {
+   "fast_flag_exit": 0
+  }
+ ],
+ "codex": [
+  {
+   "model_list": [
+    {
+     "model": "gpt-6.1-sol",
+     "hidden": false,
+     "isDefault": true,
+     "defaultReasoningEffort": "low",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": "Fast responses with lighter reasoning"
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": "Balances speed and reasoning depth for everyday tasks"
+      },
+      {
+       "reasoningEffort": "high",
+       "description": "Greater reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "xhigh",
+       "description": "Extra high reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "max",
+       "description": "Maximum reasoning depth for the hardest problems"
+      },
+      {
+       "reasoningEffort": "ultra",
+       "description": "Maximum reasoning with automatic task delegation"
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "2x speed, increased usage"
+      }
+     ],
+     "defaultServiceTier": null,
+     "additionalSpeedTiers": [
+      "fast"
+     ]
+    },
+    {
+     "model": "gpt-6-astra",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "medium",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": "Fast responses with lighter reasoning"
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": "Balances speed and reasoning depth for everyday tasks"
+      },
+      {
+       "reasoningEffort": "high",
+       "description": "Greater reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "xhigh",
+       "description": "Extra high reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "max",
+       "description": "Maximum reasoning depth for the hardest problems"
+      },
+      {
+       "reasoningEffort": "ultra",
+       "description": "Maximum reasoning with automatic task delegation"
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "2x speed, increased usage"
+      }
+     ],
+     "defaultServiceTier": null,
+     "additionalSpeedTiers": [
+      "fast"
+     ]
+    },
+    {
+     "model": "gpt-6.1-terra",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "low",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": "Fast responses with lighter reasoning"
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": "Balances speed and reasoning depth for everyday tasks"
+      },
+      {
+       "reasoningEffort": "high",
+       "description": "Greater reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "xhigh",
+       "description": "Extra high reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "max",
+       "description": "Maximum reasoning depth for the hardest problems"
+      },
+      {
+       "reasoningEffort": "ultra",
+       "description": "Maximum reasoning with automatic task delegation"
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "1.5x speed"
+      }
+     ],
+     "defaultServiceTier": null,
+     "additionalSpeedTiers": [
+      "fast"
+     ]
+    },
+    {
+     "model": "gpt-6-sol",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "medium",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": "Fast responses with lighter reasoning"
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": "Balances speed and reasoning depth for everyday tasks"
+      },
+      {
+       "reasoningEffort": "high",
+       "description": "Greater reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "xhigh",
+       "description": "Extra high reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "max",
+       "description": "Maximum reasoning depth for the hardest problems"
+      },
+      {
+       "reasoningEffort": "ultra",
+       "description": "Maximum reasoning with automatic task delegation"
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "1.5x speed"
+      }
+     ],
+     "defaultServiceTier": null,
+     "additionalSpeedTiers": [
+      "fast"
+     ]
+    },
+    {
+     "model": "gpt-6-luna",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "medium",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": "Fast responses with lighter reasoning"
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": "Balances speed and reasoning depth for everyday tasks"
+      },
+      {
+       "reasoningEffort": "high",
+       "description": "Greater reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "xhigh",
+       "description": "Extra high reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "max",
+       "description": "Maximum reasoning depth for the hardest problems"
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "1.5x speed"
+      }
+     ],
+     "defaultServiceTier": null,
+     "additionalSpeedTiers": [
+      "fast"
+     ]
+    },
+    {
+     "model": "gpt-5.6-sol",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "low",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": "Fast responses with lighter reasoning"
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": "Balances speed and reasoning depth for everyday tasks"
+      },
+      {
+       "reasoningEffort": "high",
+       "description": "Greater reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "xhigh",
+       "description": "Extra high reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "max",
+       "description": "Maximum reasoning depth for the hardest problems"
+      },
+      {
+       "reasoningEffort": "ultra",
+       "description": "Maximum reasoning with automatic task delegation"
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "1.5x speed, increased usage"
+      }
+     ],
+     "defaultServiceTier": null,
+     "additionalSpeedTiers": [
+      "fast"
+     ]
+    },
+    {
+     "model": "gpt-5.6-terra",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "medium",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": "Fast responses with lighter reasoning"
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": "Balances speed and reasoning depth for everyday tasks"
+      },
+      {
+       "reasoningEffort": "high",
+       "description": "Greater reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "xhigh",
+       "description": "Extra high reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "max",
+       "description": "Maximum reasoning depth for the hardest problems"
+      },
+      {
+       "reasoningEffort": "ultra",
+       "description": "Maximum reasoning with automatic task delegation"
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "1.5x speed, increased usage"
+      }
+     ],
+     "defaultServiceTier": null,
+     "additionalSpeedTiers": [
+      "fast"
+     ]
+    },
+    {
+     "model": "gpt-5.6-luna",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "medium",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": "Fast responses with lighter reasoning"
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": "Balances speed and reasoning depth for everyday tasks"
+      },
+      {
+       "reasoningEffort": "high",
+       "description": "Greater reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "xhigh",
+       "description": "Extra high reasoning depth for complex problems"
+      },
+      {
+       "reasoningEffort": "max",
+       "description": "Maximum reasoning depth for the hardest problems"
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "1.5x speed, increased usage"
+      }
+     ],
+     "defaultServiceTier": null,
+     "additionalSpeedTiers": [
+      "fast"
+     ]
+    }
+   ]
+  },
+  {
+   "thread_start": {
+    "model": "gpt-6-luna",
+    "reasoningEffort": "high",
+    "serviceTier": "priority"
+   },
+   "notifications": []
+  },
+  {
+   "turn_1_low_default_tier": {
+    "sent": {
+     "effort": "low",
+     "serviceTier": "default"
+    },
+    "answer_error": null,
+    "notifications": [
+     {
+      "settings": {
+       "model": "gpt-6-luna",
+       "effort": "low",
+       "serviceTier": "default"
+      }
+     },
+     {
+      "turn_completed": "completed",
+      "error": null
+     }
+    ],
+    "thread_read": {
+     "model": "gpt-6-luna",
+     "reasoningEffort": "low"
+    }
+   }
+  },
+  {
+   "turn_2_nothing_sent": {
+    "sent": {},
+    "answer_error": null,
+    "notifications": [
+     {
+      "turn_completed": "completed",
+      "error": null
+     }
+    ],
+    "thread_read": {
+     "model": "gpt-6-luna",
+     "reasoningEffort": "low"
+    }
+   }
+  },
+  {
+   "turn_3_other_model_medium": {
+    "sent": {
+     "model": "gpt-5.6-luna",
+     "effort": "medium"
+    },
+    "answer_error": null,
+    "notifications": [
+     {
+      "settings": {
+       "model": "gpt-5.6-luna",
+       "effort": "medium",
+       "serviceTier": "default"
+      }
+     },
+     {
+      "turn_completed": "completed",
+      "error": null
+     }
+    ],
+    "thread_read": {
+     "model": "gpt-5.6-luna",
+     "reasoningEffort": "medium"
+    }
+   }
+  },
+  {
+   "turn_4_priority": {
+    "sent": {
+     "serviceTier": "priority"
+    },
+    "answer_error": null,
+    "notifications": [
+     {
+      "settings": {
+       "model": "gpt-5.6-luna",
+       "effort": "medium",
+       "serviceTier": "priority"
+      }
+     },
+     {
+      "turn_completed": "completed",
+      "error": null
+     }
+    ],
+    "thread_read": {
+     "model": "gpt-5.6-luna",
+     "reasoningEffort": "medium"
+    }
+   }
+  },
+  {
+   "turn_5_tier_null": {
+    "sent": {
+     "serviceTier": null
+    },
+    "answer_error": null,
+    "notifications": [
+     {
+      "settings": {
+       "model": "gpt-5.6-luna",
+       "effort": "medium",
+       "serviceTier": "default"
+      }
+     },
+     {
+      "turn_completed": "completed",
+      "error": null
+     }
+    ],
+    "thread_read": {
+     "model": "gpt-5.6-luna",
+     "reasoningEffort": "medium"
+    }
+   }
+  },
+  {
+   "turn_6_tier_default": {
+    "sent": {
+     "serviceTier": "default"
+    },
+    "answer_error": null,
+    "notifications": [
+     {
+      "turn_completed": "completed",
+      "error": null
+     }
+    ],
+    "thread_read": {
+     "model": "gpt-5.6-luna",
+     "reasoningEffort": "medium"
+    }
+   }
+  },
+  {
+   "turn_7_unsupported_effort": {
+    "sent": {
+     "effort": "ultra"
+    },
+    "answer_error": null,
+    "notifications": [
+     {
+      "settings": {
+       "model": "gpt-5.6-luna",
+       "effort": "ultra",
+       "serviceTier": "default"
+      }
+     },
+     {
+      "turn_completed": "completed",
+      "error": null
+     }
+    ],
+    "thread_read": {
+     "model": "gpt-5.6-luna",
+     "reasoningEffort": "ultra"
+    }
+   }
+  },
+  {
+   "turn_8_unknown_tier": {
+    "sent": {
+     "serviceTier": "flex"
+    },
+    "answer_error": null,
+    "notifications": [
+     {
+      "settings": {
+       "model": "gpt-5.6-luna",
+       "effort": "ultra",
+       "serviceTier": "flex"
+      }
+     },
+     {
+      "error": {
+       "error": {
+        "message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Unsupported service_tier: flex\"}}",
+        "codexErrorInfo": "other",
+        "additionalDetails": null,
+        "misalignment": null
+       },
+       "willRetry": false,
+       "threadId": "01a19d51-f473-7ce0-96e2-253792f4a61a",
+       "turnId": "01a19d52-21d5-7622-a811-20d4b0963e22"
+      }
+     },
+     {
+      "turn_completed": "failed",
+      "error": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Unsupported service_tier: flex\"}}"
+     }
+    ],
+    "thread_read": {
+     "model": "gpt-5.6-luna",
+     "reasoningEffort": "ultra"
+    }
+   }
+  },
+  {
+   "resume_without_settings": {
+    "model": "gpt-5.6-luna",
+    "reasoningEffort": "ultra",
+    "serviceTier": "flex"
+   },
+   "error": null
+  }
+ ]
+}

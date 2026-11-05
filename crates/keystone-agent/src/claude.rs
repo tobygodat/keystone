@@ -12,13 +12,13 @@
 
 use crate::driver::{ApprovalState, Command, Image, Outputs};
 use crate::item::{
-    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
+    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, Speed, TurnStatus,
     cap_output,
 };
 use crate::mcp::{Caller, Issuer};
 use crate::surface;
 use keystone_core::integrations::{Health, ServerStatus};
-use keystone_core::{ApprovalMode, LimitWindow, UsageLimit};
+use keystone_core::{ApprovalMode, LimitWindow, ModelChoice, UsageLimit};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
@@ -54,6 +54,11 @@ pub const STEER_NOT_YET: &str = "Claude Code cannot steer this turn yet. Send ag
 /// Keystone cannot read only leaves the account's usage as it was.
 const USAGE_REQUEST: &str = "keystone-usage";
 
+/// The speed values the Claude driver lists for a model with fast mode. They stand for
+/// Claude's `fastMode: false` and `fastMode: true`.
+pub const STANDARD_SPEED: &str = "standard";
+pub const FAST_SPEED: &str = "fast";
+
 /// Claude's `--permission-mode` for an approval mode, or `None` to pass none.
 /// `default` is the mode Claude 2.1.300 also calls `manual`.
 pub fn permission_mode(mode: ApprovalMode) -> Option<&'static str> {
@@ -73,6 +78,34 @@ pub fn args(mode: ApprovalMode) -> Vec<&'static str> {
         args.extend(["--permission-mode", mode]);
     }
     args
+}
+
+/// The launch arguments for a model choice: `--model`, `--effort`, and fast mode as a
+/// flag setting, which a process started for the SDK needs before it runs fast. A speed
+/// this driver does not list passes nothing.
+pub fn choice_args(choice: &ModelChoice) -> Vec<&str> {
+    let mut args = Vec::new();
+    if let Some(model) = &choice.model {
+        args.extend(["--model", model]);
+    }
+    if let Some(effort) = &choice.effort {
+        args.extend(["--effort", effort]);
+    }
+    match choice.speed.as_deref().and_then(fast_mode) {
+        Some(true) => args.extend(["--settings", r#"{"fastMode":true}"#]),
+        Some(false) => args.extend(["--settings", r#"{"fastMode":false}"#]),
+        None => {}
+    }
+    args
+}
+
+/// Claude's `fastMode` setting for a speed this driver lists.
+fn fast_mode(speed: &str) -> Option<bool> {
+    match speed {
+        FAST_SPEED => Some(true),
+        STANDARD_SPEED => Some(false),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -111,7 +144,7 @@ impl Launch {
         self,
         mode: ApprovalMode,
         baseline: Option<&'a str>,
-        model: Option<&'a str>,
+        choice: &'a ModelChoice,
         resume: Option<&'a str>,
         fork: Option<&'a keystone_core::ForkPoint>,
     ) -> Vec<&'a str> {
@@ -121,9 +154,7 @@ impl Launch {
                 if let Some(baseline) = baseline {
                     args.extend(["--permission-mode", baseline]);
                 }
-                if let Some(model) = model {
-                    args.extend(["--model", model]);
-                }
+                args.extend(choice_args(choice));
                 match (resume, fork) {
                     (Some(resume), _) => args.extend(["--resume", resume]),
                     (None, Some(fork)) => args.extend([
@@ -197,6 +228,12 @@ enum Request {
     SetMode {
         version: u64,
         target: &'static str,
+    },
+    /// A `set_model` or `apply_flag_settings` for the model choice with this version,
+    /// and the fields it changes.
+    Choose {
+        version: u64,
+        change: ModelChoice,
     },
     /// A repeated `initialize` asking whether the process is quiescent, for idle
     /// eviction ([`ClaudeDriver::check_quiescence`]).
@@ -297,6 +334,16 @@ pub struct ClaudeDriver {
     /// Whether the user allowed `ExitPlanMode` in the running turn. Claude's mode is
     /// then unknown until the turn ends, so steers wait for the next turn.
     leaving_plan: bool,
+    /// The model choice the process runs with: what it was launched with, then each
+    /// change Claude accepted.
+    applied: ModelChoice,
+    /// The model choice the user selected last, and its version, which counts every
+    /// change. Each change request records the version it was sent for.
+    selected: ModelChoice,
+    choice_version: u64,
+    /// Whether Claude was reported not running the fast mode it was asked for, since
+    /// the speed last changed.
+    fast_warned: bool,
     /// Whether `initialize` or a `set_permission_mode` failed or went unanswered too
     /// long. The process cannot be relied on, so it is replaced before anything else
     /// is written to it.
@@ -347,6 +394,13 @@ impl ClaudeDriver {
         out: &mut Outputs,
     ) -> Self {
         Self::launched(session, resume, seed, mode, Launch::Chat, out)
+    }
+
+    /// Says the process was launched with `choice` ([`choice_args`]), so it needs no
+    /// change before its first turn.
+    pub fn set_launch_choice(&mut self, choice: ModelChoice) {
+        self.applied = choice.clone();
+        self.selected = choice;
     }
 
     /// Says the process was started with `--fork-session`, for a failure to open.
@@ -403,6 +457,10 @@ impl ClaudeDriver {
             ui_calls: HashMap::new(),
             confirmed: None,
             changed: false,
+            applied: ModelChoice::default(),
+            selected: ModelChoice::default(),
+            choice_version: 0,
+            fast_warned: false,
             leaving_plan: false,
             untrusted: false,
             timed: Vec::new(),
@@ -625,6 +683,9 @@ impl ClaudeDriver {
             Some(Request::SetMode { .. }) => {
                 "Claude Code did not confirm the approval mode in time. Send again."
             }
+            Some(Request::Choose { .. }) => {
+                "Claude Code did not confirm the model change in time. Send again."
+            }
             Some(Request::Mcp { .. }) => {
                 "Claude Code did not configure Keystone tools in time. Send again."
             }
@@ -665,6 +726,14 @@ impl ClaudeDriver {
                 if mode != self.mode {
                     self.mode = mode;
                     self.version += 1;
+                }
+                self.pump(out);
+            }
+            // Checked before the first message of each turn is written.
+            Command::Choose { choice, .. } => {
+                if self.launch == Launch::Chat && choice != self.selected {
+                    self.selected = choice;
+                    self.choice_version += 1;
                 }
                 self.pump(out);
             }
@@ -1079,7 +1148,11 @@ impl ClaudeDriver {
     fn request(&mut self, request: Value, purpose: Request) -> String {
         self.next_request += 1;
         let id = format!("keystone-{}", self.next_request);
-        if let Request::Initialize | Request::Mcp { .. } | Request::SetMode { .. } = purpose {
+        if let Request::Initialize
+        | Request::Mcp { .. }
+        | Request::SetMode { .. }
+        | Request::Choose { .. } = purpose
+        {
             self.timed.push(id.clone());
         }
         let line =
@@ -1136,6 +1209,78 @@ impl ClaudeDriver {
             .any(|r| matches!(r, Request::SetMode { .. }))
     }
 
+    /// The fields of the selected choice Claude does not run yet. A `None` field is
+    /// never sent, and neither is a speed this driver does not list.
+    fn choice_change(&self) -> ModelChoice {
+        let differs = |selected: &Option<String>, applied: &Option<String>| {
+            selected
+                .clone()
+                .filter(|value| Some(value) != applied.as_ref())
+        };
+        ModelChoice {
+            model: differs(&self.selected.model, &self.applied.model),
+            effort: differs(&self.selected.effort, &self.applied.effort),
+            speed: differs(&self.selected.speed, &self.applied.speed)
+                .filter(|speed| fast_mode(speed).is_some()),
+        }
+    }
+
+    fn choice_requested(&self) -> bool {
+        self.requests
+            .values()
+            .any(|r| matches!(r, Request::Choose { .. }))
+    }
+
+    /// Whether a turn's first message may be written: Claude runs the selected choice
+    /// and no change is unanswered.
+    fn choice_applied(&self) -> bool {
+        !self.choice_requested() && self.choice_change() == ModelChoice::default()
+    }
+
+    /// Asks Claude to run the selected choice, when it differs and no change is
+    /// unanswered: `set_model` for the model, one `apply_flag_settings` for effort and
+    /// speed.
+    fn request_choice(&mut self, out: &mut Outputs) {
+        if !self.initialized || self.needs_restart() || self.choice_requested() {
+            return;
+        }
+        let change = self.choice_change();
+        let version = self.choice_version;
+        if let Some(model) = &change.model {
+            let line = self.request(
+                json!({"subtype": "set_model", "model": model}),
+                Request::Choose {
+                    version,
+                    change: ModelChoice {
+                        model: Some(model.clone()),
+                        ..ModelChoice::default()
+                    },
+                },
+            );
+            out.writes.push(line);
+        }
+        let mut settings = serde_json::Map::new();
+        if let Some(effort) = &change.effort {
+            settings.insert("effortLevel".into(), json!(effort));
+        }
+        if let Some(fast) = change.speed.as_deref().and_then(fast_mode) {
+            settings.insert("fastMode".into(), json!(fast));
+        }
+        if !settings.is_empty() {
+            let line = self.request(
+                json!({"subtype": "apply_flag_settings", "settings": settings}),
+                Request::Choose {
+                    version,
+                    change: ModelChoice {
+                        model: None,
+                        ..change
+                    },
+                },
+            );
+            out.writes.push(line);
+        }
+    }
+
     /// Writes the held messages if the selected mode is confirmed, or asks Claude for
     /// it when nothing else is pending. A process that needs replacing is left to the
     /// connection ([`ClaudeDriver::wants_restart`]).
@@ -1145,6 +1290,11 @@ impl ClaudeDriver {
         }
         if self.turn.as_ref().is_none_or(|turn| turn.held.is_empty()) || self.end_unseen {
             return;
+        }
+        // A choice change applies from a turn's start; steers go into the running turn.
+        let first = self.turn.as_ref().is_some_and(|turn| !turn.written);
+        if first {
+            self.request_choice(out);
         }
         if !self.mode_confirmed() {
             if self.initialized
@@ -1163,6 +1313,9 @@ impl ClaudeDriver {
                 self.changed = true;
                 out.writes.push(line);
             }
+            return;
+        }
+        if first && !self.choice_applied() {
             return;
         }
         let Some(turn) = &mut self.turn else { return };
@@ -1207,7 +1360,8 @@ impl ClaudeDriver {
     /// Writes one message: the turn's first, or a steer. Only [`ClaudeDriver::pump`]
     /// calls it, after checking the mode; it is checked again here.
     fn write(&mut self, message: QueuedMessage, out: &mut Outputs) {
-        if !self.mode_confirmed() {
+        let first = self.turn.as_ref().is_some_and(|turn| !turn.written);
+        if !self.mode_confirmed() || (first && !self.choice_applied()) {
             if let Some(turn) = &mut self.turn {
                 turn.held.push(message);
             }
@@ -1413,6 +1567,25 @@ impl ClaudeDriver {
         }
         if init.permission_mode.is_some() {
             self.confirmed = init.permission_mode;
+        }
+        // The account, not only the request, decides whether fast mode runs.
+        if self.applied.speed.as_deref() == Some(FAST_SPEED)
+            && !self.fast_warned
+            && let Some(state) = &init.fast_mode_state
+            && state != "on"
+            && state != "cooldown"
+        {
+            self.fast_warned = true;
+            let reason = init
+                .fast_mode_disabled_reason
+                .clone()
+                .unwrap_or_else(|| state.clone());
+            out.event(
+                self.session,
+                Event::Warning {
+                    message: format!("Claude Code did not turn on fast mode ({reason})."),
+                },
+            );
         }
         // Claude repeats `init` before each turn; report the ID and the model once.
         if self.conversation.as_deref() != Some(init.session_id.as_str()) {
@@ -2009,6 +2182,9 @@ impl ClaudeDriver {
             Request::SetMode { version, target } => {
                 return self.on_mode_set(response, version, target, out);
             }
+            Request::Choose { version, change } => {
+                return self.on_choice_set(response, version, change, out);
+            }
             Request::Quiesce => return self.on_quiescence(response),
             Request::Initialize if response.subtype != "error" => {
                 if self.launch == Launch::LayoutHelper {
@@ -2097,6 +2273,56 @@ impl ClaudeDriver {
                     .and_then(|r| r.mode)
                     .unwrap_or_else(|| target.to_owned()),
             );
+        }
+        self.pump(out);
+    }
+
+    /// Claude answered a `set_model` or `apply_flag_settings`. A success is what the
+    /// process runs now, whichever selection it was for, and `set_model`'s answer names
+    /// the model it resolved to. A refusal of the latest selection fails the waiting
+    /// turn unsent; an older one is followed by a new request.
+    fn on_choice_set(
+        &mut self,
+        response: ControlResult,
+        version: u64,
+        change: ModelChoice,
+        out: &mut Outputs,
+    ) {
+        if response.subtype == "error" {
+            if version == self.choice_version {
+                let error = response.error.unwrap_or_else(|| "no reason given".into());
+                return self.fail_held(
+                    &format!(
+                        "Claude Code refused the model change: {error}. Choose another model, effort or speed."
+                    ),
+                    out,
+                );
+            }
+            return self.pump(out);
+        }
+        if change.model.is_some() {
+            self.applied.model = change.model;
+            match response.response.and_then(|r| r.model) {
+                Some(model) => {
+                    if self.model.as_deref() != Some(model.as_str()) {
+                        self.model = Some(model.clone());
+                        out.event(self.session, Event::ModelReported { model });
+                    }
+                }
+                // The next `init` reports it.
+                None => {
+                    if self.model.take().is_some() {
+                        out.event(self.session, Event::ModelLost);
+                    }
+                }
+            }
+        }
+        if change.effort.is_some() {
+            self.applied.effort = change.effort;
+        }
+        if change.speed.is_some() {
+            self.applied.speed = change.speed;
+            self.fast_warned = false;
         }
         self.pump(out);
     }
@@ -2212,6 +2438,22 @@ pub fn initialize_catalog(line: &[u8]) -> Option<Catalog> {
         .into_iter()
         .filter(|m| m.value != "default")
         .map(|m| ModelInfo {
+            efforts: if m.supports_effort {
+                m.supported_effort_levels
+            } else {
+                Vec::new()
+            },
+            default_effort: None,
+            speeds: if m.supports_fast_mode {
+                [(STANDARD_SPEED, "Standard"), (FAST_SPEED, "Fast")]
+                    .map(|(value, label)| Speed {
+                        value: value.into(),
+                        label: label.into(),
+                    })
+                    .into()
+            } else {
+                Vec::new()
+            },
             model: m.value,
             label: m.display_name,
             resolved: m.resolved_model,
@@ -2324,6 +2566,8 @@ struct Init {
     #[serde(rename = "permissionMode")]
     permission_mode: Option<String>,
     model: Option<String>,
+    fast_mode_state: Option<String>,
+    fast_mode_disabled_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2714,6 +2958,7 @@ struct ModeSet {
     added: Option<Vec<String>>,
     errors: Option<Value>,
     mode: Option<String>,
+    model: Option<String>,
     current_permission_mode: Option<String>,
     commands: Option<Value>,
     claude_code_version: Option<Value>,
@@ -2727,6 +2972,12 @@ struct WireModel {
     value: String,
     display_name: String,
     resolved_model: Option<String>,
+    #[serde(default)]
+    supports_effort: bool,
+    #[serde(default)]
+    supported_effort_levels: Vec<String>,
+    #[serde(default)]
+    supports_fast_mode: bool,
 }
 
 fn helper_init_problem(init: &Value) -> Option<String> {
@@ -3517,7 +3768,8 @@ mod tests {
             thread: "source".into(),
             at: "entry-2".into(),
         };
-        let args = Launch::Chat.args(ApprovalMode::Provider, None, None, None, Some(&fork));
+        let none = ModelChoice::default();
+        let args = Launch::Chat.args(ApprovalMode::Provider, None, &none, None, Some(&fork));
         assert_eq!(
             args[ARGS.len()..],
             [
@@ -3532,13 +3784,13 @@ mod tests {
         let args = Launch::Chat.args(
             ApprovalMode::Provider,
             None,
-            None,
+            &none,
             Some("fork"),
             Some(&fork),
         );
         assert_eq!(args[ARGS.len()..], ["--resume", "fork"]);
         let helper =
-            Launch::LayoutHelper.args(ApprovalMode::Provider, None, None, None, Some(&fork));
+            Launch::LayoutHelper.args(ApprovalMode::Provider, None, &none, None, Some(&fork));
         assert!(!helper.contains(&"--fork-session"));
 
         let mut out = Outputs::default();

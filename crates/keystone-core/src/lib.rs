@@ -205,17 +205,22 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "is_default")]
     approval_overridden: bool,
     /// The provider-native model the user asked for, such as Claude's `opus` or Codex's
-    /// `gpt-6-astra`. `None` leaves the choice to the provider. Fixed once the session
-    /// has started.
+    /// `gpt-6-astra`. `None` leaves the choice to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// The effort level the user asked for, from the model's catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    /// The speed the user asked for, a catalog speed value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speed: Option<String>,
     /// Set just before the first message goes to the provider, so the provider and
-    /// model stay fixed even if nothing else of that send was saved.
+    /// account stay fixed even if nothing else of that send was saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_locked: Option<bool>,
     /// The provider account the session runs under. `None` is the provider's default
     /// account, which every session saved before accounts existed uses. Fixed, with
-    /// the provider and model, once the session has started.
+    /// the provider, once the session has started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account: Option<AccountId>,
     /// The session this one continues: a handoff carried its context here in a new
@@ -265,6 +270,19 @@ pub struct Session {
 pub struct ForkPoint {
     pub thread: String,
     pub at: String,
+}
+
+/// What a session asks its provider to run. Each field is the provider's own value, from
+/// its catalog; `None` sends nothing, so the provider's own configuration (or, after an
+/// earlier choice, what the conversation already has) decides.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// Claude's `value`, such as `opus`, or Codex's `model`.
+    pub model: Option<String>,
+    /// A catalog effort level, such as `high`.
+    pub effort: Option<String>,
+    /// A catalog speed value.
+    pub speed: Option<String>,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -345,6 +363,8 @@ impl Session {
             approval_mode: ApprovalMode::default(),
             approval_overridden: false,
             model: None,
+            effort: None,
+            speed: None,
             model_locked: Some(false),
             account: None,
             handed_off_from: None,
@@ -407,6 +427,29 @@ impl Session {
         self.model.as_deref()
     }
 
+    pub fn effort(&self) -> Option<&str> {
+        self.effort.as_deref()
+    }
+
+    pub fn speed(&self) -> Option<&str> {
+        self.speed.as_deref()
+    }
+
+    /// The model, effort and speed the session asks its provider for.
+    pub fn choice(&self) -> ModelChoice {
+        ModelChoice {
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            speed: self.speed.clone(),
+        }
+    }
+
+    fn clear_choice(&mut self) {
+        self.model = None;
+        self.effort = None;
+        self.speed = None;
+    }
+
     pub fn model_locked(&self) -> Option<bool> {
         self.model_locked
     }
@@ -449,7 +492,7 @@ impl Session {
         self.second_opinion_on
     }
 
-    /// Whether the session has sent anything to its provider. The provider and model
+    /// Whether the session has sent anything to its provider. The provider and account
     /// are fixed from then on. A session saved before the lock existed counts as sent.
     pub fn started(&self) -> bool {
         self.model_locked.unwrap_or(true)
@@ -1081,7 +1124,7 @@ impl Store {
 
     /// Forks `source` into a new session selected in `window`, in one save, saving
     /// `show` with it as [`Store::create_showing`] does. The fork keeps `source`'s
-    /// provider, account, model, approval mode and execution context, and its title
+    /// provider, account, model choice, approval mode and execution context, and its title
     /// with "(fork)" after it, or "(handoff fork)" without `point`. Like a handoff, it
     /// works in the same folder or worktree and keeps the branch's pull request. With
     /// `point`, the provider forks its conversation there on the first message, and the session counts as started, since the conversation
@@ -1118,6 +1161,8 @@ impl Store {
         // A native fork carries any override the provider kept on the conversation.
         fork.approval_overridden = point.is_some() && from.approval_overridden;
         fork.model = from.model.clone();
+        fork.effort = from.effort.clone();
+        fork.speed = from.speed.clone();
         fork.account = from.account.clone();
         fork.model_locked = Some(point.is_some());
         fork.pull_request = from.pull_request.clone();
@@ -1418,13 +1463,18 @@ impl Store {
         self.update_session(id, |session| session.provider_thread = Some(thread))
     }
 
-    /// Chooses the model the session's provider is asked for, or `None` for the
-    /// provider's default. Refused once the session has started.
-    pub fn set_model(&mut self, id: u64, model: Option<String>) -> StoreResult<Applied<()>> {
-        self.update_unstarted(id, |session| session.model = model)
+    /// Chooses the model, effort and speed the session's provider is asked for; a `None`
+    /// field leaves it to the provider. Allowed after the session started too: it applies
+    /// from the provider's next turn.
+    pub fn set_choice(&mut self, id: u64, choice: ModelChoice) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            session.model = choice.model;
+            session.effort = choice.effort;
+            session.speed = choice.speed;
+        })
     }
 
-    /// Changes the session's provider. The model and account return to the provider's
+    /// Changes the session's provider. The model choice and account return to the provider's
     /// defaults, and a placeholder title names the new provider. Refused once the
     /// session has started.
     pub fn set_provider(&mut self, id: u64, provider: Provider) -> StoreResult<Applied<()>> {
@@ -1433,7 +1483,7 @@ impl Store {
                 session.account = None;
             }
             session.provider = provider;
-            session.model = None;
+            session.clear_choice();
             if session.title_source == TitleSource::Placeholder {
                 session.title = format!("New {provider} session");
             }
@@ -1442,8 +1492,8 @@ impl Store {
 
     /// Chooses the account the session runs under: one of its provider's accounts, or
     /// `None` (or [`AccountId::DEFAULT`]) for the provider's default. A different
-    /// account returns the model to the provider's default, since accounts may offer
-    /// different models. Refused once the session has started, so a conversation
+    /// account returns the model choice to the provider's default, since accounts may
+    /// offer different models. Refused once the session has started, so a conversation
     /// never moves between accounts.
     pub fn set_account(&mut self, id: u64, account: Option<AccountId>) -> StoreResult<Applied<()>> {
         let provider = self.session_provider(id)?;
@@ -1466,11 +1516,11 @@ impl Store {
                 if session.title_source == TitleSource::Placeholder {
                     session.title = format!("New {provider} session");
                 }
-                session.model = None;
+                session.clear_choice();
             }
             if session.account != account {
                 session.account = account;
-                session.model = None;
+                session.clear_choice();
             }
         })
     }
@@ -1717,8 +1767,9 @@ impl Store {
         self.commit(next, self.next_id)
     }
 
-    /// Fixes the session's provider, account and model, for just before its first
-    /// message is sent. A send whose later saves fail still leaves them fixed.
+    /// Fixes the session's provider and account, for just before its first message is
+    /// sent. A send whose later saves fail still leaves them fixed. The model choice can
+    /// still change.
     pub fn lock_model(&mut self, id: u64) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.model_locked = Some(true))
     }
@@ -1833,10 +1884,9 @@ impl Store {
             .ok_or_else(|| invalid(format!("unknown session ID {id}")))?
             .started();
         if started {
-            return Err(invalid(
-                "the provider, account and model are fixed once a session has sent",
-            )
-            .into());
+            return Err(
+                invalid("the provider and account are fixed once a session has sent").into(),
+            );
         }
         self.update_session(id, change)
     }
@@ -2002,6 +2052,14 @@ mod tests {
 
     fn working_directory() -> WorkingDirectory {
         WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    fn choice(model: Option<&str>, effort: Option<&str>, speed: Option<&str>) -> ModelChoice {
+        ModelChoice {
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+            speed: speed.map(str::to_owned),
+        }
     }
 
     #[test]
@@ -2775,7 +2833,7 @@ mod tests {
     }
 
     #[test]
-    fn a_state_file_without_a_model_lock_loads_as_sent_and_keeps_no_model() {
+    fn a_state_file_without_a_model_lock_loads_as_sent_and_keeps_no_choice() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         std::fs::write(
@@ -2785,10 +2843,12 @@ mod tests {
         .unwrap();
         let mut store = Store::open(&path).unwrap();
         let session = &store.workspace().sessions()[0];
-        assert_eq!((session.model(), session.model_locked()), (None, None));
-        // Nothing says this session never launched, so its provider and model stay.
+        assert_eq!(
+            (session.choice(), session.model_locked()),
+            (ModelChoice::default(), None)
+        );
+        // Nothing says this session never launched, so its provider stays.
         assert!(session.started());
-        assert!(store.set_model(1, Some("fake-fast".into())).is_err());
         assert!(store.set_provider(1, Provider::Claude).is_err());
         store.set_draft(1, "edited".into()).unwrap();
         let saved = json(&path).to_string();
@@ -2798,7 +2858,7 @@ mod tests {
     }
 
     #[test]
-    fn the_model_and_provider_are_fixed_once_the_session_is_locked() {
+    fn the_provider_is_fixed_once_the_session_is_locked_and_the_choice_is_not() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         let mut store = Store::open(&path).unwrap();
@@ -2810,25 +2870,29 @@ mod tests {
         assert_eq!(session.model_locked(), Some(false));
         let saved = json(&path).to_string();
         assert!(saved.contains(r#""model_locked":false"#), "{saved}");
-        store.set_model(1, Some("fake-fast".into())).unwrap();
+        store
+            .set_choice(1, choice(Some("fake-fast"), None, None))
+            .unwrap();
 
         store.lock_model(1).unwrap();
         let session = &store.workspace().sessions()[0];
         assert!(session.started() && session.last_turn().is_none());
         let writes = store.writes();
-        assert!(store.set_model(1, None).is_err());
         assert!(store.set_provider(1, Provider::Claude).is_err());
-        assert!(store.set_model(9, None).is_err());
+        assert!(store.set_account(1, None).is_err());
+        assert!(store.set_choice(9, ModelChoice::default()).is_err());
         assert_eq!(store.writes(), writes);
+        let later = choice(Some("fake-slow"), Some("high"), Some("fast"));
+        store.set_choice(1, later.clone()).unwrap();
         let reopened = Store::open(&path).unwrap();
         let session = &reopened.workspace().sessions()[0];
-        assert_eq!(session.model(), Some("fake-fast"));
+        assert_eq!(session.choice(), later);
         assert_eq!(session.provider(), Provider::Codex);
         assert!(session.started());
     }
 
     #[test]
-    fn changing_the_provider_resets_the_model_and_a_placeholder_title_only() {
+    fn changing_the_provider_resets_the_choice_and_a_placeholder_title_only() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::open(directory.path().join("state.json")).unwrap();
         store
@@ -2837,11 +2901,13 @@ mod tests {
         store
             .create(Provider::Codex, &working_directory(), 1_000)
             .unwrap();
-        store.set_model(1, Some("fake-fast".into())).unwrap();
+        store
+            .set_choice(1, choice(Some("fake-fast"), Some("low"), Some("fast")))
+            .unwrap();
         store.set_provider(1, Provider::Claude).unwrap();
         let session = &store.workspace().sessions()[0];
         assert_eq!(session.provider(), Provider::Claude);
-        assert_eq!(session.model(), None);
+        assert_eq!(session.choice(), ModelChoice::default());
         assert_eq!(session.title(), "New Claude session");
 
         store.rename(2, "Release notes").unwrap();
@@ -3978,7 +4044,8 @@ mod tests {
         store
             .set_provider_account(source, Provider::Claude, Some(work.clone()))
             .unwrap();
-        store.set_model(source, Some("opus".into())).unwrap();
+        let chosen = choice(Some("opus"), Some("max"), Some("fast"));
+        store.set_choice(source, chosen.clone()).unwrap();
         store
             .set_approval_mode(source, ApprovalMode::ReadOnly)
             .unwrap();
@@ -4020,7 +4087,7 @@ mod tests {
         assert_eq!(new.fork_point(), Some(&point));
         assert_eq!(new.provider(), Provider::Claude);
         assert_eq!(new.account(), Some(&work));
-        assert_eq!(new.model(), Some("opus"));
+        assert_eq!(new.choice(), chosen);
         assert_eq!(new.approval_mode(), ApprovalMode::ReadOnly);
         assert!(new.approval_overridden());
         assert!(new.started());
@@ -4028,7 +4095,7 @@ mod tests {
         assert_eq!(new.draft(), "");
         assert_eq!(new.title(), "Fix the login bug (fork)");
         assert_eq!(new.context(), from.context());
-        assert!(store.set_model(fork, None).is_err());
+        assert!(store.set_provider(fork, Provider::Codex).is_err());
     }
 
     #[test]

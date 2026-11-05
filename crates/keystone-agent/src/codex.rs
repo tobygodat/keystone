@@ -9,13 +9,13 @@
 use crate::commands::{self, Commands};
 use crate::driver::{ApprovalState, Command, Image, Outputs};
 use crate::item::{
-    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, TurnStatus,
+    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, Speed, TurnStatus,
     cap_output,
 };
 use crate::mcp::{Caller, Issuer};
 use crate::surface;
 use keystone_core::integrations::{Health, ServerStatus};
-use keystone_core::{ApprovalMode, ForkPoint, LimitWindow};
+use keystone_core::{ApprovalMode, ForkPoint, LimitWindow, ModelChoice};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::{Value, json};
@@ -23,6 +23,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 const CATALOG_PAGES: u32 = 20;
+
+/// Codex's standard service tier, the first speed of a model that lists others.
+pub const STANDARD_TIER: &str = "default";
 
 /// The ID of the `account/rateLimits/read` an app-server is asked once it is
 /// initialized. It is outside the numbered requests, so no other request's ID moves,
@@ -202,8 +205,11 @@ struct Session {
     /// Every `show_ui` call ID the running turn made, answered or not.
     ui_seen: HashSet<String>,
     cwd: String,
-    /// The model the thread is opened with. `None` leaves the choice to Codex.
-    model: Option<String>,
+    /// The model, effort and speed for new turns. Codex keeps what a turn sets for the
+    /// thread's later turns, so a `None` field is left out, never sent as null.
+    choice: ModelChoice,
+    /// The model last reported for the thread.
+    reported: Option<String>,
     /// The policy for new turns. `None` uses the user's settings.
     policy: Option<Policy>,
     mode: ApprovalMode,
@@ -414,12 +420,10 @@ impl CodexDriver {
                 session,
                 cwd,
                 resume,
-                model,
             } => {
                 let state = self.sessions.entry(session).or_default();
                 state.opening = true;
                 state.cwd = cwd.clone();
-                state.model = model;
                 let fork = state.fork.take().filter(|_| resume.is_none());
                 // A resumed or forked thread reports its own override, not the user's
                 // settings, so read those from a fresh thread before the next turn needs
@@ -444,6 +448,9 @@ impl CodexDriver {
                 if !open {
                     state.overridden |= overridden;
                 }
+            }
+            Command::Choose { session, choice } => {
+                self.sessions.entry(session).or_default().choice = choice;
             }
             Command::Send {
                 session,
@@ -731,7 +738,11 @@ impl CodexDriver {
         let forking = fork.is_some();
         let resume = resume.is_some() || forking;
         // A resumed thread keeps the tools it started with.
-        if let Some(model) = self.sessions.get(&session).and_then(|s| s.model.clone()) {
+        if let Some(model) = self
+            .sessions
+            .get(&session)
+            .and_then(|s| s.choice.model.clone())
+        {
             params["model"] = json!(model);
         }
         let injected = if let Some(config) = self.mcp.remove(&session) {
@@ -850,6 +861,26 @@ impl CodexDriver {
                                     .into(),
                         },
                     );
+                }
+                for (field, value) in [
+                    ("model", &state.choice.model),
+                    ("effort", &state.choice.effort),
+                    ("serviceTier", &state.choice.speed),
+                ] {
+                    if let Some(value) = value {
+                        params[field] = json!(value);
+                    }
+                }
+                // The model reported so far no longer runs; the settings Codex sends
+                // for this turn report the new one.
+                if let Some(model) = &state.choice.model
+                    && state
+                        .reported
+                        .as_ref()
+                        .is_some_and(|reported| reported != model)
+                {
+                    state.reported = None;
+                    out.event(session, Event::ModelLost);
                 }
                 // Starting, so further messages wait for the ID instead of starting a
                 // parallel turn.
@@ -1058,8 +1089,12 @@ impl CodexDriver {
                 }
                 match result.map(|r| (r.thread.id, r.model)) {
                     Some((thread, model)) => {
+                        self.sessions.entry(session).or_default().reported = model.clone();
                         self.thread_ready(session, thread, out);
-                        if let Some(model) = model {
+                        // A turn started meanwhile under another model lost it.
+                        if let Some(model) = model
+                            && self.sessions[&session].reported.as_ref() == Some(&model)
+                        {
                             out.event(session, Event::ModelReported { model });
                         }
                     }
@@ -1069,6 +1104,7 @@ impl CodexDriver {
                         let state = self.sessions.entry(session).or_default();
                         state.opening = false;
                         state.waiting.clear();
+                        state.reported = None;
                         let reason = if injected {
                             "MCP-enabled thread initialization failed".into()
                         } else {
@@ -1456,6 +1492,20 @@ impl CodexDriver {
                     out.event(0, Event::Usage(windows));
                 }
             }
+            // Sent when a turn changes the thread's model, effort or speed.
+            "thread/settings/updated" => {
+                let Some(note) = params::<SettingsNote>(line) else {
+                    return self.unknown += 1;
+                };
+                if let Some(session) = self.session_for(&note.thread_id)
+                    && let Some(model) = note.thread_settings.model
+                    && let Some(state) = self.sessions.get_mut(&session)
+                    && state.reported.as_ref() != Some(&model)
+                {
+                    state.reported = Some(model.clone());
+                    out.event(session, Event::ModelReported { model });
+                }
+            }
             "thread/tokenUsage/updated" => {
                 let Some(note) = params::<TokenUsageNote>(line) else {
                     return self.unknown += 1;
@@ -1718,6 +1768,23 @@ struct WireModel {
     display_name: String,
     #[serde(default)]
     hidden: bool,
+    #[serde(default)]
+    supported_reasoning_efforts: Vec<WireEffort>,
+    default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    service_tiers: Vec<WireTier>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireEffort {
+    reasoning_effort: String,
+}
+
+#[derive(Deserialize)]
+struct WireTier {
+    id: String,
+    name: String,
 }
 
 impl ModelList {
@@ -1728,6 +1795,26 @@ impl ModelList {
             model: m.model.clone(),
             label: m.display_name.clone(),
             resolved: None,
+            efforts: m
+                .supported_reasoning_efforts
+                .iter()
+                .map(|e| e.reasoning_effort.clone())
+                .collect(),
+            default_effort: m.default_reasoning_effort.clone(),
+            // `default` is Codex's standard tier, which it lists apart from the others.
+            speeds: if m.service_tiers.is_empty() {
+                Vec::new()
+            } else {
+                std::iter::once(Speed {
+                    value: STANDARD_TIER.into(),
+                    label: "Standard".into(),
+                })
+                .chain(m.service_tiers.iter().map(|tier| Speed {
+                    value: tier.id.clone(),
+                    label: tier.name.clone(),
+                }))
+                .collect()
+            },
         })
     }
 }
@@ -1750,6 +1837,18 @@ struct McpStartupNote {
     name: String,
     status: String,
     failure_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsNote {
+    thread_id: String,
+    thread_settings: ThreadSettings,
+}
+
+#[derive(Deserialize)]
+struct ThreadSettings {
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]

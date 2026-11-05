@@ -466,7 +466,10 @@ impl QuickComposer {
             account: self.account.as_ref(),
             accounts: state.store().workspace().accounts(),
             model: self.model.as_deref(),
+            effort: None,
+            speed: None,
             reported_model: None,
+            default_model: None,
             started: false,
             choices,
         };
@@ -491,6 +494,7 @@ impl QuickComposer {
                     this.choose_model(*provider, model.clone(), cx)
                 },
             )),
+            choose_options: None,
             retry: Rc::new(cx.listener(|this, _: &Provider, _, cx| {
                 if let Some(key) = this.catalog_key() {
                     let asker = ASKERS.fetch_sub(1, Ordering::Relaxed);

@@ -9,6 +9,7 @@ use crate::files::ToggleFiles;
 use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
 use crate::import::ImportSessions;
+use crate::model_selector::{NextEffort, NextModel, ToggleFastMode};
 use crate::notes::ToggleNotes;
 use crate::projects::{ChangeProjectColor, OpenProject, SwitchProject};
 use crate::prompts::InsertPrompt;
@@ -145,6 +146,27 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-s"],
         context: Some(APP),
         action: || Box::new(CaptureScreenshot),
+    },
+    Command {
+        id: "next-effort",
+        label: "Next effort level",
+        keys: &["secondary-alt-e"],
+        context: Some(APP),
+        action: || Box::new(NextEffort),
+    },
+    Command {
+        id: "toggle-fast-mode",
+        label: "Toggle fast mode",
+        keys: &["secondary-alt-f"],
+        context: Some(APP),
+        action: || Box::new(ToggleFastMode),
+    },
+    Command {
+        id: "next-model",
+        label: "Next model",
+        keys: &[],
+        context: Some(APP),
+        action: || Box::new(NextModel),
     },
     Command {
         id: "rename-session",
@@ -637,15 +659,16 @@ mod tests {
         let mut ids = HashSet::new();
         let mut actions = HashSet::new();
         for command in COMMANDS {
-            assert!(!command.keys.is_empty(), "{} has no key", command.id);
             assert!(ids.insert(command.id), "{} is listed twice", command.id);
             let name = (command.action)().name();
             assert!(actions.insert(name), "{name} backs two rows");
-            assert!(
+            // A palette-only command has no key.
+            assert_eq!(
                 bindings
                     .iter()
                     .any(|binding| binding.action().name() == name),
-                "{name} has no binding"
+                !command.keys.is_empty(),
+                "{name}'s binding"
             );
         }
     }
@@ -670,10 +693,13 @@ mod tests {
         let bindings = bindings();
         for (command, item) in COMMANDS.iter().zip(palette_items()) {
             let name = (command.action)().name();
-            let binding = bindings
+            let Some(binding) = bindings
                 .iter()
                 .find(|binding| binding.action().name() == name)
-                .unwrap();
+            else {
+                assert_eq!(item.kbd, None, "{name}");
+                continue;
+            };
             let keys = binding
                 .keystrokes()
                 .iter()

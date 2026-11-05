@@ -5,6 +5,7 @@
 use keystone_agent::{
     ApprovalState, Catalog, ClaudeConnection, CodexConnection, Event, LaunchProfile,
 };
+use keystone_core::ModelChoice;
 use keystone_core::{ApprovalMode, Provider};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -134,7 +135,14 @@ fn claude_accounts_get_their_own_config_dir_on_every_process_and_never_another()
     let cwd = root.to_str().unwrap();
     for (connection, session) in [(&on_work, 1), (&on_personal, 2), (&on_default, 3)] {
         connection
-            .send(session, cwd, None, None, PROVIDER, "hello".into())
+            .send(
+                session,
+                cwd,
+                None,
+                &ModelChoice::default(),
+                PROVIDER,
+                "hello".into(),
+            )
             .unwrap();
     }
     let done = |_: u64, event: &Event| matches!(event, Event::TurnCompleted { .. });
@@ -158,7 +166,7 @@ fn claude_accounts_get_their_own_config_dir_on_every_process_and_never_another()
     };
     on_work.set_approval(1, full);
     on_work
-        .send(1, cwd, None, None, full, "again".into())
+        .send(1, cwd, None, &ModelChoice::default(), full, "again".into())
         .unwrap();
     until(|| on_work.drain(), &rx_work, done);
     assert_ne!(on_work.pid(1).unwrap(), pids[0]);
@@ -175,7 +183,14 @@ fn claude_accounts_get_their_own_config_dir_on_every_process_and_never_another()
     };
     let thread = thread_of(&work_events);
     resumed
-        .send(1, cwd, Some(&thread), None, restored, "resumed".into())
+        .send(
+            1,
+            cwd,
+            Some(&thread),
+            &ModelChoice::default(),
+            restored,
+            "resumed".into(),
+        )
         .unwrap();
     until(|| resumed.drain(), &rx_resumed, done);
 
@@ -245,9 +260,30 @@ fn each_codex_account_runs_its_own_app_server_on_its_own_home() {
     let done = |session: u64| {
         move |s: u64, event: &Event| s == session && matches!(event, Event::TurnCompleted { .. })
     };
-    on_work.send(10, cwd, None, None, PROVIDER, "one".into());
-    on_work.send(11, cwd, None, None, PROVIDER, "two".into());
-    on_default.send(12, cwd, None, None, PROVIDER, "three".into());
+    on_work.send(
+        10,
+        cwd,
+        None,
+        &ModelChoice::default(),
+        PROVIDER,
+        "one".into(),
+    );
+    on_work.send(
+        11,
+        cwd,
+        None,
+        &ModelChoice::default(),
+        PROVIDER,
+        "two".into(),
+    );
+    on_default.send(
+        12,
+        cwd,
+        None,
+        &ModelChoice::default(),
+        PROVIDER,
+        "three".into(),
+    );
     let work_events = until(|| on_work.drain(), &rx_work, done(10));
     if !work_events
         .iter()
@@ -271,7 +307,14 @@ fn each_codex_account_runs_its_own_app_server_on_its_own_home() {
         LaunchProfile::account(Provider::Codex, "Gone", &missing),
         wake_missing,
     );
-    on_missing.send(13, cwd, None, None, PROVIDER, "four".into());
+    on_missing.send(
+        13,
+        cwd,
+        None,
+        &ModelChoice::default(),
+        PROVIDER,
+        "four".into(),
+    );
     let failed = until(
         || on_missing.drain(),
         &rx_missing,

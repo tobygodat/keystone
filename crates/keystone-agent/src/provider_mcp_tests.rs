@@ -45,7 +45,6 @@ fn codex_open(driver: &mut CodexDriver, resume: Option<&str>, out: &mut Outputs)
             session: 7,
             cwd: "/synthetic".into(),
             resume: resume.map(str::to_owned),
-            model: None,
         },
         out,
     );
@@ -622,7 +621,6 @@ fn replacement_keeps_running_authorization_without_duplicate_turn_start() {
             7,
             Path::new("/"),
             None,
-            None,
             true,
             move |driver, pending| {
                 driver.carry(messages, pending);
@@ -795,7 +793,6 @@ fn live(driver: ClaudeDriver, lease: Lease) -> Live {
         generation: 1,
         cwd: PathBuf::from("/synthetic"),
         resume: None,
-        model: None,
         replacing: false,
         seen: 0,
         epoch: 0,
@@ -838,7 +835,7 @@ fn a_refused_queued_message_no_longer_keeps_the_process_busy() {
         session: 99,
         generation: 0,
     };
-    let job = Job::Message(PathBuf::from("/synthetic"), None, None, Some(caller));
+    let job = Job::Message(PathBuf::from("/synthetic"), None, Some(caller));
     connection
         .starter
         .run(7, job, |_, _| panic!("the refused message was dispatched"));
@@ -1059,7 +1056,7 @@ fn claude_launch_rechecks_authorization_before_starting_any_process() {
     drop(credentials);
     connection.starter.run(
         7,
-        Job::Message(PathBuf::from("/synthetic"), None, None, Some(identity)),
+        Job::Message(PathBuf::from("/synthetic"), None, Some(identity)),
         |_, _| panic!("unauthorized launch dispatched"),
     );
     let shared = connection.starter.shared.lock().unwrap();

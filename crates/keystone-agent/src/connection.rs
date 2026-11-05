@@ -14,6 +14,7 @@ use crate::version::{self, Provider};
 use crate::worker::Worker;
 use keystone_core::ApprovalMode;
 use keystone_core::ForkPoint;
+use keystone_core::ModelChoice;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
@@ -62,7 +63,7 @@ pub trait Connection {
         _session: u64,
         _cwd: &str,
         _resume: Option<&str>,
-        _model: Option<&str>,
+        _choice: &ModelChoice,
         _approval: ApprovalState,
         _text: String,
         _caller: Caller,
@@ -82,10 +83,10 @@ pub trait Connection {
     }
     /// Opens the session's conversation if needed, then sends `text`: a new turn, or a
     /// steer for the running one. `resume` is the saved provider conversation ID, and
-    /// `model` the provider-native model the session asked for, applied when the
-    /// conversation opens. `approval` is the session's approval state, which a turn
-    /// this message starts runs under unless [`Connection::set_approval`] changes it
-    /// first. `images` follow the text, each in the provider's native form. Returns the
+    /// `choice` the model, effort and speed the session asked for, which a turn this
+    /// message starts runs with unless [`Connection::set_choice`] changes it first.
+    /// `approval` is the session's approval state, which a turn this message starts
+    /// runs under unless [`Connection::set_approval`] changes it first. `images` follow the text, each in the provider's native form. Returns the
     /// reason, without sending, when the provider cannot take a steer now, so the caller
     /// can keep the text.
     #[allow(clippy::too_many_arguments)]
@@ -94,7 +95,7 @@ pub trait Connection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
         images: Vec<Image>,
@@ -107,6 +108,11 @@ pub trait Connection {
     /// provider starts for the session, including one for a message already sent and
     /// still waiting, and survives a provider restart.
     fn set_approval(&self, session: u64, approval: ApprovalState);
+    /// Changes the session's model, effort and speed at once. Like an approval change,
+    /// it applies to the next turn the provider starts for the session, including one
+    /// for a message already sent and still waiting, and survives a provider restart.
+    /// A running turn keeps what it started with.
+    fn set_choice(&self, session: u64, choice: ModelChoice);
     /// Has the session's conversation, when first opened with no conversation of its
     /// own, fork `point`'s instead of starting a new one. Once the provider reports
     /// the fork's own conversation ([`Event::ThreadReady`]), that one is resumed.
@@ -173,6 +179,7 @@ fn command_session(command: &Command) -> u64 {
         | Command::Interrupt { session }
         | Command::Answer { session, .. }
         | Command::Configure { session, .. }
+        | Command::Choose { session, .. }
         | Command::Act { session, .. } => *session,
     }
 }
@@ -225,6 +232,8 @@ struct Shared {
     /// Each session's approval state, kept across process restarts and given to every
     /// driver before it handles the session's messages.
     approvals: HashMap<u64, ApprovalState>,
+    /// Each session's model choice, given to every driver like its approval state.
+    choices: HashMap<u64, ModelChoice>,
     /// Where a session with no thread yet forks another one; see
     /// [`Connection::set_fork`].
     forks: HashMap<u64, ForkPoint>,
@@ -259,6 +268,15 @@ impl Shared {
                 Command::Configure { session, approval },
                 &mut Outputs::default(),
             );
+        }
+    }
+
+    /// Records the session's model choice and gives it to the driver, under the lock
+    /// its turns start under, as [`Shared::set_approval`] does.
+    fn set_choice(&mut self, session: u64, choice: ModelChoice) {
+        self.choices.insert(session, choice.clone());
+        if let Some(driver) = &mut self.driver {
+            driver.command(Command::Choose { session, choice }, &mut Outputs::default());
         }
     }
 }
@@ -325,7 +343,7 @@ impl CodexConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
     ) {
@@ -333,7 +351,7 @@ impl CodexConnection {
             session,
             cwd,
             resume,
-            model,
+            choice,
             approval,
             text,
             Vec::new(),
@@ -347,7 +365,7 @@ impl CodexConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
         images: Vec<Image>,
@@ -367,11 +385,11 @@ impl CodexConnection {
                 }
             }
             shared.set_approval(session, approval);
+            shared.set_choice(session, choice.clone());
             *shared.queued.entry(session).or_default() += 1;
         }
         let cwd = cwd.to_owned();
         let resume = resume.map(str::to_owned);
-        let model = model.map(str::to_owned);
         let pending = self.shared.clone();
         self.with_driver(
             session,
@@ -399,6 +417,8 @@ impl CodexConnection {
                     return;
                 }
                 driver.command(Command::Configure { session, approval }, out);
+                let choice = shared.choices.get(&session).cloned().unwrap_or_default();
+                driver.command(Command::Choose { session, choice }, out);
                 if !driver.is_open(session) {
                     if let Some(issuer) = &shared.mcp {
                         match issuer.issue(session) {
@@ -430,7 +450,6 @@ impl CodexConnection {
                             session,
                             cwd,
                             resume,
-                            model,
                         },
                         out,
                     );
@@ -533,6 +552,11 @@ impl CodexConnection {
     /// Changes the session's approval state at once; see [`Connection::set_approval`].
     pub fn set_approval(&self, session: u64, approval: ApprovalState) {
         self.shared.lock().unwrap().set_approval(session, approval);
+    }
+
+    /// Changes the session's model choice at once; see [`Connection::set_choice`].
+    pub fn set_choice(&self, session: u64, choice: ModelChoice) {
+        self.shared.lock().unwrap().set_choice(session, choice);
     }
 
     /// The approval state the connection holds for the session, if it was given one.
@@ -784,7 +808,7 @@ impl Connection for CodexConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
         caller: Caller,
@@ -793,7 +817,7 @@ impl Connection for CodexConnection {
             session,
             cwd,
             resume,
-            model,
+            choice,
             approval,
             text,
             Vec::new(),
@@ -866,12 +890,12 @@ impl Connection for CodexConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
         images: Vec<Image>,
     ) -> Result<(), &'static str> {
-        let _ = self.send_inner(session, cwd, resume, model, approval, text, images, None);
+        let _ = self.send_inner(session, cwd, resume, choice, approval, text, images, None);
         Ok(())
     }
 
@@ -884,6 +908,10 @@ impl Connection for CodexConnection {
 
     fn set_approval(&self, session: u64, approval: ApprovalState) {
         CodexConnection::set_approval(self, session, approval);
+    }
+
+    fn set_choice(&self, session: u64, choice: ModelChoice) {
+        CodexConnection::set_choice(self, session, choice);
     }
 
     fn run_in_order(&self, _session: u64, job: Box<dyn FnOnce() + Send>) {
@@ -1013,8 +1041,9 @@ pub struct ClaudeConnection {
 
 type Workers = Arc<Mutex<HashMap<u64, Worker>>>;
 
-/// How long Claude may take to answer `initialize` or `set_permission_mode` before
-/// the messages waiting for it fail and its process is replaced.
+/// How long Claude may take to answer `initialize`, `set_permission_mode`, or a model,
+/// effort or speed change before the messages waiting for it fail and its process is
+/// replaced.
 const MODE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long Claude may take to report the user's own permission mode.
@@ -1039,6 +1068,9 @@ struct ClaudeShared {
     /// Each session's approval state. A process is launched in its mode, and replaced
     /// before a turn that its mode cannot run.
     approvals: HashMap<u64, ApprovalState>,
+    /// Each session's model choice. A process is launched with it and asked to change
+    /// before a turn when it changes.
+    choices: HashMap<u64, ModelChoice>,
     /// Processes being started, outside the lock.
     starting: usize,
     /// Incremented per process, so a late exit from an old one is ignored.
@@ -1106,7 +1138,6 @@ struct Live {
     /// What the process was started with, for a replacement.
     cwd: PathBuf,
     resume: Option<String>,
-    model: Option<String>,
     /// Whether the worker has a job queued to replace the process.
     replacing: bool,
     /// The driver's activity count last seen, and the epoch that counts its changes
@@ -1187,11 +1218,22 @@ fn configure(shared: &mut ClaudeShared, session: u64, approval: ApprovalState) -
     out
 }
 
+/// Records the session's model choice and gives it to its driver, which asks Claude
+/// for it before the next turn. Returns what the driver wrote.
+fn choose(shared: &mut ClaudeShared, session: u64, choice: ModelChoice) -> Outputs {
+    shared.choices.insert(session, choice.clone());
+    let mut out = Outputs::default();
+    if let Some(live) = shared.live.get_mut(&session) {
+        live.driver
+            .command(Command::Choose { session, choice }, &mut out);
+    }
+    out
+}
+
 /// What a job on a session's worker is for.
 enum Job {
-    /// A message, with the directory, saved conversation, and model to start a process
-    /// with.
-    Message(PathBuf, Option<String>, Option<String>, Option<Caller>),
+    /// A message, with the directory and saved conversation to start a process with.
+    Message(PathBuf, Option<String>, Option<Caller>),
     /// Stop or an answer: nothing to start. The event, if any, is reported when no
     /// process is there to take it, as for a widget action no call waits for.
     Command(Option<Event>),
@@ -1334,7 +1376,7 @@ impl ClaudeConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
     ) -> Result<(), &'static str> {
@@ -1342,7 +1384,7 @@ impl ClaudeConnection {
             session,
             cwd,
             resume,
-            model,
+            choice,
             approval,
             text,
             Vec::new(),
@@ -1356,7 +1398,7 @@ impl ClaudeConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
         images: Vec<Image>,
@@ -1377,7 +1419,10 @@ impl ClaudeConnection {
                 }
             }
             issuer = shared.mcp.clone();
-            let out = configure(&mut shared, session, approval);
+            let mut out = configure(&mut shared, session, approval);
+            let chosen = choose(&mut shared, session, choice.clone());
+            out.writes.extend(chosen.writes);
+            out.events.extend(chosen.events);
             let refused = shared.steer_blocked(session);
             if refused.is_none() {
                 *shared.queued.entry(session).or_default() += 1;
@@ -1390,12 +1435,7 @@ impl ClaudeConnection {
                 return Err(reason);
             }
         }
-        let start = Job::Message(
-            PathBuf::from(cwd),
-            resume.map(str::to_owned),
-            model.map(str::to_owned),
-            caller,
-        );
+        let start = Job::Message(PathBuf::from(cwd), resume.map(str::to_owned), caller);
         // Each image is read and encoded on the session's worker before the shared state
         // is locked, so a large one never holds up other sessions or the UI.
         self.starter.on_worker(session, move |starter| {
@@ -1483,6 +1523,13 @@ impl ClaudeConnection {
     pub fn set_approval(&self, session: u64, approval: ApprovalState) {
         let mut shared = self.starter.shared.lock().unwrap();
         let out = configure(&mut shared, session, approval);
+        self.starter.deliver(shared, session, out);
+    }
+
+    /// Changes the session's model choice at once; see [`Connection::set_choice`].
+    pub fn set_choice(&self, session: u64, choice: ModelChoice) {
+        let mut shared = self.starter.shared.lock().unwrap();
+        let out = choose(&mut shared, session, choice);
         self.starter.deliver(shared, session, out);
     }
 
@@ -1671,7 +1718,7 @@ impl ClaudeStarter {
     /// process and epoch, offered, and nothing waiting. It leaves routing under the
     /// lock, so nothing more reaches it, and is ended on this worker after, so a
     /// message queued meanwhile starts its successor only once it is gone. The
-    /// conversation, approval state and requested model stay for that successor.
+    /// conversation, approval state and model choice stay for that successor.
     fn evict(
         &self,
         mut shared: MutexGuard<'_, ClaudeShared>,
@@ -1794,7 +1841,7 @@ impl ClaudeStarter {
         if shared.closed {
             return;
         }
-        if let Job::Message(_, _, _, Some(caller)) = &job
+        if let Job::Message(_, _, Some(caller)) = &job
             && !shared.mcp.as_ref().is_some_and(|issuer| {
                 issuer.permits_launch(
                     *caller,
@@ -1837,7 +1884,7 @@ impl ClaudeStarter {
             _ => None,
         };
         let mut start = match job {
-            Job::Message(cwd, resume, model, _) => Some((cwd, resume, model)),
+            Job::Message(cwd, resume, _) => Some((cwd, resume)),
             _ => None,
         };
         let mut carried = Vec::new();
@@ -1859,11 +1906,7 @@ impl ClaudeStarter {
                 unseen = live.driver.end_unseen();
                 carried = live.driver.take_unsent();
                 let live = shared.live.remove(&session).expect("checked above");
-                start = start.or(Some((
-                    live.cwd.clone(),
-                    live.resume.clone(),
-                    live.model.clone(),
-                )));
+                start = start.or(Some((live.cwd.clone(), live.resume.clone())));
                 self.inbox.lock().unwrap().push((session, Event::ModelLost));
                 lost = true;
                 // Dropping the handle ends the process; its late exit is ignored.
@@ -1871,7 +1914,7 @@ impl ClaudeStarter {
             }
         }
         if !shared.live.contains_key(&session) {
-            if let Some((cwd, resume, model)) = start
+            if let Some((cwd, resume)) = start
                 && (message || !carried.is_empty())
             {
                 let act = move |driver: &mut ClaudeDriver, out: &mut Outputs| {
@@ -1884,7 +1927,7 @@ impl ClaudeStarter {
                         act(driver, out);
                     }
                 };
-                self.start(shared, session, &cwd, resume, model, message, act);
+                self.start(shared, session, &cwd, resume, message, act);
             } else {
                 drop(shared);
                 if let Some(event) = missed {
@@ -1916,7 +1959,6 @@ impl ClaudeStarter {
         session: u64,
         cwd: &Path,
         resume: Option<String>,
-        model: Option<String>,
         message: bool,
         act: impl FnOnce(&mut ClaudeDriver, &mut Outputs),
     ) {
@@ -1950,6 +1992,13 @@ impl ClaudeStarter {
         if fork.is_some() {
             driver.set_forking();
         }
+        // The process is launched with the latest choice, so it needs no change before
+        // its first turn.
+        let choice = match launch {
+            Launch::Chat => shared.choices.get(&session).cloned().unwrap_or_default(),
+            Launch::LayoutHelper => ModelChoice::default(),
+        };
+        driver.set_launch_choice(choice.clone());
         if shared.holds.contains(&session) {
             driver.hold_follow_ups();
         }
@@ -2000,7 +2049,6 @@ impl ClaudeStarter {
                 generation,
                 cwd: cwd.to_owned(),
                 resume: resume.clone(),
-                model: model.clone(),
                 replacing: false,
                 seen: 0,
                 epoch: 0,
@@ -2012,7 +2060,7 @@ impl ClaudeStarter {
         let hook = shared.before_start.clone();
         drop(shared);
         let spawned = self.spawn(
-            session, generation, program, hook, cwd, resume, fork, model, mode, probe, launch,
+            session, generation, program, hook, cwd, resume, fork, choice, mode, probe, launch,
         );
 
         let mut shared = self.shared.lock().unwrap();
@@ -2069,8 +2117,8 @@ impl ClaudeStarter {
 
     /// Finds and starts the session's `claude`, holding no lock. A mode Keystone
     /// selected is always passed, on `--resume` too; with Provider settings, `probe`
-    /// asks for the user's own mode to pass. A model the session asked for is passed
-    /// on every launch too, since whether a resume keeps it is not known.
+    /// asks for the user's own mode to pass. The model, effort and speed the session
+    /// asked for are passed on every launch too, `--resume` included.
     #[allow(clippy::too_many_arguments)]
     fn spawn(
         &self,
@@ -2081,7 +2129,7 @@ impl ClaudeStarter {
         cwd: &Path,
         resume: Option<String>,
         fork: Option<ForkPoint>,
-        model: Option<String>,
+        choice: ModelChoice,
         mode: ApprovalMode,
         probe: bool,
         launch: Launch,
@@ -2110,7 +2158,7 @@ impl ClaudeStarter {
         let args = launch.args(
             mode,
             baseline.as_deref(),
-            model.as_deref(),
+            &choice,
             resume.as_deref(),
             fork.as_ref(),
         );
@@ -2412,7 +2460,7 @@ impl Connection for ClaudeConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
         caller: Caller,
@@ -2421,7 +2469,7 @@ impl Connection for ClaudeConnection {
             session,
             cwd,
             resume,
-            model,
+            choice,
             approval,
             text,
             Vec::new(),
@@ -2500,12 +2548,12 @@ impl Connection for ClaudeConnection {
         session: u64,
         cwd: &str,
         resume: Option<&str>,
-        model: Option<&str>,
+        choice: &ModelChoice,
         approval: ApprovalState,
         text: String,
         images: Vec<Image>,
     ) -> Result<(), &'static str> {
-        self.send_inner(session, cwd, resume, model, approval, text, images, None)
+        self.send_inner(session, cwd, resume, choice, approval, text, images, None)
     }
 
     fn request_catalog(&self, session: u64, cwd: &str) {
@@ -2514,6 +2562,10 @@ impl Connection for ClaudeConnection {
 
     fn set_approval(&self, session: u64, approval: ApprovalState) {
         ClaudeConnection::set_approval(self, session, approval);
+    }
+
+    fn set_choice(&self, session: u64, choice: ModelChoice) {
+        ClaudeConnection::set_choice(self, session, choice);
     }
 
     fn run_in_order(&self, session: u64, job: Box<dyn FnOnce() + Send>) {

@@ -37,8 +37,16 @@ pub const HAND_OFF_KEYS: &str = if cfg!(target_os = "macos") {
 pub use commands::{CommandSource, Commands, SlashCommand, terminal_only};
 pub use connection::{ClaudeConnection, CodexConnection, Connection, SpawnHook, StartHook, Wake};
 pub use driver::{ApprovalState, Command, Image, Outputs};
+
+/// The speed value that runs `provider` at standard speed, whatever model it runs.
+pub fn standard_speed(provider: keystone_core::Provider) -> &'static str {
+    match provider {
+        keystone_core::Provider::Claude => claude::STANDARD_SPEED,
+        keystone_core::Provider::Codex => codex::STANDARD_TIER,
+    }
+}
 pub use item::{
-    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, OUTPUT_CAP, RequestId,
+    Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, OUTPUT_CAP, RequestId, Speed,
     TurnStatus, cap_output,
 };
 pub use profile::{

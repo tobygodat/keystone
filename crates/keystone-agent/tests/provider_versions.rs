@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use keystone_agent::{ApprovalState, ClaudeConnection, CodexConnection, Connection, Event};
+use keystone_core::ModelChoice;
 use serde::Deserialize;
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
@@ -78,7 +79,7 @@ fn scripted_versions_warn_or_refuse_before_sending_and_gate_optional_fields() {
             1,
             dir.path().to_str().unwrap(),
             None,
-            None,
+            &ModelChoice::default(),
             ApprovalState::default(),
             "hello".into(),
             Vec::new(),
@@ -143,7 +144,7 @@ fn scripted_versions_warn_or_refuse_before_sending_and_gate_optional_fields() {
                 2,
                 dir.path().to_str().unwrap(),
                 None,
-                None,
+                &ModelChoice::default(),
                 ApprovalState::default(),
                 "hello".into(),
                 Vec::new(),
@@ -188,7 +189,7 @@ fn unavailable_version_probe_is_bounded_and_does_not_prevent_a_safe_turn() {
             1,
             dir.path().to_str().unwrap(),
             None,
-            None,
+            &ModelChoice::default(),
             ApprovalState::default(),
             "hello".into(),
             Vec::new(),
@@ -230,7 +231,7 @@ fn claude_handshake_controls_queued_cancellation_and_safe_steering() {
             1,
             dir.path().to_str().unwrap(),
             None,
-            None,
+            &ModelChoice::default(),
             ApprovalState::default(),
             "long".into(),
         )
@@ -240,7 +241,7 @@ fn claude_handshake_controls_queued_cancellation_and_safe_steering() {
             1,
             dir.path().to_str().unwrap(),
             None,
-            None,
+            &ModelChoice::default(),
             ApprovalState::default(),
             "long change".into(),
         );
@@ -282,7 +283,7 @@ fn rejected_codex_notification_capability_retries_plain_handshake_without_losing
         1,
         dir.path().to_str().unwrap(),
         None,
-        None,
+        &ModelChoice::default(),
         ApprovalState::default(),
         "hello".into(),
         Vec::new(),
@@ -379,7 +380,7 @@ fn a_tested_claude_reconnect_clears_the_run_local_notice() {
         1,
         dir.path().to_str().unwrap(),
         None,
-        None,
+        &ModelChoice::default(),
         ApprovalState::default(),
         "hello".into(),
     )
@@ -395,7 +396,7 @@ fn a_tested_claude_reconnect_clears_the_run_local_notice() {
         1,
         dir.path().to_str().unwrap(),
         None,
-        None,
+        &ModelChoice::default(),
         ApprovalState {
             mode: keystone_core::ApprovalMode::FullAccess,
             overridden: true,
@@ -433,7 +434,7 @@ fn a_claude_version_timeout_does_not_prevent_the_handshake_and_turn() {
         1,
         dir.path().to_str().unwrap(),
         None,
-        None,
+        &ModelChoice::default(),
         ApprovalState::default(),
         "hello".into(),
     )
@@ -483,7 +484,7 @@ fn a_version_notice_is_kept_for_the_first_session_after_an_import_listing() {
         1,
         dir.path().to_str().unwrap(),
         None,
-        None,
+        &ModelChoice::default(),
         ApprovalState::default(),
         "hello".into(),
         Vec::new(),

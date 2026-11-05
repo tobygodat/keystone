@@ -550,6 +550,14 @@ pub fn row(
             .size(TextSize::Ui)
             .color(Color::Muted)
             .into_any_element(),
+        Row::Note(text) => div()
+            .automation_id(format!("note-{index}"))
+            .child(
+                Label::new(text.clone())
+                    .size(TextSize::Ui)
+                    .color(Color::Muted),
+            )
+            .into_any_element(),
         Row::OlderNotImported => div()
             .automation_id(format!("older-not-imported-{index}"))
             .child(
