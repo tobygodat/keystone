@@ -31,6 +31,7 @@ mod tabs;
 mod usage;
 mod windows;
 pub mod worktree;
+mod writer;
 
 pub use account::{Account, AccountId, expand_home, homes_overlap, lexical};
 pub use attachment::Attachment;
@@ -1956,9 +1957,10 @@ impl Store {
         } else {
             Some(File::open(parent)?)
         };
-        self.database_revision =
+        let (revision, snapshot) =
             self.database
-                .commit(&snapshot, &self.workspace, self.database_revision)?;
+                .commit(snapshot, self.workspace.clone(), self.database_revision)?;
+        self.database_revision = revision;
         self.writes += 1;
         self.workspace = snapshot.workspace;
         self.next_id = snapshot.next_id;

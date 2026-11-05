@@ -1,3 +1,4 @@
+use crate::writer::{self, Writer};
 use crate::{AccountUsage, Durability, Snapshot, Workspace, invalid, validate};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value};
@@ -21,10 +22,7 @@ fn copy_key(pair: &crate::integrations::copy::Pair) -> io::Result<String> {
 }
 
 pub(crate) const SCHEMA_VERSION: u32 = 6;
-const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
-/// How long a write waits for this process's other writers, each finishing one
-/// transaction, before reporting the gate busy: a hang guard, not a latency budget.
-const WRITER_WAIT: Duration = Duration::from_secs(2);
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
 /// The `metadata` keys that hold each folder's unfinished commit message.
@@ -111,7 +109,7 @@ pub struct Database {
     path: PathBuf,
     memory: Option<Arc<Mutex<Connection>>>,
     read_only: bool,
-    write_gate: Arc<parking_lot::Mutex<()>>,
+    writer: Option<Arc<Writer>>,
 }
 
 #[derive(Debug)]
@@ -122,7 +120,7 @@ pub struct StoredEvent {
     pub payload: String,
 }
 
-fn sql_error(error: rusqlite::Error) -> io::Error {
+pub(crate) fn sql_error(error: rusqlite::Error) -> io::Error {
     let kind = match error.sqlite_error_code() {
         Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
             io::ErrorKind::WouldBlock
@@ -141,7 +139,7 @@ fn sql_error(error: rusqlite::Error) -> io::Error {
     io::Error::new(kind, error)
 }
 
-fn configure(connection: &Connection, busy_timeout: Duration) -> io::Result<()> {
+pub(crate) fn configure(connection: &Connection, busy_timeout: Duration) -> io::Result<()> {
     connection.busy_timeout(busy_timeout).map_err(sql_error)?;
     connection
         .execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")
@@ -204,10 +202,6 @@ impl Database {
         } else {
             supplied.to_path_buf()
         };
-        let write_gate = Arc::new(parking_lot::Mutex::new(()));
-        let guard = write_gate
-            .try_lock_for(WRITER_WAIT)
-            .ok_or_else(writer_busy)?;
         let mut file = fs::OpenOptions::new();
         file.write(true).create_new(true);
         #[cfg(unix)]
@@ -220,6 +214,7 @@ impl Database {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
+        let id = writer::identify(&path);
         let mut connection = Connection::open(&path).map_err(sql_error)?;
         require_writable(&connection)?;
         configure(&connection, BUSY_TIMEOUT)?;
@@ -248,8 +243,7 @@ impl Database {
         if !initialized {
             Self::initialize(&mut connection, Some(&legacy))?;
         }
-        drop(connection);
-        drop(guard);
+        let writer = Writer::start(&path, connection, id)?;
         File::open(
             path.parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
@@ -260,7 +254,7 @@ impl Database {
             path,
             memory: None,
             read_only: false,
-            write_gate,
+            writer: Some(writer),
         })
     }
 
@@ -291,7 +285,7 @@ impl Database {
             path,
             memory: None,
             read_only: true,
-            write_gate: Arc::default(),
+            writer: None,
         })
     }
 
@@ -303,7 +297,7 @@ impl Database {
             path: PathBuf::from(":memory:"),
             memory: Some(Arc::new(Mutex::new(connection))),
             read_only: false,
-            write_gate: Arc::default(),
+            writer: None,
         })
     }
 
@@ -377,47 +371,47 @@ impl Database {
         self.memory.is_some()
     }
 
-    fn connection<T>(
-        &self,
-        read_only: bool,
+    fn memory<T>(
+        memory: &Mutex<Connection>,
         f: impl FnOnce(&mut Connection) -> io::Result<T>,
     ) -> io::Result<T> {
-        if self.read_only && !read_only {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "SQLite database is read-only",
-            ));
-        }
+        let mut connection = memory
+            .lock()
+            .map_err(|_| io::Error::other("SQLite connection lock poisoned"))?;
+        f(&mut connection)
+    }
+
+    /// Runs `f` on an independent read-only connection, which never waits for writes.
+    fn read<T>(&self, f: impl FnOnce(&mut Connection) -> io::Result<T>) -> io::Result<T> {
         if let Some(memory) = &self.memory {
-            let mut connection = memory
-                .lock()
-                .map_err(|_| io::Error::other("SQLite connection lock poisoned"))?;
-            return f(&mut connection);
+            return Self::memory(memory, f);
         }
-        let _writer = if read_only {
-            None
-        } else {
-            Some(
-                self.write_gate
-                    .try_lock_for(WRITER_WAIT)
-                    .ok_or_else(writer_busy)?,
-            )
-        };
-        let flags = if read_only {
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-        } else {
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-        };
-        let mut connection = Connection::open_with_flags(&self.path, flags).map_err(sql_error)?;
-        if !read_only {
-            require_writable(&connection)?;
-        }
+        let mut connection =
+            Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(sql_error)?;
         configure(&connection, BUSY_TIMEOUT)?;
         f(&mut connection)
     }
 
+    /// Runs `f` on the writer's connection, after the writes queued before it.
+    fn write<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        if let Some(memory) = &self.memory {
+            return Self::memory(memory, f);
+        }
+        match &self.writer {
+            Some(writer) if !self.read_only => writer.write(f),
+            _ => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "SQLite database is read-only",
+            )),
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> io::Result<(Snapshot, i64)> {
-        self.connection(true, |connection| {
+        self.read(|connection| {
             let tx = connection.transaction().map_err(sql_error)?;
             let (payload, revision): (String, i64) = tx
                 .query_one(
@@ -521,13 +515,15 @@ impl Database {
         })
     }
 
+    /// Commits `snapshot` as the revision after `revision`, and returns that revision
+    /// with the snapshot.
     pub(crate) fn commit(
         &self,
-        snapshot: &Snapshot,
-        previous: &Workspace,
+        snapshot: Snapshot,
+        previous: Workspace,
         revision: i64,
-    ) -> io::Result<i64> {
-        self.connection(false, |connection| {
+    ) -> io::Result<(i64, Snapshot)> {
+        self.write(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
@@ -546,9 +542,9 @@ impl Database {
             let next = revision
                 .checked_add(1)
                 .ok_or_else(|| invalid("workspace revision exhausted"))?;
-            write_projection(&tx, snapshot, next, Some(previous))?;
+            write_projection(&tx, &snapshot, next, Some(&previous))?;
             tx.commit().map_err(sql_error)?;
-            Ok(next)
+            Ok((next, snapshot))
         })
     }
 
@@ -557,10 +553,11 @@ impl Database {
         session: u64,
         records: &[(String, String)],
     ) -> io::Result<Durability> {
-        self.connection(false, |connection| {
+        let records = records.to_vec();
+        self.write(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql_error)?;
             let session = session.to_string();
-            for (key, payload) in records {
+            for (key, payload) in &records {
                 let existing: Option<(String, String, String)> = tx.query_row("SELECT kind, entity_id, payload FROM events WHERE event_key=?1", [key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(sql_error)?;
                 if let Some(existing) = existing {
                     if existing != ("log.appended".into(), session.clone(), payload.clone()) {
@@ -581,7 +578,7 @@ impl Database {
 
     /// Whether a log entry is saved under each of `keys`.
     pub fn logs_saved<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> io::Result<bool> {
-        self.connection(true, |connection| {
+        self.read(|connection| {
             let mut statement = connection
                 .prepare("SELECT 1 FROM events WHERE event_key=?1 AND kind='log.appended'")
                 .map_err(sql_error)?;
@@ -595,7 +592,7 @@ impl Database {
     }
 
     pub fn read_logs(&self, session: u64) -> io::Result<Vec<String>> {
-        self.connection(true, |connection| {
+        self.read(|connection| {
             let mut statement = connection
                 .prepare("SELECT payload FROM log_entries WHERE session_id=?1 ORDER BY sequence")
                 .map_err(sql_error)?;
@@ -610,11 +607,12 @@ impl Database {
     /// The name this workspace's checkpoints are saved under in each repository:
     /// `fresh` the first time it is asked for, and the same name from then on.
     pub fn checkpoint_store(&self, fresh: &str) -> io::Result<String> {
-        self.connection(false, |connection| {
+        let fresh = fresh.to_owned();
+        self.write(move |connection| {
             connection
                 .execute(
                     "INSERT OR IGNORE INTO metadata(key, value) VALUES ('checkpoint_store', ?1)",
-                    [fresh],
+                    [&fresh],
                 )
                 .map_err(sql_error)?;
             connection
@@ -632,7 +630,8 @@ impl Database {
     /// `usage` does not carry are kept, so a reading this process never loaded is not
     /// lost.
     pub fn record_usage(&self, account: &str, usage: &AccountUsage) -> io::Result<()> {
-        self.connection(false, |connection| {
+        let (account, usage) = (account.to_owned(), usage.clone());
+        self.write(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
@@ -675,7 +674,7 @@ impl Database {
     /// Every account's saved usage, by the key [`Database::record_usage`] took. A
     /// reading that no longer parses is skipped.
     pub fn usage(&self) -> io::Result<Vec<(String, AccountUsage)>> {
-        self.connection(true, |connection| {
+        self.read(|connection| {
             let mut statement = connection
                 .prepare("SELECT key, value FROM metadata WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key")
                 .map_err(sql_error)?;
@@ -702,12 +701,12 @@ impl Database {
     /// its projection in `metadata`, keyed by the copy, so copying over it again
     /// replaces it.
     pub fn record_copy(&self, pair: &crate::integrations::copy::Pair) -> io::Result<()> {
-        self.connection(false, |connection| {
+        let key = copy_key(pair)?;
+        let payload = serde_json::to_string(pair)?;
+        self.write(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
-            let key = copy_key(pair)?;
-            let payload = serde_json::to_string(pair)?;
             tx.execute(
                 "INSERT INTO events(kind, entity_id, payload) VALUES ('integration.copied', ?1, ?2)",
                 params![key, payload],
@@ -724,11 +723,11 @@ impl Database {
 
     /// Forgets a copy [`Database::record_copy`] remembered.
     pub fn forget_copy(&self, pair: &crate::integrations::copy::Pair) -> io::Result<()> {
-        self.connection(false, |connection| {
+        let key = copy_key(pair)?;
+        self.write(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
-            let key = copy_key(pair)?;
             tx.execute(
                 "INSERT INTO events(kind, entity_id, payload) VALUES ('integration.copy_forgotten', ?1, '{}')",
                 [&key],
@@ -743,7 +742,7 @@ impl Database {
     /// Every copy [`Database::record_copy`] remembered. One that no longer parses is
     /// skipped.
     pub fn copies(&self) -> io::Result<Vec<crate::integrations::copy::Pair>> {
-        self.connection(true, |connection| {
+        self.read(|connection| {
             let mut statement = connection
                 .prepare(
                     "SELECT value FROM metadata WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key",
@@ -764,12 +763,12 @@ impl Database {
     /// Saves a scheduled task: a `scheduled_task.upserted` event and its projection in
     /// `metadata`, which older builds leave alone.
     pub fn save_scheduled_task(&self, task: &crate::ScheduledTask) -> io::Result<()> {
-        self.connection(false, |connection| {
+        let id = task.id().to_string();
+        let payload = serde_json::to_string(task)?;
+        self.write(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
-            let id = task.id().to_string();
-            let payload = serde_json::to_string(task)?;
             tx.execute(
                 "INSERT INTO events(kind, entity_id, payload) VALUES ('scheduled_task.upserted', ?1, ?2)",
                 params![id, payload],
@@ -786,7 +785,7 @@ impl Database {
 
     /// Removes the scheduled task `id`, with a `scheduled_task.removed` event.
     pub fn remove_scheduled_task(&self, id: u64) -> io::Result<()> {
-        self.connection(false, |connection| {
+        self.write(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(sql_error)?;
@@ -806,7 +805,7 @@ impl Database {
 
     /// Every saved scheduled task, by ID. One that no longer parses is skipped.
     pub fn scheduled_tasks(&self) -> io::Result<Vec<crate::ScheduledTask>> {
-        self.connection(true, |connection| {
+        self.read(|connection| {
             let mut statement = connection
                 .prepare("SELECT value FROM metadata WHERE substr(key, 1, length(?1)) = ?1")
                 .map_err(sql_error)?;
@@ -827,7 +826,7 @@ impl Database {
     pub fn events_after(&self, sequence: u64, limit: u32) -> io::Result<Vec<StoredEvent>> {
         let sequence = i64::try_from(sequence)
             .map_err(|_| invalid("event cursor exceeds SQLite sequence range"))?;
-        self.connection(true, |connection| {
+        self.read(|connection| {
             let mut statement = connection.prepare("SELECT sequence, kind, entity_id, payload FROM events WHERE sequence>?1 ORDER BY sequence LIMIT ?2").map_err(sql_error)?;
             statement.query_map(params![sequence, limit.min(1000)], |row| Ok(StoredEvent { sequence: row.get::<_, i64>(0)? as u64, kind: row.get(1)?, entity_id: row.get(2)?, payload: row.get(3)? })).map_err(sql_error)?.collect::<Result<Vec<_>, _>>().map_err(sql_error)
         })
@@ -847,21 +846,18 @@ impl Database {
     }
 }
 
-fn writer_busy() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::WouldBlock,
-        "SQLite writer is busy; retry saving",
-    )
-}
-
-fn require_writable(connection: &Connection) -> io::Result<()> {
+pub(crate) fn require_writable(connection: &Connection) -> io::Result<()> {
     if connection.is_readonly("main").map_err(sql_error)? {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "SQLite workspace is read-only; restore write permission before retrying",
-        ));
+        return Err(read_only());
     }
     Ok(())
+}
+
+pub(crate) fn read_only() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "SQLite workspace is read-only; restore write permission before retrying",
+    )
 }
 
 fn empty_snapshot() -> Snapshot {
@@ -1197,6 +1193,7 @@ fn import_error(path: &Path, error: io::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::writer::WRITER_WAIT;
     use crate::{Provider, Store, WorkingDirectory};
     use std::time::Instant;
 
@@ -1332,7 +1329,7 @@ mod tests {
         let database = store.database();
         let before = store.saved_snapshot().unwrap();
         let count = database.events_after(0, 1000).unwrap().len();
-        database.connection(false, |connection| {
+        database.write(|connection| {
             assert!(connection.execute("UPDATE events SET kind='changed'", []).is_err());
             assert!(connection.execute("DELETE FROM events", []).is_err());
             connection.execute_batch("CREATE TRIGGER reject_workspace BEFORE UPDATE ON workspace BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END;").map_err(sql_error)
@@ -1342,7 +1339,7 @@ mod tests {
         assert_eq!(store.saved_snapshot().unwrap(), before);
         assert_eq!(database.events_after(0, 1000).unwrap().len(), count);
         database
-            .connection(false, |connection| {
+            .write(|connection| {
                 connection
                     .execute_batch("DROP TRIGGER reject_workspace")
                     .map_err(sql_error)
@@ -1381,7 +1378,7 @@ mod tests {
         let database = store.database();
         let count = database.events_after(0, 1000).unwrap().len();
         database
-            .connection(false, |connection| {
+            .write(|connection| {
                 connection
                     .execute_batch("PRAGMA max_page_count=1")
                     .map_err(sql_error)
@@ -1398,7 +1395,7 @@ mod tests {
         assert_eq!(store.workspace().sessions()[0].draft(), "");
         assert_eq!(database.events_after(0, 1000).unwrap().len(), count);
         database
-            .connection(false, |connection| {
+            .write(|connection| {
                 connection
                     .execute_batch("PRAGMA max_page_count=1073741823")
                     .map_err(sql_error)
@@ -1598,7 +1595,7 @@ mod tests {
         let database = database.clone();
         let writer = std::thread::spawn(move || {
             database
-                .connection(false, |_| {
+                .write(move |_| {
                     held.send(()).unwrap();
                     std::thread::sleep(hold);
                     Ok(())
@@ -1626,7 +1623,7 @@ mod tests {
         let database = Database::open(dir.path().join("workspace.sqlite3")).unwrap();
         let writer = slow_write(&database, Duration::from_millis(150));
         let busy: i64 = database
-            .connection(false, |connection| {
+            .write(|connection| {
                 connection
                     .pragma_query_value(None, "busy_timeout", |row| row.get(0))
                     .map_err(sql_error)
@@ -1667,7 +1664,21 @@ mod tests {
         let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
         store.create(Provider::Claude, &directory(), 1).unwrap();
         let database = store.database();
-        let gate = database.write_gate.lock();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (started, wait) = std::sync::mpsc::channel();
+        let blocker = {
+            let database = database.clone();
+            std::thread::spawn(move || {
+                database
+                    .write(move |_| {
+                        started.send(()).unwrap();
+                        held.recv().unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        };
+        wait.recv().unwrap();
         assert!(database.read_logs(1).unwrap().is_empty());
         let start = Instant::now();
         let error = store.set_draft(1, "retained for retry".into()).unwrap_err();
@@ -1677,8 +1688,54 @@ mod tests {
         );
         assert!(start.elapsed() < WRITER_WAIT + Duration::from_secs(1));
         assert_eq!(store.workspace().sessions()[0].draft(), "");
-        drop(gate);
+        release.send(()).unwrap();
+        blocker.join().unwrap();
         store.set_draft(1, "retained for retry".into()).unwrap();
+    }
+
+    #[test]
+    fn a_write_withdrawn_as_busy_never_runs_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Database::open(dir.path().join("workspace.sqlite3")).unwrap();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (started, wait) = std::sync::mpsc::channel();
+        let blocker = {
+            let database = database.clone();
+            std::thread::spawn(move || {
+                database
+                    .write(move |_| {
+                        started.send(()).unwrap();
+                        held.recv().unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        };
+        wait.recv().unwrap();
+        let error = database
+            .append_logs(1, &[("withdrawn".into(), r#"{"n":"withdrawn"}"#.into())])
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        release.send(()).unwrap();
+        blocker.join().unwrap();
+        database
+            .append_logs(1, &[("after".into(), r#"{"n":"after"}"#.into())])
+            .unwrap();
+        assert_eq!(database.read_logs(1).unwrap(), [r#"{"n":"after"}"#]);
+    }
+
+    #[test]
+    fn a_write_that_panics_fails_and_the_next_write_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Database::open(dir.path().join("workspace.sqlite3")).unwrap();
+        let error = database
+            .write(|_| -> io::Result<()> { panic!("a write job panicked") })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "SQLite write stopped unexpectedly");
+        database
+            .append_logs(1, &[("after".into(), r#"{"n":"after"}"#.into())])
+            .unwrap();
+        assert_eq!(database.read_logs(1).unwrap(), [r#"{"n":"after"}"#]);
     }
 
     #[test]
@@ -1749,6 +1806,159 @@ mod tests {
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].draft(),
             "keep for retry"
+        );
+    }
+
+    #[test]
+    fn a_file_that_replaces_an_idle_database_is_read_and_written_as_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.sqlite3");
+        let database = Database::open(&path).unwrap();
+        database
+            .append_logs(1, &[("old".into(), r#"{"origin":"old"}"#.into())])
+            .unwrap();
+        let other = dir.path().join("replacement.sqlite3");
+        let replacement = Database::open(&other).unwrap();
+        replacement
+            .append_logs(1, &[("new".into(), r#"{"origin":"new"}"#.into())])
+            .unwrap();
+        drop(replacement);
+        fs::rename(&other, &path).unwrap();
+        assert_eq!(database.read_logs(1).unwrap(), [r#"{"origin":"new"}"#]);
+        database
+            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())])
+            .unwrap();
+        drop(database);
+        assert_eq!(
+            Database::open_read_only(&path)
+                .unwrap()
+                .read_logs(1)
+                .unwrap(),
+            [r#"{"origin":"new"}"#, r#"{"origin":"after"}"#]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_fails_as_a_fresh_connection_would_once_this_process_cannot_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.sqlite3");
+        let database = Database::open(&path).unwrap();
+        let append = |key: &str| database.append_logs(1, &[(key.into(), "{}".into())]);
+        append("first").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o460)).unwrap();
+        assert_eq!(
+            append("denied").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        append("repaired").unwrap();
+        assert_eq!(database.read_logs(1).unwrap().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_fails_as_a_fresh_connection_would_once_its_folder_is_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.sqlite3");
+        let database = Database::open(&path).unwrap();
+        let append = |key: &str| database.append_logs(1, &[(key.into(), "{}".into())]);
+        append("first").unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let denied = append("denied");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        append("repaired").unwrap();
+        assert_eq!(database.read_logs(1).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_file_that_replaces_a_database_just_opened_is_read_and_written_as_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("replacement.sqlite3");
+        let replacement = Database::open(&other).unwrap();
+        replacement
+            .append_logs(1, &[("new".into(), r#"{"origin":"new"}"#.into())])
+            .unwrap();
+        drop(replacement);
+        let path = dir.path().join("workspace.sqlite3");
+        let database = Database::open(&path).unwrap();
+        fs::rename(&other, &path).unwrap();
+        database
+            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())])
+            .unwrap();
+        drop(database);
+        assert_eq!(
+            Database::open_read_only(&path)
+                .unwrap()
+                .read_logs(1)
+                .unwrap(),
+            [r#"{"origin":"new"}"#, r#"{"origin":"after"}"#]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn exclusive_writer_child() {
+        let path = std::env::var_os("KEYSTONE_TEST_EXCLUSIVE_WRITER").expect("child database path");
+        let path = PathBuf::from(path);
+        let connection = Connection::open(&path).unwrap();
+        connection.busy_timeout(BUSY_TIMEOUT).unwrap();
+        let outcome = connection.execute_batch(
+            r#"PRAGMA locking_mode=EXCLUSIVE;
+            BEGIN EXCLUSIVE;
+            INSERT INTO events(kind, entity_id, payload, event_key)
+                VALUES ('log.appended', '1', '{"origin":"child"}', 'child');
+            INSERT INTO log_entries(sequence, session_id, payload)
+                VALUES (last_insert_rowid(), '1', '{"origin":"child"}');
+            COMMIT;"#,
+        );
+        let outcome = if outcome.is_ok() {
+            "committed"
+        } else {
+            "refused"
+        };
+        fs::write(path.with_extension("outcome"), outcome).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_another_process_commits_between_ours_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.sqlite3");
+        let database = Database::open(&path).unwrap();
+        database
+            .append_logs(1, &[("seed".into(), r#"{"origin":"seed"}"#.into())])
+            .unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "database::tests::exclusive_writer_child",
+                "--ignored",
+            ])
+            .env("KEYSTONE_TEST_EXCLUSIVE_WRITER", &path)
+            .output()
+            .unwrap();
+        assert!(child.status.success(), "{child:?}");
+        let committed = fs::read_to_string(path.with_extension("outcome")).unwrap() == "committed";
+        database
+            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())])
+            .unwrap();
+        drop(database);
+        let mut expected = vec![r#"{"origin":"seed"}"#];
+        if committed {
+            expected.push(r#"{"origin":"child"}"#);
+        }
+        expected.push(r#"{"origin":"after"}"#);
+        assert_eq!(
+            Database::open_read_only(&path)
+                .unwrap()
+                .read_logs(1)
+                .unwrap(),
+            expected
         );
     }
 

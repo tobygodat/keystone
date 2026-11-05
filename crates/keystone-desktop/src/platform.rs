@@ -102,7 +102,7 @@ fn login_environment(
     }
     let mut child = command.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
-    let (chunks, received) = std::sync::mpsc::channel();
+    let (chunks, received) = std::sync::mpsc::sync_channel(64);
     std::thread::spawn(move || {
         let mut chunk = [0; 16 * 1024];
         while let Ok(read @ 1..) = stdout.read(&mut chunk) {
@@ -122,7 +122,10 @@ fn login_environment(
             break None;
         }
         match received.recv_timeout(left) {
-            Ok(chunk) => output.extend(chunk),
+            Ok(chunk) => {
+                output.extend(chunk);
+                output.extend(received.try_iter().flatten());
+            }
             Err(_) => break parse_login_environment(&output),
         }
     };

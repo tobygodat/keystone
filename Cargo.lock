@@ -2847,7 +2847,7 @@ dependencies = [
 name = "keystone-core"
 version = "0.1.0"
 dependencies = [
- "parking_lot",
+ "libc",
  "percent-encoding",
  "rusqlite",
  "serde",

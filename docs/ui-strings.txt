@@ -359,7 +359,6 @@ crates/keystone-core/src/database.rs
 	SQLite database is read-only
 	SQLite workspace import is incomplete
 	SQLite workspace is read-only; restore write permission before retrying
-	SQLite writer is busy; retry saving
 	The workspace changed in another writer. Reload Keystone before saving.
 	event cursor exceeds SQLite sequence range
 	log event key reused for a different entry
@@ -542,6 +541,11 @@ crates/keystone-core/src/worktree.rs
 	worktree parent must be an ordinary directory
 	worktree paths must be UTF-8
 	worktree registration belongs to another directory
+
+crates/keystone-core/src/writer.rs
+	SQLite write stopped unexpectedly
+	SQLite writer has stopped
+	SQLite writer is busy; retry saving
 
 crates/keystone-desktop/src/app_state.rs
 	1 log entry was
