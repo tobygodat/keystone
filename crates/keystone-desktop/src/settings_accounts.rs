@@ -376,8 +376,8 @@ impl Keystone {
         match self.state.update(cx, |state, cx| {
             state.add_account(provider, &name, &folder, cx)
         }) {
-            Ok(applied) => {
-                self.error = crate::durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 for input in [&name_input, &folder_input] {
                     input.update(cx, |input, cx| input.set_value(String::new(), cx));
                 }
@@ -439,8 +439,8 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.rename_account(&id, &label, cx))
         {
-            Ok(applied) => {
-                self.error = crate::durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 self.cancel_account_rename(window, cx);
             }
             Err(error) => self.error = Some(format!("Account not renamed. {error}")),
@@ -453,7 +453,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.remove_account(id, cx))
         {
-            Ok(applied) => crate::durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(format!("Account not removed. {error}")),
         };
         self.refresh(cx);

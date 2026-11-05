@@ -7,9 +7,9 @@
 //! Working in another view selects the session it holds. The layout, the tabs and the
 //! selection are saved together, so a relaunch or a crash restores them as one.
 
+use crate::Keystone;
 use crate::arrangement::{ordered_views, tabs_holding};
 use crate::view_state::ViewKey;
-use crate::{Keystone, durability_warning};
 use gpui::{App, Context, IntoElement, Window};
 use keystone_core::{Axis, Component, Composition, Edit, Place, SessionTabs, Size, ViewId};
 use keystone_ui::prelude::*;
@@ -335,8 +335,8 @@ impl Keystone {
         let saved = match self.state.update(cx, |state, cx| {
             state.show(&project, self.window_id, layout, tabs, selected, cx)
         }) {
-            Ok(applied) => {
-                self.error = durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 true
             }
             Err(error) => {

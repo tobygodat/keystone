@@ -17,7 +17,7 @@ const NOT_SENT: &str = "The prompt was not sent.";
 
 #[derive(Default)]
 pub(crate) struct Scheduler {
-    tasks: Vec<ScheduledTask>,
+    pending: HashMap<u64, PendingRun>,
     /// Tasks the user asked to run now that have not run yet.
     run_now: HashSet<u64>,
     /// Tasks waiting on an existing session's history, since when.
@@ -26,6 +26,12 @@ pub(crate) struct Scheduler {
     timer: Option<gpui::Task<()>>,
     /// The last save that failed, shown in Settings until a later one succeeds.
     pub(crate) error: Option<String>,
+}
+
+struct PendingRun {
+    task: ScheduledTask,
+    revision: keystone_core::Revision,
+    session: Option<u64>,
 }
 
 /// The local UTC offset in seconds at `at`.
@@ -46,17 +52,11 @@ fn hold_reason(hold: Hold) -> &'static str {
 impl AppState {
     /// Reads the saved tasks and wakes when the first is due. Called once, at launch.
     pub(crate) fn load_scheduled_tasks(&mut self, cx: &mut Context<Self>) {
-        match self.store.database().scheduled_tasks() {
-            Ok(tasks) => self.scheduler.tasks = tasks,
-            Err(error) => {
-                self.scheduler.error = Some(format!("Scheduled tasks could not be read. {error}"))
-            }
-        }
         self.arm_scheduler(cx);
     }
 
     pub(crate) fn scheduled_tasks(&self) -> &[ScheduledTask] {
-        &self.scheduler.tasks
+        self.store.scheduled_tasks()
     }
 
     pub(crate) fn scheduler_error(&self) -> Option<&str> {
@@ -71,8 +71,8 @@ impl AppState {
         let now = now_ms();
         // Unix milliseconds, so an ID is never reused after a delete.
         let id = self
-            .scheduler
-            .tasks
+            .store
+            .scheduled_tasks()
             .iter()
             .map(|task| task.id() + 1)
             .fold(now, u64::max);
@@ -85,6 +85,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.scheduler.waiting.remove(&id);
+        self.scheduler.pending.remove(&id);
         self.change_task(id, ScheduledTask::pause, cx)
     }
 
@@ -101,11 +102,8 @@ impl AppState {
         id: u64,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        self.store
-            .database()
-            .remove_scheduled_task(id)
-            .map_err(|error| error.to_string())?;
-        self.scheduler.tasks.retain(|task| task.id() != id);
+        self.store.remove_scheduled_task(id);
+        self.scheduler.pending.remove(&id);
         self.scheduler.run_now.remove(&id);
         self.scheduler.waiting.remove(&id);
         self.arm_scheduler(cx);
@@ -128,29 +126,22 @@ impl AppState {
         change: impl FnOnce(&mut ScheduledTask),
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let Some(mut task) = self.scheduler.tasks.iter().find(|t| t.id() == id).cloned() else {
+        let Some(mut task) = self
+            .store
+            .scheduled_tasks()
+            .iter()
+            .find(|t| t.id() == id)
+            .cloned()
+        else {
             return Err("The task was deleted.".into());
         };
         change(&mut task);
         self.save_task(task, cx)
     }
 
-    /// Saves `task` and then shows it, replacing the task with its ID.
+    /// Applies the task and queues its save without waiting for the database.
     fn save_task(&mut self, task: ScheduledTask, cx: &mut Context<Self>) -> Result<(), String> {
-        self.store
-            .database()
-            .save_scheduled_task(&task)
-            .map_err(|error| error.to_string())?;
-        self.scheduler.error = None;
-        match self
-            .scheduler
-            .tasks
-            .iter_mut()
-            .find(|t| t.id() == task.id())
-        {
-            Some(old) => *old = task,
-            None => self.scheduler.tasks.push(task),
-        }
+        self.store.save_scheduled_task(task);
         self.arm_scheduler(cx);
         self.refresh(cx);
         Ok(())
@@ -161,8 +152,14 @@ impl AppState {
     /// could not go yet is checked again sooner.
     fn arm_scheduler(&mut self, cx: &mut Context<Self>) {
         let now = now_ms();
-        let tasks = &self.scheduler.tasks;
-        let delay = if tasks.iter().any(|task| task.due(now).is_some())
+        let tasks = self.store.scheduled_tasks();
+        let delay = if !self.scheduler.pending.is_empty() && !self.quitting() {
+            if self.scheduler.error.is_some() {
+                RETRY_MS
+            } else {
+                LOAD_POLL_MS
+            }
+        } else if tasks.iter().any(|task| task.due(now).is_some())
             || !self.scheduler.run_now.is_empty()
         {
             if self.quitting() {
@@ -200,10 +197,14 @@ impl AppState {
     /// Runs every task that is due, or that the user asked to run now.
     fn check_schedules(&mut self, cx: &mut Context<Self>) {
         if !self.quitting() {
+            let pending: Vec<_> = self.scheduler.pending.keys().copied().collect();
+            for id in pending {
+                self.finish_pending_run(id, cx);
+            }
             let now = now_ms();
             let mut runs: Vec<(u64, Option<u64>)> = self
-                .scheduler
-                .tasks
+                .store
+                .scheduled_tasks()
                 .iter()
                 .filter_map(|task| Some((task.id(), Some(task.due(now)?))))
                 .collect();
@@ -233,7 +234,13 @@ impl AppState {
     /// Runs task `id`, `due` at a time or now. Returns false when it has to wait: for
     /// its session's history, or because its run could not be saved first.
     fn run_task(&mut self, id: u64, due: Option<u64>, cx: &mut Context<Self>) -> bool {
-        let Some(task) = self.scheduler.tasks.iter().find(|t| t.id() == id).cloned() else {
+        let Some(task) = self
+            .store
+            .scheduled_tasks()
+            .iter()
+            .find(|t| t.id() == id)
+            .cloned()
+        else {
             return true;
         };
         let now = now_ms();
@@ -248,100 +255,149 @@ impl AppState {
             }
         }
         self.scheduler.waiting.remove(&id);
-        // Saved before the run starts, so a crash during it never runs it again.
-        let mut ran = task.clone();
-        ran.begin(due, now, offset);
-        if let Err(error) = self.store.database().save_scheduled_task(&ran) {
-            self.scheduler.error = Some(format!(
-                "\u{201c}{}\u{201d} did not run and tries again shortly. {error}",
-                task.title()
-            ));
-            self.refresh(cx);
+        if self.scheduler.pending.contains_key(&id) {
             return false;
         }
-        let outcome = self.start_run(&task, cx);
-        ran.finish(outcome);
-        if let Err(error) = self.save_task(ran.clone(), cx) {
-            self.scheduler.error = Some(format!(
-                "\u{201c}{}\u{201d} ran, but its run was not saved. {error}",
-                task.title()
-            ));
-            if let Some(old) = self.scheduler.tasks.iter_mut().find(|t| t.id() == id) {
-                *old = ran;
-            }
-            self.refresh(cx);
-        }
+        let mut ran = task.clone();
+        ran.begin(due, now, offset);
+        let revision = self.store.save_scheduled_task(ran).revision;
+        self.scheduler.pending.insert(
+            id,
+            PendingRun {
+                task,
+                revision,
+                session: None,
+            },
+        );
+        self.finish_pending_run(id, cx);
         true
     }
 
-    fn start_run(&mut self, task: &ScheduledTask, cx: &mut Context<Self>) -> Outcome {
-        let draft = |session| ComposerDraft {
+    pub(super) fn resume_scheduled_runs(&mut self, cx: &mut Context<Self>) {
+        if self.quitting() {
+            return;
+        }
+        let pending: Vec<_> = self.scheduler.pending.keys().copied().collect();
+        for id in pending {
+            self.finish_pending_run(id, cx);
+        }
+    }
+
+    fn finish_pending_run(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(mut pending) = self.scheduler.pending.remove(&id) else {
+            return;
+        };
+        if !self.store.is_durable(pending.revision) {
+            if let Some(error) = self.store.save_error() {
+                self.scheduler.error = Some(format!(
+                    "\u{201c}{}\u{201d} did not run and tries again shortly. {error}",
+                    pending.task.title()
+                ));
+                self.store.retry();
+            }
+            self.store.wake_when_durable(pending.revision);
+            self.scheduler.pending.insert(id, pending);
+            self.refresh(cx);
+            return;
+        }
+        self.scheduler.error = None;
+        match self.start_run(&pending.task, &mut pending.session, cx) {
+            Some(outcome) => {
+                if let Some(mut ran) = self
+                    .store
+                    .scheduled_tasks()
+                    .iter()
+                    .find(|task| task.id() == id)
+                    .cloned()
+                {
+                    ran.finish(outcome);
+                    let _ = self.save_task(ran, cx);
+                }
+            }
+            None => {
+                pending.revision = self.store.revision();
+                self.store.wake_when_durable(pending.revision);
+                self.scheduler.pending.insert(id, pending);
+            }
+        }
+    }
+
+    fn start_run(
+        &mut self,
+        task: &ScheduledTask,
+        created: &mut Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Option<Outcome> {
+        let session = match task.target() {
+            Target::New { provider } => match *created {
+                Some(session) => session,
+                None => {
+                    let directory = match WorkingDirectory::new(task.project().path()) {
+                        Ok(directory) => directory,
+                        Err(error) => {
+                            return Some(Outcome::Failed {
+                                session: None,
+                                reason: format!("The project folder could not be opened. {error}"),
+                            });
+                        }
+                    };
+                    let session = match self.create_quick(provider, None, None, &directory, cx) {
+                        Ok(applied) => applied.value,
+                        Err(error) => {
+                            return Some(Outcome::Failed {
+                                session: None,
+                                reason: format!("No session was created. {error}"),
+                            });
+                        }
+                    };
+                    *created = Some(session);
+                    let _ = self.rename(session, task.title(), cx);
+                    session
+                }
+            },
+            Target::Session { session } => session,
+        };
+        if self.session(session).is_none() {
+            return Some(Outcome::Skipped {
+                reason: "The session no longer exists.".into(),
+            });
+        }
+        if matches!(task.target(), Target::Session { .. })
+            && let Some(hold) = self.result_hold(session)
+        {
+            return Some(Outcome::Skipped {
+                reason: hold_reason(hold).into(),
+            });
+        }
+        if self.restoring(session) {
+            return Some(Outcome::Skipped {
+                reason: "Files were being restored in its repository.".into(),
+            });
+        }
+        if self
+            .session(session)
+            .and_then(|s| s.continue_at())
+            .is_some()
+        {
+            return Some(Outcome::Skipped {
+                reason: "The session waits to continue after its usage limit.".into(),
+            });
+        }
+        let draft = ComposerDraft {
             session,
             text: task.prompt().to_owned(),
             attachments: Vec::new(),
         };
-        match task.target() {
-            Target::New { provider } => {
-                let directory = match WorkingDirectory::new(task.project().path()) {
-                    Ok(directory) => directory,
-                    Err(error) => {
-                        return Outcome::Failed {
-                            session: None,
-                            reason: format!("The project folder could not be opened. {error}"),
-                        };
-                    }
-                };
-                let session = match self.create_quick(provider, None, None, &directory, cx) {
-                    Ok(applied) => applied.value,
-                    Err(error) => {
-                        return Outcome::Failed {
-                            session: None,
-                            reason: format!("No session was created. {error}"),
-                        };
-                    }
-                };
-                // A title that cannot be saved leaves the placeholder; the run still goes.
-                let _ = self.rename(session, task.title(), cx);
-                if self.send_message_from(draft(session), None, SendKind::Scheduled, cx) {
-                    return Outcome::Started { session };
+        match self.send_message_from(draft, None, SendKind::Scheduled, cx) {
+            Sent::Yes => Some(Outcome::Started { session }),
+            Sent::Later => None,
+            Sent::No => {
+                if matches!(task.target(), Target::New { .. }) {
+                    let _ = self.set_draft(session, task.prompt().to_owned(), cx);
+                    let alert = vec![(session, crate::notifications::Alert::TurnFailed)];
+                    cx.defer(move |cx| crate::notifications::offer(alert, cx));
                 }
-                // The prompt waits in the composer, where the user can send it.
-                let _ = self.set_draft(session, task.prompt().to_owned(), cx);
-                let alert = vec![(session, crate::notifications::Alert::TurnFailed)];
-                cx.defer(move |cx| crate::notifications::offer(alert, cx));
-                self.failed_send(session)
-            }
-            Target::Session { session } => {
-                if self.session(session).is_none() {
-                    return Outcome::Skipped {
-                        reason: "The session no longer exists.".into(),
-                    };
-                }
-                if let Some(hold) = self.result_hold(session) {
-                    return Outcome::Skipped {
-                        reason: hold_reason(hold).into(),
-                    };
-                }
-                if self.restoring(session) {
-                    return Outcome::Skipped {
-                        reason: "Files were being restored in its repository.".into(),
-                    };
-                }
-                // A message would cancel the continue the user scheduled.
-                if self
-                    .session(session)
-                    .and_then(|s| s.continue_at())
-                    .is_some()
-                {
-                    return Outcome::Skipped {
-                        reason: "The session waits to continue after its usage limit.".into(),
-                    };
-                }
-                if self.send_message_from(draft(session), None, SendKind::Scheduled, cx) {
-                    Outcome::Started { session }
-                } else {
-                    self.failed_send(session)
-                }
+                Some(self.failed_send(session))
             }
         }
     }

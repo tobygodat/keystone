@@ -107,13 +107,12 @@ fn save_failure_keeps_visible_state_unchanged() {
     let before = Store::open(&path).unwrap().saved_snapshot().unwrap();
     let lock = Connection::open(store.path()).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(
-        store
-            .create(Provider::Claude, &working_directory(), 1)
-            .is_err()
-    );
-    assert!(store.workspace().sessions().is_empty());
-    assert_eq!(store.workspace().selected(), None);
+    let created = store
+        .create(Provider::Claude, &working_directory(), 1)
+        .unwrap();
+    assert!(store.flush().is_err());
+    assert_eq!(store.workspace().sessions().len(), 1);
+    assert_eq!(store.workspace().selected(), Some(1));
     assert_eq!(store.writes(), 0);
     assert_eq!(
         Store::open(&path).unwrap().saved_snapshot().unwrap(),
@@ -121,13 +120,8 @@ fn save_failure_keeps_visible_state_unchanged() {
     );
 
     lock.execute_batch("ROLLBACK").unwrap();
-    assert_eq!(
-        store
-            .create(Provider::Claude, &working_directory(), 1)
-            .unwrap()
-            .value,
-        1
-    );
+    store.flush().unwrap();
+    assert_eq!(created.value, 1);
     assert_eq!(store.writes(), 1);
     assert_eq!(
         Store::open(&path).unwrap().workspace().sessions()[0].id(),
@@ -137,34 +131,119 @@ fn save_failure_keeps_visible_state_unchanged() {
     let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
     let before = store.workspace().clone();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(store.set_draft(1, "unwritten".into()).is_err());
-    assert_eq!(store.workspace().sessions()[0].draft(), "");
-    assert!(store.rename(1, "Unwritten").is_err());
-    assert!(store.record_message(1, "Unwritten", 2).is_err());
-    assert_eq!(
-        store.workspace().sessions()[0].title(),
-        "New Claude session"
-    );
+    store.set_draft(1, "unwritten".into()).unwrap();
+    assert!(store.flush().is_err());
+    assert_eq!(store.workspace().sessions()[0].draft(), "unwritten");
+    store.rename(1, "Unwritten").unwrap();
+    store.record_message(1, "Unwritten", 2).unwrap();
+    assert!(store.flush().is_err());
+    assert_eq!(store.workspace().sessions()[0].title(), "Unwritten");
     assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
-    assert!(
-        store
-            .create(Provider::Codex, &working_directory(), 3)
-            .is_err()
-    );
-    assert_eq!(store.workspace(), &before);
+    let created = store
+        .create(Provider::Codex, &working_directory(), 3)
+        .unwrap();
+    assert!(store.flush().is_err());
+    assert_ne!(store.workspace(), &before);
     assert_eq!(store.writes(), 1);
     assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
     lock.execute_batch("ROLLBACK").unwrap();
-    assert_eq!(
-        store
-            .create(Provider::Codex, &working_directory(), 3)
-            .unwrap()
-            .value,
-        2
-    );
+    store.flush().unwrap();
+    assert_eq!(created.value, 2);
     assert_eq!(store.writes(), 2);
     assert_eq!(store.workspace().sessions().len(), 2);
     assert_eq!(Store::open(&path).unwrap().workspace(), store.workspace());
+}
+
+#[test]
+fn a_failed_save_stays_in_memory_and_saves_once_when_retried() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .create(Provider::Claude, &working_directory(), 1)
+        .unwrap();
+    store.flush().unwrap();
+    let writes = store.writes();
+    let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
+    let events = store.database().events_after(0, 1000).unwrap().len();
+
+    let lock = Connection::open(store.path()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    store.set_draft(1, "typed while".into()).unwrap();
+    let typed = store.set_draft(1, "typed while locked".into()).unwrap();
+    assert_eq!(
+        store.workspace().sessions()[0].draft(),
+        "typed while locked"
+    );
+    let refused = store.flush().unwrap_err();
+    assert!(refused.contains("locked"), "{refused}");
+    assert_eq!(
+        store.save_error(),
+        Some(keystone_core::SaveError::Unsaved(refused))
+    );
+    assert!(!store.is_durable(typed.revision));
+    store.retry();
+    assert!(
+        store.flush().is_err(),
+        "Quit is refused while the save fails"
+    );
+    assert_eq!(store.writes(), writes);
+    assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
+    assert_eq!(
+        store.database().events_after(0, 1000).unwrap().len(),
+        events
+    );
+
+    lock.execute_batch("ROLLBACK").unwrap();
+    store.retry();
+    store
+        .wait(typed.revision, std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(store.save_error(), None);
+    assert!(store.is_durable(typed.revision));
+    store.flush().unwrap();
+    assert_eq!(store.writes(), writes + 1, "the retained change saves once");
+    assert_eq!(
+        store.database().events_after(0, 1000).unwrap().len(),
+        events + 1
+    );
+    assert_eq!(
+        Store::open(&path).unwrap().workspace().sessions()[0].draft(),
+        "typed while locked"
+    );
+}
+
+/// Saves queued behind a failed one cost one more try, not one each: a send that
+/// waits for them hears why they failed rather than that the writer is busy.
+#[test]
+fn saves_queued_after_a_failure_are_tried_once() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .create(Provider::Claude, &working_directory(), 1)
+        .unwrap();
+    store.flush().unwrap();
+
+    let lock = Connection::open(store.path()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    store.set_draft(1, "failed".into()).unwrap();
+    assert!(store.flush().is_err());
+    for n in 0..40 {
+        store.set_draft(1, format!("draft {n}")).unwrap();
+    }
+    let error = store.wait(store.revision(), keystone_core::WRITER_WAIT);
+    assert!(
+        matches!(&error, Err(Some(keystone_core::SaveError::Unsaved(reason))) if reason.contains("locked")),
+        "{error:?}"
+    );
+
+    lock.execute_batch("ROLLBACK").unwrap();
+    store.flush().unwrap();
+    assert_eq!(
+        Store::open(&path).unwrap().workspace().sessions()[0].draft(),
+        "draft 39"
+    );
 }
 
 #[test]
@@ -545,16 +624,15 @@ fn failed_legacy_choice_before_rename_keeps_context_and_retries() {
     let saved = Store::open(&path).unwrap().saved_snapshot().unwrap();
     let lock = Connection::open(store.path()).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(
-        store
-            .choose_legacy_directory(1, &working_directory())
-            .is_err()
-    );
-    assert_eq!(store.workspace(), &before);
-    assert_eq!(
+    store
+        .choose_legacy_directory(1, &working_directory())
+        .unwrap();
+    assert!(store.flush().is_err());
+    assert_ne!(store.workspace(), &before);
+    assert!(matches!(
         store.workspace().sessions()[0].context(),
-        SessionContext::LegacyMissing
-    );
+        SessionContext::Recorded { .. }
+    ));
     assert_eq!(store.writes(), 0);
     assert_eq!(Store::open(&path).unwrap().workspace(), &before);
     assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
@@ -572,4 +650,38 @@ fn failed_legacy_choice_before_rename_keeps_context_and_retries() {
     assert_eq!(store.writes(), 1);
     assert_eq!(Store::open(&path).unwrap().saved_snapshot().unwrap(), saved);
     assert_eq!(fs::read(&path).unwrap(), legacy);
+}
+/// Another writer's commit leaves this store's changes unsaveable. The error stays,
+/// a retry or a later change does not clear it, and flush does not fail for it.
+#[test]
+fn a_stale_store_keeps_its_error_and_flush_does_not_fail_for_it() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let mut first = Store::open(&path).unwrap();
+    let mut stale = Store::open(&path).unwrap();
+    first
+        .create(Provider::Claude, &working_directory(), 1)
+        .unwrap();
+    first.flush().unwrap();
+    stale
+        .create(Provider::Codex, &working_directory(), 2)
+        .unwrap();
+    stale.flush().unwrap();
+    let error = stale.save_error();
+    assert!(
+        error
+            .as_ref()
+            .is_some_and(|error| error.to_string().contains("another writer")),
+        "{error:?}"
+    );
+    stale.retry();
+    stale.set_draft(1, "later".into()).unwrap();
+    stale.flush().unwrap();
+    assert_eq!(stale.save_error(), error);
+    let restored = Store::open(&path).unwrap();
+    assert_eq!(restored.workspace().sessions().len(), 1);
+    assert_eq!(
+        restored.workspace().sessions()[0].provider(),
+        Provider::Claude
+    );
 }

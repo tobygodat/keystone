@@ -623,6 +623,57 @@ fn directory_sync_failure_vetoes_title_bar_close_until_explicit_retry(cx: &mut T
     });
 }
 
+/// A close the store refuses gives the store's reason once, in the status line, and
+/// Quit's own message does not repeat it.
+#[gpui::test]
+fn a_close_the_store_refuses_gives_its_reason_once(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, state, cx) = open(dir.path(), cx);
+    state.update(cx, |s, _| {
+        s.test_sync_directory(|_| Err(std::io::Error::other("injected sync failure")))
+    });
+    draft(&view, cx, "directory sync draft");
+    close_from_title_bar(cx);
+    assert_eq!(phase(&state, cx), Phase::Running);
+    view.read_with(cx, |view, cx| {
+        assert_eq!(
+            view.status_line(cx).unwrap().0,
+            "Not quit. Saved, but not confirmed on disk. injected sync failure"
+        )
+    });
+    state.update(cx, |s, _| s.test_sync_directory(std::fs::File::sync_all));
+    close_from_title_bar(cx);
+    assert_eq!(phase(&state, cx), Phase::Exiting);
+}
+
+/// A store another writer moved on can never save its changes, so the reason stays in
+/// the status line and Quit exits rather than refusing for good.
+#[gpui::test]
+fn a_stale_writer_keeps_its_reason_on_screen_and_quit_still_exits(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, state, cx) = open(dir.path(), cx);
+    let mut other = Store::open(dir.path().join("workspace.json")).unwrap();
+    other.set_draft(2, "Another writer".into()).unwrap();
+    other.flush().unwrap();
+    drop(other);
+    let shown =
+        "Not saved. The workspace changed in another writer. Reload Keystone before saving.";
+    state.update(cx, |s, cx| {
+        s.set_settled(2, true, cx).unwrap();
+        let _ = s.store().flush();
+        s.pump(cx);
+        s.store().retry();
+        let _ = s.store().flush();
+        s.pump(cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.status_line(cx).unwrap().0, shown)
+    });
+    close_from_title_bar(cx);
+    assert_eq!(phase(&state, cx), Phase::Exiting);
+}
+
 #[gpui::test]
 fn failed_nonselected_provider_metadata_is_replayed_before_quit(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -648,9 +699,7 @@ fn failed_nonselected_provider_metadata_is_replayed_before_quit(cx: &mut TestApp
     view.read_with(cx, |v, cx| {
         let message = v.status_line(cx).unwrap().0;
         assert_eq!(
-            message
-                .matches("Could not save the conversation ID")
-                .count(),
+            message.matches("Not saved. database is locked").count(),
             1,
             "failed Quit must show each metadata error once: {message}"
         )

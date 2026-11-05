@@ -36,6 +36,8 @@ Mutations == {"none",
               "quit-skips-recheck",       \* quit_if_idle's deferred callback quits without checking again
               "turns-ignore-connections", \* has_work reads only Conversation.running
               "work-ignores-queued",      \* has_work skips a send the worker has not taken
+              "work-ignores-result",     \* has_work skips a result waiting for its durable save
+              "result-save-no-wake",     \* a durable Delivered save wakes no pump
               "work-ignores-steer",       \* has_work skips a steer Codex has not answered
               "steer-settles-silently",   \* an accepted late steer does not wake Keystone
               "scheduler-ignores-wait",   \* scheduled.rs quitting() forgets quit_when_idle
@@ -77,8 +79,9 @@ HasWork(fu, s) ==
     \/ fu[s] = "steer" /\ Mutation # "work-ignores-steer"
 
 \* AppState::has_work.
-TurnRunning(run, fu) ==
-    \E s \in Sessions : run[s] \/ (HasWork(fu, s) /\ Mutation # "turns-ignore-connections")
+TurnRunning(run, fu, del) ==
+    \/ del \in {"Saving", "Saved"} /\ Mutation # "work-ignores-result"
+    \/ \E s \in Sessions : run[s] \/ (HasWork(fu, s) /\ Mutation # "turns-ignore-connections")
 Asking(run, ask) == \E s \in Sessions : run[s] /\ ask[s] \* AppState::asking
 
 RequestQuitCb == [kind |-> "request_quit"]
@@ -90,9 +93,9 @@ SaveCb(by) == [kind |-> "save_and_teardown", by |-> by]
 (* the values an update has reached so far, so it takes them as arguments *)
 (* and returns the new quit_when_idle and deferred queue.                  *)
 (***************************************************************************)
-QuitIfIdle(ph, qwi, run, fu, ask, d) ==
+QuitIfIdle(ph, qwi, run, fu, ask, del, d) ==
     IF ~qwi \/ ph # "Running" THEN [qwi |-> qwi, d |-> d]
-    ELSE IF ~TurnRunning(run, fu)
+    ELSE IF ~TurnRunning(run, fu, del)
          THEN [qwi |-> FALSE, d |-> Append(d, RequestQuitCb)]
     ELSE IF Asking(run, ask)
          THEN [qwi |-> FALSE, d |-> Append(d, ShowApprovalCb)]
@@ -116,7 +119,7 @@ Idle == deferred = <<>>   \* no deferred callback is waiting, so a new update ma
 CloseLastWindow ==
     /\ Idle /\ phase = "Running" /\ windows = 1
     /\ ~Asking(running, asking)                      \* "Answer the approval request..."
-    /\ IF ~TurnRunning(running, followUp) \/ Mutation = "close-ignores-turns"
+    /\ IF ~TurnRunning(running, followUp, delivery) \/ Mutation = "close-ignores-turns"
        THEN LET q == RequestQuit(phase, deferred, "keystone")
             IN /\ phase' = q.ph /\ deferred' = q.d
                /\ UNCHANGED <<quitWhenIdle, windows>>
@@ -242,11 +245,11 @@ ParentLaunchesChild ==
 (*   1. receive applies the drained events in order: a turn end clears     *)
 (*      running and asking (conversation.rs apply), then a follow-up's     *)
 (*      start sets running. Child's end saves its result as Ready          *)
-(*      (receive -> save_results -> persist, saved at once).               *)
+(*      (receive -> save_results -> Store, applied in memory).            *)
 (*   2. receive ends with publish -> quit_if_idle.                         *)
 (*   3. deliver_results (delivery.rs): when phase is Running and Parent    *)
-(*      holds nothing back (result_hold), it saves Delivered and sends,    *)
-(*      which starts Parent's turn at once (push_sent).                    *)
+(*      holds nothing back, it queues Delivered as Saving. A later pump   *)
+(*      sends once WriterConfirmsDelivery makes it Saved.                 *)
 (*   4. deliver_results ends with refresh -> quit_if_idle.                 *)
 (* The pump returns at once when exiting. The store is assumed to save.   *)
 (* It runs when woken: a connection queued an event (deliver wakes the UI  *)
@@ -262,20 +265,31 @@ Pump ==
            ask1 == [s \in Sessions |-> (asking[s] \/ s \in asked) /\ s \notin ended]
            fu1 == [s \in Sessions |-> IF s \in started THEN "none" ELSE followUp[s]]
            del1 == IF Child \in ended /\ delivery = "Working" THEN "Ready" ELSE delivery
-           q1 == QuitIfIdle(phase, quitWhenIdle, run1, fu1, ask1, deferred)
-           deliver == phase = "Running" /\ del1 = "Ready"
+           q1 == QuitIfIdle(phase, quitWhenIdle, run1, fu1, ask1, del1, deferred)
+           accept == phase = "Running" /\ del1 = "Ready"
+                      /\ ~Runs(run1, fu1, Parent) /\ ~ask1[Parent]
+           deliver == phase = "Running" /\ del1 = "Saved"
                       /\ ~Runs(run1, fu1, Parent) /\ ~ask1[Parent]
            run2 == IF deliver THEN [run1 EXCEPT ![Parent] = TRUE] ELSE run1
-           q2 == QuitIfIdle(phase, q1.qwi, run2, fu1, ask1, q1.d)
+           del2 == IF deliver THEN "Delivered" ELSE IF accept THEN "Saving" ELSE del1
+           q2 == QuitIfIdle(phase, q1.qwi, run2, fu1, ask1, del2, q1.d)
        IN /\ running' = run2
           /\ asking' = ask1
           /\ inbox' = [s \in Sessions |-> "none"]
           /\ followUp' = fu1
           /\ woken' = FALSE
-          /\ delivery' = IF deliver THEN "Delivered" ELSE del1
+          /\ delivery' = del2
           /\ quitWhenIdle' = q2.qwi
           /\ deferred' = q2.d
     /\ UNCHANGED <<phase, windows, cutOff, scheduledWhileWaiting>>
+
+\* Store's watched Delivered revision becomes durable on the writer thread.
+WriterConfirmsDelivery ==
+    /\ phase # "Exiting" /\ delivery = "Saving"
+    /\ delivery' = "Saved"
+    /\ woken' = (woken \/ Mutation # "result-save-no-wake")
+    /\ UNCHANGED <<phase, quitWhenIdle, windows, running, asking, inbox, followUp,
+                   deferred, cutOff, scheduledWhileWaiting>>
 
 \* scheduled.rs check_schedules -> run_task -> start_run: runs a due task unless
 \* quitting() (phase not Running, or quit_when_idle). The run starts a turn at once.
@@ -294,7 +308,7 @@ ScheduledRun ==
 \* turn, as deliver_results does, so it checks again: while a turn runs it waits
 \* to quit again, else it is main.rs request_quit.
 RequestQuitDeferred(rest) ==
-    IF TurnRunning(running, followUp) /\ Mutation # "quit-skips-recheck"
+    IF TurnRunning(running, followUp, delivery) /\ Mutation # "quit-skips-recheck"
     THEN /\ quitWhenIdle' = TRUE /\ deferred' = rest
          /\ UNCHANGED <<phase, windows, cutOff>>
     ELSE LET q == RequestQuit(phase, rest, "keystone")
@@ -318,9 +332,10 @@ ShowApprovalDeferred(rest) ==
 SaveAndTeardownDeferred(cb, rest) ==
     \/ /\ phase' = "Exiting" /\ deferred' = rest
        /\ cutOff' = IF cb.by = "user" THEN cutOff
-                    ELSE cutOff \cup {s \in Sessions : running[s] \/ followUp[s] # "none"}
+                    ELSE cutOff \cup {s \in Sessions : running[s] \/ followUp[s] # "none"
+                                      \/ (s = Parent /\ delivery \in {"Saving", "Saved"})}
        /\ UNCHANGED <<quitWhenIdle, windows>>
-    \/ LET q == QuitIfIdle("Running", quitWhenIdle, running, followUp, asking, rest)
+    \/ LET q == QuitIfIdle("Running", quitWhenIdle, running, followUp, asking, delivery, rest)
        IN /\ phase' = "Running"
           /\ deferred' = q.d
           /\ windows' = 1
@@ -360,12 +375,13 @@ Next ==
     \/ \E s \in Sessions : UserSends(s) \/ UserAnswers(s)
     \/ \E s \in Sessions : ProviderEndsTurn(s) \/ ProviderAsks(s)
     \/ WorkerTakesFollowUp \/ CodexAnswersSteer \/ ProviderReleasesFollowUp
-    \/ ParentLaunchesChild \/ Pump \/ ScheduledRun
+    \/ ParentLaunchesChild \/ Pump \/ WriterConfirmsDelivery \/ ScheduledRun
     \/ RunDeferred \/ Exited
 
 \* Turns end, providers take and answer follow-ups, the pump drains what wakes it,
 \* and deferred callbacks run. The user and the scheduler are never forced to act.
 Fairness ==
+    /\ WF_vars(WriterConfirmsDelivery)
     /\ WF_vars(Pump)
     /\ WF_vars(RunDeferred)
     /\ WF_vars(WorkerTakesFollowUp)
@@ -385,7 +401,7 @@ TypeOK ==
     /\ inbox \in [Sessions -> {"none", "ask", "end"}]
     /\ followUp \in [Sessions -> {"none", "queued", "steer", "held", "start"}]
     /\ woken \in BOOLEAN
-    /\ delivery \in {"none", "Working", "Ready", "Delivered"}
+    /\ delivery \in {"none", "Working", "Ready", "Saving", "Saved", "Delivered"}
     /\ Len(deferred) <= 2 /\ cutOff \subseteq Sessions
 
 \* Keystone stops a running turn, or drops a message it accepted for one, only when

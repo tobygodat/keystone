@@ -382,10 +382,9 @@ impl Store {
     ) -> StoreResult<Applied<WindowId>> {
         let mut next = self.workspace.clone();
         let id = next.add_window(project, selected, placement)?;
-        let applied = self.commit(next, self.next_id)?;
+        let applied = self.commit(next, self.next_id);
         Ok(Applied {
             value: id,
-            durability: applied.durability,
             revision: applied.revision,
         })
     }
@@ -400,9 +399,9 @@ impl Store {
         next.show(from)?;
         next.show(to)?;
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Saves what `from.window` shows once a tab left it and a new window showing
@@ -417,10 +416,9 @@ impl Store {
         let project = from.project.clone();
         next.show(from)?;
         let id = next.add_window(Some(&project), Some(session), placement)?;
-        let applied = self.commit(next, self.next_id)?;
+        let applied = self.commit(next, self.next_id);
         Ok(Applied {
             value: id,
-            durability: applied.durability,
             revision: applied.revision,
         })
     }
@@ -445,10 +443,9 @@ impl Store {
                 return Err(invalid("the last window stays open").into());
             }
             windows.retain(|w| w.id != window);
-            let applied = self.commit(next, self.next_id)?;
+            let applied = self.commit(next, self.next_id);
             return Ok(Applied {
                 value: None,
-                durability: applied.durability,
                 revision: applied.revision,
             });
         };
@@ -467,10 +464,9 @@ impl Store {
             .inherit(heir.layouts, &shown);
         next.preferences.project_tabs.inherit(heir.tabs, &shown);
         next.selected = heir.selected.filter(|&id| next.exists(id));
-        let applied = self.commit(next, self.next_id)?;
+        let applied = self.commit(next, self.next_id);
         Ok(Applied {
             value: Some(heir.id),
-            durability: applied.durability,
             revision: applied.revision,
         })
     }
@@ -484,9 +480,9 @@ impl Store {
         let mut next = self.workspace.clone();
         next.preferences.windows.entry(window)?.project = Some(project.as_saved().to_owned());
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Saves where `window` is, how big it is and, when known, the project it shows.
@@ -503,9 +499,9 @@ impl Store {
             saved.project = Some(project.as_saved().to_owned());
         }
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Saves the drafts, and each window's placement and project, collected for Quit
@@ -542,9 +538,9 @@ impl Store {
             next.list_project(project, now);
         }
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 }
 

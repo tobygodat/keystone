@@ -278,6 +278,7 @@ fn a_saved_account_list_with_a_reserved_or_duplicate_id_is_refused() {
     store
         .add_account(Provider::Claude, "Home", "/accounts/b".into(), &[])
         .unwrap();
+    store.flush().unwrap();
     let connection = rusqlite::Connection::open(store.path()).unwrap();
     connection
         .execute(

@@ -269,18 +269,15 @@ fn failed_worktree_session_creation_leaves_no_partial_session_or_metadata() {
     let before = store.saved_snapshot().unwrap();
     let lock = rusqlite::Connection::open(store.path()).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(
-        store
-            .create_worktree_showing(Provider::Codex, &context, 1, WindowId::FIRST, None)
-            .is_err()
-    );
-    assert_eq!(store.writes(), 0);
-    assert!(store.workspace().sessions().is_empty());
-    assert_eq!(store.saved_snapshot().unwrap(), before);
-    lock.execute_batch("ROLLBACK").unwrap();
     store
         .create_worktree_showing(Provider::Codex, &context, 1, WindowId::FIRST, None)
         .unwrap();
+    assert!(store.flush().is_err());
+    assert_eq!(store.writes(), 0);
+    assert_eq!(store.workspace().sessions().len(), 1);
+    assert_eq!(store.saved_snapshot().unwrap(), before);
+    lock.execute_batch("ROLLBACK").unwrap();
+    store.flush().unwrap();
     assert_eq!(store.workspace().sessions()[0].worktree(), Some(&context));
 }
 

@@ -16,7 +16,7 @@ This describes what is built. [ADR 0010](adr/0010-terminal-browser-scheduling-ed
 
 ## Data
 
-**Storage.** One bundled SQLite database holds an append-only `events` log and the projections the app reads: `sessions`, `workspace` and `log_entries`. `Store` decides changes against its in-memory read model and commits synchronously, and a stale writer gets a reload-required error instead of overwriting. It lives at `$XDG_DATA_HOME/keystone/workspace.sqlite3` (macOS: `~/Library/Application Support/Keystone/`), or at `KEYSTONE_STATE_PATH`. A file lock keeps two processes off one workspace. Attached images are copied into `attachments/` beside it. Details, durability and backups: [storage](design/storage.md).
+**Storage.** One bundled SQLite database holds an append-only `events` log and the projections the app reads: `sessions`, `workspace` and `log_entries`. `Store` applies changes to its in-memory read model and queues ordered commits on the database writer, and a stale writer gets a reload-required error instead of overwriting. It lives at `$XDG_DATA_HOME/keystone/workspace.sqlite3` (macOS: `~/Library/Application Support/Keystone/`), or at `KEYSTONE_STATE_PATH`. A file lock keeps two processes off one workspace. Attached images are copied into `attachments/` beside it. Details, durability and backups: [storage](design/storage.md).
 
 **Conversations.** The provider owns the real conversation. Keystone keeps a neutral log of completed items with capped tool output, so it can restore, hand off, fork and offer second opinions.
 

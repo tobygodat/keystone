@@ -156,7 +156,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_project_color(&project, color, cx))
         {
-            Ok(applied) => self.error = crate::durability_warning(applied.durability),
+            Ok(_) => self.error = None,
             Err(error) => self.error = Some(format!("Color not saved. {error}")),
         }
         self.refresh(cx);
@@ -457,8 +457,8 @@ impl Keystone {
             .state
             .update(cx, |state, _| state.forget_project(&project))
         {
-            Ok(applied) => {
-                self.error = crate::durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 if let Some(list) = &self.projects {
                     list.state
                         .update(cx, |state, cx| state.remove_item(&item.id, cx));

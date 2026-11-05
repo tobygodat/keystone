@@ -617,7 +617,7 @@ impl AppState {
                     Ok(())
                 })();
                 if let Err(error) = setup {
-                    self.persist(PendingSave::Delivery(id, DeliveryState::Unsent));
+                    let _ = self.store.set_delivery(id, DeliveryState::Unsent);
                     return Ok(
                         json!({"session":id,"sent":false,"error":error,"created_by":{"session":caller.session}}),
                     );
@@ -631,9 +631,9 @@ impl AppState {
                     Some(caller),
                     SendKind::Draft,
                     cx,
-                );
+                ) == Sent::Yes;
                 if !sent {
-                    self.persist(PendingSave::Delivery(id, DeliveryState::Unsent));
+                    let _ = self.store.set_delivery(id, DeliveryState::Unsent);
                 }
                 Ok(json!({"session":id,"sent":sent,"created_by":{"session":caller.session}}))
             }
@@ -652,7 +652,9 @@ impl AppState {
                 self.conversation(send.session)
                     .push_sent(&send.message, Vec::new());
                 self.commit(send.session);
-                self.persist(PendingSave::Message(send.session, send.message, now_ms()));
+                let _ = self
+                    .store
+                    .record_message(send.session, &send.message, now_ms());
                 self.refresh(cx);
                 Ok(json!({"session":send.session,"sent":true,"delivery":"steer-requested"}))
             }
@@ -781,18 +783,10 @@ impl AppState {
                     .map(keystone_agent::cap_output);
                 // The parent saw its launched session's turn end, so no turn of its own
                 // is started for the result.
-                // A result still being saved counts as ended too.
-                let ended = |state: &DeliveryState| {
-                    match state {
+                let ended = |state: &DeliveryState| match state {
                     DeliveryState::Ready { .. } => true,
-                    DeliveryState::Working => {
-                        self.finished.contains_key(&wait.session)
-                            || self.pending.iter().any(|save| {
-                                matches!(save, PendingSave::Delivery(child, DeliveryState::Ready { .. }) if *child == wait.session)
-                            })
-                    }
+                    DeliveryState::Working => self.finished.contains_key(&wait.session),
                     _ => false,
-                }
                 };
                 if !running
                     && self
@@ -806,7 +800,9 @@ impl AppState {
                         })
                 {
                     self.finished.remove(&wait.session);
-                    self.persist(PendingSave::Delivery(wait.session, DeliveryState::Observed));
+                    let _ = self
+                        .store
+                        .set_delivery(wait.session, DeliveryState::Observed);
                 }
                 Ok(json!({"session":wait.session,"running":running,"error":error}))
             }

@@ -8,8 +8,8 @@ use keystone_agent::{Catalog, Commands, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{
     AccountId, AccountUsage, Applied, Composition, LimitWindow, ModelChoice, Placement,
-    ProjectColor, ProjectId, SavedComposition, SessionTabs, ViewId, WindowId, WindowView,
-    WorkingDirectory,
+    ProjectColor, ProjectId, SaveError, SavedComposition, SessionTabs, ViewId, WindowId,
+    WindowView, WorkingDirectory,
 };
 use std::collections::BTreeMap;
 
@@ -36,16 +36,6 @@ pub(crate) enum Phase {
     Exiting,
 }
 
-enum PendingSave {
-    TurnStart(u64),
-    TurnEnd(u64, bool, u64),
-    Thread(u64, String),
-    Message(u64, String, u64),
-    Draft(u64, String),
-    DraftAttachments(u64, Vec<keystone_core::Attachment>),
-    Delivery(u64, keystone_core::DeliveryState),
-}
-
 /// What a message is, which decides what sending it may do.
 #[derive(Clone, Copy, PartialEq)]
 enum SendKind {
@@ -57,6 +47,15 @@ enum SendKind {
     Result,
     /// A scheduled task's prompt. Only ever a new turn, and the draft stays.
     Scheduled,
+}
+
+/// What became of a message given to `send_message_from`.
+#[derive(Clone, Copy, PartialEq)]
+enum Sent {
+    Yes,
+    No,
+    /// An automatic message waits for changes made before it to be saved.
+    Later,
 }
 
 #[derive(Default)]
@@ -104,8 +103,8 @@ pub(crate) struct AppState {
     checkpoints: HashMap<u64, checkpoints::State>,
     /// The tree each session's next or running turn starts from.
     turn_starts: checkpoints::Starts,
-    /// The name this workspace's checkpoints are saved under, once read.
-    checkpoint_store: Option<String>,
+    /// The name this workspace's checkpoints are saved under.
+    checkpoint_store: checkpoints::StoreName,
     /// Repositories whose files a restore is putting back. No message to a session in
     /// one goes until it ends.
     restoring: HashMap<PathBuf, checkpoints::InFlight>,
@@ -120,7 +119,6 @@ pub(crate) struct AppState {
     /// Set when the last window closed while a turn ran. Keystone then quits, saving
     /// as Quit does, once no turn runs.
     pub(crate) quit_when_idle: bool,
-    pending: std::collections::VecDeque<PendingSave>,
     orchestrator: Option<orchestrator::Orchestrator>,
     /// Each session's current recovery request, from its check until its batch saves.
     recoveries: HashMap<u64, u64>,
@@ -147,6 +145,9 @@ pub(crate) struct AppState {
     /// Idle processes waiting for their session's log to save, by session: the log
     /// checkpoint's ticket and the provider's candidate.
     idle_saves: HashMap<u64, (u64, IdleCandidate)>,
+    /// Idle processes offered while changes were still being saved, by session: the
+    /// revision they wait for and the provider's candidate.
+    idle_waiting: HashMap<u64, (keystone_core::Revision, IdleCandidate)>,
     /// Each account's latest usage readings, by [`usage_key`], as saved.
     usage: BTreeMap<String, AccountUsage>,
     /// Readings waiting to be saved off the UI thread, the newest per account, and
@@ -166,6 +167,11 @@ pub(crate) struct AppState {
     /// Set while ready results are being sent, so a send's own pump does not send
     /// them again.
     delivering: bool,
+    /// Results saved as delivered and not sent yet: the launched session, its parent,
+    /// the message and the revision it waits for, its own save or a later one its send
+    /// found still saving. Each goes, to where its parent's work continues then, once
+    /// that revision is on disk.
+    unsent: Vec<(u64, u64, String, keystone_core::Revision)>,
     /// Sessions with a widget press that goes as a message after the current batch. A
     /// result waits for it, so the press is not sent into the result's turn.
     pressing: std::collections::HashSet<u64>,
@@ -307,7 +313,7 @@ impl AppState {
     }
     #[cfg(all(test, feature = "ui-tests"))]
     pub(crate) fn test_sync_directory(&mut self, sync: fn(&std::fs::File) -> std::io::Result<()>) {
-        self.store.sync_directory = sync;
+        self.store.set_sync_directory(sync);
     }
     /// The default account's connection, else any started one.
     #[cfg(test)]
@@ -358,12 +364,27 @@ impl AppState {
         true
     }
 
-    pub(crate) fn quit_failed(&mut self, error: String, cx: &mut Context<Self>) {
+    pub(crate) fn quit_failed(&mut self, reason: String, cx: &mut Context<Self>) {
         self.phase = Phase::Running;
-        self.shutdown_error = Some(format!(
-            "Could not save before quitting. Fix storage and retry Quit. {error}"
-        ));
+        self.shutdown_error = Some(format!("Not quit. {reason}"));
         self.publish(cx);
+    }
+
+    /// Whether the store's only news is that its changes are committed and not yet
+    /// confirmed on disk, which the status line shows as a warning.
+    pub(crate) fn save_unconfirmed(&self) -> bool {
+        matches!(self.store.save_error(), Some(SaveError::Unconfirmed(_)))
+            && self.error == self.save_status()
+    }
+
+    /// Why the store's changes are not saved, as the status line shows it.
+    fn save_status(&self) -> Option<String> {
+        self.store.save_error().map(|error| match error {
+            SaveError::Unsaved(error) | SaveError::Stale(error) => format!("Not saved. {error}"),
+            SaveError::Unconfirmed(error) => {
+                format!("Saved, but not confirmed on disk. {error}")
+            }
+        })
     }
 
     /// Saves each unsaved project note, then every window's draft, placement and project
@@ -384,25 +405,24 @@ impl AppState {
         {
             self.save_calls += 1;
         }
+        // A result saved as delivered and not sent yet goes after the next start.
+        for (child, _, message, _) in std::mem::take(&mut self.unsent) {
+            let _ = self
+                .store
+                .set_delivery(child, keystone_core::DeliveryState::Ready { message });
+            self.deliveries_due = true;
+        }
         let mut errors = Vec::new();
-        let sessions: Vec<u64> = drafts.iter().map(|d| d.session).collect();
         let drafts = drafts.into_iter().map(|d| (d.session, d.text)).collect();
         for (project, text) in notes {
             if let Err(error) = self.store.set_note(&project, text) {
                 errors.push(format!("Note not saved. {error}"));
             }
         }
-        match self.store.save_for_quit(drafts, windows, crate::now_ms()) {
-            Ok(_) => self.pending.retain(
-                |update| !matches!(update, PendingSave::Draft(id, _) if sessions.contains(id)),
-            ),
-            Err(error) => errors.push(format!("Draft not saved. {error}")),
+        if let Err(error) = self.store.save_for_quit(drafts, windows, crate::now_ms()) {
+            errors.push(format!("Draft not saved. {error}"));
         }
         let logs = self.flush_logs(cx);
-        self.retry_updates();
-        if let Some(error) = &self.error {
-            errors.push(error.clone());
-        }
         match logs {
             Err(error) => errors.push(error),
             Ok(()) => {
@@ -413,13 +433,23 @@ impl AppState {
                 }
             }
         }
-        if let Err(error) = self.store.sync_pending() {
-            errors.push(format!("Workspace directory sync failed. {error}"));
-        }
-        if !errors.is_empty() {
-            let error = errors.join("\n");
-            self.quit_failed(error.clone(), cx);
-            return Err(error);
+        let unsaved = self.store.flush().err();
+        if !errors.is_empty() || unsaved.is_some() {
+            // One line gives every reason, the store's too, which the status line then
+            // shows only there.
+            self.error = self.save_status();
+            let reason = errors
+                .iter()
+                .cloned()
+                .chain(self.error.clone().or_else(|| unsaved.clone()))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            self.quit_failed(reason, cx);
+            return Err(errors
+                .into_iter()
+                .chain(unsaved)
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
         self.shutdown_error = None;
         self.changes.sidebar = true;
@@ -437,69 +467,6 @@ impl AppState {
         self.publish(cx);
     }
 
-    fn persist(&mut self, update: PendingSave) {
-        self.pending.push_back(update);
-        self.retry_updates();
-    }
-
-    fn retry_updates(&mut self) {
-        while let Some(update) = self.pending.front() {
-            let (result, message) = match update {
-                PendingSave::TurnStart(id) => (
-                    self.store.record_turn_start(*id),
-                    "Could not save the session",
-                ),
-                PendingSave::TurnEnd(id, failed, now) => (
-                    self.store.record_turn_end(*id, *failed, *now),
-                    "Could not save the session",
-                ),
-                PendingSave::Thread(id, thread) => (
-                    self.store.set_provider_thread(*id, thread.clone()),
-                    "Could not save the conversation ID",
-                ),
-                PendingSave::Message(id, text, now) => (
-                    self.store.record_message(*id, text, *now),
-                    "Could not save the session",
-                ),
-                PendingSave::Draft(id, text) => {
-                    (self.store.set_draft(*id, text.clone()), "Draft not saved")
-                }
-                PendingSave::DraftAttachments(id, attachments) => (
-                    self.store.set_draft_attachments(*id, attachments.clone()),
-                    "Draft not saved",
-                ),
-                PendingSave::Delivery(child, state) => (
-                    self.store.set_delivery(*child, state.clone()),
-                    "Result not saved",
-                ),
-            };
-            if let Err(error) = result {
-                self.error = Some(format!("{message}. {error}"));
-                return;
-            }
-            // A result whose ready save waited goes now.
-            if let Some(PendingSave::Delivery(_, keystone_core::DeliveryState::Ready { .. })) =
-                self.pending.pop_front()
-            {
-                self.deliveries_due = true;
-                (self.wake)();
-            }
-            self.changes.sidebar = true;
-        }
-        self.error = None;
-    }
-
-    pub(crate) fn sync_pending(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
-        if self.phase == Phase::Exiting {
-            return Err(std::io::Error::other("Keystone is exiting."));
-        }
-
-        let result = self.store.sync_pending();
-        self.changes.sidebar = true;
-        self.publish(cx);
-        result
-    }
-
     pub(crate) fn set_draft(
         &mut self,
         id: u64,
@@ -511,12 +478,6 @@ impl AppState {
         }
 
         let result = self.store.set_draft(id, text);
-        if result.is_ok() {
-            self.pending.retain(
-                |update| !matches!(update, PendingSave::Draft(session, _) if *session == id),
-            );
-            self.retry_updates();
-        }
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -534,12 +495,6 @@ impl AppState {
             return Err(std::io::Error::other("Keystone is exiting.").into());
         }
         let result = self.store.set_draft_attachments(id, attachments);
-        if result.is_ok() {
-            self.pending.retain(|update| {
-                !matches!(update, PendingSave::DraftAttachments(session, _) if *session == id)
-            });
-            self.retry_updates();
-        }
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -1480,9 +1435,10 @@ impl AppState {
     }
 
     pub(crate) fn has_work(&self) -> bool {
-        self.conversations.iter().any(|(&id, conversation)| {
-            conversation.running || self.started(id).is_some_and(|c| c.has_work(id))
-        })
+        (!self.unsent.is_empty() && self.store.save_error().is_none())
+            || self.conversations.iter().any(|(&id, conversation)| {
+                conversation.running || self.started(id).is_some_and(|c| c.has_work(id))
+            })
     }
 
     fn runs_turn(&self, id: u64) -> bool {
@@ -1529,7 +1485,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn new(store: Store, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(mut store: Store, cx: &mut Context<Self>) -> Self {
         let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
         cx.spawn(async move |this, cx| {
             while wake_rx.next().await.is_some() {
@@ -1544,6 +1500,7 @@ impl AppState {
         });
         // The first pump sends results that were ready when Keystone last closed.
         wake();
+        store.set_wake(wake.clone());
         let logs = Logs::with_database(store.database(), wake.clone());
         let data_dir = store.path().parent().unwrap_or(std::path::Path::new("."));
         let attachments = keystone_core::attachment::Attachments::in_data_dir(data_dir);
@@ -1570,7 +1527,7 @@ impl AppState {
             conversations: HashMap::new(),
             checkpoints: HashMap::new(),
             turn_starts: checkpoints::Starts::default(),
-            checkpoint_store: None,
+            checkpoint_store: checkpoints::StoreName::new(store.database()),
             restoring: Default::default(),
             saving: HashMap::new(),
             catalogs: Catalogs::default(),
@@ -1580,7 +1537,6 @@ impl AppState {
             changes: RuntimeChanged::default(),
             phase: Phase::Running,
             quit_when_idle: false,
-            pending: Default::default(),
             orchestrator: None,
             recoveries: HashMap::new(),
             next_ticket: 0,
@@ -1593,6 +1549,7 @@ impl AppState {
             widget_saves: Default::default(),
             send_unloaded: Default::default(),
             idle_saves: HashMap::new(),
+            idle_waiting: HashMap::new(),
             usage: store
                 .database()
                 .usage()
@@ -1616,6 +1573,7 @@ impl AppState {
             // Results saved before a restart may be ready for their parents.
             deliveries_due: true,
             delivering: false,
+            unsent: Vec::new(),
             pressing: Default::default(),
             #[cfg(test)]
             test_idle: None,
@@ -1892,6 +1850,17 @@ impl AppState {
         if self.phase == Phase::Exiting {
             return;
         }
+        self.resume_scheduled_runs(cx);
+        self.error = self.save_status();
+        let failed = self.store.save_error().is_some();
+        let store = &self.store;
+        let offers: Vec<_> = self
+            .idle_waiting
+            .extract_if(|_, (saving, _)| failed || store.is_durable(*saving))
+            .collect();
+        for (session, (_, candidate)) in offers {
+            self.offer_idle(session, candidate);
+        }
         let reports = self.logs.drain();
         let mut events = Vec::new();
         // A catalog belongs to the connection it came from, whatever provider or
@@ -2069,12 +2038,10 @@ impl AppState {
             let failed = turn_failed(&event);
             if failed.is_some() {
                 self.deliveries_due = true;
-                // A result whose save is queued is already taken.
+                // A result already taken is no longer working.
                 if matches!(
                     self.store.workspace().delivery(session).map(|d| d.state()),
                     Some(keystone_core::DeliveryState::Working)
-                ) && !self.pending.iter().any(
-                    |save| matches!(save, PendingSave::Delivery(child, _) if *child == session),
                 ) {
                     self.finished
                         .entry(session)
@@ -2082,8 +2049,13 @@ impl AppState {
                 }
             }
             match (&event, failed) {
-                (Event::TurnStarted, _) => self.persist(PendingSave::TurnStart(session)),
-                (_, Some(failed)) => self.persist(PendingSave::TurnEnd(session, failed, now_ms())),
+                (Event::TurnStarted, _) => {
+                    let _ = self.store.record_turn_start(session);
+                    self.changes.sidebar = true;
+                }
+                (_, Some(failed)) => {
+                    let _ = self.store.record_turn_end(session, failed, now_ms());
+                }
                 _ => {}
             }
             sidebar_changed |= failed.is_some()
@@ -2109,7 +2081,8 @@ impl AppState {
                     .iter()
                     .any(|s| s.id() == session && s.provider_thread() == Some(thread.as_str()));
                 if !known {
-                    self.persist(PendingSave::Thread(session, thread));
+                    let _ = self.store.set_provider_thread(session, thread);
+                    self.changes.sidebar = true;
                 }
             }
         }
@@ -2448,19 +2421,16 @@ impl AppState {
 
     /// A provider proved the session's process idle, and every event before that is
     /// applied. Once the conversation ID is saved and synced and a log checkpoint saves
-    /// everything queued so far, the process may end. Anything not saved, or a session
-    /// busy here, keeps it running; its next activity proves it again.
+    /// everything queued so far, the process may end. Changes still being saved hold
+    /// the offer until they are on disk, and the pump then makes it again. A failed save,
+    /// or a session busy here, keeps it running; its next activity proves it again.
     fn offer_idle(&mut self, session: u64, candidate: IdleCandidate) {
         if self.phase != Phase::Running {
             return;
         }
         let thread_saved = self
             .session(session)
-            .is_some_and(|s| s.provider_thread() == Some(candidate.thread.as_str()))
-            && !self
-                .pending
-                .iter()
-                .any(|update| matches!(update, PendingSave::Thread(id, _) if *id == session));
+            .is_some_and(|s| s.provider_thread() == Some(candidate.thread.as_str()));
         let settled = self
             .conversations
             .get(&session)
@@ -2469,7 +2439,7 @@ impl AppState {
             Some("its conversation ID is not saved yet")
         } else if !settled {
             Some("its conversation is loading, running or not being saved")
-        } else if self.store.sync_pending().is_err() {
+        } else if self.store.save_error().is_some() {
             Some("the workspace could not be saved")
         } else {
             None
@@ -2478,6 +2448,12 @@ impl AppState {
             if let Some(connection) = self.started(session) {
                 connection.decline_idle(session, candidate, format!("Keystone kept it: {reason}"));
             }
+            return;
+        }
+        let saving = self.store.revision();
+        if !self.store.is_durable(saving) {
+            self.store.wake_when_durable(saving);
+            self.idle_waiting.insert(session, (saving, candidate));
             return;
         }
         self.next_ticket += 1;
@@ -3031,7 +3007,7 @@ impl AppState {
     }
 
     pub(crate) fn send_message(&mut self, draft: ComposerDraft, cx: &mut Context<Self>) -> bool {
-        self.send_message_from(draft, None, SendKind::Draft, cx)
+        self.send_message_from(draft, None, SendKind::Draft, cx) == Sent::Yes
     }
 
     /// Sends [`CONTINUE_TEXT`] to a session whose last turn hit its usage limit, at the
@@ -3048,7 +3024,7 @@ impl AppState {
             text: CONTINUE_TEXT.into(),
             attachments: Vec::new(),
         };
-        if self.send_message_from(draft, None, SendKind::Widget, cx) {
+        if self.send_message_from(draft, None, SendKind::Widget, cx) == Sent::Yes {
             return true;
         }
         let conversation = self.conversation(session);
@@ -3241,7 +3217,7 @@ impl AppState {
             text: keystone_agent::surface::message_for(call, action),
             attachments: Vec::new(),
         };
-        if self.send_message_from(draft, None, SendKind::Widget, cx) {
+        if self.send_message_from(draft, None, SendKind::Widget, cx) == Sent::Yes {
             return;
         }
         let conversation = self.conversation(session);
@@ -3258,9 +3234,9 @@ impl AppState {
         caller: Option<keystone_agent::mcp::Caller>,
         kind: SendKind,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Sent {
         if self.phase != Phase::Running {
-            return false;
+            return Sent::No;
         }
         let id = draft.session;
         let Some(session) = self
@@ -3271,11 +3247,11 @@ impl AppState {
             .find(|s| s.id() == id)
             .cloned()
         else {
-            return false;
+            return Sent::No;
         };
         let text = draft.text.trim().to_owned();
         if text.is_empty() && draft.attachments.is_empty() {
-            return false;
+            return Sent::No;
         }
         // An image whose copy is gone or cannot be opened keeps the draft, with a reason,
         // rather than going without it.
@@ -3297,7 +3273,7 @@ impl AppState {
                 self.conversation(id).error = Some(refused);
                 self.commit(id);
                 self.publish(cx);
-                return false;
+                return Sent::No;
             }
             images.push(keystone_agent::Image {
                 path,
@@ -3313,19 +3289,19 @@ impl AppState {
         // its history, which decides whether recovery is needed.
         if let Some(conversation) = self.conversations.get_mut(&id) {
             if conversation.recovery.is_some() {
-                return false;
+                return Sent::No;
             }
             if conversation.is_loading()
                 && session.provider_thread().is_some()
                 && !self.send_unloaded.contains(&id)
             {
                 self.wait_for_history(id, cx);
-                return false;
+                return Sent::No;
             }
         }
         // A result waits for a turn that started meanwhile rather than steering it.
         if matches!(kind, SendKind::Result | SendKind::Scheduled) && self.runs_turn(id) {
-            return false;
+            return Sent::No;
         }
         // A result also waits for a restore in its repository to end.
         if self.restoring(id) {
@@ -3334,17 +3310,17 @@ impl AppState {
                 self.commit(id);
                 self.publish(cx);
             }
-            return false;
+            return Sent::No;
         }
         let Some(directory) = self.dispatch_directory(id, cx) else {
-            return false;
+            return Sent::No;
         };
         // A session whose account is gone keeps its draft and stays unstarted.
         if let Err(error) = self.profile(session.provider(), session.account()) {
             self.conversation(id).error = Some(error);
             self.commit(id);
             self.publish(cx);
-            return false;
+            return Sent::No;
         }
         let cwd = directory.as_str();
         // Read after pumping: the pump may have just saved a newer thread ID.
@@ -3368,40 +3344,30 @@ impl AppState {
             ));
             self.commit(id);
             self.publish(cx);
-            return false;
+            return Sent::No;
         }
-        // The provider and model are fixed from the first message on. Saved before the
+        // The provider and account are fixed from the first message on. Saved before the
         // message goes, so a crash after this leaves them fixed rather than free.
-        if !session.started() {
-            if let Err(error) = self.store.lock_model(id) {
-                self.conversation(id).error = Some(format!(
-                    "Not sent: the model choice could not be saved first. {error}"
-                ));
-                self.commit(id);
-                self.publish(cx);
-                return false;
-            }
+        if !session.started()
+            && let Err(error) = self.store.lock_model(id)
+        {
+            self.conversation(id).error = Some(format!(
+                "Not sent: the model choice could not be saved first. {error}"
+            ));
+            self.commit(id);
+            self.publish(cx);
+            return Sent::No;
         }
         let Some((provider, approval)) = self.approval(id) else {
-            return false;
+            return Sent::No;
         };
         if let Err(error) = self.ensure_orchestrator() {
             self.conversation(id).error = Some(format!("Not sent: {error}"));
             self.commit(id);
             self.publish(cx);
-            return false;
+            return Sent::No;
         }
         let account = session.account().cloned();
-        // A failure to start the provider arrives later as an error in this
-        // conversation. A refusal comes now, and the text stays in the composer.
-        if let Err(error) = self.store.sync_pending() {
-            self.conversation(id).error = Some(format!(
-                "Not sent. Could not finish saving changes. {error}"
-            ));
-            self.commit(id);
-            self.refresh(cx);
-            return false;
-        }
         // A message the user sends replaces any continue they scheduled. Cancelled first,
         // so a restart can never send that continue as well; a send that then fails leaves
         // it cancelled and the card offers it again.
@@ -3413,7 +3379,32 @@ impl AppState {
             ));
             self.commit(id);
             self.refresh(cx);
-            return false;
+            return Sent::No;
+        }
+        // The saves above must be on disk before the provider can see the message, and
+        // so must any that an earlier refused send left queued. A failure to start the
+        // provider arrives later as an error in this conversation. A refusal comes now,
+        // and the text stays in the composer. A result never waits here: it is kept
+        // and tried again once they are.
+        if !self.store.is_durable(self.store.revision()) {
+            if matches!(kind, SendKind::Result | SendKind::Scheduled) {
+                return Sent::Later;
+            }
+            self.store.retry();
+            if let Err(error) = self
+                .store
+                .wait(self.store.revision(), keystone_core::WRITER_WAIT)
+            {
+                let error = error.map(|error| error.to_string()).unwrap_or_default();
+                self.conversation(id).error = Some(
+                    format!("Not sent. Could not finish saving changes. {error}")
+                        .trim_end()
+                        .to_owned(),
+                );
+                self.commit(id);
+                self.refresh(cx);
+                return Sent::No;
+            }
         }
         // A message that starts a turn first reads the files the turn starts from.
         let steer = self.runs_turn(id);
@@ -3455,7 +3446,7 @@ impl AppState {
             self.conversation(id).error = Some(reason);
             self.commit(id);
             self.publish(cx);
-            return false;
+            return Sent::No;
         }
         for attachment in &draft.attachments {
             self.attachments.touch(attachment);
@@ -3463,15 +3454,15 @@ impl AppState {
         self.conversation(id)
             .push_sent(&text, draft.attachments.clone());
         self.commit(id);
-        self.persist(PendingSave::Message(id, text.clone(), now_ms()));
+        let _ = self.store.record_message(id, &text, now_ms());
         if kind == SendKind::Draft {
-            self.persist(PendingSave::Draft(id, String::new()));
+            let _ = self.store.set_draft(id, String::new());
             if !draft.attachments.is_empty() {
-                self.persist(PendingSave::DraftAttachments(id, Vec::new()));
+                let _ = self.store.set_draft_attachments(id, Vec::new());
             }
         }
         self.refresh(cx);
-        true
+        Sent::Yes
     }
 
     pub(crate) fn stop_turn(&mut self, id: u64, cx: &mut Context<Self>) {

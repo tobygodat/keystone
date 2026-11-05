@@ -38,6 +38,40 @@ pub(crate) enum State {
 /// The tree each session's next or running turn starts from, by session.
 pub(crate) type Starts = Arc<Mutex<HashMap<u64, String>>>;
 
+/// The name this workspace's checkpoints are saved under in each repository. It is read,
+/// or first saved, by the first checkpoint that needs it, and by a later one after that
+/// failed.
+#[derive(Clone)]
+pub(crate) struct StoreName {
+    database: keystone_core::Database,
+    name: Arc<Mutex<Option<String>>>,
+}
+
+impl StoreName {
+    pub(crate) fn new(database: keystone_core::Database) -> Self {
+        Self {
+            database,
+            name: Arc::default(),
+        }
+    }
+
+    /// The session's checkpoints, named for this workspace. Naming them may wait for
+    /// the writer, so never on the UI thread.
+    pub(crate) fn session(&self, id: u64) -> checkpoint::Result<checkpoint::Session> {
+        let named = self.name.lock().unwrap().clone();
+        let store = match named {
+            Some(store) => store,
+            None => {
+                let store = checkpoint::new_store()
+                    .and_then(|fresh| self.database.checkpoint_store(&fresh))?;
+                *self.name.lock().unwrap() = Some(store.clone());
+                store
+            }
+        };
+        Ok(checkpoint::Session { store, id })
+    }
+}
+
 /// A restore under way in a repository: what stops it, and its thread.
 pub(crate) struct InFlight {
     cancel: Cancel,
@@ -143,24 +177,6 @@ impl AppState {
         }
     }
 
-    /// The session's checkpoints, named for this workspace.
-    fn checkpoint_session(&mut self, session: u64) -> Result<checkpoint::Session, String> {
-        let store = match &self.checkpoint_store {
-            Some(store) => store.clone(),
-            None => {
-                let fresh = checkpoint::new_store().map_err(|e| e.to_string())?;
-                let store = self
-                    .store
-                    .database()
-                    .checkpoint_store(&fresh)
-                    .map_err(|e| e.to_string())?;
-                self.checkpoint_store = Some(store.clone());
-                store
-            }
-        };
-        Ok(checkpoint::Session { store, id: session })
-    }
-
     fn session_connection(&mut self, session: u64) -> Option<&dyn Connection> {
         let saved = self.session(session)?;
         let (provider, account) = (saved.provider(), saved.account().cloned());
@@ -219,13 +235,13 @@ impl AppState {
         let Some(folder) = self.checkpoint_folder(session) else {
             return;
         };
-        let key = match self.checkpoint_session(session) {
-            Ok(key) => key,
-            Err(error) => return self.checkpoints_read(session, Err(error), false, cx),
-        };
+        let names = self.checkpoint_store.clone();
         let read = cx.background_executor().spawn(async move {
             match checkpoint::root(&folder) {
-                Ok(Some(root)) => checkpoint::list(&root, &key).map(Some),
+                Ok(Some(root)) => names
+                    .session(session)
+                    .and_then(|key| checkpoint::list(&root, &key))
+                    .map(Some),
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
             }
@@ -287,10 +303,7 @@ impl AppState {
         else {
             return;
         };
-        let key = match self.checkpoint_session(session) {
-            Ok(key) => key,
-            Err(error) => return self.checkpoints_read(session, Err(error), true, cx),
-        };
+        let names = self.checkpoint_store.clone();
         let starts = self.turn_starts.clone();
         let keep = keep();
         *self.saving.entry(session).or_default() += 1;
@@ -300,6 +313,7 @@ impl AppState {
                 let Some((root, snapshot)) = snapshot(&folder)? else {
                     return Ok(None);
                 };
+                let key = names.session(session)?;
                 // The files this turn left are where the next one starts.
                 let start = starts
                     .lock()
@@ -423,14 +437,17 @@ impl AppState {
         };
         let root = saved.root.clone();
         let started = self.idle_in(&root).and_then(|()| {
-            let key = self.checkpoint_session(session)?;
+            let names = self.checkpoint_store.clone();
             let (ended, end) = oneshot::channel();
             let folder = root.clone();
             let thread = std::thread::Builder::new()
                 .name("keystone-put-back".into())
                 .spawn(move || {
                     let put = checkpoint::put_back(&folder);
-                    let _ = ended.send((put, checkpoint::list(&folder, &key)));
+                    let listed = names
+                        .session(session)
+                        .and_then(|key| checkpoint::list(&folder, &key));
+                    let _ = ended.send((put, listed));
                 })
                 .map_err(|error| error.to_string())?;
             Ok((end, thread))
@@ -495,7 +512,7 @@ impl AppState {
             _ => return Err("This checkpoint is no longer saved.".into()),
         };
         self.idle_in(&root)?;
-        let key = self.checkpoint_session(session)?;
+        let names = self.checkpoint_store.clone();
         let cancel = Cancel::default();
         let (placed_sender, placed) = oneshot::channel();
         let (ended, end) = oneshot::channel();
@@ -522,7 +539,10 @@ impl AppState {
                         }
                     }
                 };
-                let _ = ended.send(checkpoint::restore(&restored_root, &key, turn, &stop, keep));
+                let restored = names
+                    .session(session)
+                    .and_then(|key| checkpoint::restore(&restored_root, &key, turn, &stop, keep));
+                let _ = ended.send(restored);
             })
             .map_err(|error| error.to_string())?;
         self.restoring.insert(

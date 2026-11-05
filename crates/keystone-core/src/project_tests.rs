@@ -374,6 +374,7 @@ fn a_color_from_a_newer_release_reads_as_automatic() {
         ProjectColor::Teal
     );
     let saved = |store: &Store| -> String {
+        store.flush().unwrap();
         rusqlite::Connection::open(store.path())
             .unwrap()
             .query_one("SELECT payload FROM projects WHERE id='/x'", [], |row| {

@@ -22,3 +22,5 @@ date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_
 2026-11-03T23:57:35Z	b752055	1.19	1.53	462	1.10	1.37	TOB-125 explicit diagram test expiry; wall-clock production deadlines retained; shared load, no speed comparison	1.66	1.45
 2026-11-04T00:01:04Z	4787219	1.21	1.63	462	1.13	1.40	TOB-125 final deadline constructor keeps original budget start; shared load, no speed comparison	1.69	1.42
 2026-11-04T00:50:23Z	2646bbc	4.80	4.93	459	1.11	1.33	TOB-289 bounded recovery sizing; shared-host baseline, no speed comparison	1.32	1.40
+2026-11-05T04:13:15Z	9d00517+dirty	4.83	5.56	464	1.11	1.29	TOB-183 author integration against dc1ba13: optimistic Store saves, scheduled metadata and asynchronous run claims; jobs=2 incremental=0; observational run under shared host load, no comparative speed claim	1.49	1.42
+2026-11-05T04:19:19Z	9d00517+dirty	4.97	5.59	464	1.10	1.32	TOB-183 author integration against dc1ba13: optimistic Store saves, scheduled metadata and asynchronous run claims; jobs=2 incremental=0; observational run under shared host load, no comparative speed claim	1.49	1.49

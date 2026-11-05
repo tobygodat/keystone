@@ -308,7 +308,7 @@ impl Store {
             Some(listed) => listed.opened(now),
             None => next.projects.push(Project::new(project, now)),
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Gives listed `project` the tile color `color`, or its automatic one for `None`.
@@ -330,7 +330,7 @@ impl Store {
             .into());
         };
         listed.color = color.map(SavedColor::Known);
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Takes `project` off the list. Nothing on disk changes, and its sessions and
@@ -352,7 +352,7 @@ impl Store {
         if let Some(listed) = next.projects.iter_mut().find(|p| p.is(project)) {
             listed.removed = true;
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 }
 

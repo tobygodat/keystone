@@ -235,6 +235,40 @@ fn an_idle_claude_process_ends_after_saving_and_resumes_on_its_own_account(
     });
 }
 
+/// A process proven idle while a save is still landing is neither kept as though the
+/// save failed nor ended before the save is on disk: it ends once the save lands.
+#[gpui::test]
+fn an_idle_process_offered_while_a_save_lands_ends_once_it_is_saved(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let clock = Arc::new(ManualClock::default());
+    let (state, _) = idle_app(dir, &clock, cx);
+    send(&state, "hello", cx);
+    residency(&state, "armed", cx);
+    let first = pid(&state, cx).unwrap();
+    let stalled = dir.join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_sync_directory(crate::tests::stall_while_marked);
+        state.store.set_draft(1, "Unrelated".into()).unwrap();
+    });
+    clock.advance(TEN_MINUTES);
+    let now = |state: &AppState| state.test_claude().and_then(|c| c.residency(1));
+    wait_until(cx, &state, |state| {
+        now(state).is_some_and(|now| now == "offered" || now.contains("Keystone kept it"))
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert_eq!(now(state).as_deref(), Some("offered"));
+        assert_eq!(state.test_claude().and_then(|c| c.pid(1)), Some(first));
+    });
+    std::fs::remove_file(&stalled).unwrap();
+    wait_until(cx, &state, |state| {
+        state.test_claude().is_some_and(|c| c.pid(1).is_none())
+    });
+}
+
 /// Recovery's gate still holds Send for a session whose process was evicted, and
 /// starts nothing.
 #[gpui::test]

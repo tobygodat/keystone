@@ -120,10 +120,10 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_note(project, text, cx))
         {
-            Ok(applied) => {
-                self.error = crate::durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 cx.notify();
-                self.error.is_none()
+                true
             }
             Err(error) => {
                 self.error = Some(format!("Note not saved. {error}"));

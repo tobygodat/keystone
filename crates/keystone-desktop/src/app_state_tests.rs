@@ -719,13 +719,12 @@ fn recovered_provider_metadata_invalidates_the_cached_sidebar(cx: &mut gpui::Tes
     });
     let writer = crate::tests::lock_database(&dir.path().join("workspace.sqlite3"));
     state.update(cx, |state, cx| {
-        state.persist(PendingSave::Message(
-            1,
-            "Recovered sidebar title".into(),
-            now_ms(),
-        ));
+        let _ = state
+            .store
+            .record_message(1, "Recovered sidebar title", now_ms());
         state.publish(cx);
     });
+    crate::tests::settle(&state, cx);
     state.read_with(cx, |state, _| assert!(state.error.is_some()));
     drop(writer);
     seen.borrow_mut().clear();
@@ -741,6 +740,7 @@ fn recovered_provider_metadata_invalidates_the_cached_sidebar(cx: &mut gpui::Tes
             cx,
         )
     });
+    crate::tests::settle(&state, cx);
     state.read_with(cx, |state, _| {
         assert!(state.error.is_none());
         assert_eq!(state.session(1).unwrap().title(), "Recovered sidebar title");
@@ -1465,7 +1465,9 @@ fn turns_get_checkpoints_and_a_restore_holds_messages_to_the_repository(
         &repo,
         &["for-each-ref", "--format=%(refname)", "refs/keystone"],
     );
-    let store = state.read_with(cx, |state, _| state.checkpoint_store.clone().unwrap());
+    let store = state.read_with(cx, |state, _| {
+        state.checkpoint_store.session(2).unwrap().store
+    });
     assert_eq!(
         refs.lines().collect::<Vec<_>>(),
         ["1", "2", "before-restore"]
@@ -1508,23 +1510,7 @@ fn repositories(
     for (folder, provider) in sessions {
         let repo = dir.join(folder);
         if !repo.exists() {
-            std::fs::create_dir(&repo).unwrap();
-            git(&repo, &["init", "-q", "-b", "main"]);
-            std::fs::write(repo.join("a.txt"), "start\n").unwrap();
-            git(&repo, &["add", "--all"]);
-            git(
-                &repo,
-                &[
-                    "-c",
-                    "user.name=T",
-                    "-c",
-                    "user.email=t@e",
-                    "commit",
-                    "-q",
-                    "-m",
-                    "start",
-                ],
-            );
+            repository(&repo);
         }
         store
             .create(*provider, &WorkingDirectory::new(&repo).unwrap(), 1)
@@ -1535,6 +1521,96 @@ fn repositories(
     connect(&state, dir, 0, false, cx);
     state.update(cx, |state, _| state.test_checkpoints = true);
     state
+}
+
+/// A checkpoint store the database's lock kept from being named at start is never named
+/// on the UI thread: reading a session's checkpoints never waits for the writer, and
+/// the read ends without the launch-time error.
+#[gpui::test]
+fn a_checkpoint_store_that_failed_at_start_is_not_retried_on_the_ui_thread(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.json");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .create(
+            Provider::Codex,
+            &WorkingDirectory::new(dir.path()).unwrap(),
+            1,
+        )
+        .unwrap();
+    store.flush().unwrap();
+    let lock = crate::tests::lock_database(&path);
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    drop(lock);
+    let stalled = dir.path().join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_checkpoints = true;
+        state.test_sync_directory(crate::tests::stall_while_marked);
+        state.store.set_draft(1, "held".into()).unwrap();
+    });
+    let read = Instant::now();
+    state.update(cx, |state, cx| state.read_checkpoints(1, cx));
+    let took = read.elapsed();
+    std::fs::remove_file(&stalled).unwrap();
+    assert!(
+        took < keystone_core::WRITER_WAIT,
+        "the read waited {took:?}"
+    );
+    wait_until(cx, &state, |state| state.checkpoints(1).is_some());
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.checkpoints(1), Some(&checkpoints::State::Unavailable))
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
+/// A new repository at `repo` with one commit.
+fn repository(repo: &Path) {
+    std::fs::create_dir(repo).unwrap();
+    git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "start\n").unwrap();
+    git(repo, &["add", "--all"]);
+    git(
+        repo,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-q",
+            "-m",
+            "start",
+        ],
+    );
+}
+
+/// A database lock at launch that clears later still lets a turn save its checkpoint:
+/// the store is named when a checkpoint needs it, not only at start.
+#[gpui::test]
+fn a_checkpoint_store_locked_at_launch_is_named_once_the_lock_clears(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    repository(&repo);
+    let path = dir.path().join("workspace.json");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .create(Provider::Codex, &WorkingDirectory::new(&repo).unwrap(), 1)
+        .unwrap();
+    store.flush().unwrap();
+    let lock = crate::tests::lock_database(&path);
+    cx.executor().allow_parking();
+    let state = cx.new(|cx| AppState::new(store, cx));
+    drop(lock);
+    connect(&state, dir.path(), 0, false, cx);
+    state.update(cx, |state, _| state.test_checkpoints = true);
+    checkpointed_turn(&state, 1, "write a.txt: one", 1, cx);
+    state.update(cx, |state, cx| state.teardown(cx));
 }
 
 /// Sends `text` to the session and waits for its turn's checkpoint.

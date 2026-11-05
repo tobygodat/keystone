@@ -480,15 +480,12 @@ impl Customization {
         &mut self,
         previous: Option<SavedComposition>,
         shown: Composition,
-        result: Result<bool, String>,
+        result: Result<(), String>,
     ) {
         match result {
-            Ok(warning) => {
+            Ok(()) => {
                 self.replaced = Some(previous);
-                self.stage(
-                    shown,
-                    warning.then(|| "Layout applied, but not confirmed on disk.".into()),
-                );
+                self.stage(shown, None);
             }
             Err(error) => self.editing.as_mut().unwrap().note = Some(format!("Not saved. {error}")),
         }
@@ -530,7 +527,7 @@ mod tests {
         e.saved(None, candidate.clone(), Err("disk full".into()));
         assert!(e.can_apply(None, &saved));
         assert!(!e.can_undo(&saved));
-        e.saved(None, candidate.clone(), Ok(true));
+        e.saved(None, candidate.clone(), Ok(()));
         assert!(!e.can_apply(Some(&candidate.clone().into()), &candidate));
         assert!(!e.can_discard(&candidate));
         assert_eq!(

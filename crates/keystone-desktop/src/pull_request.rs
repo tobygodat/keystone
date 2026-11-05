@@ -711,7 +711,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_draft(session, draft, cx))
         {
-            Ok(applied) => crate::durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(format!("Draft not saved. {error}")),
         };
         self.refresh(cx);

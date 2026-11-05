@@ -63,9 +63,9 @@ impl Store {
             }),
         }
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 }
 

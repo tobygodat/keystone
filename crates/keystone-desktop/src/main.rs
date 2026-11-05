@@ -66,8 +66,7 @@ use keystone_core::ViewId;
 #[cfg(test)]
 use keystone_core::WorkingDirectory;
 use keystone_core::{
-    AccountId, Appearance, ApprovalMode, Attention, Durability, ModelChoice, Provider, Revision,
-    SidebarSide, Store,
+    AccountId, Appearance, ApprovalMode, Attention, ModelChoice, Provider, SidebarSide, Store,
 };
 use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
@@ -169,17 +168,6 @@ fn turn_failed(event: &Event) -> Option<bool> {
 /// How long closing waits for saved histories to finish loading.
 const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-const FOLDER_UNCONFIRMED: &str = "Folder selected, but not confirmed on disk.";
-
-fn durability_warning(durability: Durability) -> Option<String> {
-    match durability {
-        Durability::Synced => None,
-        Durability::DirectorySyncPending(error) => {
-            Some(format!("Saved, but not confirmed on disk. {error}"))
-        }
-    }
-}
-
 /// The open rename dialog. A failed save keeps it open with `error`.
 struct Renaming {
     id: u64,
@@ -198,11 +186,6 @@ struct ComposerDraft {
     session: u64,
     text: String,
     attachments: Vec<keystone_core::Attachment>,
-}
-
-struct FolderWarning {
-    session: u64,
-    revision: Revision,
 }
 
 struct DesktopApp {
@@ -485,7 +468,6 @@ struct Keystone {
     /// The saved window the platform title names, set once it has been.
     titled: Option<keystone_core::WindowId>,
     error: Option<String>,
-    folder_warning: Option<FolderWarning>,
     composer: Entity<TextInput>,
     search: Entity<TextInput>,
     session_sidebar: Entity<SessionSidebar>,
@@ -910,7 +892,6 @@ impl Keystone {
             placement_task: None,
             titled: None,
             error: None,
-            folder_warning: None,
             composer,
             search,
             session_sidebar,
@@ -1009,7 +990,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_appearance(appearance, cx))
         {
-            Ok(applied) => durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(format!("Settings not saved. {error}")),
         };
         self.apply_theme(window, cx);
@@ -1105,26 +1086,19 @@ impl Keystone {
     }
 
     fn save_draft(&mut self, cx: &mut Context<Self>) -> bool {
-        let session_id = self.selected(cx);
-        let result = if let Some(id) = session_id {
-            let draft = self.composer.read(cx).value().to_owned();
-            self.state
-                .update(cx, |state, cx| state.set_draft(id, draft, cx))
-                .map(|applied| applied.durability)
-        } else {
-            self.state
-                .update(cx, |state, cx| state.sync_pending(cx))
-                .map(|()| Durability::Synced)
-                .map_err(Into::into)
+        let Some(id) = self.selected(cx) else {
+            return true;
         };
-        match result {
-            Ok(durability) => {
-                if let Some(id) = session_id {
-                    self.share_draft(id, cx);
-                }
-                self.error = durability_warning(durability);
+        let draft = self.composer.read(cx).value().to_owned();
+        match self
+            .state
+            .update(cx, |state, cx| state.set_draft(id, draft, cx))
+        {
+            Ok(_) => {
+                self.share_draft(id, cx);
+                self.error = None;
                 cx.notify();
-                self.error.is_none()
+                true
             }
             Err(error) => {
                 self.error = Some(format!("Draft not saved. {error}"));
@@ -1212,7 +1186,7 @@ impl Keystone {
         }
         let previous = self.selected(cx);
         self.error = match self.state.update(cx, create) {
-            Ok(applied) => durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(error.to_string()),
         };
         if self.selected(cx) != previous {
@@ -1265,7 +1239,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_settled(id, settled, cx))
         {
-            Ok(applied) => durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(error.to_string()),
         };
         self.refresh(cx);
@@ -1336,7 +1310,7 @@ impl Keystone {
         });
         let saved = result.is_ok();
         self.error = match result {
-            Ok(applied) => durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(error.to_string()),
         };
         self.presentation.current.arrangement.picked |=
@@ -1586,8 +1560,8 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.rename(id, &title, cx))
         {
-            Ok(applied) => {
-                self.error = durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 self.close_rename(window, cx);
             }
             Err(error) => {
@@ -2142,8 +2116,8 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_provider(session, provider, cx))
         {
-            Ok(applied) => {
-                self.error = durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 self.request_catalog(session, provider, cx);
             }
             Err(error) => self.error = Some(format!("Provider not changed. {error}")),
@@ -2173,8 +2147,8 @@ impl Keystone {
             state.set_provider_account(session, provider, account, cx)
         });
         match result {
-            Ok(applied) => {
-                self.error = durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 self.request_catalog(session, provider, cx);
             }
             Err(error) => self.error = Some(format!("Account not changed. {error}")),
@@ -2244,7 +2218,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_choice(session, choice, cx))
         {
-            Ok(applied) => durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(format!("Model not saved. {error}")),
         };
     }
@@ -2416,8 +2390,8 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_approval_mode(id, mode, cx))
         {
-            Ok(applied) => {
-                self.error = durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
             }
             Err(error) => self.error = Some(format!("Approval mode not saved. {error}")),
         }
@@ -3216,17 +3190,13 @@ impl Keystone {
                 errors.push(error.as_str());
             }
         }
-        (!errors.is_empty())
-            .then(|| (errors.join("\n"), Color::Danger))
-            .or_else(|| {
-                self.folder_warning
-                    .as_ref()
-                    .filter(|warning| {
-                        self.selected(cx) == Some(warning.session)
-                            && !self.state.read(cx).store().is_durable(warning.revision)
-                    })
-                    .map(|_| (FOLDER_UNCONFIRMED.into(), Color::Warning))
-            })
+        let color = match errors.as_slice() {
+            [only] if state.error.as_deref() == Some(*only) && state.save_unconfirmed() => {
+                Color::Warning
+            }
+            _ => Color::Danger,
+        };
+        (!errors.is_empty()).then(|| (errors.join("\n"), color))
     }
 }
 
@@ -4814,6 +4784,14 @@ mod tests {
         .unwrap();
         connection.execute_batch("BEGIN IMMEDIATE").unwrap();
         connection
+    }
+
+    /// Waits for every save to end, then lets the app see how they went.
+    pub(super) fn settle(state: &gpui::Entity<AppState>, cx: &mut gpui::TestAppContext) {
+        state.update(cx, |state, cx| {
+            let _ = state.store().flush();
+            state.pump(cx);
+        });
     }
 
     fn working_directory() -> WorkingDirectory {
@@ -6918,6 +6896,129 @@ mod tests {
             "never / dangerFullAccess"
         );
         assert!(saved(1).approval_overridden());
+    }
+
+    /// A first message waits for the save that fixes the session's model. While that
+    /// save fails, the message is refused and Codex never sees it.
+    #[gpui::test]
+    fn a_first_send_waits_for_its_model_lock_and_is_refused_when_it_fails(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let codex = wrapper(
+            dir.path(),
+            "keystone-fake-codex",
+            "KEYSTONE_FAKE_CODEX_DELAY_MS=2",
+        );
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex),
+                    "test",
+                    state.test_wake().clone(),
+                )));
+            })
+        });
+        click(cx, "welcome-codex");
+        let started = || Store::open(&path).unwrap().workspace().sessions()[0].started();
+        assert!(!started());
+
+        let writer = lock_database(&path);
+        send_text(&view, cx, "hello");
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let state = view.state.read(cx);
+            assert_eq!(
+                state.conversations()[&1].error.as_deref(),
+                Some("Not sent. Could not finish saving changes. database is locked")
+            );
+            assert_eq!(view.composer.read(cx).value(), "hello");
+            assert!(
+                !state.test_codex().unwrap().is_open(1),
+                "nothing reached Codex"
+            );
+        });
+        drop(writer);
+        assert!(!started());
+
+        cx.simulate_keystrokes("secondary-enter");
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "You wrote: hello", cx).is_some()
+        });
+        assert!(started());
+    }
+
+    /// A folder sync that waits while the folder holds a file named `stalled`, so a
+    /// test can hold the writer past [`keystone_core::WRITER_WAIT`] without a failure.
+    pub(super) fn stall_while_marked(directory: &std::fs::File) -> std::io::Result<()> {
+        let dir = crate::feedback_tests::directory_path(directory)?;
+        while dir.join("stalled").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        directory.sync_all()
+    }
+
+    /// A send refused because its model lock was still saving leaves the lock applied in
+    /// memory. Sending again before that save lands is refused too, so Codex never sees
+    /// the message before the lock is on disk.
+    #[gpui::test]
+    fn a_send_after_a_timed_out_fence_waits_for_the_saves_it_left_queued(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let codex = wrapper(
+            dir.path(),
+            "keystone-fake-codex",
+            "KEYSTONE_FAKE_CODEX_DELAY_MS=2",
+        );
+        let (view, cx) = open_window(&path, cx);
+        view.update(cx, |view, cx| {
+            view.state.update(cx, |state, _| {
+                state.test_set_codex(Some(CodexConnection::new(
+                    Some(codex),
+                    "test",
+                    state.test_wake().clone(),
+                )));
+            })
+        });
+        click(cx, "welcome-codex");
+        cx.run_until_parked();
+
+        let stalled = dir.path().join("stalled");
+        std::fs::write(&stalled, "").unwrap();
+        view.update(cx, |view, cx| {
+            view.state
+                .update(cx, |state, _| state.test_sync_directory(stall_while_marked))
+        });
+        let refused = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, cx| {
+                let state = view.state.read(cx);
+                assert_eq!(view.composer.read(cx).value(), "hello", "the send was kept");
+                assert!(
+                    !state.test_codex().unwrap().is_open(1),
+                    "nothing reached Codex"
+                );
+                assert_eq!(
+                    state.conversations()[&1].error.as_deref(),
+                    Some("Not sent. Could not finish saving changes.")
+                );
+            });
+        };
+        send_text(&view, cx, "hello");
+        refused(&view, cx);
+        cx.simulate_keystrokes("secondary-enter");
+        cx.run_until_parked();
+        refused(&view, cx);
+
+        std::fs::remove_file(&stalled).unwrap();
+        cx.simulate_keystrokes("secondary-enter");
+        wait_until(cx, &view, |view, cx| {
+            reply_with(view, "You wrote: hello", cx).is_some()
+        });
+        assert!(Store::open(&path).unwrap().workspace().sessions()[0].started());
     }
 
     /// 2c in review: a mode chosen from the menu reaches work already handed to Codex.
@@ -10285,25 +10386,21 @@ mod tests {
             keystroke: gpui::Keystroke::parse("enter").unwrap(),
         });
         cx.run_until_parked();
-        assert!(view.read_with(cx, |view, _cx| view.renaming.is_some()));
+        assert!(view.read_with(cx, |view, _cx| view.renaming.is_none()));
+        let state = view.read_with(cx, |view, _| view.state.clone());
+        settle(&state, cx);
         assert!(
-            cx.debug_bounds("rename-error").is_some(),
-            "the dialog shows the error"
-        );
-        cx.simulate_input("!");
-        assert_eq!(
-            value(cx),
-            "Newer!",
-            "the typed title stays, with the field focused"
+            view.read_with(cx, |view, cx| view.status_line(cx))
+                .is_some_and(|(error, _)| error.starts_with("Not saved.")),
+            "the window shows the error"
         );
 
         std::fs::rename(dir.path().join("backup"), &state_dir).unwrap();
-        cx.simulate_keystrokes("enter");
-        assert!(view.read_with(cx, |view, _cx| view.renaming.is_none()));
+        settle(&state, cx);
         let saved = Store::open(&path).unwrap().workspace().sessions()[0]
             .title()
             .to_owned();
-        assert_eq!(saved, "Newer!");
+        assert_eq!(saved, "Newer");
     }
 
     #[gpui::test]
@@ -10337,25 +10434,46 @@ mod tests {
         let bounds = cx.debug_bounds("session-1").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
+        let state = view.read_with(cx, |view, _| view.state.clone());
+        settle(&state, cx);
+        let draft = |view: &Keystone, cx: &App, id: u64| {
+            view.state
+                .read(cx)
+                .store()
+                .workspace()
+                .sessions()
+                .iter()
+                .find(|s| s.id() == id)
+                .unwrap()
+                .draft()
+                .to_owned()
+        };
         view.read_with(cx, |view, cx| {
-            assert_eq!(view.state.read(cx).store().workspace().selected(), Some(2));
-            assert_eq!(view.composer.read(cx).value(), "Keep my unsaved draft");
-            assert!(view.error.as_deref().unwrap().contains("Draft not saved"));
+            assert_eq!(view.state.read(cx).store().workspace().selected(), Some(1));
+            assert_eq!(draft(view, cx, 2), "Keep my unsaved draft");
+            assert!(view.status_line(cx).unwrap().0.starts_with("Not saved."));
         });
         view.update(cx, |view, cx| {
             view.create(Provider::Claude, None, cx);
-            assert_eq!(view.state.read(cx).store().workspace().selected(), Some(2));
-            assert_eq!(view.state.read(cx).store().workspace().sessions().len(), 2);
-            assert_eq!(view.composer.read(cx).value(), "Keep my unsaved draft");
-            assert!(view.error.as_deref().unwrap().contains("Draft not saved"));
+            assert_eq!(view.state.read(cx).store().workspace().selected(), Some(3));
+            assert_eq!(view.state.read(cx).store().workspace().sessions().len(), 3);
+            assert_eq!(draft(view, cx, 2), "Keep my unsaved draft");
         });
         std::fs::rename(dir.path().join("backup"), &state_dir).unwrap();
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("session-1").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         let restored = Store::open(&path).unwrap();
         assert_eq!(restored.workspace().selected(), Some(1));
         assert_eq!(
-            restored.workspace().sessions()[1].draft(),
+            restored
+                .workspace()
+                .sessions()
+                .iter()
+                .find(|s| s.id() == 2)
+                .unwrap()
+                .draft(),
             "Keep my unsaved draft"
         );
         let bounds = cx.debug_bounds("composer-field").unwrap();
@@ -10372,7 +10490,14 @@ mod tests {
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         assert_eq!(
-            Store::open(&path).unwrap().workspace().sessions()[0].draft(),
+            Store::open(&path)
+                .unwrap()
+                .workspace()
+                .sessions()
+                .iter()
+                .find(|s| s.id() == 1)
+                .unwrap()
+                .draft(),
             "first line\nsecond line"
         );
     }

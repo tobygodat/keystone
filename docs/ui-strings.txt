@@ -543,6 +543,7 @@ crates/keystone-core/src/worktree.rs
 	worktree registration belongs to another directory
 
 crates/keystone-core/src/writer.rs
+	SQLite connection lock poisoned
 	SQLite write stopped unexpectedly
 	SQLite writer has stopped
 	SQLite writer is busy; retry saving
@@ -556,12 +557,8 @@ crates/keystone-desktop/src/app_state.rs
 	Continue was not scheduled. {error}
 	Continue was not sent.
 	Could not create {}. {error}
-	Could not save before quitting. Fix storage and retry Quit. {error}
 	Could not save conversation logs before closing. {error}
-	Could not save the conversation ID
-	Could not save the session
 	Could not use {}. {error}
-	Draft not saved
 	Draft not saved. {error}
 	Keystone could not read this conversation's history
 	Keystone is already exiting.
@@ -572,6 +569,8 @@ crates/keystone-desktop/src/app_state.rs
 	Keystone kept it: {reason}
 	Not imported. {error}
 	Not kept: {error}.
+	Not quit. {reason}
+	Not saved. {error}
 	Not sent. Choose a conversation folder using the folder button beside the model.
 	Not sent. Could not finish saving changes. {error}
 	Not sent. The account “{}” now resolves to {}, which overlaps the account “{}”. Give each account a folder of its own.
@@ -588,7 +587,7 @@ crates/keystone-desktop/src/app_state.rs
 	Not sent: {} could not be opened in Keystone's data folder: {error}. Remove it and attach it again.
 	Not sent: {} is no longer in Keystone's data folder. Remove it and attach it again.
 	Note not saved. {error}
-	Result not saved
+	Saved, but not confirmed on disk. {error}
 	Session {session}: log entries were lost
 	Session {session}: {entries} lost (log budget exceeded).
 	Session {session}: {error}
@@ -597,7 +596,6 @@ crates/keystone-desktop/src/app_state.rs
 	The scheduled continue will retry shortly. {error}
 	The widget's answer was not sent.
 	This conversation is not being saved. {error}
-	Workspace directory sync failed. {error}
 	Your usage limit has reset. Continue where you left off, without repeating work that is already done.
 	could not start reading: {error}
 	it did not load during the shutdown attempt; restart to retry history loading
@@ -609,7 +607,6 @@ crates/keystone-desktop/src/app_state.rs
 	this conversation's provider ID was never saved, so sending starts a new provider conversation
 	this session's account is not set up
 	{lost} log entries were
-	{message}. {error}
 	{} is not a folder.
 
 crates/keystone-desktop/src/arrangement.rs
@@ -625,7 +622,6 @@ crates/keystone-desktop/src/arrangement.rs
 crates/keystone-desktop/src/arrangement_editor.rs
 	Borrowed from {}
 	Describe the change first.
-	Layout applied, but not confirmed on disk.
 	No more component IDs are available.
 	No more preview requests are available.
 	Not saved. {error}
@@ -1030,7 +1026,6 @@ crates/keystone-desktop/src/main.rs
 	Draft not saved. {error}
 	F2
 	Filter sessions
-	Folder selected, but not confirmed on disk.
 	Hide sidebar
 	Import…
 	In worktree…
@@ -1056,7 +1051,6 @@ crates/keystone-desktop/src/main.rs
 	Rename session
 	Retry
 	Return to active work
-	Saved, but not confirmed on disk. {error}
 	Saving…
 	Search
 	Send
@@ -1286,7 +1280,6 @@ crates/keystone-desktop/src/scheduled.rs
 	Crash recovery holds the session.
 	Files were being restored in its repository.
 	No session was created. {error}
-	Scheduled tasks could not be read. {error}
 	The project folder could not be opened. {error}
 	The prompt was not sent.
 	The session is settled.
@@ -1296,7 +1289,6 @@ crates/keystone-desktop/src/scheduled.rs
 	The session's history did not load in time.
 	The task was deleted.
 	“{}” did not run and tries again shortly. {error}
-	“{}” ran, but its run was not saved. {error}
 
 crates/keystone-desktop/src/screenshot.rs
 	Check Keystone's Screen Recording permission in System Settings.

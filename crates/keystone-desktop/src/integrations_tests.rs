@@ -938,6 +938,41 @@ fn the_copy_panel_closes_when_the_accounts_move_and_a_removed_copy_is_forgotten(
     );
 }
 
+/// A read the page no longer waits for, because it closed, forgets no copy, even one
+/// whose end is gone.
+#[gpui::test]
+fn a_read_for_a_closed_page_forgets_no_copy(cx: &mut gpui::TestAppContext) {
+    let fixture = fixture();
+    let (view, vcx, _) = open_for_changes(&fixture, cx);
+    settle(&view, vcx);
+    click(
+        vcx,
+        "integration-claude-default-skill-user-fixture-skill-copy",
+    );
+    click(vcx, "integrations-form-submit");
+    settle(&view, vcx);
+    let remembered = |view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext| {
+        view.read_with(cx, |view, cx| {
+            view.state
+                .read(cx)
+                .store()
+                .database()
+                .copies()
+                .unwrap()
+                .len()
+        })
+    };
+    assert_eq!(remembered(&view, vcx), 1);
+
+    std::fs::remove_dir_all(fixture.claude.join("skills").join("fixture-skill")).unwrap();
+    view.update(vcx, |view, cx| {
+        view.read_integrations(cx);
+        view.settings = None;
+    });
+    vcx.run_until_parked();
+    assert_eq!(remembered(&view, vcx), 1, "a stale read forgets nothing");
+}
+
 #[gpui::test]
 fn a_server_edited_since_its_preview_is_copied_only_on_a_second_press(
     cx: &mut gpui::TestAppContext,

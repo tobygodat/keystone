@@ -450,12 +450,7 @@ impl Keystone {
         match self.state.update(cx, |state, cx| {
             state.choose_legacy_directory(ticket.session, &directory, cx)
         }) {
-            Ok(applied) => {
-                self.folder_warning = (!self.state.read(cx).store().is_durable(applied.revision))
-                    .then_some(crate::FolderWarning {
-                        session: ticket.session,
-                        revision: applied.revision,
-                    });
+            Ok(_) => {
                 if self.selected(cx).is_none() {
                     return self.open_project(ProjectId::of(&directory), cx);
                 }

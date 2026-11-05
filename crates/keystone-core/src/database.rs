@@ -1,4 +1,4 @@
-use crate::writer::{self, Writer};
+use crate::writer::{Reply, Slot, Writer};
 use crate::{AccountUsage, Durability, Snapshot, Workspace, invalid, validate};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Map, Value};
@@ -209,41 +209,42 @@ impl Database {
             use std::os::unix::fs::OpenOptionsExt;
             file.mode(0o600);
         }
-        match file.open(&path) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        let created = match file.open(&path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
             Err(error) => return Err(error),
-        }
-        let id = writer::identify(&path);
-        let mut connection = Connection::open(&path).map_err(sql_error)?;
-        require_writable(&connection)?;
-        configure(&connection, BUSY_TIMEOUT)?;
-        let version: u32 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(sql_error)?;
-        if version > SCHEMA_VERSION {
-            return Err(invalid(format!(
-                "unsupported SQLite schema version {version} (expected at most {SCHEMA_VERSION})"
-            )));
-        }
-        let journal: String = connection
-            .query_one("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-            .map_err(sql_error)?;
-        if journal != "wal" {
-            return Err(io::Error::other("SQLite WAL mode is required"));
-        }
-        let initialized = version == SCHEMA_VERSION
-            && connection
-                .query_one(
-                    "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='legacy_import_complete')",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
+        };
+        let writer = Writer::shared(&path, created, || {
+            let mut connection = Connection::open(&path).map_err(sql_error)?;
+            require_writable(&connection)?;
+            configure(&connection, BUSY_TIMEOUT)?;
+            let version: u32 = connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
                 .map_err(sql_error)?;
-        if !initialized {
-            Self::initialize(&mut connection, Some(&legacy))?;
-        }
-        let writer = Writer::start(&path, connection, id)?;
+            if version > SCHEMA_VERSION {
+                return Err(invalid(format!(
+                    "unsupported SQLite schema version {version} (expected at most {SCHEMA_VERSION})"
+                )));
+            }
+            let journal: String = connection
+                .query_one("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+                .map_err(sql_error)?;
+            if journal != "wal" {
+                return Err(io::Error::other("SQLite WAL mode is required"));
+            }
+            let initialized = version == SCHEMA_VERSION
+                && connection
+                    .query_one(
+                        "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='legacy_import_complete')",
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(sql_error)?;
+            if !initialized {
+                Self::initialize(&mut connection, Some(&legacy))?;
+            }
+            Ok(connection)
+        })?;
         File::open(
             path.parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
@@ -282,10 +283,10 @@ impl Database {
             return Err(invalid("SQLite workspace import is incomplete"));
         }
         Ok(Self {
+            writer: Writer::live(&path),
             path,
             memory: None,
             read_only: true,
-            writer: None,
         })
     }
 
@@ -381,11 +382,13 @@ impl Database {
         f(&mut connection)
     }
 
-    /// Runs `f` on an independent read-only connection, which never waits for writes.
+    /// Waits for the writes this process queued before it, then runs `f` on an
+    /// independent read-only connection, so a read sees every save made before it.
     fn read<T>(&self, f: impl FnOnce(&mut Connection) -> io::Result<T>) -> io::Result<T> {
         if let Some(memory) = &self.memory {
             return Self::memory(memory, f);
         }
+        self.flush();
         let mut connection =
             Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(sql_error)?;
@@ -407,6 +410,32 @@ impl Database {
                 io::ErrorKind::PermissionDenied,
                 "SQLite database is read-only",
             )),
+        }
+    }
+
+    /// Runs `job` on the write connection after every write queued before it, without
+    /// waiting: on the writer's thread, or at once for an in-memory database.
+    pub(crate) fn submit(
+        &self,
+        job: impl FnOnce(&mut Slot) -> Reply + Send + 'static,
+    ) -> io::Result<()> {
+        if let Some(memory) = &self.memory {
+            job(&mut Slot::Memory(memory.clone()))();
+            return Ok(());
+        }
+        match &self.writer {
+            Some(writer) if !self.read_only => writer.submit(job),
+            _ => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "SQLite database is read-only",
+            )),
+        }
+    }
+
+    /// Waits for every write this process queued on the database before this call.
+    pub(crate) fn flush(&self) {
+        if let Some(writer) = &self.writer {
+            writer.flush();
         }
     }
 
@@ -510,41 +539,23 @@ impl Database {
                         .insert(folder.to_owned(), text);
                 }
             }
+            let mut statement = tx
+                .prepare("SELECT value FROM metadata WHERE substr(key, 1, length(?1)) = ?1")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([SCHEDULED_TASK_PREFIX], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?;
+            for row in rows {
+                if let Ok(task) = serde_json::from_str(&row.map_err(sql_error)?) {
+                    snapshot.workspace.scheduled_tasks.push(task);
+                }
+            }
+            snapshot
+                .workspace
+                .scheduled_tasks
+                .sort_by_key(crate::ScheduledTask::id);
             validate(&snapshot).map_err(|error| invalid(error.to_string()))?;
             Ok((snapshot, revision))
-        })
-    }
-
-    /// Commits `snapshot` as the revision after `revision`, and returns that revision
-    /// with the snapshot.
-    pub(crate) fn commit(
-        &self,
-        snapshot: Snapshot,
-        previous: Workspace,
-        revision: i64,
-    ) -> io::Result<(i64, Snapshot)> {
-        self.write(move |connection| {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(sql_error)?;
-            let actual: i64 = tx
-                .query_one(
-                    "SELECT revision FROM workspace WHERE singleton=1",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(sql_error)?;
-            if actual != revision {
-                return Err(io::Error::other(
-                    "The workspace changed in another writer. Reload Keystone before saving.",
-                ));
-            }
-            let next = revision
-                .checked_add(1)
-                .ok_or_else(|| invalid("workspace revision exhausted"))?;
-            write_projection(&tx, &snapshot, next, Some(&previous))?;
-            tx.commit().map_err(sql_error)?;
-            Ok((next, snapshot))
         })
     }
 
@@ -760,69 +771,6 @@ impl Database {
         })
     }
 
-    /// Saves a scheduled task: a `scheduled_task.upserted` event and its projection in
-    /// `metadata`, which older builds leave alone.
-    pub fn save_scheduled_task(&self, task: &crate::ScheduledTask) -> io::Result<()> {
-        let id = task.id().to_string();
-        let payload = serde_json::to_string(task)?;
-        self.write(move |connection| {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(sql_error)?;
-            tx.execute(
-                "INSERT INTO events(kind, entity_id, payload) VALUES ('scheduled_task.upserted', ?1, ?2)",
-                params![id, payload],
-            )
-            .map_err(sql_error)?;
-            tx.execute(
-                "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![format!("{SCHEDULED_TASK_PREFIX}{id}"), payload],
-            )
-            .map_err(sql_error)?;
-            tx.commit().map_err(sql_error)
-        })
-    }
-
-    /// Removes the scheduled task `id`, with a `scheduled_task.removed` event.
-    pub fn remove_scheduled_task(&self, id: u64) -> io::Result<()> {
-        self.write(move |connection| {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(sql_error)?;
-            tx.execute(
-                "INSERT INTO events(kind, entity_id, payload) VALUES ('scheduled_task.removed', ?1, '{}')",
-                [id.to_string()],
-            )
-            .map_err(sql_error)?;
-            tx.execute(
-                "DELETE FROM metadata WHERE key=?1",
-                [format!("{SCHEDULED_TASK_PREFIX}{id}")],
-            )
-            .map_err(sql_error)?;
-            tx.commit().map_err(sql_error)
-        })
-    }
-
-    /// Every saved scheduled task, by ID. One that no longer parses is skipped.
-    pub fn scheduled_tasks(&self) -> io::Result<Vec<crate::ScheduledTask>> {
-        self.read(|connection| {
-            let mut statement = connection
-                .prepare("SELECT value FROM metadata WHERE substr(key, 1, length(?1)) = ?1")
-                .map_err(sql_error)?;
-            let rows = statement
-                .query_map([SCHEDULED_TASK_PREFIX], |row| row.get::<_, String>(0))
-                .map_err(sql_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(sql_error)?;
-            let mut tasks: Vec<crate::ScheduledTask> = rows
-                .iter()
-                .filter_map(|value| serde_json::from_str(value).ok())
-                .collect();
-            tasks.sort_by_key(crate::ScheduledTask::id);
-            Ok(tasks)
-        })
-    }
-
     pub fn events_after(&self, sequence: u64, limit: u32) -> io::Result<Vec<StoredEvent>> {
         let sequence = i64::try_from(sequence)
             .map_err(|_| invalid("event cursor exceeds SQLite sequence range"))?;
@@ -844,6 +792,49 @@ impl Database {
         }
         Ok(())
     }
+}
+
+/// The database holds a workspace revision this store did not commit: another writer
+/// changed it, so no commit from this store can follow.
+#[derive(Debug)]
+pub(crate) struct Stale;
+
+impl std::fmt::Display for Stale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The workspace changed in another writer. Reload Keystone before saving.")
+    }
+}
+
+impl std::error::Error for Stale {}
+
+/// Commits `snapshot` over `previous` as the revision after `revision`, and returns
+/// that revision. Fails with [`Stale`], without writing, when the database holds another
+/// revision.
+pub(crate) fn commit(
+    connection: &mut Connection,
+    snapshot: &Snapshot,
+    previous: &Workspace,
+    revision: i64,
+) -> io::Result<i64> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let actual: i64 = tx
+        .query_one(
+            "SELECT revision FROM workspace WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    if actual != revision {
+        return Err(io::Error::other(Stale));
+    }
+    let next = revision
+        .checked_add(1)
+        .ok_or_else(|| invalid("workspace revision exhausted"))?;
+    write_projection(&tx, snapshot, next, Some(previous))?;
+    tx.commit().map_err(sql_error)?;
+    Ok(next)
 }
 
 pub(crate) fn require_writable(connection: &Connection) -> io::Result<()> {
@@ -1076,6 +1067,30 @@ fn write_projection(
         )
         .map_err(sql_error)?;
     }
+    let tasks = &snapshot.workspace.scheduled_tasks;
+    for removed in previous
+        .into_iter()
+        .flat_map(|workspace| &workspace.scheduled_tasks)
+        .filter(|old| !tasks.iter().any(|task| task.id() == old.id()))
+    {
+        let id = removed.id().to_string();
+        tx.execute("INSERT INTO events(kind, entity_id, payload) VALUES ('scheduled_task.removed', ?1, '{}')", [&id]).map_err(sql_error)?;
+        tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [format!("{SCHEDULED_TASK_PREFIX}{id}")],
+        )
+        .map_err(sql_error)?;
+    }
+    for task in tasks {
+        if previous.is_some_and(|workspace| workspace.scheduled_tasks.iter().any(|old| old == task))
+        {
+            continue;
+        }
+        let id = task.id().to_string();
+        let payload = serde_json::to_string(task)?;
+        tx.execute("INSERT INTO events(kind, entity_id, payload) VALUES ('scheduled_task.upserted', ?1, ?2)", params![id, payload]).map_err(sql_error)?;
+        tx.execute("INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![format!("{SCHEDULED_TASK_PREFIX}{id}"), payload]).map_err(sql_error)?;
+    }
     let mut metadata = Snapshot {
         version: snapshot.version,
         next_id: snapshot.next_id,
@@ -1089,6 +1104,7 @@ fn write_projection(
     metadata.workspace.deliveries.clear();
     metadata.workspace.notes.clear();
     metadata.workspace.commit_drafts.clear();
+    metadata.workspace.scheduled_tasks.clear();
     let payload = serde_json::to_string(&metadata)?;
     let previous: Option<String> = tx
         .query_row(
@@ -1193,7 +1209,6 @@ fn import_error(path: &Path, error: io::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::writer::WRITER_WAIT;
     use crate::{Provider, Store, WorkingDirectory};
     use std::time::Instant;
 
@@ -1334,8 +1349,9 @@ mod tests {
             assert!(connection.execute("DELETE FROM events", []).is_err());
             connection.execute_batch("CREATE TRIGGER reject_workspace BEFORE UPDATE ON workspace BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END;").map_err(sql_error)
         }).unwrap();
-        assert!(store.create(Provider::Claude, &directory(), 1).is_err());
-        assert!(store.workspace().sessions().is_empty());
+        let created = store.create(Provider::Claude, &directory(), 1).unwrap();
+        assert!(store.flush().is_err());
+        assert_eq!(store.workspace().sessions().len(), 1);
         assert_eq!(store.saved_snapshot().unwrap(), before);
         assert_eq!(database.events_after(0, 1000).unwrap().len(), count);
         database
@@ -1345,11 +1361,14 @@ mod tests {
                     .map_err(sql_error)
             })
             .unwrap();
+        store.flush().unwrap();
+        assert_eq!(created.value, 1);
         assert_eq!(
-            store
-                .create(Provider::Claude, &directory(), 1)
+            Store::from_database(database)
                 .unwrap()
-                .value,
+                .workspace()
+                .sessions()[0]
+                .id(),
             1
         );
     }
@@ -1361,9 +1380,14 @@ mod tests {
         let mut stale = Store::from_database(database.clone()).unwrap();
         first.create(Provider::Claude, &directory(), 1).unwrap();
         let count = database.events_after(0, 1000).unwrap().len();
-        let error = stale.create(Provider::Codex, &directory(), 2).unwrap_err();
-        assert!(error.to_string().contains("another writer"));
-        assert!(stale.workspace().sessions().is_empty());
+        stale.create(Provider::Codex, &directory(), 2).unwrap();
+        stale.flush().unwrap();
+        let error = stale.save_error();
+        assert!(
+            matches!(&error, Some(crate::SaveError::Stale(reason)) if reason.contains("another writer")),
+            "{error:?}"
+        );
+        assert_eq!(stale.workspace().sessions().len(), 1);
         assert_eq!(database.events_after(0, 1000).unwrap().len(), count);
         assert_eq!(
             Store::from_database(database).unwrap().workspace(),
@@ -1385,14 +1409,9 @@ mod tests {
             })
             .unwrap();
         let draft = "full storage retry ".repeat(4096);
-        assert!(
-            store
-                .set_draft(1, draft.clone())
-                .unwrap_err()
-                .to_string()
-                .contains("full")
-        );
-        assert_eq!(store.workspace().sessions()[0].draft(), "");
+        store.set_draft(1, draft.clone()).unwrap();
+        assert!(store.flush().unwrap_err().contains("full"));
+        assert_eq!(store.workspace().sessions()[0].draft(), draft);
         assert_eq!(database.events_after(0, 1000).unwrap().len(), count);
         database
             .write(|connection| {
@@ -1581,7 +1600,12 @@ mod tests {
         let events = database.events_after(cursor, 1000).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "session.upserted");
-        assert!(stale.set_draft(1, "do not overwrite".into()).is_err());
+        stale.set_draft(1, "do not overwrite".into()).unwrap();
+        stale.flush().unwrap();
+        assert!(matches!(
+            stale.save_error(),
+            Some(crate::SaveError::Stale(_))
+        ));
         assert_eq!(
             Store::from_database(database).unwrap().workspace(),
             store.workspace()
@@ -1659,38 +1683,50 @@ mod tests {
     }
 
     #[test]
-    fn disk_writer_gate_is_bounded_and_does_not_block_readers() {
+    fn a_save_returns_at_once_while_the_writer_is_held_and_lands_after() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut store = Store::open(&path).unwrap();
         store.create(Provider::Claude, &directory(), 1).unwrap();
-        let database = store.database();
-        let (release, held) = std::sync::mpsc::channel::<()>();
-        let (started, wait) = std::sync::mpsc::channel();
-        let blocker = {
-            let database = database.clone();
-            std::thread::spawn(move || {
-                database
-                    .write(move |_| {
-                        started.send(()).unwrap();
-                        held.recv().unwrap();
-                        Ok(())
-                    })
-                    .unwrap();
-            })
-        };
-        wait.recv().unwrap();
-        assert!(database.read_logs(1).unwrap().is_empty());
+        let writer = slow_write(&store.database(), Duration::from_secs(2));
         let start = Instant::now();
-        let error = store.set_draft(1, "retained for retry".into()).unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<io::Error>().unwrap().kind(),
-            io::ErrorKind::WouldBlock
+        let saved = store.set_draft(1, "saved after the hold".into()).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            start.elapsed()
         );
-        assert!(start.elapsed() < WRITER_WAIT + Duration::from_secs(1));
-        assert_eq!(store.workspace().sessions()[0].draft(), "");
-        release.send(()).unwrap();
-        blocker.join().unwrap();
-        store.set_draft(1, "retained for retry".into()).unwrap();
+        assert_eq!(
+            store.workspace().sessions()[0].draft(),
+            "saved after the hold"
+        );
+        assert!(!store.is_durable(saved.revision));
+        writer.join().unwrap();
+        store.flush().unwrap();
+        assert!(store.is_durable(saved.revision));
+        assert_eq!(
+            Store::open(&path).unwrap().workspace().sessions()[0].draft(),
+            "saved after the hold"
+        );
+    }
+
+    #[test]
+    fn a_reopen_in_the_same_process_sees_saves_issued_just_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut store = Store::open(&path).unwrap();
+        store.create(Provider::Claude, &directory(), 1).unwrap();
+        let writer = slow_write(&store.database(), Duration::from_millis(300));
+        for index in 0..20 {
+            store.set_draft(1, format!("draft {index}")).unwrap();
+        }
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.workspace().sessions()[0].draft(), "draft 19");
+        let logs = Database::open(&path).unwrap();
+        logs.append_logs(1, &[("after".into(), "{}".into())])
+            .unwrap();
+        assert_eq!(reopened.database().read_logs(1).unwrap(), ["{}"]);
+        writer.join().unwrap();
     }
 
     #[test]
@@ -1792,8 +1828,9 @@ mod tests {
         store.create(Provider::Claude, &directory(), 1).unwrap();
         let before = store.saved_snapshot().unwrap();
         fs::set_permissions(store.path(), fs::Permissions::from_mode(0o400)).unwrap();
-        assert!(store.set_draft(1, "keep for retry".into()).is_err());
-        assert_eq!(store.workspace().sessions()[0].draft(), "");
+        store.set_draft(1, "keep for retry".into()).unwrap();
+        assert!(store.flush().is_err());
+        assert_eq!(store.workspace().sessions()[0].draft(), "keep for retry");
         assert_eq!(store.saved_snapshot().unwrap(), before);
         fs::set_permissions(store.path(), fs::Permissions::from_mode(0o600)).unwrap();
         for suffix in ["-wal", "-shm"] {

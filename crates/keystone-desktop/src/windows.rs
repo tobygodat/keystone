@@ -5,7 +5,7 @@
 
 use crate::app_state::Phase;
 use crate::session_tabs::{bring_forward, conversations, replacement};
-use crate::{AppState, DesktopApp, Keystone, durability_warning, open_windows, register_window};
+use crate::{AppState, DesktopApp, Keystone, open_windows, register_window};
 use gpui::{
     App, AppContext, Bounds, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement,
     Pixels, Point, Stateful, Styled, TitlebarOptions, Window, WindowBounds, WindowOptions,
@@ -248,10 +248,10 @@ pub(crate) fn move_tab(
             };
             let shown = to.layout.as_ref().map(|_| to.tabs.view_of(session));
             match state.update(cx, |state, cx| state.move_tab(from, to, cx)) {
-                Ok(applied) => {
+                Ok(_) => {
                     source.update(cx, |source, cx| source.tab_left(session, cx));
                     target.update(cx, |target, cx| {
-                        target.error = durability_warning(applied.durability);
+                        target.error = None;
                         target.tab_arrived(shown.flatten(), cx);
                     });
                 }
@@ -272,7 +272,7 @@ pub(crate) fn move_tab(
             }) {
                 Ok(applied) => {
                     let fixture = source.update(cx, |source, cx| {
-                        source.error = durability_warning(applied.durability);
+                        source.error = None;
                         source.tab_left(session, cx);
                         source.fixture
                     });
@@ -355,7 +355,7 @@ impl Keystone {
         });
         let id = match opened {
             Ok(applied) => {
-                self.error = durability_warning(applied.durability);
+                self.error = None;
                 applied.value
             }
             Err(error) => {

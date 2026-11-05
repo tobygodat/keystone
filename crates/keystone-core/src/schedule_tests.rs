@@ -192,22 +192,29 @@ fn a_saved_task_round_trips_and_keeps_fields_a_newer_build_added() {
 fn tasks_are_saved_with_an_event_reopened_in_id_order_and_removed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");
-    crate::Store::open(&path).unwrap();
+    let mut store = crate::Store::open(&path).unwrap();
     let database = Database::open(&path).unwrap();
     let mut first = task(Schedule::Every { minutes: 5 }, FRIDAY_8_UTC);
     let mut tenth = first.clone();
     tenth.id = 10;
     first.id = 2;
-    database.save_scheduled_task(&tenth).unwrap();
-    database.save_scheduled_task(&first).unwrap();
+    store.save_scheduled_task(tenth.clone());
+    store.save_scheduled_task(first.clone());
     first.begin(Some(FRIDAY_8_UTC), FRIDAY_8_UTC, plus_one);
-    database.save_scheduled_task(&first).unwrap();
+    store.save_scheduled_task(first.clone());
 
-    let reopened = Database::open(&path).unwrap().scheduled_tasks().unwrap();
+    let reopened = crate::Store::open(&path)
+        .unwrap()
+        .scheduled_tasks()
+        .to_vec();
     assert_eq!(reopened, [first.clone(), tenth.clone()]);
 
-    database.remove_scheduled_task(10).unwrap();
-    assert_eq!(database.scheduled_tasks().unwrap(), [first]);
+    store.remove_scheduled_task(10);
+    store.flush().unwrap();
+    assert_eq!(
+        crate::Store::open(&path).unwrap().scheduled_tasks(),
+        [first]
+    );
     let kinds: Vec<(String, String)> = database
         .events_after(0, 1000)
         .unwrap()

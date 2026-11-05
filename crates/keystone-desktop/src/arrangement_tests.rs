@@ -244,6 +244,12 @@ fn unread(view: &Entity<Keystone>, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+fn settle(view: &Entity<Keystone>, cx: &mut VisualTestContext) {
+    let state = view.read_with(cx, |this, _| this.state.clone());
+    crate::tests::settle(&state, cx);
+    cx.run_until_parked();
+}
+
 fn viewed(view: &Entity<Keystone>, cx: &VisualTestContext) -> u64 {
     view.read_with(cx, |this, cx| {
         this.selected_session(cx).unwrap().viewed_at().unwrap()
@@ -304,26 +310,25 @@ fn failed_observation_waits_for_deliberate_activation_before_retry(cx: &mut Test
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     click(cx, "conversation");
-    view.read_with(cx, |this, _cx| {
-        assert!(
-            this.error
-                .as_ref()
-                .unwrap()
-                .starts_with("Could not save read status.")
-        );
+    settle(&view, cx);
+    view.read_with(cx, |this, cx| {
+        assert!(this.status_line(cx).unwrap().0.starts_with("Not saved."));
     });
-    assert!(viewed(&view, cx) < 10);
+    assert!(viewed(&view, cx) >= 10);
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(&backup, &path).unwrap();
     for _ in 0..3 {
         view.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
     }
-    assert!(viewed(&view, cx) < 10);
     let writes = view.read_with(cx, |this, cx| this.state.read(cx).store().writes());
     click(cx, "composer-field");
     click(cx, "conversation");
     assert!(viewed(&view, cx) >= 10);
+    view.read_with(cx, |this, cx| {
+        assert_eq!(this.state.read(cx).store().writes(), writes)
+    });
+    settle(&view, cx);
     view.read_with(cx, |this, cx| {
         assert_eq!(this.state.read(cx).store().writes(), writes + 1)
     });
@@ -478,14 +483,15 @@ fn a_tab_choice_that_cannot_be_saved_leaves_focus_where_it_was(cx: &mut TestAppC
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     click(cx, "surface-tabs-0-tab-1");
-    assert!(cx.debug_bounds("conversation").is_some(), "the tab stays");
-    view.read_with(cx, |this, _cx| {
+    assert!(cx.debug_bounds("conversation").is_none(), "the tab changes");
+    settle(&view, cx);
+    view.read_with(cx, |this, cx| {
+        let status = this.status_line(cx);
         assert!(
-            this.error
+            status
                 .as_ref()
-                .is_some_and(|e| e.starts_with("Layout not changed.")),
-            "{:?}",
-            this.error
+                .is_some_and(|(e, _)| e.starts_with("Not saved.")),
+            "{status:?}"
         );
     });
     std::fs::remove_dir(&path).unwrap();
@@ -691,23 +697,19 @@ fn a_files_shortcut_that_cannot_save_keeps_focus_on_the_displayed_conversation(
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     toggle_files(cx);
-    assert!(cx.debug_bounds("conversation").is_some());
-    assert!(cx.debug_bounds("files-tree-row-0").is_none());
+    assert!(cx.debug_bounds("conversation").is_none());
+    assert!(cx.debug_bounds("files-tree-row-0").is_some());
+    settle(&view, cx);
     view.update_in(cx, |this, window, cx| {
-        assert!(
-            this.error
-                .as_ref()
-                .unwrap()
-                .starts_with("Layout not changed.")
-        );
-        assert!(this.view_contains_focus(ViewId::MAIN, window, cx));
+        assert!(this.status_line(cx).unwrap().0.starts_with("Not saved."));
+        assert!(!this.view_contains_focus(ViewId::MAIN, window, cx));
     });
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(&backup, &path).unwrap();
     toggle_files(cx);
-    assert!(cx.debug_bounds("files-tree-row-1").is_some());
-    toggle_files(cx);
     assert!(cx.debug_bounds("files-tree-row-0").is_none());
+    toggle_files(cx);
+    assert!(cx.debug_bounds("files-tree-row-1").is_some());
 }
 
 #[gpui::test]
@@ -721,18 +723,13 @@ fn a_files_menu_insert_that_cannot_save_does_not_focus_an_absent_tree(cx: &mut T
     std::fs::create_dir(&path).unwrap();
     click(cx, "surface-add");
     click(cx, "surface-add-files");
-    assert!(cx.debug_bounds("files-tree-row-0").is_none());
+    assert!(cx.debug_bounds("files-tree-row-0").is_some());
+    settle(&view, cx);
     view.update_in(cx, |this, window, cx| {
-        assert!(
-            this.error
-                .as_ref()
-                .unwrap()
-                .starts_with("Layout not changed.")
-        );
+        assert!(this.status_line(cx).unwrap().0.starts_with("Not saved."));
         let root = this.files_root(cx).unwrap();
         assert!(
-            !this
-                .files
+            this.files
                 .browser(&root, cx)
                 .focus_handle(cx)
                 .contains_focused(window, cx)
@@ -741,7 +738,7 @@ fn a_files_menu_insert_that_cannot_save_does_not_focus_an_absent_tree(cx: &mut T
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(&backup, &path).unwrap();
     toggle_files(cx);
-    assert!(cx.debug_bounds("files-tree-row-1").is_some());
+    assert!(cx.debug_bounds("files-tree-row-1").is_none());
 }
 
 #[gpui::test]

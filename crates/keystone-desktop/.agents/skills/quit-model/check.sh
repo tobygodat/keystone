@@ -33,7 +33,7 @@ FUNCTIONS=(
   quit_if_idle publish refresh has_work runs_turn asking reserve_quit quit_failed save teardown
   pump receive save_results deliver_results result_hold send_message_from
   close_window request_quit save_and_teardown
-  check_schedules arm_scheduler quitting run_task start_run reopen show
+  check_schedules arm_scheduler quitting run_task start_run finish_pending_run resume_scheduled_runs reopen show
   push_sent apply awaiting_approval launch_job set_delivery
   turn_ended take_turn_end is_running hold_follow_ups release_follow_ups
   started route send_inner unqueue deliver on_response flush enqueue carry finish
@@ -114,6 +114,8 @@ EXPECT=(
   "OnlyQuitStopsTurns           quit-skips-recheck        breaks    can fail: a delivered result's turn (TOB-350)"
   "OnlyQuitStopsTurns           turns-ignore-connections  breaks    can fail: a held follow-up's turn (TOB-350)"
   "OnlyQuitStopsTurns           work-ignores-queued       breaks    can fail: a follow-up the worker has not taken (TOB-350)"
+  "OnlyQuitStopsTurns           work-ignores-result       breaks    can fail: a result waiting for its durable save"
+  "WindowlessEventuallyEnds     result-save-no-wake       breaks    can fail: a durable result wakes nothing"
   "OnlyQuitStopsTurns           work-ignores-steer        breaks    can fail: a steer Codex rejects after the end (TOB-350)"
   "NoScheduledRunWhileWaiting   scheduler-ignores-wait    breaks    can fail"
   "WindowlessMeansWaiting       close-forgets-wait        breaks    can fail"

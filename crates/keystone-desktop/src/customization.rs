@@ -188,7 +188,7 @@ impl Keystone {
                             .update(cx, |state, cx| {
                                 state.set_layout(project, window_id, layout, cx)
                             })
-                            .map(|a| !matches!(a.durability, keystone_core::Durability::Synced))
+                            .map(|_| ())
                             .map_err(|e| e.to_string()),
                         Err(error) => Err(format!("Cannot save this project's layout. {error}")),
                     };

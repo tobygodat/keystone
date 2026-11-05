@@ -286,7 +286,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_notifications(notifications, cx))
         {
-            Ok(applied) => crate::durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(format!("Settings not saved. {error}")),
         };
         self.refresh(cx);
@@ -313,7 +313,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.set_sounds(sounds, cx))
         {
-            Ok(applied) => crate::durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(format!("Settings not saved. {error}")),
         };
         let preview = preview.filter(|_| self.error.is_none());
@@ -892,13 +892,11 @@ mod tests {
         let writer = crate::tests::lock_database(&path);
         click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
+        let state = view.read_with(cx, |view, _| view.state.clone());
+        crate::tests::settle(&state, cx);
+        cx.run_until_parked();
         view.read_with(cx, |view, cx| {
-            assert!(
-                view.error
-                    .as_deref()
-                    .unwrap()
-                    .starts_with("Settings not saved.")
-            );
+            assert!(view.status_line(cx).unwrap().0.starts_with("Not saved."));
             assert_eq!(
                 view.state
                     .read(cx)
@@ -907,7 +905,7 @@ mod tests {
                     .preferences()
                     .appearance()
                     .theme,
-                ThemeMode::System
+                ThemeMode::Light
             );
         });
         assert!(shown(cx, "settings-error"), "the page shows the save error");
@@ -915,6 +913,8 @@ mod tests {
         click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
         assert_eq!(saved(&path).theme, ThemeMode::Light);
+        crate::tests::settle(&state, cx);
+        cx.run_until_parked();
         assert!(
             !shown(cx, "settings-error"),
             "a successful save clears the error"

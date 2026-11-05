@@ -2072,21 +2072,18 @@ mod ui_tests {
                 git(repo, &["log", "-1", "--format=%s"]),
                 "saved then committed\n"
             );
-            assert!(matches!(
-                notice(&view, cx),
-                Some(Notice::Failed {
-                    title: "Commit message not saved",
-                    ..
-                })
-            ));
+            let app = view.read_with(cx, |view, _| view.state.clone());
+            crate::tests::settle(&app, cx);
             assert!(
-                view.update(cx, |view, cx| view.changes.save_drafts(cx))
-                    .is_err()
+                view.read_with(cx, |view, cx| view.status_line(cx))
+                    .is_some_and(|(error, _)| error.starts_with("Not saved."))
             );
+            assert!(app.read_with(cx, |app, _| app.store().flush()).is_err());
 
             fs::set_permissions(state.path(), fs::Permissions::from_mode(0o755)).unwrap();
             view.update(cx, |view, cx| view.changes.save_drafts(cx))
                 .unwrap();
+            crate::tests::settle(&app, cx);
         }
         let reopened = Store::open(state.path().join("workspace.json")).unwrap();
         let key = WorkingDirectory::new(repo).unwrap();

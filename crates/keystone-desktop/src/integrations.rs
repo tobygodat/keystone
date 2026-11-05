@@ -459,7 +459,7 @@ impl Keystone {
             .as_ref()
             .ok()
             .map(|p| p.path().to_owned());
-        let pairs = state.store().database().copies().unwrap_or_default();
+        let database = state.store().database();
         let read = cx.background_executor().spawn(async move {
             let read = accounts
                 .into_iter()
@@ -489,7 +489,9 @@ impl Keystone {
                     .find(|account| account.is(end.provider, &end.account))
                     .and_then(|account| account.location.as_ref())
             };
-            let copies = pairs
+            let copies = database
+                .copies()
+                .unwrap_or_default()
                 .into_iter()
                 .filter_map(|pair| {
                     let (from, to) = (location(&pair.from)?, location(&pair.to)?);
@@ -523,13 +525,17 @@ impl Keystone {
                     page.form = None;
                 }
                 page.read = Some(read);
-                page.copies = copies
+                let (gone, copies): (Vec<_>, Vec<_>) = copies
                     .into_iter()
-                    .filter(|(pair, drift)| {
-                        *drift != Drift::Gone || database.forget_copy(pair).is_err()
-                    })
-                    .collect();
+                    .partition(|(_, drift)| *drift == Drift::Gone);
+                page.copies = copies;
                 page.reading = false;
+                cx.background_spawn(async move {
+                    for (pair, _) in gone {
+                        let _ = database.forget_copy(&pair);
+                    }
+                })
+                .detach();
                 this.refresh_copy(cx);
                 cx.notify();
             });
@@ -1573,30 +1579,32 @@ impl Keystone {
         let copied = copying
             .as_ref()
             .map(|copying| (copying.asked, copying.preview.pair.clone()));
+        let database = self.state.read(cx).store().database();
         let task = cx.background_executor().spawn(async move {
+            let mut pair = None;
             if let Some(copying) = copying {
                 let again = (copying.again)();
                 if again.as_ref() != Ok(&copying.preview) {
-                    return Err(again);
+                    return (Err(again), Ok(()));
                 }
+                pair = Some(copying.preview.pair);
             }
-            Ok(profile.map_err(Failure::Failed).and_then(|profile| {
+            let made = profile.map_err(Failure::Failed).and_then(|profile| {
                 let plan = edit::plan(&location, claude_writes_global, &project, change)
                     .map_err(Failure::Failed)?;
                 edit::apply(plan, &shown, &backups, &mut |call| {
                     keystone_agent::run_config_cli(provider, program.as_deref(), &profile, call)
                 })
-            }))
+            });
+            let recorded = match (&made, pair) {
+                (Ok(()), Some(pair)) => database.record_copy(&pair),
+                _ => Ok(()),
+            };
+            (Ok(made), recorded)
         });
         cx.spawn(async move |this, cx| {
-            let made = task.await;
+            let (made, recorded) = task.await;
             let _ = this.update(cx, |this, cx| {
-                let recorded = match (&made, &copied) {
-                    (Ok(Ok(())), Some((_, pair))) => {
-                        this.state.read(cx).store().database().record_copy(pair)
-                    }
-                    _ => Ok(()),
-                };
                 let Some(page) = this.integrations_page() else {
                     return;
                 };

@@ -3,7 +3,6 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt;
-use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use unicode_segmentation::UnicodeSegmentation;
@@ -25,6 +24,7 @@ mod prompt;
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
 mod pull_request;
+mod save;
 mod schedule;
 mod session_context;
 mod tabs;
@@ -52,6 +52,8 @@ pub use pull_request::{
     Check, CheckState, MergeState, PullRequestAlert, PullRequestReport, PullRequestState,
     PullRequestWatch, Review, ReviewComment, ReviewDecision, ReviewState,
 };
+use save::Saves;
+pub use save::{SaveError, Wake};
 pub use schedule::{
     Days, INTERRUPTED, KEPT_RUNS, Outcome, Run, Schedule, ScheduledTask, Target, TaskFields,
 };
@@ -62,6 +64,7 @@ pub use tabs::SessionTabs;
 pub use usage::{AccountUsage, LimitWindow, Reading, UsageLimit};
 use windows::SavedWindows;
 pub use windows::{Placement, WindowId, WindowView};
+pub use writer::WRITER_WAIT;
 
 type StoreResult<T> = Result<T, Box<dyn Error>>;
 
@@ -70,20 +73,14 @@ const FORMAT_VERSION: u32 = 1;
 #[derive(Debug)]
 pub struct Applied<T> {
     pub value: T,
-    pub durability: Durability,
-    /// The transaction that holds this change. A no-op names the current revision.
+    /// The save that holds this change. A no-op names the newest save issued.
     pub revision: Revision,
 }
 
-/// A position in one [`Store`]'s write order, issued by it and meaningful only to it.
-/// Ask that store with [`Store::is_durable`] whether the snapshot has been confirmed.
+/// A position in one [`Store`]'s save order, issued by it and meaningful only to it.
+/// Ask that store with [`Store::is_durable`] whether the save is on disk.
 #[derive(Clone, Copy, Debug)]
 pub struct Revision(u64);
-
-struct PendingSync {
-    directory: File,
-    oldest_unconfirmed: Revision,
-}
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Durability {
@@ -767,6 +764,8 @@ pub struct Workspace {
     /// in their own projection, never in the workspace payload.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     commit_drafts: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    scheduled_tasks: Vec<ScheduledTask>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -844,18 +843,17 @@ struct Snapshot {
     unknown: Map<String, Value>,
 }
 
+/// The workspace, and the saves that put each change to it on disk. A change applies in
+/// memory and returns at once; a writer thread commits the changes in order. A failed
+/// save stays in memory, shows in [`Store::save_error`], and is retried by the next
+/// change, [`Store::retry`] and [`Store::flush`].
 pub struct Store {
     path: PathBuf,
     database: Database,
-    database_revision: i64,
     workspace: Workspace,
     next_id: u64,
     unknown: Map<String, Value>,
-    pending: Option<PendingSync>,
-    writes: u64,
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub sync_directory: fn(&File) -> io::Result<()>,
+    saves: Saves,
 }
 
 impl Store {
@@ -868,19 +866,15 @@ impl Store {
     }
 
     pub fn from_database(database: Database) -> StoreResult<Self> {
-        let (mut snapshot, database_revision) = database.snapshot()?;
+        let (mut snapshot, revision) = database.snapshot()?;
         snapshot.workspace.forget_closed_tabs();
         let mut store = Self {
             path: database.path().to_path_buf(),
+            saves: Saves::new(database.clone(), snapshot.workspace.clone(), revision),
             database,
-            database_revision,
             workspace: snapshot.workspace,
             next_id: snapshot.next_id,
             unknown: snapshot.unknown,
-            pending: None,
-            writes: 0,
-            #[cfg(any(test, feature = "test-support"))]
-            sync_directory: File::sync_all,
         };
         store.relink_second_opinions()?;
         Ok(store)
@@ -902,13 +896,46 @@ impl Store {
             }
         }
         if moved {
-            self.commit(next, self.next_id)?;
+            self.commit(next, self.next_id);
+            self.flush().map_err(io::Error::other)?;
         }
         Ok(())
     }
 
     pub fn workspace(&self) -> &Workspace {
         &self.workspace
+    }
+
+    pub fn scheduled_tasks(&self) -> &[ScheduledTask] {
+        &self.workspace.scheduled_tasks
+    }
+
+    /// Applies a task in memory and queues its metadata projection with every earlier save.
+    pub fn save_scheduled_task(&mut self, task: ScheduledTask) -> Applied<()> {
+        let mut next = self.workspace.clone();
+        match next
+            .scheduled_tasks
+            .iter_mut()
+            .find(|old| old.id() == task.id())
+        {
+            Some(old) => *old = task,
+            None => next.scheduled_tasks.push(task),
+        }
+        next.scheduled_tasks.sort_by_key(ScheduledTask::id);
+        if next == self.workspace {
+            return self.unchanged();
+        }
+        self.commit(next, self.next_id)
+    }
+
+    /// Removes a task in memory and queues its removal on the same save queue.
+    pub fn remove_scheduled_task(&mut self, id: u64) -> Applied<()> {
+        let mut next = self.workspace.clone();
+        next.scheduled_tasks.retain(|task| task.id() != id);
+        if next == self.workspace {
+            return self.unchanged();
+        }
+        self.commit(next, self.next_id)
     }
 
     pub fn database(&self) -> Database {
@@ -926,10 +953,69 @@ impl Store {
         &self.path
     }
 
-    /// How many workspace transactions this store has committed since it opened.
+    /// How many workspace transactions this store has committed since it opened, once
+    /// the saves queued before this call are done.
     #[doc(hidden)]
     pub fn writes(&self) -> u64 {
-        self.writes
+        self.saves.writes()
+    }
+
+    /// The newest save this store issued.
+    pub fn revision(&self) -> Revision {
+        self.saves.issued()
+    }
+
+    /// Whether the save `revision` names is committed and confirmed by a folder sync.
+    /// Only answers for revisions this store issued. Once true, it stays true.
+    pub fn is_durable(&self, revision: Revision) -> bool {
+        self.saves.is_durable(revision)
+    }
+
+    /// Calls the wake set with [`Store::set_wake`] once `revision` is durable, at once
+    /// when it already is.
+    pub fn wake_when_durable(&self, revision: Revision) {
+        self.saves.wake_when_durable(revision);
+    }
+
+    /// Why the last try left changes unsaved. It stays until a retry saves them, or for
+    /// good when another writer made them stale.
+    pub fn save_error(&self) -> Option<SaveError> {
+        self.saves.error()
+    }
+
+    /// Tries a failed save again on the writer, without waiting.
+    pub fn retry(&self) {
+        self.saves.retry();
+    }
+
+    /// Tries a failed save again and waits until every change is saved, or says why
+    /// not. Changes another writer made stale do not fail it; [`Store::save_error`]
+    /// keeps their error. It blocks, so it is for Quit and tests.
+    pub fn flush(&self) -> Result<(), String> {
+        self.saves.flush()
+    }
+
+    /// Waits up to `timeout` for `revision` to be saved, or says why it is not, or
+    /// nothing when it is still being saved.
+    pub fn wait(
+        &self,
+        revision: Revision,
+        timeout: std::time::Duration,
+    ) -> Result<(), Option<SaveError>> {
+        self.saves.wait(revision, timeout)
+    }
+
+    /// Calls `wake`, from the writer's thread, whenever a save fails, a failed save is
+    /// saved after all, or a revision given to [`Store::wake_when_durable`] is saved.
+    pub fn set_wake(&mut self, wake: Wake) {
+        self.saves.set_wake(wake);
+    }
+
+    /// Replaces the folder sync that confirms each save, from the next save on.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn set_sync_directory(&self, sync: fn(&std::fs::File) -> io::Result<()>) {
+        self.saves.set_sync_directory(sync);
     }
 
     /// Creates a session and selects it. `now` is unix milliseconds.
@@ -1246,10 +1332,9 @@ impl Store {
                 next.deliveries.push(Delivery::launched(id, parent));
             }
         }
-        let applied = self.commit(next, next_id)?;
+        let applied = self.commit(next, next_id);
         Ok(Applied {
             value: id,
-            durability: applied.durability,
             revision: applied.revision,
         })
     }
@@ -1273,7 +1358,7 @@ impl Store {
             SessionContext::Recorded {
                 directory: chosen,
                 origin: ContextOrigin::Chosen,
-            } if chosen == directory => Ok(self.finish_sync()),
+            } if chosen == directory => Ok(self.unchanged()),
             _ => Err(invalid("session execution directory cannot be replaced").into()),
         }
     }
@@ -1293,14 +1378,14 @@ impl Store {
             return Err(invalid(format!("unknown session ID {id}")).into());
         }
         if self.workspace.selected_in(window) == Some(id) {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
         let mut next = self.workspace.clone();
         *next.shown_mut(window)?.selected = Some(id);
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Acknowledges content the desktop actually showed in a focused conversation.
@@ -1417,9 +1502,9 @@ impl Store {
         shown.layouts.set(project, layout)?;
         shown.forget_closed_tabs(project, &sidebar);
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Saves what `project`'s window shows in one write, so a crash keeps all of it or
@@ -1455,9 +1540,9 @@ impl Store {
             selected,
         })?;
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     pub fn set_provider_thread(&mut self, id: u64, thread: String) -> StoreResult<Applied<()>> {
@@ -1580,10 +1665,9 @@ impl Store {
         let mut next = self.workspace.clone();
         next.accounts
             .push(Account::new(id.clone(), provider, label, home));
-        let applied = self.commit(next, self.next_id)?;
+        let applied = self.commit(next, self.next_id);
         Ok(Applied {
             value: id,
-            durability: applied.durability,
             revision: applied.revision,
         })
     }
@@ -1601,9 +1685,9 @@ impl Store {
             account.set_label(label);
         }
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Removes an account Keystone no longer offers. Refused while any session uses
@@ -1629,7 +1713,7 @@ impl Store {
         }
         let mut next = self.workspace.clone();
         next.accounts.retain(|account| account.id() != id);
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// `label` on one line, refused when blank or already naming another of
@@ -1709,10 +1793,9 @@ impl Store {
             .ok_or_else(|| invalid("session ID space exhausted"))?;
         let mut next = self.workspace.clone();
         next.prompts.push(Prompt::new(id, checked));
-        let applied = self.commit(next, next_id)?;
+        let applied = self.commit(next, next_id);
         Ok(Applied {
             value: id,
-            durability: applied.durability,
             revision: applied.revision,
         })
     }
@@ -1736,9 +1819,9 @@ impl Store {
         let to = to.min(next.prompts.len());
         next.prompts.insert(to, prompt);
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     pub fn remove_prompt(&mut self, id: u64) -> StoreResult<Applied<()>> {
@@ -1747,7 +1830,7 @@ impl Store {
         }
         let mut next = self.workspace.clone();
         next.prompts.retain(|prompt| prompt.id() != id);
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     fn update_prompt(
@@ -1763,9 +1846,9 @@ impl Store {
             .ok_or_else(|| invalid(format!("unknown prompt {id}")))?;
         change(prompt);
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Fixes the session's provider and account, for just before its first message is
@@ -1854,9 +1937,9 @@ impl Store {
             next.commit_drafts.insert(folder.to_owned(), text);
         }
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     fn update_preferences(
@@ -1866,9 +1949,9 @@ impl Store {
         let mut next = self.workspace.clone();
         change(&mut next.preferences);
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
     /// A change allowed only before the session has sent anything.
@@ -1905,76 +1988,34 @@ impl Store {
             .ok_or_else(|| invalid(format!("unknown session ID {id}")))?;
         change(session);
         if next == self.workspace {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 
-    /// Whether the snapshot `revision` names has been confirmed by a directory sync.
-    /// Only answers for revisions this store issued. Once true, it stays true.
-    pub fn is_durable(&self, revision: Revision) -> bool {
-        self.pending
-            .as_ref()
-            .is_none_or(|pending| revision.0 < pending.oldest_unconfirmed.0)
-    }
-
-    pub fn sync_pending(&mut self) -> io::Result<()> {
-        if let Some(pending) = &self.pending {
-            #[cfg(any(test, feature = "test-support"))]
-            (self.sync_directory)(&pending.directory)?;
-            #[cfg(not(any(test, feature = "test-support")))]
-            pending.directory.sync_all()?;
-            self.pending = None;
-        }
-        Ok(())
-    }
-
-    fn finish_sync(&mut self) -> Applied<()> {
+    /// A change that changed nothing. It tries a failed save again.
+    fn unchanged(&mut self) -> Applied<()> {
+        self.saves.retry();
         Applied {
             value: (),
-            durability: match self.sync_pending() {
-                Ok(()) => Durability::Synced,
-                Err(error) => Durability::DirectorySyncPending(error.to_string()),
-            },
-            revision: Revision(self.writes),
+            revision: self.revision(),
         }
     }
 
-    fn commit(&mut self, workspace: Workspace, next_id: u64) -> StoreResult<Applied<()>> {
-        let snapshot = Snapshot {
+    /// Applies `workspace` and queues its save.
+    fn commit(&mut self, workspace: Workspace, next_id: u64) -> Applied<()> {
+        let revision = self.saves.save(Snapshot {
             version: FORMAT_VERSION,
             next_id,
-            workspace,
+            workspace: workspace.clone(),
             unknown: self.unknown.clone(),
-        };
-        let parent = self
-            .path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let directory = if self.database.is_memory() {
-            None
-        } else {
-            Some(File::open(parent)?)
-        };
-        let (revision, snapshot) =
-            self.database
-                .commit(snapshot, self.workspace.clone(), self.database_revision)?;
-        self.database_revision = revision;
-        self.writes += 1;
-        self.workspace = snapshot.workspace;
-        self.next_id = snapshot.next_id;
-        if let Some(directory) = directory {
-            let oldest_unconfirmed = self
-                .pending
-                .take()
-                .map_or(Revision(self.writes), |pending| pending.oldest_unconfirmed);
-            self.pending = Some(PendingSync {
-                directory,
-                oldest_unconfirmed,
-            });
+        });
+        self.workspace = workspace;
+        self.next_id = next_id;
+        Applied {
+            value: (),
+            revision,
         }
-        Ok(self.finish_sync())
     }
 }
 
@@ -2098,16 +2139,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.json");
         let mut store = Store::open(&path).unwrap();
-        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        store.set_sync_directory(|_| Err(io::Error::other("directory sync unavailable")));
 
         let created = store
             .create(Provider::Claude, &working_directory(), 1)
             .unwrap();
         assert_eq!(created.value, 1);
+        assert_eq!(store.flush(), Err("directory sync unavailable".into()));
         assert_eq!(
-            created.durability,
-            Durability::DirectorySyncPending("directory sync unavailable".into())
+            store.save_error(),
+            Some(SaveError::Unconfirmed("directory sync unavailable".into()))
         );
+        assert!(!store.is_durable(created.revision));
         assert_eq!(store.workspace().selected(), Some(1));
         assert_eq!(store.workspace().sessions().len(), 1);
         let reopened = Store::open(&path).unwrap();
@@ -2115,28 +2158,48 @@ mod tests {
         assert_eq!(reopened.workspace().sessions()[0].id(), 1);
         assert_eq!(reopened.workspace().sessions().len(), 1);
         assert_eq!(reopened.next_id, 2);
-        assert!(matches!(
-            store.select(1).unwrap().durability,
-            Durability::DirectorySyncPending(_)
-        ));
-        assert!(matches!(
-            store.set_draft(1, String::new()).unwrap().durability,
-            Durability::DirectorySyncPending(_)
-        ));
+        store.select(1).unwrap();
+        assert!(store.flush().is_err());
+        store.set_draft(1, String::new()).unwrap();
+        assert!(store.flush().is_err());
         let before_retry = json(&path);
-        assert!(store.sync_pending().is_err());
-        store.sync_directory = File::sync_all;
-        store.sync_pending().unwrap();
-        store.sync_pending().unwrap();
-        assert!(store.pending.is_none());
+        assert!(store.flush().is_err());
+        store.set_sync_directory(std::fs::File::sync_all);
+        store.flush().unwrap();
+        store.flush().unwrap();
+        assert!(store.is_durable(created.revision));
+        assert_eq!(store.save_error(), None);
         assert_eq!(json(&path), before_retry);
         assert_eq!(store.workspace().sessions().len(), 1);
         let next = store
             .create(Provider::Codex, &working_directory(), 3)
             .unwrap();
         assert_eq!(next.value, 2);
-        assert_eq!(next.durability, Durability::Synced);
+        store.flush().unwrap();
+        assert!(store.is_durable(next.revision));
         assert_eq!(Store::open(&path).unwrap().workspace().sessions().len(), 2);
+    }
+
+    /// A wake asked for once a revision is saved still comes when the save landed
+    /// before the ask, so a caller that found it unsaved a moment earlier is woken.
+    #[test]
+    fn a_wake_asked_for_after_its_save_landed_comes_at_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counted = wakes.clone();
+        store.set_wake(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }));
+        let created = store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        store.flush().unwrap();
+        let before = wakes.load(Ordering::SeqCst);
+        store.wake_when_durable(created.revision);
+        assert_eq!(wakes.load(Ordering::SeqCst), before + 1);
     }
 
     #[test]
@@ -2146,12 +2209,10 @@ mod tests {
         std::fs::write(&path, r#"{"version":1,"next_id":2,"workspace":{"selected":1,"sessions":[{"id":1,"title":"Legacy","provider":"Codex","settled":false,"draft":"keep"}]}}"#).unwrap();
         let mut store = Store::open(&path).unwrap();
         let chosen = WorkingDirectory::new(directory.path()).unwrap();
-        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        store.set_sync_directory(|_| Err(io::Error::other("directory sync unavailable")));
         let applied = store.choose_legacy_directory(1, &chosen).unwrap();
-        assert!(matches!(
-            applied.durability,
-            Durability::DirectorySyncPending(_)
-        ));
+        assert!(store.flush().is_err());
+        assert!(!store.is_durable(applied.revision));
         let expected = SessionContext::Recorded {
             directory: &chosen,
             origin: ContextOrigin::Chosen,
@@ -2162,29 +2223,21 @@ mod tests {
             expected
         );
         let before = json(&path);
-        assert!(matches!(
-            store
-                .choose_legacy_directory(1, &chosen)
-                .unwrap()
-                .durability,
-            Durability::DirectorySyncPending(_)
-        ));
-        assert!(store.sync_pending().is_err());
+        let again = store.choose_legacy_directory(1, &chosen).unwrap();
+        assert!(store.flush().is_err());
+        assert!(!store.is_durable(again.revision));
+        assert!(store.flush().is_err());
         assert!(
             store
                 .choose_legacy_directory(1, &working_directory())
                 .is_err()
         );
-        assert!(store.sync_pending().is_err());
-        store.sync_directory = File::sync_all;
-        assert_eq!(
-            store
-                .choose_legacy_directory(1, &chosen)
-                .unwrap()
-                .durability,
-            Durability::Synced
-        );
-        assert!(store.pending.is_none());
+        assert!(store.flush().is_err());
+        store.set_sync_directory(std::fs::File::sync_all);
+        let repaired = store.choose_legacy_directory(1, &chosen).unwrap();
+        store.flush().unwrap();
+        assert!(store.is_durable(repaired.revision));
+        assert_eq!(store.save_error(), None);
         assert_eq!(store.writes(), 1);
         assert_eq!(json(&path), before);
     }
@@ -2199,26 +2252,20 @@ mod tests {
         let mut store = Store::open(&path).unwrap();
         let chosen = WorkingDirectory::new(directory.path()).unwrap();
 
-        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        store.set_sync_directory(|_| Err(io::Error::other("directory sync unavailable")));
         let choice = store.choose_legacy_directory(1, &chosen).unwrap();
-        assert!(matches!(
-            choice.durability,
-            Durability::DirectorySyncPending(_)
-        ));
+        assert!(store.flush().is_err());
         assert!(!store.is_durable(choice.revision));
 
-        store.sync_directory = File::sync_all;
+        store.set_sync_directory(std::fs::File::sync_all);
         let unrelated = store.set_draft(1, "typed later".into()).unwrap();
-        assert_eq!(unrelated.durability, Durability::Synced);
+        store.flush().unwrap();
         assert!(store.is_durable(choice.revision));
         assert!(store.is_durable(unrelated.revision));
 
-        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        store.set_sync_directory(|_| Err(io::Error::other("directory sync unavailable")));
         let debt = store.set_approval_mode(1, ApprovalMode::ReadOnly).unwrap();
-        assert!(matches!(
-            debt.durability,
-            Durability::DirectorySyncPending(_)
-        ));
+        assert!(store.flush().is_err());
         assert!(
             store.is_durable(choice.revision),
             "confirmed once, confirmed for good"
@@ -2230,39 +2277,43 @@ mod tests {
         let before = json(&path);
         let lock = rusqlite::Connection::open(store.path()).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let rejected = store.set_provider_thread(1, "rejected-thread".into());
+        let rejected = store
+            .set_provider_thread(1, "rejected-thread".into())
+            .unwrap();
+        assert!(store.flush().is_err());
         lock.execute_batch("ROLLBACK").unwrap();
-        assert!(rejected.is_err());
         assert_eq!(
             store.writes(),
             writes,
             "a failure before the rename writes nothing"
         );
         assert_eq!(json(&path), before);
-        assert!(store.workspace().sessions()[0].provider_thread().is_none());
+        assert_eq!(
+            store.workspace().sessions()[0].provider_thread(),
+            Some("rejected-thread")
+        );
         assert!(!store.is_durable(debt.revision));
+        assert!(!store.is_durable(rejected.revision));
 
         let retry = store.set_approval_mode(1, ApprovalMode::ReadOnly).unwrap();
-        assert!(matches!(
-            retry.durability,
-            Durability::DirectorySyncPending(_)
-        ));
+        assert!(store.flush().is_err());
         assert_eq!(
             store.writes(),
-            writes,
-            "a no-op retries the sync without a write"
+            writes + 1,
+            "a no-op retries the retained save once"
         );
         assert!(!store.is_durable(retry.revision));
 
-        store.sync_directory = File::sync_all;
+        store.set_sync_directory(std::fs::File::sync_all);
         let repaired = store.set_approval_mode(1, ApprovalMode::ReadOnly).unwrap();
-        assert_eq!(repaired.durability, Durability::Synced);
-        assert_eq!(store.writes(), writes);
+        store.flush().unwrap();
+        assert_eq!(store.writes(), writes + 1);
         assert!(store.is_durable(debt.revision));
         assert!(store.is_durable(retry.revision));
+        assert!(store.is_durable(repaired.revision));
         let saved = json(&path).to_string();
         assert!(saved.contains(r#""origin":"chosen""#), "{saved}");
-        assert!(!saved.contains("rejected-thread"), "{saved}");
+        assert!(saved.contains("rejected-thread"), "{saved}");
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].context(),
             SessionContext::Recorded {
@@ -3091,7 +3142,8 @@ mod tests {
             width: SidebarWidth::new(360).unwrap(),
         };
         let applied = store.set_sidebar_layout(layout.into()).unwrap();
-        assert_eq!(applied.durability, Durability::Synced);
+        store.flush().unwrap();
+        assert!(store.is_durable(applied.revision));
         let writes = store.writes();
         store.set_sidebar_layout(layout.into()).unwrap();
         assert_eq!(store.writes(), writes);
@@ -3239,7 +3291,8 @@ mod tests {
         let applied = store
             .set_project_layout(&a, Some(mine.clone().into()))
             .unwrap();
-        assert_eq!(applied.durability, Durability::Synced);
+        store.flush().unwrap();
+        assert!(store.is_durable(applied.revision));
         assert_eq!(
             project_layouts(&path),
             Some(serde_json::json!({ a.path().to_str().unwrap(): mine }))
@@ -3672,12 +3725,10 @@ mod tests {
             .create(Provider::Codex, &working_directory(), 1)
             .unwrap();
 
-        store.sync_directory = |_| Err(io::Error::other("directory sync unavailable"));
+        store.set_sync_directory(|_| Err(io::Error::other("directory sync unavailable")));
         let applied = store.set_project_layout(&a, Some(tabbed().into())).unwrap();
-        assert!(matches!(
-            applied.durability,
-            Durability::DirectorySyncPending(_)
-        ));
+        assert!(store.flush().is_err());
+        assert!(!store.is_durable(applied.revision));
         assert_eq!(
             Store::open(&path)
                 .unwrap()
@@ -3686,15 +3737,19 @@ mod tests {
                 .composition(&a),
             tabbed()
         );
-        store.sync_directory = File::sync_all;
+        store.set_sync_directory(std::fs::File::sync_all);
 
         let before = json(&path);
         let lock = rusqlite::Connection::open(store.path()).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let failed = store.set_project_layout(&a, None);
+        store.set_project_layout(&a, None).unwrap();
+        let failed = store.flush();
         lock.execute_batch("ROLLBACK").unwrap();
         assert!(failed.is_err());
-        assert_eq!(store.workspace().preferences().composition(&a), tabbed());
+        assert_eq!(
+            store.workspace().preferences().composition(&a),
+            Composition::default()
+        );
         assert_eq!(json(&path), before);
     }
 

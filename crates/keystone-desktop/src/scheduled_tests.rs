@@ -41,7 +41,10 @@ fn a_task_that_came_due_while_closed_runs_once_at_launch_in_a_new_titled_session
         crate::app_state::scheduled::offset,
     );
     let due = saved.next_run().unwrap();
-    database.save_scheduled_task(&saved).unwrap();
+    state.update(cx, |state, _| {
+        state.store.save_scheduled_task(saved.clone());
+        state.store.flush().unwrap();
+    });
 
     state.update(cx, |state, cx| state.load_scheduled_tasks(cx));
     wait_until(cx, &state, |state| {
@@ -76,7 +79,10 @@ fn a_task_that_came_due_while_closed_runs_once_at_launch_in_a_new_titled_session
         "the next run counts from the launch"
     );
     assert_eq!(
-        database.scheduled_tasks().unwrap(),
+        Store::open(database.path())
+            .unwrap()
+            .scheduled_tasks()
+            .to_vec(),
         [ran],
         "the run is saved"
     );
@@ -130,6 +136,13 @@ fn a_run_into_an_existing_session_keeps_its_draft_and_never_steers_a_running_tur
         state.run_scheduled_task_now(id, cx);
         state.run_scheduled_task_now(id, cx);
     });
+    wait_until(cx, &state, |state| {
+        state.scheduled_tasks()[0].runs().len() == 2
+            && matches!(
+                state.scheduled_tasks()[0].runs()[1].outcome,
+                Outcome::Skipped { .. }
+            )
+    });
     let runs = task(&state, cx).runs().to_vec();
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].outcome, Outcome::Started { session: claude });
@@ -182,16 +195,37 @@ fn pause_resume_and_delete_are_saved(cx: &mut gpui::TestAppContext) {
     state
         .update(cx, |state, cx| state.pause_scheduled_task(id, cx))
         .unwrap();
-    assert_eq!(database.scheduled_tasks().unwrap()[0].next_run(), None);
+    assert_eq!(
+        Store::open(database.path())
+            .unwrap()
+            .scheduled_tasks()
+            .to_vec()[0]
+            .next_run(),
+        None
+    );
     let resumed = now_ms();
     state
         .update(cx, |state, cx| state.resume_scheduled_task(id, cx))
         .unwrap();
-    assert!(database.scheduled_tasks().unwrap()[0].next_run().unwrap() >= resumed + HOUR);
+    assert!(
+        Store::open(database.path())
+            .unwrap()
+            .scheduled_tasks()
+            .to_vec()[0]
+            .next_run()
+            .unwrap()
+            >= resumed + HOUR
+    );
     state
         .update(cx, |state, cx| state.delete_scheduled_task(id, cx))
         .unwrap();
-    assert!(database.scheduled_tasks().unwrap().is_empty());
+    assert!(
+        Store::open(database.path())
+            .unwrap()
+            .scheduled_tasks()
+            .to_vec()
+            .is_empty()
+    );
     assert!(state.read_with(cx, |state, _| state.scheduled_tasks().is_empty()));
 }
 
@@ -216,7 +250,10 @@ fn launched_with_a_due_task(
         now_ms() - 2 * HOUR,
         crate::app_state::scheduled::offset,
     );
-    database.save_scheduled_task(&saved).unwrap();
+    state.update(cx, |state, _| {
+        state.store.save_scheduled_task(saved.clone());
+        state.store.flush().unwrap();
+    });
     (state, database, saved.id())
 }
 
@@ -232,7 +269,9 @@ fn run_now_on_a_task_that_is_already_due_runs_it_once(cx: &mut gpui::TestAppCont
         state.load_scheduled_tasks(cx);
         state.run_scheduled_task_now(id, cx);
     });
-    cx.run_until_parked();
+    wait_until(cx, &state, |state| {
+        state.store.workspace().sessions().len() == 1
+    });
     assert_eq!(session_count(&state, cx), 1);
     let runs = task(&state, cx).runs().to_vec();
     assert_eq!(runs.len(), 1);
@@ -261,7 +300,7 @@ fn a_run_whose_first_save_fails_starts_nothing_and_goes_once_saving_works(
     };
     mode(0o444);
     state.update(cx, |state, cx| state.load_scheduled_tasks(cx));
-    cx.run_until_parked();
+    wait_until(cx, &state, |state| state.scheduler_error().is_some());
     let refused = state.read_with(cx, |state, _| state.scheduler_error().map(str::to_owned));
     mode(0o644);
     assert!(
@@ -269,13 +308,149 @@ fn a_run_whose_first_save_fails_starts_nothing_and_goes_once_saving_works(
         "the failed save is shown"
     );
     assert_eq!(session_count(&state, cx), 0, "nothing ran unsaved");
-    assert!(task(&state, cx).runs().is_empty());
+    assert_eq!(
+        task(&state, cx).runs()[0].outcome,
+        Outcome::Failed {
+            session: None,
+            reason: keystone_core::INTERRUPTED.into()
+        }
+    );
 
     cx.executor()
         .advance_clock(std::time::Duration::from_secs(6));
     wait_until(cx, &state, |state| {
         state.store.workspace().sessions().len() == 1
     });
-    assert_eq!(database.scheduled_tasks().unwrap()[0].runs().len(), 1);
+    assert_eq!(
+        Store::open(database.path())
+            .unwrap()
+            .scheduled_tasks()
+            .to_vec()[0]
+            .runs()
+            .len(),
+        1
+    );
     assert!(state.read_with(cx, |state, _| state.scheduler_error().is_none()));
+}
+
+#[gpui::test]
+fn task_edits_and_run_now_never_wait_for_a_stalled_save_and_send_once_after_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    connect(&state, dir.path(), 400, false, cx);
+    state.read_with(cx, |state, _| state.store.flush().unwrap());
+    let stalled = dir.path().join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_sync_directory(crate::tests::stall_while_marked)
+    });
+    let before = session_count(&state, cx);
+    let start = std::time::Instant::now();
+    state.update(cx, |state, cx| {
+        state
+            .add_scheduled_task(
+                fields(
+                    dir.path(),
+                    "Held task",
+                    Target::New {
+                        provider: Provider::Claude,
+                    },
+                ),
+                cx,
+            )
+            .unwrap();
+        let id = state.scheduled_tasks()[0].id();
+        state.pause_scheduled_task(id, cx).unwrap();
+        state.resume_scheduled_task(id, cx).unwrap();
+        state.run_scheduled_task_now(id, cx);
+    });
+    let elapsed = start.elapsed();
+    assert_eq!(
+        session_count(&state, cx),
+        before,
+        "no task starts before its claim is durable"
+    );
+    std::fs::remove_file(stalled).unwrap();
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "task calls blocked for {elapsed:?}"
+    );
+    wait_until(cx, &state, |state| {
+        matches!(
+            state.scheduled_tasks()[0].runs()[0].outcome,
+            Outcome::Started { .. }
+        )
+    });
+    let started = task(&state, cx);
+    assert_eq!(started.runs().len(), 1);
+    assert_eq!(session_count(&state, cx), before + 1);
+    let Outcome::Started { session } = started.runs()[0].outcome else {
+        unreachable!()
+    };
+    wait_until(cx, &state, |state| completed(state, session));
+    state.read_with(cx, |state, _| {
+        let sent = state.conversations[&session]
+            .rows
+            .iter()
+            .filter(|row| matches!(row, Row::Item(item) if item.kind == ItemKind::UserMessage))
+            .count();
+        assert_eq!(sent, 1, "durability polling cannot send twice");
+        state.store.flush().unwrap();
+        assert_eq!(
+            Store::open(state.store.path()).unwrap().scheduled_tasks(),
+            &[started]
+        );
+    });
+}
+
+#[gpui::test]
+fn deleting_a_task_while_its_run_saves_cancels_the_unsent_run(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    state.read_with(cx, |state, _| state.store.flush().unwrap());
+    let stalled = dir.path().join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_sync_directory(crate::tests::stall_while_marked)
+    });
+    let before = session_count(&state, cx);
+    let start = std::time::Instant::now();
+    state.update(cx, |state, cx| {
+        state
+            .add_scheduled_task(
+                fields(
+                    dir.path(),
+                    "Deleted task",
+                    Target::New {
+                        provider: Provider::Claude,
+                    },
+                ),
+                cx,
+            )
+            .unwrap();
+        let id = state.scheduled_tasks()[0].id();
+        state.run_scheduled_task_now(id, cx);
+        state.delete_scheduled_task(id, cx).unwrap();
+    });
+    let elapsed = start.elapsed();
+    std::fs::remove_file(stalled).unwrap();
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "delete blocked for {elapsed:?}"
+    );
+    state.read_with(cx, |state, _| state.store.flush().unwrap());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(session_count(&state, cx), before);
+    state.read_with(cx, |state, _| {
+        assert!(
+            Store::open(state.store.path())
+                .unwrap()
+                .scheduled_tasks()
+                .is_empty()
+        )
+    });
 }

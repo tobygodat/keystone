@@ -8,8 +8,13 @@ fn a_stale_writer_never_overwrites_another_stores_session() {
     let mut first = Store::open(&path).unwrap();
     let mut stale = Store::open(&path).unwrap();
     first.create(Provider::Claude, &directory, 1).unwrap();
-    assert!(stale.create(Provider::Codex, &directory, 2).is_err());
-    assert!(stale.workspace().sessions().is_empty());
+    stale.create(Provider::Codex, &directory, 2).unwrap();
+    stale.flush().unwrap();
+    assert!(matches!(
+        stale.save_error(),
+        Some(keystone_core::SaveError::Stale(_))
+    ));
+    assert_eq!(stale.workspace().sessions().len(), 1);
     let restored = Store::open(&path).unwrap();
     assert_eq!(restored.workspace().sessions().len(), 1);
     assert_eq!(

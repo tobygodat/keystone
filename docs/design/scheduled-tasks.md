@@ -29,12 +29,12 @@ An **existing session** gets the prompt as a new turn, and never as a steer. A r
 
 Each task is one row in the database's `metadata` table under `scheduled_task/<id>`, with a `scheduled_task.upserted` or `scheduled_task.removed` event in the same transaction. This is the pattern account usage and integration copies use. It needs no schema version, and older builds leave the rows alone. A task keeps its last 20 runs.
 
-A run goes at most once. Before it starts, the task is saved with its next run moved on and the run recorded as failed because Keystone stopped during it. Once the run has started or failed, that record is replaced with what happened. A crash in between leaves the honest record, and the run does not repeat on the next launch. If that first save fails, nothing runs, Settings shows the error, and the task tries again 5 seconds later.
+A run goes at most once. Before it starts, the task is saved with its next run moved on and the run recorded as failed because Keystone stopped during it. Once the run has started or failed, that record is replaced with what happened. A crash in between leaves the honest record, and the run does not repeat on the next launch. Task edits apply in memory and join Store's ordered save queue. Failed edits stay visible with the shared save error and retry on the next change or Quit. A run waits asynchronously for its claim and every save before its send to become durable. If saving fails, nothing runs, Settings shows the error, and the task retries saving 5 seconds later. While waiting, it reuses one new session and checks an existing session's holds again before sending. Pausing or deleting a task cancels its pending unsent run. Quit flushes task changes through the same Store queue.
 
 ## Code
 
-- `keystone-core/src/schedule.rs` holds the task, its schedule and its runs, and computes the next run. It takes the local UTC offset as a function, so it stays free of the clock and time zone and its tests can fix both. `Database::save_scheduled_task`, `remove_scheduled_task` and `scheduled_tasks` save and load the tasks.
-- `keystone-desktop/src/scheduled.rs` is the scheduler on `AppState`: it loads the tasks, keeps the timer and runs tasks. It sends through `send_message_from` with `SendKind::Scheduled`, which, like a launched session's result, only ever starts a new turn.
+- `keystone-core/src/schedule.rs` holds the task, its schedule and its runs, and computes the next run. It takes the local UTC offset as a function, so it stays free of the clock and time zone and its tests can fix both. `Store::save_scheduled_task`, `remove_scheduled_task` and `scheduled_tasks` apply changes and read tasks in memory. The database loads their metadata rows with the workspace at startup and commits their projections with each Store snapshot.
+- `keystone-desktop/src/scheduled.rs` is the scheduler on `AppState`: it keeps the timer and pending durable claims and runs tasks. It sends through `send_message_from` with `SendKind::Scheduled`, which, like a launched session's result, only ever starts a new turn.
 - `keystone-desktop/src/settings_scheduled.rs` is the Settings section.
 
 ## Not done

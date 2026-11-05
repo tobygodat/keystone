@@ -284,10 +284,9 @@ impl AppState {
                 })
                 .filter(|reply| !reply.trim().is_empty());
             let message = message(child, &title, &outcome, reply);
-            self.persist(PendingSave::Delivery(
-                child,
-                DeliveryState::Ready { message },
-            ));
+            let _ = self
+                .store
+                .set_delivery(child, DeliveryState::Ready { message });
             self.deliveries_due = true;
         }
     }
@@ -295,75 +294,115 @@ impl AppState {
     /// Starts a turn of each idle parent with a result ready for it, one result per
     /// parent at a time. A held result waits, shown in its parent's transcript.
     pub(super) fn deliver_results(&mut self, cx: &mut Context<Self>) {
-        if self.phase != Phase::Running || self.delivering || !self.deliveries_due {
+        if self.phase != Phase::Running
+            || self.delivering
+            || !self.deliveries_due && self.unsent.is_empty()
+        {
             return;
         }
-        self.deliveries_due = false;
+        // A result waits for a failed save to be saved; saving it wakes the app.
+        if self.store.save_error().is_some() {
+            self.store.retry();
+            return;
+        }
         self.delivering = true;
-        let ready: Vec<(u64, u64, String)> = self
-            .store
-            .workspace()
-            .deliveries()
-            .iter()
-            .filter_map(|d| match d.state() {
-                DeliveryState::Ready { message } => Some((d.child(), d.parent(), message.clone())),
-                _ => None,
-            })
-            .collect();
-        let mut started = std::collections::HashSet::new();
-        let mut unsaved = false;
-        for (child, parent, message) in ready {
-            let parent = self.recipient(parent);
-            if started.contains(&parent) {
-                continue;
-            }
-            // A send below runs a pump, which can observe or settle this result, and a
-            // queued save of it would overwrite whatever is saved here.
-            let current = self.store.workspace().delivery(child).map(|d| d.state());
-            if current
-                != Some(&DeliveryState::Ready {
-                    message: message.clone(),
+        if std::mem::take(&mut self.deliveries_due) {
+            let ready: Vec<(u64, u64, String)> = self
+                .store
+                .workspace()
+                .deliveries()
+                .iter()
+                .filter_map(|d| match d.state() {
+                    DeliveryState::Ready { message } => {
+                        Some((d.child(), d.parent(), message.clone()))
+                    }
+                    _ => None,
                 })
-                || self
-                    .pending
+                .collect();
+            for (child, parent, message) in ready {
+                let recipient = self.recipient(parent);
+                if self
+                    .unsent
                     .iter()
-                    .any(|save| matches!(save, PendingSave::Delivery(c, _) if *c == child))
-            {
-                continue;
-            }
-            match self.result_hold(parent) {
-                Some(Hold::Loading) => {
-                    self.ensure_history(parent);
+                    .any(|unsent| self.recipient(unsent.1) == recipient)
+                {
                     continue;
                 }
-                Some(_) => continue,
-                None => {}
+                match self.result_hold(recipient) {
+                    Some(Hold::Loading) => {
+                        self.ensure_history(recipient);
+                        continue;
+                    }
+                    Some(_) => continue,
+                    None => {}
+                }
+                // Saved before the message goes, so a crash after this never sends it
+                // again. Saving it wakes the app to send it.
+                let delivered = DeliveryState::Delivered {
+                    message: message.clone(),
+                };
+                match self.store.set_delivery(child, delivered) {
+                    Ok(applied) => {
+                        self.store.wake_when_durable(applied.revision);
+                        self.unsent.push((child, parent, message, applied.revision));
+                    }
+                    Err(error) => {
+                        self.conversation(recipient).error = Some(format!(
+                            "Result from session {child} not delivered. {error}"
+                        ));
+                        self.commit(recipient);
+                    }
+                }
             }
-            // Saved before the message goes, so a crash after this never sends it again.
+        }
+        for (child, parent, message, revision) in std::mem::take(&mut self.unsent) {
+            // A send below runs a pump, which can observe or settle this result.
             let delivered = DeliveryState::Delivered {
                 message: message.clone(),
             };
-            if let Err(error) = self.store.set_delivery(child, delivered) {
-                self.conversation(parent).error = Some(format!(
-                    "Result from session {child} not delivered. {error}"
-                ));
-                self.commit(parent);
-                unsaved = true;
+            if self.store.workspace().delivery(child).map(|d| d.state()) != Some(&delivered) {
+                continue;
+            }
+            // Where the work continues, and what holds it, may have changed while the
+            // save landed. A result held now waits as a ready one, until what holds it
+            // lets results go again.
+            let recipient = self.recipient(parent);
+            match self.result_hold(recipient) {
+                Some(Hold::Loading) => {
+                    self.ensure_history(recipient);
+                    self.unsent.push((child, parent, message, revision));
+                    continue;
+                }
+                Some(_) => {
+                    let _ = self
+                        .store
+                        .set_delivery(child, DeliveryState::Ready { message });
+                    continue;
+                }
+                None => {}
+            }
+            if !self.store.is_durable(revision) {
+                self.unsent.push((child, parent, message, revision));
                 continue;
             }
             let draft = ComposerDraft {
-                session: parent,
+                session: recipient,
                 text: message.clone(),
                 attachments: Vec::new(),
             };
-            if self.send_message_from(draft, None, SendKind::Result, cx) {
-                started.insert(parent);
-            } else {
-                // Saved directly: a queued save's success would schedule this send
-                // again at once. It is tried again when something next makes it due.
-                let ready = DeliveryState::Ready { message };
-                if self.store.set_delivery(child, ready.clone()).is_err() {
-                    self.persist(PendingSave::Delivery(child, ready));
+            match self.send_message_from(draft, None, SendKind::Result, cx) {
+                Sent::Yes => {}
+                // It waits for the changes saved before it. Saving them wakes the app.
+                Sent::Later => {
+                    let saving = self.store.revision();
+                    self.store.wake_when_durable(saving);
+                    self.unsent.push((child, parent, message, saving));
+                }
+                // It is tried again when something next makes it due.
+                Sent::No => {
+                    let _ = self
+                        .store
+                        .set_delivery(child, DeliveryState::Ready { message });
                 }
             }
         }
@@ -371,9 +410,6 @@ impl AppState {
         if self.deliveries_due {
             (self.wake)();
         }
-        // Retried by the next pump rather than at once, so a failing database is not
-        // retried in a loop.
-        self.deliveries_due |= unsaved;
         self.refresh(cx);
     }
 }

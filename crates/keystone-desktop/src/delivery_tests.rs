@@ -48,6 +48,17 @@ fn child_finishes(state: &Entity<AppState>, end: Event, cx: &mut gpui::TestAppCo
     });
 }
 
+/// Saves and pumps until no result waits for a save. A result's send first saves the
+/// parent's model lock, and the result goes from a pump after every save made before
+/// it lands.
+fn settle_and_deliver(state: &Entity<AppState>, cx: &mut gpui::TestAppContext) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while state.read_with(cx, |state, _| !state.unsent.is_empty()) {
+        assert!(Instant::now() < deadline, "a result kept waiting for saves");
+        crate::tests::settle(state, cx);
+    }
+}
+
 fn finished() -> Event {
     Event::TurnCompleted {
         status: TurnStatus::Completed,
@@ -90,6 +101,7 @@ fn an_idle_parent_starts_one_turn_with_its_launched_sessions_result(cx: &mut gpu
         let dir = tempfile::tempdir().unwrap();
         let state = launched(dir.path(), parent, cx);
         child_finishes(&state, finished(), cx);
+        settle_and_deliver(&state, cx);
         state.read_with(cx, |state, _| {
             assert!(matches!(state_of(state), DeliveryState::Delivered { .. }));
             assert!(state.conversations[&parent].running, "a new turn started");
@@ -178,6 +190,7 @@ fn a_busy_parent_gets_the_result_once_its_turn_ends(cx: &mut gpui::TestAppContex
         state.receive(Vec::new(), vec![(1, finished())], cx);
         state.pump(cx);
     });
+    settle_and_deliver(&state, cx);
     state.read_with(cx, |state, _| {
         assert!(matches!(state_of(state), DeliveryState::Delivered { .. }));
         let shown = results(state, 1);
@@ -331,7 +344,7 @@ fn a_launch_that_sent_nothing_never_delivers(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let state = launched(dir.path(), 1, cx);
     state.update(cx, |state, cx| {
-        state.persist(PendingSave::Delivery(3, DeliveryState::Unsent));
+        let _ = state.store.set_delivery(3, DeliveryState::Unsent);
         child_finishes_inline(state, cx);
     });
     state.read_with(cx, |state, _| {
@@ -413,6 +426,7 @@ fn the_result_is_the_first_turn_even_when_a_second_ends_in_the_same_batch(
         );
         state.pump(cx);
     });
+    settle_and_deliver(&state, cx);
     state.read_with(cx, |state, _| {
         let shown = results(state, 1);
         assert_eq!(shown.len(), 1);
@@ -486,7 +500,7 @@ fn a_result_whose_delivery_could_not_be_saved_goes_at_a_later_pump(cx: &mut gpui
         state.pump(cx);
     });
     state.read_with(cx, |state, _| {
-        assert!(matches!(state_of(state), DeliveryState::Ready { .. }));
+        assert!(matches!(state_of(state), DeliveryState::Delivered { .. }));
         assert!(!state.conversations[&1].running, "nothing sent unsaved");
     });
     drop(lock);
@@ -815,6 +829,7 @@ fn an_empty_reply_still_shows_as_a_result(cx: &mut gpui::TestAppContext) {
         );
         state.pump(cx);
     });
+    settle_and_deliver(&state, cx);
     state.read_with(cx, |state, _| {
         let shown = results(state, 1);
         assert_eq!(shown.len(), 1);
@@ -856,4 +871,285 @@ fn child_finishes_inline(state: &mut AppState, cx: &mut Context<AppState>) {
         cx,
     );
     state.pump(cx);
+}
+
+/// Longer than a pump takes, and far shorter than [`keystone_core::WRITER_WAIT`].
+const PUMP_LIMIT: Duration = Duration::from_millis(200);
+
+/// Session 3's result with its parent 1 idle, while the writer stalls past
+/// [`keystone_core::WRITER_WAIT`]: how long each pump took, and whether the result
+/// was still delivered in memory and unsent after it. The stall then ends.
+fn deliver_during_a_stall(
+    dir: &Path,
+    cx: &mut gpui::TestAppContext,
+) -> (Entity<AppState>, Vec<(Duration, bool)>) {
+    let state = launched(dir, 1, cx);
+    let stalled = dir.join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_sync_directory(crate::tests::stall_while_marked)
+    });
+    let unsent = |state: &Entity<AppState>, cx: &mut gpui::TestAppContext| {
+        state.read_with(cx, |state, _| {
+            matches!(state_of(state), DeliveryState::Delivered { .. })
+                && results(state, 1).is_empty()
+                && !state.conversations[&1].running
+                && state.has_work()
+        })
+    };
+    let stall = Instant::now();
+    let mut pumps = Vec::new();
+    let pumped = Instant::now();
+    child_finishes(&state, finished(), cx);
+    pumps.push((pumped.elapsed(), unsent(&state, cx)));
+    while stall.elapsed() < keystone_core::WRITER_WAIT + Duration::from_millis(500) {
+        std::thread::sleep(Duration::from_millis(100));
+        let pumped = Instant::now();
+        state.update(cx, |state, cx| state.pump(cx));
+        pumps.push((pumped.elapsed(), unsent(&state, cx)));
+        cx.run_until_parked();
+    }
+    std::fs::remove_file(&stalled).unwrap();
+    (state, pumps)
+}
+
+/// A result goes only once its Delivered save is on disk, and a stalled save never
+/// holds up a pump: the result waits, delivered in memory, and goes once it lands.
+#[gpui::test]
+fn a_result_waits_for_its_delivered_save_without_blocking_a_pump(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, pumps) = deliver_during_a_stall(dir.path(), cx);
+    for (took, unsent) in &pumps {
+        assert!(*took < PUMP_LIMIT, "a pump waited {took:?}");
+        assert!(
+            unsent,
+            "the result changed before its save landed: {pumps:?}"
+        );
+    }
+    wait_until(cx, &state, |state| answered(state, 1));
+    state.read_with(cx, |state, _| assert_eq!(results(state, 1).len(), 1));
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
+/// A result whose Delivered save has landed waits for an unrelated save that stalls
+/// past [`keystone_core::WRITER_WAIT`] without holding up a pump or telling its parent
+/// it was not sent, and goes once when that save lands.
+#[gpui::test]
+fn a_result_waits_for_an_unrelated_stalled_save_without_blocking_a_pump(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launched(dir.path(), 1, cx);
+    let stalled = dir.path().join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_sync_directory(crate::tests::stall_while_marked)
+    });
+    child_finishes(&state, finished(), cx);
+    let delivered = state.read_with(cx, |state, _| {
+        assert_eq!(state.unsent.len(), 1);
+        state.store.revision()
+    });
+    std::fs::remove_file(&stalled).unwrap();
+    while !state.read_with(cx, |state, _| state.store.is_durable(delivered)) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.store.set_draft(2, "Unrelated".into()).unwrap();
+    });
+    let unsent = |state: &Entity<AppState>, cx: &mut gpui::TestAppContext| {
+        state.read_with(cx, |state, _| {
+            matches!(state_of(state), DeliveryState::Delivered { .. })
+                && results(state, 1).is_empty()
+                && state.conversations[&1].error.is_none()
+        })
+    };
+    let stall = Instant::now();
+    let mut pumps = Vec::new();
+    while stall.elapsed() < keystone_core::WRITER_WAIT + Duration::from_millis(500) {
+        let pumped = Instant::now();
+        state.update(cx, |state, cx| state.pump(cx));
+        pumps.push((pumped.elapsed(), unsent(&state, cx)));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::fs::remove_file(&stalled).unwrap();
+    for (took, unsent) in &pumps {
+        assert!(*took < PUMP_LIMIT, "a pump waited {took:?}: {pumps:?}");
+        assert!(unsent, "the result changed during the stall: {pumps:?}");
+    }
+    wait_until(cx, &state, |state| answered(state, 1));
+    for _ in 0..3 {
+        state.update(cx, |state, cx| {
+            state.deliveries_due();
+            state.pump(cx);
+        });
+    }
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert_eq!(results(state, 1).len(), 1);
+        assert_eq!(state.conversations[&1].error, None);
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
+/// A stalled Delivered save that then lands sends the result once, and the result is
+/// never saved back as ready.
+#[gpui::test]
+fn a_result_whose_save_stalled_is_sent_once_and_never_saved_back_as_ready(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = deliver_during_a_stall(dir.path(), cx);
+    wait_until(cx, &state, |state| answered(state, 1));
+    for _ in 0..3 {
+        state.update(cx, |state, cx| {
+            state.deliveries_due();
+            state.pump(cx);
+        });
+    }
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| assert_eq!(results(state, 1).len(), 1));
+    let database = state.read_with(cx, |state, _| {
+        keystone_core::database_path(state.store().path())
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
+    let states: Vec<String> = keystone_core::Database::open(&database)
+        .unwrap()
+        .events_after(0, 10_000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "delivery.upserted")
+        .map(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.payload).unwrap()["state"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(states, ["working", "ready", "delivered"]);
+}
+
+/// A result saved as delivered and not sent yet when Keystone quits is saved as ready,
+/// so it goes after the next start.
+#[gpui::test]
+fn a_result_still_unsent_at_quit_is_saved_as_ready(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launched(dir.path(), 1, cx);
+    let stalled = dir.path().join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_sync_directory(crate::tests::stall_while_marked)
+    });
+    child_finishes(&state, finished(), cx);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        std::fs::remove_file(stalled).unwrap();
+    });
+    state.update(cx, |state, cx| {
+        assert!(matches!(state_of(state), DeliveryState::Delivered { .. }));
+        assert!(results(state, 1).is_empty());
+        state.save(Vec::new(), Vec::new(), Vec::new(), cx).unwrap();
+    });
+    release.join().unwrap();
+    let saved = Store::open(dir.path().join("workspace.json")).unwrap();
+    assert!(matches!(
+        saved.workspace().delivery(3).unwrap().state(),
+        DeliveryState::Ready { .. }
+    ));
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
+/// A parent settled while its result's Delivered save is still landing keeps the
+/// result held, as a ready result for a settled parent is, until it is unsettled.
+#[gpui::test]
+fn a_result_whose_parent_settles_while_it_saves_waits_for_the_parent(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launched(dir.path(), 1, cx);
+    let stalled = dir.path().join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_sync_directory(crate::tests::stall_while_marked)
+    });
+    child_finishes(&state, finished(), cx);
+    state.update(cx, |state, cx| {
+        assert_eq!(state.unsent.len(), 1);
+        assert!(results(state, 1).is_empty());
+        state.set_settled(1, true, cx).unwrap();
+        assert_eq!(state.result_hold(1), Some(Hold::Settled));
+    });
+    std::fs::remove_file(stalled).unwrap();
+    crate::tests::settle(&state, cx);
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            results(state, 1).len(),
+            0,
+            "a result must not wake a parent settled while its save was pending"
+        );
+        assert!(matches!(state_of(state), DeliveryState::Ready { .. }));
+        assert_eq!(
+            state.waiting_results(1),
+            [(3, "New Codex session".to_owned(), Hold::Settled)]
+        );
+    });
+    state.update(cx, |state, cx| state.set_settled(1, false, cx).unwrap());
+    wait_until(cx, &state, |state| answered(state, 1));
+    state.read_with(cx, |state, _| assert_eq!(results(state, 1).len(), 1));
+    state.update(cx, |state, cx| state.teardown(cx));
+}
+
+/// A parent handed off while its result's Delivered save is still landing sends the
+/// result where the work now continues, once.
+#[gpui::test]
+fn a_result_whose_parent_is_handed_off_while_it_saves_goes_to_the_continuation(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launched(dir.path(), 1, cx);
+    let stalled = dir.path().join("stalled");
+    std::fs::write(&stalled, "").unwrap();
+    state.update(cx, |state, _| {
+        state.test_sync_directory(crate::tests::stall_while_marked)
+    });
+    child_finishes(&state, finished(), cx);
+    let continued = state.update(cx, |state, cx| {
+        assert_eq!(state.unsent.len(), 1);
+        let continued = state
+            .hand_off(
+                1,
+                Provider::Claude,
+                "context".into(),
+                4,
+                WindowId::FIRST,
+                None,
+                cx,
+            )
+            .unwrap()
+            .value;
+        state.ensure_history(continued);
+        state.receive(
+            Vec::new(),
+            vec![(continued, Event::TurnStarted), (continued, finished())],
+            cx,
+        );
+        assert_eq!(state.recipient(1), continued);
+        continued
+    });
+    std::fs::remove_file(stalled).unwrap();
+    crate::tests::settle(&state, cx);
+    wait_until(cx, &state, |state| answered(state, continued));
+    for _ in 0..3 {
+        state.update(cx, |state, cx| {
+            state.deliveries_due();
+            state.pump(cx);
+        });
+    }
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert_eq!(results(state, continued).len(), 1);
+        assert!(results(state, 1).is_empty(), "the source is not woken");
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
 }

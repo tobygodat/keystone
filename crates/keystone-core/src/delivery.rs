@@ -82,10 +82,10 @@ impl Store {
             .find(|delivery| delivery.child == child)
             .ok_or_else(|| invalid(format!("session {child} has no delivery")))?;
         if delivery.state == state {
-            return Ok(self.finish_sync());
+            return Ok(self.unchanged());
         }
         delivery.state = state;
-        self.commit(next, self.next_id)
+        Ok(self.commit(next, self.next_id))
     }
 }
 

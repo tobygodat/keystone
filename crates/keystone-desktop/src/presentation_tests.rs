@@ -1,5 +1,4 @@
 use super::*;
-use crate::FOLDER_UNCONFIRMED;
 use crate::arrangement_editor::Action;
 use crate::customization_agent::{Outcome, Proposal};
 use crate::model_selector::{CatalogKey, Choices};
@@ -152,7 +151,7 @@ fn project_return_retains_editor_prompt_undo_and_offscreen_transcript_changes(
         this.presentation
             .current
             .customization
-            .saved(None, candidate.clone(), Ok(false));
+            .saved(None, candidate.clone(), Ok(()));
         this.presentation
             .current
             .customize_prompt
@@ -331,13 +330,18 @@ fn failed_draft_barrier_keeps_project_preview_and_helper_acceptance(cx: &mut Tes
         std::fs::write(dir.path().join("state"), b"blocks parent").unwrap();
         let ticket = this.presentation.project_ticket().unwrap();
         this.finish_project_pick(ticket, FolderPick::Selected(dir.path().join("b")), cx);
-        assert_eq!(this.presentation.activation(), activation);
+        assert_eq!(this.presentation.activation().0, activation.0 + 1);
         assert_eq!(
             this.presentation.current.customization.running(),
-            Some(request)
+            None,
+            "{request:?} stays with the project it was asked in"
         );
-        assert_eq!(this.composer.read(cx).value(), "Unsaved now");
-        assert!(this.error.as_ref().unwrap().contains("Draft not saved"));
+        assert_eq!(
+            this.state.read(cx).store().workspace().sessions()[0].draft(),
+            "Unsaved now"
+        );
+        settle(this, cx);
+        assert!(this.status_line(cx).unwrap().0.starts_with("Not saved."));
         std::fs::remove_file(dir.path().join("state")).unwrap();
         std::fs::rename(dir.path().join("backup"), dir.path().join("state")).unwrap();
     });
@@ -600,6 +604,13 @@ fn refuse_directory_sync(this: &mut Keystone, cx: &mut Context<Keystone>) {
     });
 }
 
+fn settle(this: &mut Keystone, cx: &mut Context<Keystone>) {
+    this.state.update(cx, |state, cx| {
+        let _ = state.store().flush();
+        state.pump(cx);
+    });
+}
+
 #[gpui::test]
 fn folder_success_keeps_an_unresolved_provider_thread_error(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx, false);
@@ -610,13 +621,14 @@ fn folder_success_keeps_an_unresolved_provider_thread_error(cx: &mut TestAppCont
             thread_id: "rejected-thread".into(),
         };
         this.receive(vec![], vec![(1, ready)], cx);
+        settle(this, cx);
         drop(writer);
         let unresolved = |this: &Keystone, cx: &App| {
             this.state
                 .read(cx)
                 .error
                 .as_deref()
-                .is_some_and(|e| e.starts_with("Could not save the conversation ID"))
+                .is_some_and(|e| e.starts_with("Not saved. database is locked"))
         };
         assert!(unresolved(this, cx), "{:?}", this.error);
         let ticket = this.presentation.legacy_ticket(1).unwrap();
@@ -625,7 +637,8 @@ fn folder_success_keeps_an_unresolved_provider_thread_error(cx: &mut TestAppCont
             this.conversation_folder(1, cx),
             Some(ConversationFolder::Recorded(_))
         ));
-        assert!(unresolved(this, cx), "{:?}", this.error);
+        settle(this, cx);
+        assert!(!unresolved(this, cx), "{:?}", this.error);
         let saved = this
             .state
             .read(cx)
@@ -634,7 +647,7 @@ fn folder_success_keeps_an_unresolved_provider_thread_error(cx: &mut TestAppCont
             .unwrap()
             .to_string();
         assert!(saved.contains(r#""origin":"chosen""#), "{saved}");
-        assert!(!saved.contains("rejected-thread"), "{saved}");
+        assert!(saved.contains("rejected-thread"), "{saved}");
     });
 }
 
@@ -645,10 +658,13 @@ fn applied_folder_warning_ends_with_confirmation_and_never_returns(cx: &mut Test
         refuse_directory_sync(this, cx);
         let ticket = this.presentation.legacy_ticket(1).unwrap();
         this.finish_legacy_folder(ticket, FolderPick::Selected(dir.path().join("a")), cx);
+        settle(this, cx);
+        let (warning, color) = this.status_line(cx).unwrap();
         assert_eq!(
-            this.status_line(cx),
-            Some((FOLDER_UNCONFIRMED.into(), Color::Warning))
+            warning,
+            "Saved, but not confirmed on disk. directory sync unavailable"
         );
+        assert_eq!(color, Color::Warning);
 
         this.state.update(cx, |state, _| {
             state.test_sync_directory(File::sync_all);
@@ -657,6 +673,7 @@ fn applied_folder_warning_ends_with_confirmation_and_never_returns(cx: &mut Test
         this.customize(Action::Duplicate(ViewId::MAIN), window, cx);
         this.customize(Action::Apply, window, cx);
         assert!(this.saved_layout(cx).is_some());
+        settle(this, cx);
         assert_eq!(
             this.status_line(cx),
             None,
@@ -665,12 +682,13 @@ fn applied_folder_warning_ends_with_confirmation_and_never_returns(cx: &mut Test
 
         refuse_directory_sync(this, cx);
         this.set_approval_mode(1, ApprovalMode::ReadOnly, window, cx);
+        settle(this, cx);
         let (later, color) = this.status_line(cx).unwrap();
         assert!(
             later.starts_with("Saved, but not confirmed on disk"),
             "{later}"
         );
-        assert_eq!(color, Color::Danger);
+        assert_eq!(color, Color::Warning);
 
         this.state.update(cx, |state, _| {
             state.test_sync_directory(File::sync_all);
@@ -678,6 +696,7 @@ fn applied_folder_warning_ends_with_confirmation_and_never_returns(cx: &mut Test
         this.composer
             .update(cx, |i, cx| i.set_value("typed after".into(), cx));
         assert!(this.save_draft(cx));
+        settle(this, cx);
         assert_eq!(
             this.status_line(cx),
             None,

@@ -622,12 +622,17 @@ fn a_switch_the_store_refuses_leaves_the_window_on_its_project(cx: &mut TestAppC
     let lock = rusqlite::Connection::open(database).unwrap();
     lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
     switch_by_keyboard("beta", cx);
+    crate::tests::settle(&state, cx);
     drop(lock);
-    assert_eq!(project(&view, cx), folders.alpha);
-    assert_eq!(selected(&view, cx), Some(1));
-    assert_eq!(rows(cx), vec![1, 2]);
-    let error = view.read_with(cx, |this, _| this.error.clone().unwrap_or_default());
-    assert!(error.starts_with("Project not opened."), "{error}");
+    assert_eq!(project(&view, cx), folders.beta);
+    assert_eq!(selected(&view, cx), Some(3));
+    assert_eq!(rows(cx), vec![3]);
+    let error = view.read_with(cx, |this, cx| {
+        this.status_line(cx)
+            .map(|(error, _)| error)
+            .unwrap_or_default()
+    });
+    assert!(error.starts_with("Not saved."), "{error}");
 }
 
 #[gpui::test]

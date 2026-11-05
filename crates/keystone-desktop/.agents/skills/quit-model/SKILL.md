@@ -34,10 +34,10 @@ It lists the covered files changed since the sync commit, committed or not, the 
 bash crates/keystone-desktop/.agents/skills/quit-model/check.sh
 ```
 
-It needs `mise` and, on the first run, the network: it fetches TLC 1.7.4 (checksum-pinned) into `~/.cache/keystone/` and Java through `mise` (`java@temurin-21`). It runs thirteen TLC jobs in parallel in a few seconds, prints one line per run, and exits 0 only when every result matches what it expected:
+It needs `mise` and, on the first run, the network: it fetches TLC 1.7.4 (checksum-pinned) into `~/.cache/keystone/` and Java through `mise` (`java@temurin-21`). It runs fifteen TLC jobs in parallel in a few seconds, prints one line per run, and exits 0 only when every result matches what it expected:
 
 - `code` runs: each rule on the code as it is. All must hold.
-- `can fail` runs: each rule with a deliberate break of the code it guards (`Mutation` in the model). Each must break. If one holds, the rule has stopped checking anything. `quit-skips-recheck`, `turns-ignore-connections`, `work-ignores-queued`, `work-ignores-steer` and `steer-settles-silently` each undo part of the TOB-350 fix.
+- `can fail` runs: each rule with a deliberate break of the code it guards (`Mutation` in the model). Each must break. If one holds, the rule has stopped checking anything. `quit-skips-recheck`, `turns-ignore-connections`, `work-ignores-queued`, `work-ignores-steer` and `steer-settles-silently` each undo part of the TOB-350 fix. `work-ignores-result` omits a result still waiting for its durable save from work accounting. `result-save-no-wake` loses the wake after that save.
 
 A line marked `UNEXPECTED` prints the path of TLC's output, which holds the full trace. Each run of `check.sh` first deletes the outputs a previous run left there.
 
@@ -86,7 +86,8 @@ Sync commit: `11b9013`. The model was confirmed against the code at this commit.
 | `followUp` | a message sent into Parent's turn (`keystone-agent` `connection.rs`, `codex.rs`, `claude.rs`). `"queued"`: counted in the connection's `queued` until its worker hands it to the driver (`send_inner`, `unqueue`). `"steer"`: Codex's `Pending::Steer` with `strict: false`. `"held"`: kept for the next turn, as Codex's `waiting` or by `hold_follow_ups` until `release_follow_ups`. `"start"`: a turn the connection runs (`Connection::is_running`) before a pump applies its `Event::TurnStarted` |
 | `woken` | `CodexDriver::take_recheck`, read by the Codex connection's `on_line`: it wakes Keystone with no event, which `deliver` otherwise does only when its inbox stops being empty |
 | `windows` | `open_windows` (`main.rs`) |
-| `delivery` | Child's `DeliveryState` in the store (`keystone-core` `delivery.rs`) |
+| `delivery` | Child's `DeliveryState` and pending send in `AppState.unsent`. `Saving` and `Saved` both mean Delivered in memory, before and after its watched save is durable; `Delivered` means sent. |
+| `WriterConfirmsDelivery` | The Store writer confirms the watched revision and wakes the app through `wake_when_durable`. |
 | `deferred` | callbacks queued with `cx.defer`, run FIFO after the outermost update ends (tGPUI `App::finish_update` and `flush_effects`) |
 | `Runs`, `HasWork`, `TurnRunning`, `Asking` | `runs_turn` (`app_state.rs:1471`), `Connection::has_work` (`keystone-agent` `connection.rs:62`), `has_work` (`app_state.rs:1465`) through `started` (`:2488`) and `route` (`:2261`), `asking` (`app_state.rs:1478`) |
 | `QuitIfIdle` | `quit_if_idle` (`app_state.rs:1489`), run by every `publish` (`:1643`) and `refresh` |
@@ -109,11 +110,11 @@ Sync commit: `11b9013`. The model was confirmed against the code at this commit.
 
 ## Scope
 
-TLC explores the whole state space, 8,311 distinct states at the sync commit, for three sessions (Parent, Child, a scheduled task's Task), one window and one launched result. A pass covers the model, not all of Keystone.
+The original synced model explored 8,311 distinct states. This integration extends it with a pending Delivered save, its background confirmation and wake, and pending-result work accounting. The sync marker remains unchanged so the remaining source drift stays visible. TLC explores the bounded state space for three sessions (Parent, Child, a scheduled task's Task), one window and one launched result. A pass covers the model, not all of Keystone.
 
 Assumed, so a break there would not show:
 
-- Store writes for results and turn records succeed. The quit save can fail, and the model covers both its outcomes.
+- Store writes for results and turn records eventually succeed. Delivered may remain pending across UI updates, and its successful completion wakes the pump. The quit save can fail, and the model covers both its outcomes. The model does not prove failed-write retention, FIFO commits, retries, permission repair or the user Send durability fence; actual storage and native tests cover those paths.
 - Opening windows succeeds, and the quick composer is closed.
 - Parent's history is loaded, it has no recovery and is not settled.
 - Only Parent takes a follow-up, one at a time. Its provider does not end the turn a follow-up starts before a pump applies its start. A turn the provider is starting (Codex's `Turn::Starting`) counts as `"start"`: `is_running` counts it, and its `Event::TurnStarted` follows.
@@ -125,7 +126,7 @@ Left out:
 
 - The scheduled continue after a usage limit (`continue_when_due`), `session_send` to an existing session, widget answers, crash recovery, and `Event::Failed`.
 - Steering a running task, more than one window, more than one launched session.
-- What teardown does to provider processes, log flushing, and when `arm_scheduler` next wakes the scheduler.
+- What teardown does to provider processes, log flushing, and when `arm_scheduler` next wakes the scheduler. Scheduled claims and their save failures are abstracted into the eventual guarded `ScheduledRun` action; pending scheduled saves are not modeled.
 
 The drift check watches only the files in `COVERED` in `check.sh`. It does not watch `quick.rs`, whose closed-composer assumption is listed above, so recheck that assumption when changing it. `checkpoints.rs` is covered for its release of held follow-ups.
 

@@ -376,7 +376,6 @@ impl Keystone {
                         .add_prompt(fields)
                         .map(|applied| keystone_core::Applied {
                             value: (),
-                            durability: applied.durability,
                             revision: applied.revision,
                         }),
                 },
@@ -384,8 +383,8 @@ impl Keystone {
             )
         });
         match result {
-            Ok(applied) => {
-                self.error = crate::durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 self.reset_prompt_form(window, cx);
             }
             Err(error) => self.error = Some(format!("Prompt not saved. {error}")),
@@ -442,7 +441,7 @@ impl Keystone {
         self.error = match self.state.update(cx, |state, cx| {
             state.change_prompts(|store| store.move_prompt(id, to), cx)
         }) {
-            Ok(applied) => crate::durability_warning(applied.durability),
+            Ok(_) => None,
             Err(error) => Some(format!("Prompt not moved. {error}")),
         };
         self.refresh(cx);
@@ -453,8 +452,8 @@ impl Keystone {
             state.change_prompts(|store| store.remove_prompt(id), cx)
         });
         match result {
-            Ok(applied) => {
-                self.error = crate::durability_warning(applied.durability);
+            Ok(_) => {
+                self.error = None;
                 if self
                     .settings
                     .as_ref()

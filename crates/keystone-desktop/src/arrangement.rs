@@ -2023,7 +2023,7 @@ impl Keystone {
             .state
             .update(cx, |state, cx| state.mark_viewed(key.session, now_ms(), cx))
         {
-            Ok(applied) => self.error = crate::durability_warning(applied.durability),
+            Ok(_) => self.error = None,
             Err(error) => self.error = Some(format!("Could not save read status. {error}")),
         }
         self.refresh(cx);
