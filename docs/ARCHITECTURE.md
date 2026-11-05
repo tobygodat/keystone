@@ -44,6 +44,7 @@ This describes what is built. [ADR 0010](adr/0010-terminal-browser-scheduling-ed
 - [Orchestration](design/orchestrator.md): the `keystone` MCP server and its tools.
 - [Agent-built widgets](design/widgets.md): the `show_ui` tool and its A2UI catalog.
 - [Scheduled tasks](design/scheduled-tasks.md): when tasks fire, catch-up at launch, and what a run does.
+- [Remote machines](design/remote.md): running sessions on another machine through `keystone-host` over SSH. Design only, not built yet.
 - [macOS](macos.md): what differs from Linux.
 - [Performance](performance.md) and [development iteration timing](dev-iteration.md): how build and render costs are measured.
 - `research/`: provider probes and design research, each with its raw output.
