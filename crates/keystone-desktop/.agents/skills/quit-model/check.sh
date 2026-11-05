@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Model-checks QuitWhenIdle.tla with TLC: every rule on the code as it is, every rule
-# on the candidate fix, and each deliberate break that must make its rule fail.
+# Model-checks QuitWhenIdle.tla with TLC: every rule on the code as it is, and each
+# deliberate break that must make its rule fail.
 # Prints one line per run and exits non-zero when any result differs from EXPECT.
 #
 #   bash crates/keystone-desktop/.agents/skills/quit-model/check.sh          # all runs
@@ -13,7 +13,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(git -C "$here" rev-parse --show-toplevel)
 
 # The commit at which the model was last confirmed to describe the code below.
-SYNC=243fec7
+SYNC=11b9013
 COVERED=(
   crates/keystone-desktop/src/app_state.rs
   crates/keystone-desktop/src/main.rs
@@ -23,14 +23,21 @@ COVERED=(
   crates/keystone-desktop/src/notifications.rs
   crates/keystone-desktop/src/conversation.rs
   crates/keystone-desktop/src/orchestrator.rs
+  crates/keystone-desktop/src/checkpoints.rs
   crates/keystone-core/src/delivery.rs
+  crates/keystone-agent/src/codex.rs
+  crates/keystone-agent/src/claude.rs
+  crates/keystone-agent/src/connection.rs
 )
 FUNCTIONS=(
-  quit_if_idle publish refresh turn_running asking reserve_quit quit_failed save teardown
+  quit_if_idle publish refresh has_work runs_turn asking reserve_quit quit_failed save teardown
   pump receive save_results deliver_results result_hold send_message_from
   close_window request_quit save_and_teardown
   check_schedules arm_scheduler quitting run_task start_run reopen show
   push_sent apply awaiting_approval launch_job set_delivery
+  turn_ended take_turn_end is_running hold_follow_ups release_follow_ups
+  started route send_inner unqueue deliver on_response flush enqueue carry finish
+  take_recheck spawn run start
 )
 # The model relies on how tGPUI runs cx.defer callbacks (App::finish_update, flush_effects).
 GPUI_REV=59c962b4207236d1e99840399be25d1c52a469f7
@@ -56,7 +63,7 @@ if [[ ${1:-} == --drift ]]; then
   echo
   echo "Untracked Rust files in the covered crates:"
   untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
-    crates/keystone-desktop/src crates/keystone-core/src | grep '\.rs$' || true)
+    crates/keystone-desktop/src crates/keystone-core/src crates/keystone-agent/src | grep '\.rs$' || true)
   echo "${untracked:-  none}" | sed 's/^\([^ ]\)/  \1/'
   echo
   if grep -q "$GPUI_REV" "$root/crates/keystone-desktop/Cargo.toml"; then
@@ -94,27 +101,28 @@ rm -f "$cache"/quit-model-*.out  # outputs of a previous run's UNEXPECTED lines
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# One run: a rule, the Fix and Mutation constants, and the expected result.
+# One run: a rule, the Mutation constant, and the expected result.
 #   holds  - TLC finds no violation
-#   breaks - TLC finds one (a known finding, or a break that proves the rule can fail)
+#   breaks - TLC finds one (a break that proves the rule can fail)
 EXPECT=(
-  # rule                        fix    mutation                 expected  why
-  "OnlyQuitStopsTurns           FALSE  none                     breaks    finding: a delivered result's turn is cut off (TOB-350)"
-  "NoScheduledRunWhileWaiting   FALSE  none                     holds     code"
-  "WindowlessMeansWaiting       FALSE  none                     holds     code"
-  "WindowlessEventuallyEnds     FALSE  none                     holds     code"
-  "OnlyQuitStopsTurns           TRUE   none                     holds     candidate fix"
-  "NoScheduledRunWhileWaiting   TRUE   none                     holds     candidate fix"
-  "WindowlessMeansWaiting       TRUE   none                     holds     candidate fix"
-  "WindowlessEventuallyEnds     TRUE   none                     holds     candidate fix"
-  "OnlyQuitStopsTurns           TRUE   close-ignores-turns      breaks    can fail"
-  "NoScheduledRunWhileWaiting   FALSE  scheduler-ignores-wait   breaks    can fail"
-  "WindowlessMeansWaiting       FALSE  close-forgets-wait       breaks    can fail"
-  "WindowlessEventuallyEnds     FALSE  close-forgets-wait       breaks    can fail"
+  # rule                        mutation                  expected  why
+  "OnlyQuitStopsTurns           none                      holds     code"
+  "NoScheduledRunWhileWaiting   none                      holds     code"
+  "WindowlessMeansWaiting       none                      holds     code"
+  "WindowlessEventuallyEnds     none                      holds     code"
+  "OnlyQuitStopsTurns           close-ignores-turns       breaks    can fail"
+  "OnlyQuitStopsTurns           quit-skips-recheck        breaks    can fail: a delivered result's turn (TOB-350)"
+  "OnlyQuitStopsTurns           turns-ignore-connections  breaks    can fail: a held follow-up's turn (TOB-350)"
+  "OnlyQuitStopsTurns           work-ignores-queued       breaks    can fail: a follow-up the worker has not taken (TOB-350)"
+  "OnlyQuitStopsTurns           work-ignores-steer        breaks    can fail: a steer Codex rejects after the end (TOB-350)"
+  "NoScheduledRunWhileWaiting   scheduler-ignores-wait    breaks    can fail"
+  "WindowlessMeansWaiting       close-forgets-wait        breaks    can fail"
+  "WindowlessEventuallyEnds     close-forgets-wait        breaks    can fail"
+  "WindowlessEventuallyEnds     steer-settles-silently    breaks    can fail: a late steer's answer wakes nothing (TOB-350)"
 )
 
 run() {
-  local rule=$1 fix=$2 mutation=$3 dir=$work/$1-$2-$3
+  local rule=$1 mutation=$2 dir=$work/$1-$2
   mkdir -p "$dir"
   local kind=INVARIANT
   [[ $rule == WindowlessEventuallyEnds ]] && kind=PROPERTY
@@ -123,7 +131,6 @@ CONSTANTS
     Parent = Parent
     Child = Child
     Task = Task
-    Fix = $fix
     Mutation = "$mutation"
 SPECIFICATION Spec
 INVARIANT TypeOK
@@ -145,24 +152,24 @@ EOF
 failed=0
 pids=()
 for i in "${!EXPECT[@]}"; do
-  read -r rule fix mutation _ <<<"${EXPECT[$i]}"
-  (run "$rule" "$fix" "$mutation" >"$work/result-$i") &
+  read -r rule mutation _ <<<"${EXPECT[$i]}"
+  (run "$rule" "$mutation" >"$work/result-$i") &
   pids+=($!)
 done
 wait "${pids[@]}"
 
-printf '%-28s %-5s %-24s %-7s %s\n' RULE FIX MUTATION RESULT EXPECTED
+printf '%-28s %-24s %-7s %s\n' RULE MUTATION RESULT EXPECTED
 for i in "${!EXPECT[@]}"; do
-  read -r rule fix mutation expected why <<<"${EXPECT[$i]}"
+  read -r rule mutation expected why <<<"${EXPECT[$i]}"
   got=$(cat "$work/result-$i")
   mark=ok
   if [[ $got != "$expected" ]]; then
     mark=UNEXPECTED
     failed=1
-    keep=$cache/quit-model-$rule-$fix-$mutation.out
-    cp "$work/$rule-$fix-$mutation/tlc.out" "$keep"
+    keep=$cache/quit-model-$rule-$mutation.out
+    cp "$work/$rule-$mutation/tlc.out" "$keep"
   fi
-  printf '%-28s %-5s %-24s %-7s %-7s %s %s\n' "$rule" "$fix" "$mutation" "$got" "$expected" "$mark" "$why"
+  printf '%-28s %-24s %-7s %-7s %s %s\n' "$rule" "$mutation" "$got" "$expected" "$mark" "$why"
   [[ $mark == UNEXPECTED ]] && echo "    TLC output: $keep"
 done
 exit $failed

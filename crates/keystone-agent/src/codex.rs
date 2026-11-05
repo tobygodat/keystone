@@ -231,6 +231,7 @@ pub struct CodexDriver {
     holds: HashSet<u64>,
     /// Sessions whose last turn's end has not been released yet.
     unseen_ends: HashSet<u64>,
+    wake_without_event: bool,
     initialize_params: Value,
     initialization_error: Option<String>,
     next_id: u64,
@@ -275,6 +276,7 @@ impl CodexDriver {
         let mut driver = Self {
             holds: HashSet::new(),
             unseen_ends: HashSet::new(),
+            wake_without_event: false,
             initialize_params: params.clone(),
             initialization_error: None,
             next_id: 0,
@@ -321,6 +323,25 @@ impl CodexDriver {
         self.sessions.get(&session).is_some_and(|s| {
             s.turn != Turn::Idle || (self.unseen_ends.contains(&session) && !s.waiting.is_empty())
         })
+    }
+
+    /// Whether the session has work that runs or can still start a turn: a turn
+    /// running or starting, a message waiting to be delivered, or a steer Codex has
+    /// not answered, whose rejection after the turn's end starts the next turn.
+    pub fn has_work(&self, session: u64) -> bool {
+        self.sessions.get(&session).is_some_and(|state| {
+            state.turn != Turn::Idle
+                || !state.waiting.is_empty()
+                || self.pending.values().any(|pending| {
+                    matches!(pending, Pending::Steer { session: s, epoch, strict: false, .. }
+                        if *s == session && *epoch == state.epoch)
+                })
+        })
+    }
+
+    /// Whether a response without an event needs to wake the app to check for work.
+    pub fn take_recheck(&mut self) -> bool {
+        std::mem::take(&mut self.wake_without_event)
     }
 
     pub(crate) fn set_mcp(&mut self, session: u64, url: String, token: String) {
@@ -1207,11 +1228,14 @@ impl CodexDriver {
                 epoch,
                 strict,
             } => {
-                let Some(error) = error else { return };
                 let Some(state) = self.sessions.get(&session) else {
                     return;
                 };
                 let still_running = state.turn == Turn::Running(turn.clone());
+                let Some(error) = error else {
+                    self.wake_without_event |= !strict && !still_running;
+                    return;
+                };
                 if strict {
                     out.event(session, Event::Warning { message: "The agent message could not steer the running turn; it was not retried".into() });
                 } else if state.epoch != epoch {

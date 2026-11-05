@@ -1,6 +1,7 @@
 //! The full stack against the scripted Claude: process host, connection, and driver.
 
 use keystone_agent::ApprovalState;
+use keystone_agent::Connection;
 use keystone_agent::{
     Approval, Catalog, ClaudeConnection, Command, Event, ItemKind, ItemStatus, ModelInfo, Speed,
     TurnStatus,
@@ -204,6 +205,45 @@ fn turns_stream_steer_stop_and_ask_for_approval() {
     let events = until(&conn, &wake, completed);
     assert!(events.iter().any(|e| matches!(e,
         Event::ItemCompleted(item) if item.status == ItemStatus::Declined)));
+}
+
+/// A message the session's worker has not given Claude yet is work, though no turn
+/// runs: it starts one once the worker sends it.
+#[test]
+fn a_message_the_worker_has_not_sent_is_work() {
+    let (conn, wake) = connect();
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "hello".into(),
+    )
+    .unwrap();
+    until(&conn, &wake, completed);
+    let (open, gate) = channel::<()>();
+    conn.run_in_order(
+        1,
+        Box::new(move || {
+            let _ = gate.recv();
+        }),
+    );
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "again".into(),
+    )
+    .unwrap();
+    assert!(!conn.is_running(1));
+    assert!(conn.has_work(1), "the queued message will start a turn");
+    drop(open);
+    let events = until(&conn, &wake, completed);
+    assert!(reply(&events).unwrap().contains("You wrote: again"));
+    assert!(!conn.has_work(1));
 }
 
 #[test]

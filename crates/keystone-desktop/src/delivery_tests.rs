@@ -125,6 +125,24 @@ fn an_idle_parent_starts_one_turn_with_its_launched_sessions_result(cx: &mut gpu
 }
 
 #[gpui::test]
+fn a_result_delivered_while_waiting_to_quit_runs_its_turn_before_keystone_quits(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = launched(dir.path(), 1, cx);
+    wait_to_quit(&state, cx);
+    child_finishes(&state, finished(), cx);
+    wait_until(cx, &state, |state| state.phase == Phase::Exiting);
+    state.read_with(cx, |state, _| {
+        assert!(matches!(state_of(state), DeliveryState::Delivered { .. }));
+        assert!(
+            answered(state, 1),
+            "the parent's turn with the result ran to its end before Keystone quit"
+        );
+    });
+}
+
+#[gpui::test]
 fn a_busy_parent_gets_the_result_once_its_turn_ends(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let state = launched(dir.path(), 1, cx);

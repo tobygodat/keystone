@@ -302,7 +302,7 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
         });
         return false;
     }
-    if others == 0 && !state.read(cx).turn_running() {
+    if others == 0 && !state.read(cx).has_work() {
         request_quit(cx);
         return false;
     }

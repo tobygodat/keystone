@@ -306,6 +306,56 @@ fn a_steer_that_starts_the_next_turn_waits_until_the_turn_end_is_released() {
     }
 }
 
+/// A steer Codex has not answered when its turn ends is work: a rejection starts the
+/// next turn. One Codex takes after the end reports nothing, so the driver asks the
+/// app to check again instead.
+#[test]
+fn a_steer_unanswered_when_its_turn_ends_is_work_until_codex_answers() {
+    for rejected in [true, false] {
+        let mut driver = opened();
+        let mut out = Outputs::default();
+        let send = |text: &str| Command::Send {
+            session: SESSION,
+            text: text.into(),
+            images: Vec::new(),
+        };
+        driver.command(send("first"), &mut out);
+        driver.on_line(started("T1").as_bytes(), &mut out);
+        let mut out = Outputs::default();
+        driver.command(send("second"), &mut out);
+        let steer: Value = serde_json::from_str(&out.writes[0]).unwrap();
+        driver.on_line(completed("T1").as_bytes(), &mut out);
+        assert!(!driver.is_running(SESSION));
+        assert!(
+            driver.has_work(SESSION),
+            "the steer may start the next turn"
+        );
+        let answer = if rejected {
+            format!(
+                r#"{{"id":{},"error":{{"code":-32600,"message":"no active turn"}}}}"#,
+                steer["id"]
+            )
+        } else {
+            format!(r#"{{"id":{},"result":{{"turnId":"T1"}}}}"#, steer["id"])
+        };
+        let mut out = Outputs::default();
+        driver.on_line(answer.as_bytes(), &mut out);
+        if rejected {
+            assert_eq!(methods(&out), ["turn/start"]);
+            assert!(driver.has_work(SESSION));
+            assert!(!driver.take_recheck());
+        } else {
+            assert!(out.writes.is_empty() && out.events.is_empty());
+            assert!(!driver.has_work(SESSION));
+            assert!(
+                driver.take_recheck(),
+                "nothing else tells the app the work ended"
+            );
+            assert!(!driver.take_recheck());
+        }
+    }
+}
+
 /// Images go as `localImage` items after the text, on a new turn and on a steer, as
 /// the TOB-59 probe found Codex 0.163.0 takes them.
 #[test]
@@ -417,6 +467,10 @@ fn a_steer_rejected_after_stop_does_not_start_a_new_turn() {
         r#"{{"method":"turn/completed","params":{{"threadId":"{THREAD}","turn":{{"id":"T1","status":"interrupted"}}}}}}"#
     );
     driver.on_line(interrupted.as_bytes(), &mut out);
+    assert!(
+        !driver.has_work(SESSION),
+        "a steer sent before Stop never starts a turn"
+    );
     let rejected = format!(
         r#"{{"id":{},"error":{{"code":-32600,"message":"no active turn"}}}}"#,
         steer["id"]

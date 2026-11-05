@@ -57,6 +57,12 @@ pub trait Connection {
     fn is_running(&self, _session: u64) -> bool {
         false
     }
+    /// Whether the session has work that runs or can still start a turn: what
+    /// [`Connection::is_running`] counts, a message accepted but not yet given to the
+    /// provider, or a steer whose rejection would start the next turn.
+    fn has_work(&self, session: u64) -> bool {
+        self.is_running(session)
+    }
     #[allow(clippy::too_many_arguments)]
     fn send_from(
         &self,
@@ -332,6 +338,12 @@ impl CodexConnection {
             .driver
             .as_ref()
             .is_some_and(|d| d.is_running(session))
+    }
+
+    pub fn has_work(&self, session: u64) -> bool {
+        let shared = self.shared.lock().unwrap();
+        shared.queued.contains_key(&session)
+            || shared.driver.as_ref().is_some_and(|d| d.has_work(session))
     }
 
     /// Opens the session's conversation if this process has not, then sends `text`,
@@ -743,10 +755,12 @@ impl Starter {
                     return;
                 }
                 let mut out = Outputs::default();
+                let mut recheck = false;
                 if let Some(driver) = guard.driver.as_mut() {
                     driver.on_line(line, &mut out);
+                    recheck = driver.take_recheck();
                 }
-                let wake_now = deliver(&mut guard, &inbox, out);
+                let wake_now = deliver(&mut guard, &inbox, out) || recheck;
                 drop(guard);
                 if wake_now {
                     wake();
@@ -801,6 +815,10 @@ impl Connection for CodexConnection {
 
     fn is_running(&self, session: u64) -> bool {
         CodexConnection::is_running(self, session)
+    }
+
+    fn has_work(&self, session: u64) -> bool {
+        CodexConnection::has_work(self, session)
     }
 
     fn send_from(
@@ -1366,6 +1384,15 @@ impl ClaudeConnection {
             .live
             .get(&session)
             .is_some_and(|live| live.driver.is_running())
+    }
+
+    pub fn has_work(&self, session: u64) -> bool {
+        let shared = self.starter.shared.lock().unwrap();
+        shared.queued.contains_key(&session)
+            || shared
+                .live
+                .get(&session)
+                .is_some_and(|live| live.driver.is_running())
     }
 
     /// Starts the session's process if it is not running, then sends `text`. Refuses,
@@ -2453,6 +2480,10 @@ impl Connection for ClaudeConnection {
 
     fn is_running(&self, session: u64) -> bool {
         ClaudeConnection::is_running(self, session)
+    }
+
+    fn has_work(&self, session: u64) -> bool {
+        ClaudeConnection::has_work(self, session)
     }
 
     fn send_from(

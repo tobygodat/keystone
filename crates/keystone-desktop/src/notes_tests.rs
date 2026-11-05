@@ -231,7 +231,7 @@ fn send_to_agent_puts_the_selection_or_the_whole_note_in_the_composer(cx: &mut T
     assert_eq!(draft, "build", "saved as the draft, and not sent");
     assert!(composer_focused);
     assert!(
-        view.read_with(cx, |this, cx| !this.state.read(cx).turn_running()),
+        view.read_with(cx, |this, cx| !this.state.read(cx).has_work()),
         "nothing is sent"
     );
 

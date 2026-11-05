@@ -11,8 +11,11 @@
 //! "end on steer" ends 300 ms after a steer arrives and then rejects it, as Codex does
 //! for a steer that reaches a turn that just ended. With `KEYSTONE_FAKE_CODEX_STEER_GATE`
 //! naming a folder, such a turn instead stays running until its steer arrives, writes
-//! `steer-held` there, and ends once `steer-release` exists. One whose prompt contains "until
-//! stopped" streams its reply, then stays running until interrupted.
+//! `steer-held` there, and ends once `steer-release` exists. One whose prompt contains
+//! "until stopped" streams its reply, then stays running until interrupted. One whose
+//! prompt contains "until released" waits, before its last step, for the file
+//! `KEYSTONE_FAKE_CODEX_RELEASE` names to exist: its end, or with "end on steer", the
+//! steer's rejection after that end.
 //! `KEYSTONE_FAKE_CODEX_REPLY` replaces the reply text exactly.
 //!
 //! `model/list` returns a scripted catalog (`fake-default`, `fake-fast`, and a hidden
@@ -322,6 +325,7 @@ struct Turn {
     /// Ended by the main loop; the turn's thread stops without reporting anything.
     silent: AtomicBool,
     end_on_steer: bool,
+    until_released: bool,
     steer: Mutex<Option<String>>,
     /// Where the client's answer to the turn's open server request goes.
     answers: Mutex<Option<Sender<Value>>>,
@@ -747,6 +751,7 @@ fn main() {
                     interrupt: AtomicBool::new(false),
                     silent: AtomicBool::new(false),
                     end_on_steer: text.contains("end on steer"),
+                    until_released: text.contains("until released"),
                     steer: Mutex::new(None),
                     answers: Mutex::new(None),
                 });
@@ -774,8 +779,9 @@ fn main() {
             "turn/steer" => {
                 let turn_id = params["expectedTurnId"].as_str().unwrap_or_default();
                 let live = turns.lock().unwrap();
-                if live.get(turn_id).is_some_and(|turn| turn.end_on_steer) {
+                if let Some(turn) = live.get(turn_id).filter(|turn| turn.end_on_steer) {
                     // After a pause, so the client can change its mind meanwhile.
+                    let until_released = turn.until_released;
                     let (out, turns) = (out.clone(), turns.clone());
                     let (thread, turn_id) = (params["threadId"].clone(), turn_id.to_owned());
                     thread::spawn(move || {
@@ -790,6 +796,9 @@ fn main() {
                             &turn_id,
                             "completed",
                         );
+                        while until_released && !released() {
+                            thread::sleep(Duration::from_millis(5));
+                        }
                         emit(
                             &out,
                             json!({"id": id, "error": {"code": -32600, "message": "no active turn"}}),
@@ -1079,6 +1088,9 @@ fn run_turn(
             thread::sleep(Duration::from_millis(5));
         }
     }
+    while turn.until_released && !released() && !turn.interrupt.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(5));
+    }
     if turn.silent.load(Ordering::SeqCst) {
         return;
     }
@@ -1228,6 +1240,11 @@ fn limit(out: &Out, thread: &str, turn_id: &str, reset: u64) {
             "message": "You've hit your usage limit. (synthetic test data)",
             "codexErrorInfo": "usageLimitExceeded", "additionalDetails": null}}}),
     );
+}
+
+fn released() -> bool {
+    std::env::var_os("KEYSTONE_FAKE_CODEX_RELEASE")
+        .is_none_or(|path| std::path::Path::new(&path).exists())
 }
 
 fn finish(out: &Out, thread: &str, turn_id: &str, status: &str) {

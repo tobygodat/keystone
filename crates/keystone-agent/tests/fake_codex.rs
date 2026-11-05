@@ -4,6 +4,7 @@ mod gate;
 use gate::Gate;
 use keystone_agent::ApprovalState;
 use keystone_agent::Command;
+use keystone_agent::Connection;
 use keystone_agent::{Catalog, CodexConnection, Event, ItemKind, ModelInfo, Speed, TurnStatus};
 use keystone_core::ModelChoice;
 use std::path::PathBuf;
@@ -561,6 +562,44 @@ fn a_rejected_steer_retried_as_a_turn_uses_the_mode_chosen_since() {
     assert!(events.iter().any(|e| matches!(e,
         Event::ItemCompleted(item) if item.text.contains("You wrote: late"))));
     assert_eq!(policy_of(&events), "on-request / readOnly");
+}
+
+/// A message the worker has not given Codex yet is work, though no turn runs: it
+/// starts one once the worker sends it.
+#[test]
+fn a_message_the_worker_has_not_sent_is_work() {
+    let (conn, wake) = connect();
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "hello".into(),
+    );
+    until(&conn, &wake, completed);
+    let (open, gate) = channel::<()>();
+    conn.run_in_order(
+        1,
+        Box::new(move || {
+            let _ = gate.recv();
+        }),
+    );
+    conn.send(
+        1,
+        "/tmp",
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "again".into(),
+    );
+    assert!(!conn.is_running(1));
+    assert!(conn.has_work(1), "the queued message will start a turn");
+    drop(open);
+    let events = until(&conn, &wake, completed);
+    assert!(events.iter().any(|e| matches!(e,
+        Event::ItemCompleted(item) if item.text.contains("You wrote: again"))));
+    assert!(!conn.has_work(1));
 }
 
 /// A scripted Codex whose `account/rateLimits/read` answers as `setting` says, or like

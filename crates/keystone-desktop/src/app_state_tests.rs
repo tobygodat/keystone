@@ -44,6 +44,7 @@ fn wrapper(dir: &Path, provider: Provider, delay_ms: u64, descendants: bool) -> 
         "KEYSTONE_FAKE_CODEX_DELAY_MS": delay_ms.to_string(),
         "KEYSTONE_FAKE_CLAUDE_DELAY_MS": delay_ms.to_string(),
         "KEYSTONE_FAKE_CLAUDE_LOG_DIR": dir.to_str().unwrap(),
+        "KEYSTONE_FAKE_CODEX_RELEASE": dir.join("codex-release").to_str().unwrap(),
     });
     let tracking = if descendants {
         format!(
@@ -160,6 +161,17 @@ fn restored(sessions: &Path, session: u64) -> Vec<Row> {
     let mut conversation = Conversation::loading();
     conversation.restore(Ok(keystone_agent::log::read(sessions, session).unwrap()));
     conversation.rows
+}
+
+fn wait_to_quit(state: &Entity<AppState>, cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(crate::DesktopApp {
+            state: state.clone(),
+            windows: Vec::new(),
+            quick: None,
+        })
+    });
+    state.update(cx, |state, _| state.quit_when_idle = true);
 }
 
 fn completed(state: &AppState, session: u64) -> bool {
@@ -1149,6 +1161,99 @@ fn an_account_folder_swapped_for_a_link_to_another_never_sends(cx: &mut gpui::Te
         let error = state.conversations[&2].error.clone().unwrap_or_default();
         assert!(error.contains("overlaps the account"), "{error}");
         assert!(state.claude.is_empty(), "no process was started");
+    });
+}
+
+fn send_text(state: &Entity<AppState>, text: &str, cx: &mut gpui::TestAppContext) {
+    state.update(cx, |state, cx| {
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text: text.into(),
+                attachments: Vec::new(),
+            },
+            cx
+        ));
+    });
+}
+
+fn replied(state: &AppState, text: &str) -> bool {
+    let reply = format!("You wrote: {text}");
+    state.conversations[&1].rows.iter().any(|row| {
+        matches!(row, Row::Item(item) if item.kind == ItemKind::AgentMessage && item.text.contains(&reply))
+    })
+}
+
+fn streaming(state: &AppState) -> bool {
+    state.conversations[&1]
+        .rows
+        .iter()
+        .any(|row| matches!(row, Row::Item(item) if item.kind == ItemKind::AgentMessage))
+}
+
+#[gpui::test]
+fn a_follow_up_still_queued_when_the_turn_ends_runs_before_keystone_quits(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    connect(&state, dir.path(), 20, false, cx);
+    send_text(&state, "hello until released", cx);
+    wait_until(cx, &state, streaming);
+    let (open, gate) = std::sync::mpsc::channel::<()>();
+    state.read_with(cx, |state, _| {
+        state.codex[&None].run_in_order(
+            1,
+            Box::new(move || {
+                let _ = gate.recv();
+            }),
+        )
+    });
+    wait_to_quit(&state, cx);
+    send_text(&state, "again", cx);
+    std::fs::write(dir.path().join("codex-release"), "").unwrap();
+    wait_until(cx, &state, |state| !state.conversations[&1].running);
+    assert_eq!(
+        state.read_with(cx, |state, _| state.phase),
+        Phase::Running,
+        "the follow-up the connection still holds keeps Keystone open"
+    );
+    drop(open);
+    wait_until(cx, &state, |state| state.phase == Phase::Exiting);
+    state.read_with(cx, |state, _| {
+        assert!(
+            replied(state, "again"),
+            "the follow-up ran before Keystone quit"
+        );
+        assert!(completed(state, 1));
+    });
+}
+
+#[gpui::test]
+fn a_steer_codex_rejects_after_the_turn_ends_runs_before_keystone_quits(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runtime(dir.path(), cx);
+    connect(&state, dir.path(), 20, false, cx);
+    send_text(&state, "end on steer until released", cx);
+    wait_until(cx, &state, streaming);
+    wait_to_quit(&state, cx);
+    send_text(&state, "late", cx);
+    wait_until(cx, &state, |state| !state.conversations[&1].running);
+    assert_eq!(
+        state.read_with(cx, |state, _| state.phase),
+        Phase::Running,
+        "the steer Codex has not answered keeps Keystone open"
+    );
+    std::fs::write(dir.path().join("codex-release"), "").unwrap();
+    wait_until(cx, &state, |state| state.phase == Phase::Exiting);
+    state.read_with(cx, |state, _| {
+        assert!(
+            replied(state, "late"),
+            "the steer's turn ran before Keystone quit"
+        );
+        assert!(completed(state, 1));
     });
 }
 

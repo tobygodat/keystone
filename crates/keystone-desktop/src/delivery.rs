@@ -197,11 +197,7 @@ impl AppState {
             Some(Hold::Loading)
         } else if conversation.recovery.is_some() {
             Some(Hold::Recovery)
-        } else if conversation.running
-            || self
-                .started(recipient)
-                .is_some_and(|c| c.is_running(recipient))
-        {
+        } else if self.runs_turn(recipient) {
             Some(Hold::Turn)
         } else if conversation.settle_blocker().is_some() || self.pressing.contains(&recipient) {
             Some(Hold::Answer)

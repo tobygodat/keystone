@@ -1479,9 +1479,15 @@ impl AppState {
         self.store.set_placement(window, placement, project)
     }
 
-    /// Whether any turn runs, so Keystone keeps running without a window until it ends.
-    pub(crate) fn turn_running(&self) -> bool {
-        self.conversations.values().any(|c| c.running)
+    pub(crate) fn has_work(&self) -> bool {
+        self.conversations.iter().any(|(&id, conversation)| {
+            conversation.running || self.started(id).is_some_and(|c| c.has_work(id))
+        })
+    }
+
+    fn runs_turn(&self, id: u64) -> bool {
+        self.conversations.get(&id).is_some_and(|c| c.running)
+            || self.started(id).is_some_and(|c| c.is_running(id))
     }
 
     /// The lowest-numbered session whose running turn waits for the user to answer an
@@ -1501,9 +1507,16 @@ impl AppState {
         if !self.quit_when_idle || self.phase != Phase::Running {
             return;
         }
-        if !self.turn_running() {
+        if !self.has_work() {
             self.quit_when_idle = false;
-            cx.defer(request_quit);
+            let state = cx.entity();
+            cx.defer(move |cx| {
+                if state.read(cx).has_work() {
+                    state.update(cx, |state, _| state.quit_when_idle = true);
+                } else {
+                    request_quit(cx);
+                }
+            });
         } else if let Some(session) = self.asking() {
             self.quit_when_idle = false;
             let state = cx.entity();
@@ -3311,10 +3324,7 @@ impl AppState {
             }
         }
         // A result waits for a turn that started meanwhile rather than steering it.
-        if matches!(kind, SendKind::Result | SendKind::Scheduled)
-            && (self.conversations.get(&id).is_some_and(|c| c.running)
-                || self.started(id).is_some_and(|c| c.is_running(id)))
-        {
+        if matches!(kind, SendKind::Result | SendKind::Scheduled) && self.runs_turn(id) {
             return false;
         }
         // A result also waits for a restore in its repository to end.
@@ -3406,8 +3416,7 @@ impl AppState {
             return false;
         }
         // A message that starts a turn first reads the files the turn starts from.
-        let steer = self.conversations.get(&id).is_some_and(|c| c.running)
-            || self.started(id).is_some_and(|c| c.is_running(id));
+        let steer = self.runs_turn(id);
         self.begin_checkpoint(id, cwd, steer);
         let sent = match self.connection(provider, account.as_ref()) {
             Ok(connection) => {
