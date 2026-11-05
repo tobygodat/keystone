@@ -1765,9 +1765,34 @@ mod tests {
         let count: i64 = tx
             .query_one("SELECT count(*) FROM log_entries", [], |row| row.get(0))
             .unwrap();
-        fs::write(path.with_extension("ready"), count.to_string()).unwrap();
+        let staged = path.with_extension("ready.partial");
+        fs::write(&staged, count.to_string()).unwrap();
+        fs::rename(staged, path.with_extension("ready")).unwrap();
         loop {
             std::thread::park();
+        }
+    }
+
+    #[cfg(unix)]
+    struct LiveChild(std::process::Child);
+
+    #[cfg(unix)]
+    impl LiveChild {
+        fn running(&mut self) -> bool {
+            self.0.try_wait().unwrap().is_none()
+        }
+
+        fn kill(mut self) -> std::process::ExitStatus {
+            self.0.kill().unwrap();
+            self.0.wait().unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for LiveChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
     }
 
@@ -1780,23 +1805,21 @@ mod tests {
         legacy(&path);
         let old = fs::read(&path).unwrap();
         let ready = path.with_extension("ready");
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "database::tests::import_crash_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("KEYSTONE_TEST_CRASH_IMPORT", &path)
-            .spawn()
-            .unwrap();
+        let mut child = LiveChild(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "database::tests::import_crash_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("KEYSTONE_TEST_CRASH_IMPORT", &path)
+                .spawn()
+                .unwrap(),
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !ready.exists() && Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+        while !ready.exists() && Instant::now() < deadline && child.running() {
             std::thread::sleep(Duration::from_millis(10));
-        }
-        if !ready.exists() {
-            let _ = child.kill();
-            let _ = child.wait();
         }
         assert_eq!(
             fs::read_to_string(ready).expect("import reached uncommitted projections"),
@@ -1809,8 +1832,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        child.kill().unwrap();
-        assert!(!child.wait().unwrap().success());
+        assert!(!child.kill().success());
         drop(connection);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.workspace().sessions()[0].draft(), "saved draft");
