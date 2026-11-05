@@ -1257,15 +1257,16 @@ enum Job {
     Command(Option<Event>),
     /// Replaces a process that cannot run the waiting turn's approval mode.
     Replace,
-    /// Sends the quiescence check the idle phase waits for.
-    Check { generation: u64 },
+    /// Sends the quiescence check the idle phase of this process and activity epoch
+    /// waits for.
+    Check { generation: u64, epoch: u64 },
     /// Ends a process the app confirmed after saving.
     Evict(IdleCandidate),
 }
 
 /// What idle tracking asks for once the lock is released.
 enum IdleStep {
-    Check { generation: u64 },
+    Check { generation: u64, epoch: u64 },
     Timer(Duration, Timer),
     Offered,
 }
@@ -1621,8 +1622,8 @@ impl ClaudeStarter {
                     confirm: true,
                 };
                 drop(shared);
-                let generation = timer.generation;
-                self.queue(timer.session, Job::Check { generation }, |_, _| {});
+                let (generation, epoch) = (timer.generation, timer.epoch);
+                self.queue(timer.session, Job::Check { generation, epoch }, |_, _| {});
             }
             (
                 TimerKind::CheckTimedOut { confirm },
@@ -1676,7 +1677,7 @@ impl ClaudeStarter {
                     epoch,
                     confirm: false,
                 };
-                Some(IdleStep::Check { generation })
+                Some(IdleStep::Check { generation, epoch })
             }
             Idle::Checking { confirm, .. } => match live.driver.take_quiescence()? {
                 Err(reason) => {
@@ -1712,9 +1713,16 @@ impl ClaudeStarter {
         }
     }
 
-    /// Sends the quiescence check for the session's current idle phase, if it still
-    /// is current, and times it.
-    fn check_idle(&self, mut shared: MutexGuard<'_, ClaudeShared>, session: u64, generation: u64) {
+    /// Sends the quiescence check for the idle phase of this process and activity epoch,
+    /// if it still is current, and times it. A check queued for an epoch that has since
+    /// ended sends nothing, since the later epoch queued its own.
+    fn check_idle(
+        &self,
+        mut shared: MutexGuard<'_, ClaudeShared>,
+        session: u64,
+        generation: u64,
+        queued: u64,
+    ) {
         let Some(policy) = shared.idle.clone() else {
             return;
         };
@@ -1726,7 +1734,7 @@ impl ClaudeStarter {
             Idle::Checking {
                 epoch: phase,
                 confirm,
-            } if phase == epoch && live.generation == generation => confirm,
+            } if phase == epoch && queued == epoch && live.generation == generation => confirm,
             _ => return,
         };
         let mut out = Outputs::default();
@@ -1836,8 +1844,8 @@ impl ClaudeStarter {
             self.queue(session, Job::Replace, |_, _| {});
         }
         match idle {
-            Some(IdleStep::Check { generation }) => {
-                self.queue(session, Job::Check { generation }, |_, _| {})
+            Some(IdleStep::Check { generation, epoch }) => {
+                self.queue(session, Job::Check { generation, epoch }, |_, _| {})
             }
             Some(IdleStep::Timer(at, timer)) => self.timers.at(at, timer),
             Some(IdleStep::Offered) | None => {}
@@ -1900,7 +1908,9 @@ impl ClaudeStarter {
             return;
         }
         let job = match job {
-            Job::Check { generation } => return self.check_idle(shared, session, generation),
+            Job::Check { generation, epoch } => {
+                return self.check_idle(shared, session, generation, epoch);
+            }
             Job::Evict(candidate) => return self.evict(shared, session, candidate),
             job => job,
         };

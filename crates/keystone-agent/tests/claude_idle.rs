@@ -428,7 +428,16 @@ fn an_unproven_check_leaves_the_process_running_until_activity() {
         let dir = rig.dir(&[("quiesce", quiesce)]);
         rig.send(1, &dir, None, PROVIDER, "hello");
         rig.completed(1);
-        let quiet = rig.unproven(1, &dir, reason);
+        let pid = rig.conn.pid(1).unwrap().to_string();
+        wait_for(
+            || {
+                std::fs::read_to_string(dir.join(".fake-claude-widgets-ready"))
+                    .is_ok_and(|ready| ready == pid)
+            },
+            "the widget startup handshake",
+        );
+        let expire_check = quiesce == "no-snapshot";
+        let quiet = rig.unproven(1, &dir, reason, expire_check);
         rig.clock.advance(Duration::from_secs(3600));
         assert_eq!(rig.offered(1), None, "{quiesce}");
         rig.settle(1, &dir);
@@ -447,7 +456,11 @@ fn an_unproven_check_leaves_the_process_running_until_activity() {
             ],
         );
         wait_for(|| rig.conn.activity(1) > Some(quiet), "the snapshot");
-        assert_eq!(rig.unproven(1, &dir, reason), quiet + 1, "{quiesce}");
+        assert_eq!(
+            rig.unproven(1, &dir, reason, expire_check),
+            quiet + 1,
+            "{quiesce}"
+        );
         assert_eq!(rig.offered(1), None, "{quiesce}");
         rig.settle(1, &dir);
         assert_eq!(rig.conn.activity(1), Some(quiet + 1), "{quiesce}");
@@ -456,10 +469,8 @@ fn an_unproven_check_leaves_the_process_running_until_activity() {
 }
 
 impl Rig {
-    /// Moves time until `session`'s check fails with `reason`, and returns the activity
-    /// it failed at once everything Claude sent with it is read. The check's timer
-    /// starts once its request is written, which the test cannot see.
-    fn unproven(&mut self, session: u64, dir: &Path, reason: &str) -> u64 {
+    /// Returns the activity at the failed check once its trailing output is read.
+    fn unproven(&mut self, session: u64, dir: &Path, reason: &str, expire_check: bool) -> u64 {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !self
             .conn
@@ -471,7 +482,9 @@ impl Rig {
                 "{reason}: {:?}",
                 self.conn.residency(session)
             );
-            self.clock.advance(Duration::from_millis(500));
+            if expire_check {
+                self.clock.advance(Duration::from_millis(500));
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         self.settle(session, dir);

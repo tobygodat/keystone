@@ -889,6 +889,73 @@ fn the_first_checks_timeout_does_not_end_the_confirming_check() {
 }
 
 #[test]
+fn a_check_queued_for_an_ended_epoch_sends_nothing() {
+    let server = server();
+    let (_, _, lease) = server.issuer().issue(7).unwrap().into_parts();
+    let connection = ClaudeConnection::new(None, Arc::new(|| {}));
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+    claude_init(&mut driver, &mut out);
+    claude_lifecycle(&mut driver, &mut out);
+    let mut current = live(driver, lease);
+    let (tx, written) = std::sync::mpsc::channel();
+    current.process = Some(
+        Process::spawn(
+            Path::new("/bin/cat"),
+            &[],
+            Path::new("/"),
+            &LaunchProfile::default(),
+            move |line| {
+                let _ = tx.send(wire(&String::from_utf8_lossy(line)));
+            },
+            |_| {},
+        )
+        .unwrap(),
+    );
+    let activity = br#"{"type":"system","subtype":"session_state_changed","session_id":"conversation","state":"idle"}"#;
+    let mut jobs = Vec::new();
+    {
+        let mut shared = connection.starter.shared.lock().unwrap();
+        shared.idle = Some(IdlePolicy::after(Duration::from_secs(600)));
+        shared.live.insert(7, current);
+        for activity in [None, Some(activity)] {
+            if let Some(line) = activity {
+                let live = shared.live.get_mut(&7).unwrap();
+                live.driver.on_line(line, &mut Outputs::default());
+            }
+            match connection.starter.idle_step(&mut shared, 7) {
+                Some(IdleStep::Check { generation, epoch }) => {
+                    jobs.push(Job::Check { generation, epoch })
+                }
+                _ => panic!("no check queued: {:?}", shared.live[&7].idle),
+            }
+        }
+    }
+    for job in jobs {
+        connection.starter.run(7, job, |_, _| {});
+    }
+
+    let id = std::iter::from_fn(|| written.recv_timeout(Duration::from_secs(5)).ok())
+        .find(|line| line["request"]["subtype"] == "initialize")
+        .expect("a check was sent")["request_id"]
+        .clone();
+    let answer = json!({"type": "control_response", "response": {"subtype": "success",
+        "request_id": id, "response": {"session_state": "idle"},
+        "pending_permission_requests": [], "pending_user_dialog_requests": []}});
+    let snapshot = br#"{"type":"system","subtype":"background_tasks_changed","session_id":"conversation","tasks":[]}"#;
+    let mut shared = connection.starter.shared.lock().unwrap();
+    let mut out = Outputs::default();
+    let live = shared.live.get_mut(&7).unwrap();
+    live.driver.on_line(answer.to_string().as_bytes(), &mut out);
+    live.driver.on_line(snapshot, &mut out);
+    connection.starter.deliver(shared, 7, out);
+    let phase = connection.starter.shared.lock().unwrap().live[&7]
+        .idle
+        .clone();
+    assert!(matches!(phase, Idle::Armed { .. }), "{phase:?}");
+}
+
+#[test]
 fn claude_connection_revokes_failed_handshakes_and_drop_but_not_denied_launch_retry() {
     for failure in ["initialize", "mcp", "drop", "denied"] {
         let server = server();
@@ -1329,4 +1396,98 @@ fn codex_reports_each_threads_mcp_startup_as_one_list() {
     );
     let events = format!("{:?}", out.events);
     assert!(!events.contains("fixture-secret"), "{events}");
+}
+
+fn finish_after_an_abandoned_check(worker_wins: bool) -> Idle {
+    let server = server();
+    let (_, _, lease) = server.issuer().issue(7).unwrap().into_parts();
+    let connection = ClaudeConnection::new(None, Arc::new(|| {}));
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+    claude_init(&mut driver, &mut out);
+    claude_lifecycle(&mut driver, &mut out);
+    let mut current = live(driver, lease);
+    let (tx, written) = std::sync::mpsc::channel();
+    current.process = Some(
+        Process::spawn(
+            Path::new("/bin/cat"),
+            &[],
+            Path::new("/"),
+            &LaunchProfile::default(),
+            move |line| {
+                let _ = tx.send(wire(&String::from_utf8_lossy(line)));
+            },
+            |_| {},
+        )
+        .unwrap(),
+    );
+    let next_check = |written: &std::sync::mpsc::Receiver<Value>| {
+        std::iter::from_fn(|| written.recv_timeout(Duration::from_secs(5)).ok())
+            .find(|line| line["request"]["subtype"] == "initialize")
+            .expect("a check was sent")["request_id"]
+            .clone()
+    };
+    let answer = |id: &Value| {
+        json!({"type": "control_response", "response": {"subtype": "success",
+            "request_id": id, "response": {"session_state": "idle"},
+            "pending_permission_requests": [], "pending_user_dialog_requests": []}})
+        .to_string()
+    };
+    let snapshot: &[u8] = br#"{"type":"system","subtype":"background_tasks_changed","session_id":"conversation","tasks":[]}"#;
+    let activity: &[u8] = br#"{"type":"system","subtype":"task_notification","task_id":"old","status":"completed","summary":"done","session_id":"conversation"}"#;
+    let step = |line: &[u8]| {
+        let mut shared = connection.starter.shared.lock().unwrap();
+        shared
+            .idle
+            .get_or_insert_with(|| IdlePolicy::after(Duration::from_secs(600)));
+        let live = shared.live.get_mut(&7).unwrap();
+        live.driver.on_line(line, &mut Outputs::default());
+        connection.starter.idle_step(&mut shared, 7)
+    };
+    {
+        let mut shared = connection.starter.shared.lock().unwrap();
+        shared.idle = Some(IdlePolicy::after(Duration::from_secs(600)));
+        shared.live.insert(7, current);
+    }
+    let job = {
+        let mut shared = connection.starter.shared.lock().unwrap();
+        match connection.starter.idle_step(&mut shared, 7) {
+            Some(IdleStep::Check { generation, epoch }) => Job::Check { generation, epoch },
+            _ => panic!("no first check"),
+        }
+    };
+    connection.starter.run(7, job, |_, _| {});
+    let mut id = next_check(&written);
+    assert!(step(activity).is_none());
+    let job = match step(answer(&id).as_bytes()) {
+        Some(IdleStep::Check { generation, epoch }) => Job::Check { generation, epoch },
+        other => panic!("no next check: {:?}", other.is_some()),
+    };
+    if worker_wins {
+        connection.starter.run(7, job, |_, _| {});
+        id = next_check(&written);
+        assert!(step(snapshot).is_none(), "trailing snapshot");
+    } else {
+        assert!(step(snapshot).is_none(), "trailing snapshot");
+        connection.starter.run(7, job, |_, _| {});
+        id = next_check(&written);
+    }
+    step(answer(&id).as_bytes());
+    step(snapshot);
+    let phase = connection.starter.shared.lock().unwrap().live[&7]
+        .idle
+        .clone();
+    phase
+}
+
+#[test]
+fn an_abandoned_checks_snapshot_before_the_next_write_preserves_the_check() {
+    let phase = finish_after_an_abandoned_check(false);
+    assert!(matches!(phase, Idle::Armed { .. }), "{phase:?}");
+}
+
+#[test]
+fn an_abandoned_checks_snapshot_after_the_next_write_preserves_the_check() {
+    let phase = finish_after_an_abandoned_check(true);
+    assert!(matches!(phase, Idle::Armed { .. }), "{phase:?}");
 }

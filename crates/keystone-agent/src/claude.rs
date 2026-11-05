@@ -950,10 +950,10 @@ impl ClaudeDriver {
     /// Why a quiescence check cannot be asked yet. Activity Keystone could not read or
     /// attribute does not stop one: the check is the refresh that can clear it.
     pub fn check_blocker(&self) -> Option<&'static str> {
-        let requests = self
-            .requests
-            .values()
-            .any(|request| !matches!(request, Request::Quiesce));
+        let check = self.quiesce.as_ref().map(|check| check.id.as_str());
+        let requests = self.requests.iter().any(|(id, request)| {
+            !matches!(request, Request::Quiesce) || check != Some(id.as_str())
+        });
         [
             (self.launch != Launch::Chat, "it is the layout helper"),
             (self.untrusted || self.refused, "it must be replaced"),
@@ -989,7 +989,7 @@ impl ClaudeDriver {
     /// arrives through [`ClaudeDriver::take_quiescence`]. Anything else observed in
     /// between counts as activity, which the caller compares.
     pub fn check_quiescence(&mut self, out: &mut Outputs) {
-        self.abandon_quiescence();
+        self.quiesce = None;
         let line = self.request(json!({"subtype": "initialize"}), Request::Quiesce);
         self.quiesce = Some(Quiesce {
             id: format!("keystone-{}", self.next_request),
@@ -1006,20 +1006,23 @@ impl ClaudeDriver {
         Some(result)
     }
 
-    /// Forgets the quiescence check in flight and any snapshot owed to it, so a late
-    /// answer or snapshot matches nothing.
+    /// Forgets the quiescence check in flight and any snapshot owed to it. Its request
+    /// stays open until Claude answers, holding the next check back; the late answer
+    /// proves nothing and is activity.
     pub fn abandon_quiescence(&mut self) {
         self.snapshot_owed = false;
-        if let Some(check) = self.quiesce.take() {
-            self.requests.remove(&check.id);
-        }
+        self.quiesce = None;
     }
 
     fn on_quiescence(&mut self, response: ControlResult) {
-        if self.quiesce.is_none() {
+        self.snapshot_owed = true;
+        if !self
+            .quiesce
+            .as_ref()
+            .is_some_and(|check| response.request_id == check.id.as_str())
+        {
             return;
         }
-        self.snapshot_owed = true;
         let empty = |list: &Option<Vec<Value>>, what: &str| match list {
             Some(list) if list.is_empty() => Ok(()),
             Some(_) => Err(format!("Claude Code has {what} pending")),
@@ -4205,6 +4208,47 @@ mod tests {
             "a late answer is not expected"
         );
         assert_eq!(driver.idle_blocker(), None);
+    }
+
+    #[test]
+    fn an_abandoned_checks_snapshot_stays_passive_after_the_next_check_starts() {
+        let (mut driver, mut out) = idle_driver();
+        assert_eq!(check(&mut driver, &[]), None);
+        driver.abandon_quiescence();
+        driver.on_line(QUIET.as_bytes(), &mut out);
+        assert_eq!(driver.check_blocker(), None);
+        let activity = driver.activity();
+        driver.check_quiescence(&mut out);
+        driver.on_line(NO_TASKS.as_bytes(), &mut out);
+        assert_eq!(
+            driver.activity(),
+            activity,
+            "the abandoned check's own snapshot"
+        );
+    }
+
+    #[test]
+    fn the_next_check_waits_for_an_abandoned_checks_answer() {
+        let (mut driver, mut out) = idle_driver();
+        assert_eq!(check(&mut driver, &[]), None);
+        driver.abandon_quiescence();
+        assert_eq!(
+            driver.check_blocker(),
+            Some("a control request is unanswered")
+        );
+        let activity = driver.activity();
+        driver.on_line(QUIET.as_bytes(), &mut out);
+        assert_eq!(driver.activity(), activity + 1);
+        assert_eq!(driver.check_blocker(), None);
+        driver.on_line(NO_TASKS.as_bytes(), &mut out);
+        assert_eq!(driver.activity(), activity + 1, "its own snapshot");
+
+        driver.check_quiescence(&mut out);
+        let next = QUIET.replace("keystone-2", "keystone-3");
+        driver.on_line(next.as_bytes(), &mut out);
+        driver.on_line(NO_TASKS.as_bytes(), &mut out);
+        assert_eq!(driver.take_quiescence(), Some(Ok(())));
+        assert_eq!(driver.activity(), activity + 1);
     }
 
     #[test]

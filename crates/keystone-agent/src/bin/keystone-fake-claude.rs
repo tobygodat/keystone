@@ -1298,6 +1298,9 @@ fn connect_widgets(out: &Out, shared: &Shared) {
             .as_array()
             .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "show_ui")),
     );
+    if shared.idle {
+        std::fs::write(".fake-claude-widgets-ready", pid.to_string()).unwrap();
+    }
 }
 
 /// One `show_ui` call: the tool use, its permission check, `tools/call`, and its
