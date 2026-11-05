@@ -170,11 +170,19 @@ fn an_idle_claude_process_ends_after_saving_and_resumes_on_its_own_account(
         state.test_claude().is_some_and(|c| c.pid(1).is_none())
             && state.conversations[&1].reported_model.is_none()
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while alive(first) {
-        assert!(Instant::now() < deadline, "{first} survived");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let (retired, retirement) = std::sync::mpsc::channel();
+    state.read_with(cx, |state, _| {
+        state.test_claude().unwrap().run_in_order(
+            1,
+            Box::new(move || {
+                retired.send(()).unwrap();
+            }),
+        );
+    });
+    retirement
+        .recv_timeout(Duration::from_secs(5))
+        .expect("idle retirement completes");
+    assert!(!alive(first), "{first} survived");
     for child in std::fs::read_to_string(dir.join(".fake-claude-children"))
         .unwrap()
         .lines()
