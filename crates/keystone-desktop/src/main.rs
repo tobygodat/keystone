@@ -6833,16 +6833,22 @@ mod tests {
     /// 2c in review: a mode chosen from the menu reaches work already handed to Codex.
     /// A steer sent during a Full access turn reaches Codex as the turn ends; Codex
     /// rejects it and the driver sends it as the next turn, which must use Read only.
+    /// The scripted Codex holds the steer until the mode is chosen.
     #[gpui::test]
     fn a_mode_chosen_from_the_menu_reaches_a_steer_that_becomes_the_next_turn(
         cx: &mut gpui::TestAppContext,
     ) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
+        let gate = dir.path().join("steer-gate");
+        std::fs::create_dir(&gate).unwrap();
         let codex = wrapper(
             dir.path(),
             "keystone-fake-codex",
-            "KEYSTONE_FAKE_CODEX_DELAY_MS=20",
+            &format!(
+                "KEYSTONE_FAKE_CODEX_DELAY_MS=20 KEYSTONE_FAKE_CODEX_STEER_GATE='{}'",
+                gate.display()
+            ),
         );
         let (view, cx) = open_window(&path, cx);
         view.update(cx, |view, cx| {
@@ -6867,9 +6873,10 @@ mod tests {
                 })
         });
         send_text(&view, cx, "late");
-        // Codex holds the steer for 300 ms; choose while it waits there.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let held = gate.join("steer-held");
+        wait_until(cx, &view, move |_, _| held.exists());
         choose_mode(cx, ApprovalMode::ReadOnly);
+        std::fs::write(gate.join("steer-release"), "").unwrap();
         assert_eq!(
             setting_of_reply(&view, cx, "You wrote: late"),
             "on-request / readOnly"

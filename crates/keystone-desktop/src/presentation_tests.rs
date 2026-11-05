@@ -1060,8 +1060,12 @@ fn a_400px_composer_keeps_a_model_target_and_every_action_through_a_turn(cx: &mu
     for session in [1, 2] {
         view.update(cx, |this, cx| {
             this.select(session, cx);
-            this.state
-                .update(cx, |state, cx| state.flush_logs(cx).unwrap());
+            // Rendering would start the history load only after the flush, and events
+            // that arrive while it loads wait for it, Stop included.
+            this.state.update(cx, |state, cx| {
+                state.ensure_history(session);
+                state.flush_logs(cx).unwrap()
+            });
         });
         cx.run_until_parked();
         let check = |cx: &mut VisualTestContext, actions: &[&'static str]| {

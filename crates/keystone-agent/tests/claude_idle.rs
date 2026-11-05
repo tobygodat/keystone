@@ -409,7 +409,9 @@ fn one_idle_session_ends_while_others_run_or_wait_for_approval() {
 }
 
 /// A check Claude cannot pass, or does not answer, leaves the process running with
-/// its reason until something happens, with no retry on a timer.
+/// its reason until something happens, with no retry on a timer. The failed check's
+/// own answer and snapshot are not that something (TOB-333); the conversation's next
+/// snapshot is, and it is checked once more.
 #[test]
 fn an_unproven_check_leaves_the_process_running_until_activity() {
     for (quiesce, reason) in [
@@ -421,26 +423,54 @@ fn an_unproven_check_leaves_the_process_running_until_activity() {
         let dir = rig.dir(&[("quiesce", quiesce)]);
         rig.send(1, &dir, None, PROVIDER, "hello");
         rig.completed(1);
-        // The check's timer starts once its request is written, which the test cannot
-        // see, so time moves until it runs out.
+        let quiet = rig.unproven(1, &dir, reason);
+        rig.clock.advance(Duration::from_secs(3600));
+        assert_eq!(rig.offered(1), None, "{quiesce}");
+        rig.settle(1, &dir);
+        assert_eq!(
+            rig.conn.activity(1),
+            Some(quiet),
+            "{quiesce}: checked again"
+        );
+        rig.residency(1, reason);
+        assert!(alive(rig.conn.pid(1).unwrap()));
+
+        inject(
+            &dir,
+            &[
+                r#"{"type":"system","subtype":"background_tasks_changed","session_id":"$SESSION","tasks":[]}"#,
+            ],
+        );
+        wait_for(|| rig.conn.activity(1) > Some(quiet), "the snapshot");
+        assert_eq!(rig.unproven(1, &dir, reason), quiet + 1, "{quiesce}");
+        assert_eq!(rig.offered(1), None, "{quiesce}");
+        rig.settle(1, &dir);
+        assert_eq!(rig.conn.activity(1), Some(quiet + 1), "{quiesce}");
+        rig.residency(1, reason);
+    }
+}
+
+impl Rig {
+    /// Moves time until `session`'s check fails with `reason`, and returns the activity
+    /// it failed at once everything Claude sent with it is read. The check's timer
+    /// starts once its request is written, which the test cannot see.
+    fn unproven(&mut self, session: u64, dir: &Path, reason: &str) -> u64 {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !rig
+        while !self
             .conn
-            .residency(1)
+            .residency(session)
             .is_some_and(|now| now.contains(reason))
         {
             assert!(
                 Instant::now() < deadline,
-                "{quiesce}: {:?}",
-                rig.conn.residency(1)
+                "{reason}: {:?}",
+                self.conn.residency(session)
             );
-            rig.clock.advance(Duration::from_millis(500));
+            self.clock.advance(Duration::from_millis(500));
             std::thread::sleep(Duration::from_millis(20));
         }
-        rig.clock.advance(Duration::from_secs(3600));
-        assert_eq!(rig.offered(1), None, "{quiesce}");
-        rig.residency(1, reason);
-        assert!(alive(rig.conn.pid(1).unwrap()));
+        self.settle(session, dir);
+        self.conn.activity(session).unwrap()
     }
 }
 

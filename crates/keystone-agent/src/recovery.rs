@@ -379,28 +379,30 @@ pub fn reconcile(neutral: &[Item], open_turn: bool, snapshot: &Snapshot) -> Opti
             });
         }
     }
-    // Keep the batch within the log's budget: drop the latest additions first, so what
-    // is kept still follows on from Keystone's history.
-    // Each operation's size is counted once; the report and framing fit in the margin.
-    // An operation too large to fit on its own is dropped too.
-    let sizes: Vec<usize> = operations
+    // Keep the longest prefix within the log's budget so it still follows history.
+    // Operations after the first that doesn't fit are never serialized, so the cost
+    // follows the budget, not the size of the provider's record. The report and framing
+    // fit in the margin.
+    let mut total = 2usize;
+    let kept = operations
         .iter()
-        .map(|operation| serde_json::to_vec(operation).map_or(usize::MAX, |bytes| bytes.len() + 1))
-        .collect();
-    let mut total = sizes
-        .iter()
-        .fold(2usize, |sum, size| sum.saturating_add(*size));
+        .position(|operation| {
+            total = serde_json::to_vec(operation)
+                .map_or(usize::MAX, |bytes| total.saturating_add(bytes.len() + 1));
+            total > MAX_BATCH_BYTES - 64 * 1024
+        })
+        .unwrap_or(operations.len());
+    let dropped = operations.split_off(kept);
     let fill = |operation: &Operation| matches!(operation, Operation::Replace { expected, .. } if crate::log::lost_count(expected).is_some());
-    let mut truncated = false;
-    while total > MAX_BATCH_BYTES - 64 * 1024
-        && let Some(operation) = operations.pop()
-    {
-        total = total.saturating_sub(sizes[operations.len()]);
-        truncated |= !fill(&operation);
-        if let Operation::Insert { item, .. } = operation {
-            shown.retain(|id| *id != item.id);
-        }
-    }
+    let truncated = dropped.iter().any(|operation| !fill(operation));
+    let unshown: HashSet<&str> = dropped
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Insert { item, .. } => Some(item.id.as_str()),
+            Operation::Replace { .. } => None,
+        })
+        .collect();
+    shown.retain(|id| !unshown.contains(id.as_str()));
     if truncated {
         limits.push(Limit::Truncated);
         // Not everything the provider recorded is added, so no gap is filled.
@@ -812,7 +814,21 @@ mod tests {
             .chain((0..4).map(|n| reply(&format!("m{n}"), &big, ItemStatus::Completed)))
             .collect();
         let batch = reconcile(&neutral, false, &snapshot(vec![(items, None)])).unwrap();
-        assert!(batch.operations.len() < 4);
+        assert_eq!(
+            batch.operations,
+            [
+                Operation::Insert {
+                    after: "u1".into(),
+                    item: reply("m0", &big, ItemStatus::Completed)
+                },
+                Operation::Insert {
+                    after: "m0".into(),
+                    item: reply("m1", &big, ItemStatus::Completed)
+                },
+            ]
+        );
+        assert_eq!(batch.report_after.as_deref(), Some("m1"));
+        assert_eq!(batch.report.messages, 2);
         assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_BATCH_BYTES);
         assert!(batch.report.limits.contains(&Limit::Truncated));
         assert_eq!(batch.report.outcome, Outcome::Partial);
@@ -841,14 +857,16 @@ mod tests {
         let items: Vec<Item> = std::iter::once(user("u1", "a"))
             .chain((0..1500).map(|n| reply(&format!("m{n}"), &text, ItemStatus::Completed)))
             .collect();
+        let snap = snapshot(vec![(items, None)]);
         let started = std::time::Instant::now();
-        let batch = reconcile(&neutral, false, &snapshot(vec![(items, None)])).unwrap();
+        let batch = reconcile(&neutral, false, &snap).unwrap();
+        let elapsed = started.elapsed();
         assert!(batch.report.limits.contains(&Limit::Truncated));
         assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_BATCH_BYTES);
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(500),
+            elapsed < std::time::Duration::from_millis(500),
             "{:?}",
-            started.elapsed()
+            elapsed
         );
     }
 

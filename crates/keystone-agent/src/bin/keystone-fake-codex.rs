@@ -9,7 +9,9 @@
 //! `KEYSTONE_FAKE_CODEX_STATE` naming a file, they are kept there, so a later process
 //! resumes a thread with its override like real Codex. A turn whose prompt contains
 //! "end on steer" ends 300 ms after a steer arrives and then rejects it, as Codex does
-//! for a steer that reaches a turn that just ended. One whose prompt contains "until
+//! for a steer that reaches a turn that just ended. With `KEYSTONE_FAKE_CODEX_STEER_GATE`
+//! naming a folder, such a turn instead stays running until its steer arrives, writes
+//! `steer-held` there, and ends once `steer-release` exists. One whose prompt contains "until
 //! stopped" streams its reply, then stays running until interrupted.
 //! `KEYSTONE_FAKE_CODEX_REPLY` replaces the reply text exactly.
 //!
@@ -725,7 +727,7 @@ fn main() {
                     let (out, turns) = (out.clone(), turns.clone());
                     let (thread, turn_id) = (params["threadId"].clone(), turn_id.to_owned());
                     thread::spawn(move || {
-                        thread::sleep(Duration::from_millis(300));
+                        hold_steer();
                         if let Some(turn) = turns.lock().unwrap().remove(&turn_id) {
                             turn.silent.store(true, Ordering::SeqCst);
                             turn.interrupt.store(true, Ordering::SeqCst);
@@ -776,6 +778,22 @@ fn main() {
                 json!({"id": id, "error": {"code": -32601, "message": "not scripted"}}),
             ),
         }
+    }
+}
+
+fn steer_gate() -> Option<std::path::PathBuf> {
+    std::env::var_os("KEYSTONE_FAKE_CODEX_STEER_GATE").map(Into::into)
+}
+
+/// Waits before answering a steer to an "end on steer" turn: 300 ms, or with a steer
+/// gate, from writing `steer-held` until the test writes `steer-release`.
+fn hold_steer() {
+    let Some(gate) = steer_gate() else {
+        return thread::sleep(Duration::from_millis(300));
+    };
+    std::fs::write(gate.join("steer-held"), "").unwrap();
+    while !gate.join("steer-release").exists() {
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -992,7 +1010,7 @@ fn run_turn(
             turn.interrupt.load(Ordering::Relaxed)
         });
     }
-    if text.contains("until stopped") {
+    if text.contains("until stopped") || (turn.end_on_steer && steer_gate().is_some()) {
         while !turn.interrupt.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(5));
         }

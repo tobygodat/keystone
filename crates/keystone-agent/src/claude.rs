@@ -325,6 +325,9 @@ pub struct ClaudeDriver {
     /// clears it.
     vetoed: bool,
     quiesce: Option<Quiesce>,
+    /// A check's task snapshot can arrive after the connection took its failed
+    /// outcome. Keep that snapshot separate so it is not counted as activity.
+    snapshot_owed: bool,
     /// The context the latest main-conversation API call filled, in tokens, and the
     /// model it ran on, until the turn's `result` reports the model's window.
     context: Option<(u64, Option<String>)>,
@@ -413,6 +416,7 @@ impl ClaudeDriver {
             hooks: HashSet::new(),
             vetoed: false,
             quiesce: None,
+            snapshot_owed: false,
             context: None,
             unknown: 0,
         };
@@ -933,8 +937,10 @@ impl ClaudeDriver {
         Some(result)
     }
 
-    /// Forgets the quiescence check in flight, so a late answer matches nothing.
+    /// Forgets the quiescence check in flight and any snapshot owed to it, so a late
+    /// answer or snapshot matches nothing.
     pub fn abandon_quiescence(&mut self) {
+        self.snapshot_owed = false;
         if let Some(check) = self.quiesce.take() {
             self.requests.remove(&check.id);
         }
@@ -944,6 +950,7 @@ impl ClaudeDriver {
         if self.quiesce.is_none() {
             return;
         }
+        self.snapshot_owed = true;
         let empty = |list: &Option<Vec<Value>>, what: &str| match list {
             Some(list) if list.is_empty() => Ok(()),
             Some(_) => Err(format!("Claude Code has {what} pending")),
@@ -989,10 +996,7 @@ impl ClaudeDriver {
                 })
             }
             ("system", Some("background_tasks_changed")) => {
-                self.quiesce
-                    .as_ref()
-                    .is_some_and(|check| check.answered && check.result.is_none())
-                    && self.own_tasks(envelope, line).is_some()
+                self.snapshot_owed && self.own_tasks(envelope, line).is_some()
             }
             _ => false,
         }
@@ -1033,6 +1037,7 @@ impl ClaudeDriver {
                     return;
                 };
                 self.tasks = Some(tasks);
+                self.snapshot_owed = false;
                 if let Some(check) = &mut self.quiesce
                     && check.answered
                     && check.result.is_none()
@@ -3830,6 +3835,96 @@ mod tests {
             matches!(&result, Some(Err(m)) if m.contains("did not report the session state")),
             "{result:?}"
         );
+    }
+
+    /// Claude follows its answer to a check with the conversation's task snapshot,
+    /// passed or not. A failed check's snapshot is still its own: not activity, so the
+    /// failure is not taken for news that starts the next check (TOB-333), whether the
+    /// connection takes the outcome before the snapshot arrives or after. It proves
+    /// nothing either, and the conversation's next snapshot is activity again.
+    #[test]
+    fn a_failed_checks_own_snapshot_is_not_activity_and_proves_nothing() {
+        for answer in [
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{}}}"#,
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{"session_state":"running"},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}"#,
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"keystone-2","error":"nope"}}"#,
+        ] {
+            for taken_first in [true, false] {
+                let case = format!("{answer} taken first: {taken_first}");
+                let (mut driver, mut out) = idle_driver();
+                driver.on_line(
+                    br#"{"type":"system","subtype":"background_tasks_changed","parent_tool_use_id":"toolu_1","tasks":[]}"#,
+                    &mut out,
+                );
+                let activity = driver.activity();
+                let lines: &[&str] = if taken_first {
+                    &[answer]
+                } else {
+                    &[answer, NO_TASKS]
+                };
+                let result = check(&mut driver, lines);
+                assert!(matches!(result, Some(Err(_))), "{case}: {result:?}");
+                if taken_first {
+                    driver.on_line(NO_TASKS.as_bytes(), &mut out);
+                    assert_eq!(driver.take_quiescence(), None, "{case}");
+                }
+                assert_eq!(driver.activity(), activity, "{case}");
+                assert_eq!(driver.idle_blocker(), Some(UNATTRIBUTED), "{case}");
+                driver.on_line(NO_TASKS.as_bytes(), &mut out);
+                assert_eq!(driver.activity(), activity + 1, "{case}");
+                assert_eq!(driver.idle_blocker(), Some(UNATTRIBUTED), "{case}");
+            }
+        }
+    }
+
+    /// While a failed check's snapshot is owed, anything else is still activity: a
+    /// subagent's, another session's, an unnamed or an unreadable task list, and a
+    /// second snapshot of the conversation's own. A snapshot listing a task still
+    /// blocks, owed or not.
+    #[test]
+    fn only_one_own_snapshot_is_owed_to_a_failed_check() {
+        let running = r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{"session_state":"running"},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}"#;
+        for foreign in [
+            r#"{"type":"system","subtype":"background_tasks_changed","parent_tool_use_id":"toolu_1","session_id":"s1","tasks":[]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s2","tasks":[]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[{"description":"no id"}]}"#,
+        ] {
+            let (mut driver, mut out) = idle_driver();
+            let activity = driver.activity();
+            assert!(matches!(check(&mut driver, &[running]), Some(Err(_))));
+            driver.on_line(foreign.as_bytes(), &mut out);
+            assert_eq!(driver.activity(), activity + 1, "{foreign}");
+            driver.on_line(NO_TASKS.as_bytes(), &mut out);
+            assert_eq!(driver.activity(), activity + 1, "{foreign}");
+            assert_eq!(driver.idle_blocker(), Some(UNATTRIBUTED), "{foreign}");
+            driver.on_line(NO_TASKS.as_bytes(), &mut out);
+            assert_eq!(driver.activity(), activity + 2, "{foreign}");
+        }
+
+        let (mut driver, mut out) = idle_driver();
+        assert!(matches!(check(&mut driver, &[running]), Some(Err(_))));
+        driver.on_line(
+            br#"{"type":"system","subtype":"background_tasks_changed","session_id":"s1","tasks":[{"task_id":"t","task_type":"local_bash","description":"d"}]}"#,
+            &mut out,
+        );
+        assert_eq!(driver.idle_blocker(), Some("a background task is running"));
+    }
+
+    /// A check abandoned after its answer, such as one whose snapshot timed out, owes
+    /// nothing: a snapshot arriving later is activity.
+    #[test]
+    fn a_snapshot_after_an_abandoned_answered_check_is_activity() {
+        let running = r#"{"type":"control_response","response":{"subtype":"success","request_id":"keystone-2","response":{"session_state":"running"},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}"#;
+        for answer in [QUIET, running] {
+            let (mut driver, mut out) = idle_driver();
+            let activity = driver.activity();
+            check(&mut driver, &[answer]);
+            driver.abandon_quiescence();
+            driver.on_line(NO_TASKS.as_bytes(), &mut out);
+            assert_eq!(driver.take_quiescence(), None, "{answer}");
+            assert_eq!(driver.activity(), activity + 1, "{answer}");
+        }
     }
 
     /// An agent's steer refused because nothing runs leaves the idle proof standing:

@@ -37,6 +37,10 @@
 //! `.fake-claude-ignore-initialize` file holding `all` leaves every `initialize`
 //! unanswered, and `probe` only Keystone's settings probe (`keystone-probe`).
 //!
+//! An `echo` setting of `1` disables scripts selected by prompt text. The default
+//! reply still repeats the prompt. Other settings and environment variables still
+//! apply.
+//!
 //! A prompt containing "exit plan" asks to approve `ExitPlanMode` first, as Claude does
 //! in plan mode. Approved, the mode returns to the one before plan mode, as Claude
 //! 2.1.300 does; denied, the reply says so.
@@ -366,6 +370,7 @@ struct Shared {
     release_file: Option<PathBuf>,
     /// Whether to report session state and background tasks (the `idle` setting).
     idle: bool,
+    echo: bool,
     /// The live background tasks, as `background_tasks_changed` lists them.
     tasks: Mutex<Vec<Value>>,
     session_state: Mutex<&'static str>,
@@ -649,6 +654,7 @@ fn main() {
             std::env::var_os("KEYSTONE_FAKE_CLAUDE_RELEASE_FILE").map(PathBuf::from)
         },
         idle: setting("idle").as_deref() == Some("1"),
+        echo: setting("echo").as_deref() == Some("1"),
         tasks: Mutex::default(),
         session_state: Mutex::new("idle"),
     });
@@ -1342,7 +1348,7 @@ fn answer(
     session: &str,
     turn: u64,
     request: &str,
-    text: &str,
+    prompt: &str,
     images: &str,
     mode: &str,
     delay: Duration,
@@ -1350,6 +1356,7 @@ fn answer(
     if let Some(reset) = support_limit::limited_until(support_limit::claude_home()) {
         return limit(out, session, turn, reset);
     }
+    let text = if shared.echo { "" } else { prompt };
     let mut mode = mode.to_owned();
     let mut left_plan = "";
     if text.contains("exit plan") && mode == "plan" {
@@ -1394,7 +1401,7 @@ fn answer(
     let scripted = orchestrator::reply(text, server.as_ref(), &request);
     let mut reply = scripted.or_else(|| std::env::var("KEYSTONE_FAKE_CLAUDE_REPLY").ok()).unwrap_or_else(|| {
         format!(
-            "Claude test reply (test data): You wrote: {text} **Mode:** `{mode}`{left_plan} **Model:** `{model}`{images}"
+            "Claude test reply (test data): You wrote: {prompt} **Mode:** `{mode}`{left_plan} **Model:** `{model}`{images}"
         )
     });
     edit_files(text);

@@ -35,7 +35,7 @@ fn fake_programs(dir: &Path) -> (PathBuf, PathBuf) {
             format!(
                 "#!/bin/sh\ncase \"${var}\" in '{root}'/*) ;; *) export {var}='{root}/default-{name}' ;; esac\n\
                  KEYSTONE_FAKE_ENV_RECEIPT='{root}/receipt' KEYSTONE_FAKE_CLAUDE_DELAY_MS=1 \
-                 KEYSTONE_FAKE_CODEX_DELAY_MS=1 exec '{}' \"$@\"\n",
+                 KEYSTONE_FAKE_CLAUDE_ECHO=1 KEYSTONE_FAKE_CODEX_DELAY_MS=1 exec '{}' \"$@\"\n",
                 binary.display()
             ),
         )
@@ -60,7 +60,25 @@ fn open<'a>(
     dir: &Path,
     cx: &'a mut gpui::TestAppContext,
 ) -> (Entity<Keystone>, &'a mut gpui::VisualTestContext) {
-    let store = Store::open(path).unwrap();
+    let folder = dir.join("project-run-long-crash-hook");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mut store = Store::open(path).unwrap();
+    if store
+        .workspace()
+        .preferences()
+        .window_project(keystone_core::WindowId::FIRST)
+        .is_none()
+    {
+        store
+            .open_project(
+                keystone_core::WindowId::FIRST,
+                &keystone_core::ProjectId::new(&folder).unwrap(),
+                None,
+                None,
+                1,
+            )
+            .unwrap();
+    }
     cx.update(|cx| {
         keystone_ui::init(cx);
         bind_keys(cx);
@@ -91,13 +109,21 @@ fn wait(
             return;
         }
         if std::time::Instant::now() >= deadline {
-            let rows = view.read_with(cx, |view, cx| {
-                format!(
-                    "{:?}",
-                    conversation(view, 1, cx).map(|c| (&c.rows, &c.error, c.running))
-                )
+            let sessions = view.read_with(cx, |view, cx| {
+                let conversations = view.state.read(cx).conversations();
+                let mut ids: Vec<_> = conversations.keys().copied().collect();
+                ids.sort_unstable();
+                ids.into_iter()
+                    .map(|id| {
+                        let c = &conversations[&id];
+                        format!(
+                            "\nsession {id}: running {}, error {:?}, approvals {:?}, rows {:?}",
+                            c.running, c.error, c.approvals, c.rows
+                        )
+                    })
+                    .collect::<String>()
             });
-            panic!("timed out: {what}: {rows}");
+            panic!("timed out: {what}:{sessions}");
         }
         cx.executor().advance_clock(Duration::from_millis(300));
         std::thread::sleep(Duration::from_millis(100));

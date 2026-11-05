@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: test, clippy, check.sh, UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install GPUI system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libvulkan1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # GITHUB_TOKEN only reads Keystone; this deploy key only reads tGPUI.
+      - name: Let cargo fetch the private tGPUI fork
+        id: tgpui
+        env:
+          TGPUI_SSH_KEY: ${{ secrets.TGPUI_SSH_KEY }}
+        run: |
+          if [ -z "$TGPUI_SSH_KEY" ]; then
+            echo '::error::Add TGPUI_SSH_KEY: a read-only deploy key for tobygodat/tGPUI.'
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$TGPUI_SSH_KEY" > "$RUNNER_TEMP/tgpui-key"
+          curl --fail --silent --show-error https://api.github.com/meta |
+            python3 -c 'import json, sys; print("\n".join("github.com " + key for key in json.load(sys.stdin)["ssh_keys"]))' > "$RUNNER_TEMP/tgpui-known-hosts"
+          printf -v ssh_command 'ssh -F /dev/null -i %q -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o UserKnownHostsFile=%q' \
+            "$RUNNER_TEMP/tgpui-key" "$RUNNER_TEMP/tgpui-known-hosts"
+          export GIT_SSH_COMMAND="$ssh_command"
+          echo "GIT_SSH_COMMAND=$ssh_command" >> "$GITHUB_ENV"
+          git config --global \
+            url."ssh://git@github.com/tobygodat/tGPUI".insteadOf \
+            https://github.com/tobygodat/tGPUI
+          git ls-remote https://github.com/tobygodat/tGPUI HEAD > /dev/null
+
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          cache-on-failure: true
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+
+      - name: cargo clippy --workspace
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: cargo clippy --workspace --locked
+
+      - name: scripts/check.sh
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: bash scripts/check.sh
+
+      - name: scripts/check.sh ui (headless)
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: bash scripts/check.sh ui
+
+      - name: Remove the private dependency key
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/tgpui-key"

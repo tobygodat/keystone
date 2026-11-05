@@ -17,3 +17,5 @@ date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_
 2026-10-19T04:56:11Z	3fe5ff6+dirty	1.79	2.62	350	1.34	1.58	TOB-34 bounded Pele renderer; final prefix restoration; cloud simulated draw metrics	1.80	1.72
 2026-10-19T05:33:16Z	3c1aaa1	1.96	2.73	350	1.36	1.90	TOB-34 repaired concrete UI/mono fonts, async completion and atlas cleanup; simulated cloud baseline, not device or diagram timing	1.85	1.65
 2026-10-19T05:41:47Z	f59ff97	1.88	2.52	350	1.33	1.76	TOB-34 final source-font override repair; simulated cloud baseline, not device or diagram timing	1.84	1.77
+2026-11-03T23:40:00Z	46c4c82	1.32	2.26	460	1.27	1.51	TOB-289 after approved TOB-333 fix; shared-host baseline, no speed comparison	1.39	1.44
+2026-11-04T00:50:23Z	2646bbc	4.80	4.93	459	1.11	1.33	TOB-289 bounded recovery sizing; shared-host baseline, no speed comparison	1.32	1.40
