@@ -224,6 +224,7 @@ impl Keystone {
             .id(arrangement::selector("limit", key.view))
             .automation_id(arrangement::selector("limit", key.view))
             .surface(Elevation::Raised, cx)
+            .border_1()
             .border_color(colors.border_strong)
             .p_3()
             .gap_2()

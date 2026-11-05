@@ -19,11 +19,13 @@ pub trait StyledExt: Styled + Sized {
             Elevation::Raised => (colors.surface_raised, radius::PANEL),
             Elevation::Overlay => (colors.overlay, radius::POPOVER),
         };
-        let el = self
-            .bg(bg)
-            .border_1()
-            .border_color(colors.border)
-            .rounded(rounding);
+        // Raised blocks sit inside content, where a hairline on top of the fill stacks boxes.
+        let el = self.bg(bg).rounded(rounding);
+        let el = if elevation == Elevation::Raised {
+            el
+        } else {
+            el.border_1().border_color(colors.border)
+        };
         if elevation == Elevation::Overlay {
             el.shadow(vec![BoxShadow {
                 color: colors.shadow,

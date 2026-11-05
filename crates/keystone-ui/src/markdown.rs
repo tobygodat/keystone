@@ -1124,9 +1124,8 @@ fn code_block(
             h_flex()
                 .pl_3()
                 .pr_1()
-                .py_0p5()
+                .pt_1()
                 .gap_2()
-                .hairline_b(cx)
                 .child(div().flex_1().children(
                     language.map(|language| {
                         Label::new(language).size(TextSize::Ui).color(Color::Muted)
@@ -1141,7 +1140,8 @@ fn code_block(
                 .overflow_x_scroll()
                 .child(
                     div()
-                        .p_3()
+                        .px_3()
+                        .pb_3()
                         .flex_shrink_0()
                         .whitespace_nowrap()
                         .font_family(mono)

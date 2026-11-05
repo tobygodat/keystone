@@ -231,52 +231,53 @@ impl Theme {
 }
 
 impl Colors {
-    /// Neutral gray surfaces and text, with blue reserved for actions, selection, and focus.
+    /// MonoCode's calm dark: near-equal surfaces, #ebebeb ink in opaque tiers, and washes
+    /// and strokes of that ink. Primary actions are ink-filled; blue is only focus and links.
     pub fn dark() -> Self {
         Self {
-            background: rgb(0x161616).into(),
-            sidebar: rgb(0x101010).into(),
-            surface: rgb(0x191919).into(),
-            surface_raised: rgb(0x1c1c1c).into(),
-            overlay: rgb(0x212121).into(),
-            composer: rgb(0x1c1c1c).into(),
-            composer_border: white(0.07),
-            composer_shadow: black(0.16),
+            background: rgb(0x171717).into(),
+            sidebar: rgb(0x151515).into(),
+            surface: rgb(0x1b1b1b).into(),
+            surface_raised: rgb(0x1e1e1e).into(),
+            overlay: rgb(0x1e1e1e).into(),
+            composer: rgb(0x1b1b1b).into(),
+            composer_border: white(0.08),
+            composer_shadow: black(0.24),
 
-            element_hover: white(0.04),
-            element_active: white(0.12),
-            element_selected: white(0.07),
-            element_filled: white(0.09),
-            element_filled_hover: white(0.15),
-            element_disabled: white(0.10),
-            element_inverse: rgb(0x4470c0).into(),
-            selection_fill: white(0.16),
-            selection_ring: white(0.16),
-            selection_edge: rgb(0xbdbdbd).into(),
+            element_hover: white(0.05),
+            element_active: white(0.15),
+            element_selected: white(0.08),
+            element_filled: white(0.08),
+            element_filled_hover: white(0.12),
+            element_disabled: white(0.06),
+            element_inverse: rgb(0xebebeb).into(),
+            selection_fill: white(0.10),
+            selection_ring: white(0.12),
+            selection_edge: rgb(0xebebeb).into(),
 
-            border: white(0.06),
+            border: white(0.07),
             border_strong: white(0.10),
             border_focused: rgb(0x5b87d6).into(),
-            shadow: black(0.45),
+            shadow: black(0.5),
             scrim: black(0.5),
 
-            text: rgb(0xe6e6e6).into(),
-            text_strong: rgb(0xf2f2f2).into(),
-            text_muted: rgb(0xa3a3a3).into(),
-            text_faint: rgb(0x8a8a8a).into(),
-            text_placeholder: rgb(0xa3a3a3).into(),
-            text_inverse: rgb(0xffffff).into(),
+            text: rgb(0xebebeb).into(),
+            text_strong: rgb(0xfafafa).into(),
+            text_muted: rgb(0xababab).into(),
+            text_faint: rgb(0x969696).into(),
+            text_placeholder: rgb(0x969696).into(),
+            text_inverse: rgb(0x171717).into(),
 
-            accent: rgb(0x6f98de).into(),
-            danger: rgb(0xec9a8f).into(),
-            success: rgb(0x8fc79a).into(),
-            warning: rgb(0xe2ba6e).into(),
+            accent: rgb(0x7ea3e3).into(),
+            danger: rgb(0xe5847a).into(),
+            success: rgb(0x7fbf8e).into(),
+            warning: rgb(0xd9b26a).into(),
             provider_claude: rgb(0xd9805f).into(),
             provider_codex: rgb(0x93a6e0).into(),
 
-            code_text: rgb(0xb8b8b8).into(),
-            selection: rgba(0x5b87d670).into(),
-            caret: rgb(0xe6e6e6).into(),
+            code_text: rgb(0xc8c8c8).into(),
+            selection: rgba(0x5b87d660).into(),
+            caret: rgb(0xebebeb).into(),
 
             tiles: tiles([
                 0xaa5a54, 0x946749, 0x3e7d53, 0x3c7b78, 0x5072a3, 0x7f62b2, 0xaa5386,
@@ -288,35 +289,35 @@ impl Colors {
     /// states are translucent black washes.
     pub fn light() -> Self {
         Self {
-            background: rgb(0xfafafa).into(),
-            sidebar: rgb(0xf3f3f3).into(),
+            background: rgb(0xffffff).into(),
+            sidebar: rgb(0xf8f8f8).into(),
             surface: rgb(0xffffff).into(),
-            surface_raised: rgb(0xf3f3f3).into(),
+            surface_raised: rgb(0xf5f5f5).into(),
             overlay: rgb(0xffffff).into(),
             composer: rgb(0xffffff).into(),
-            composer_border: black(0.08),
-            composer_shadow: black(0.06),
+            composer_border: black(0.10),
+            composer_shadow: black(0.05),
 
-            element_hover: black(0.035),
+            element_hover: black(0.04),
             element_active: black(0.10),
             element_selected: black(0.06),
-            element_filled: black(0.08),
-            element_filled_hover: black(0.12),
-            element_disabled: black(0.10),
-            element_inverse: rgb(0x345fa8).into(),
-            selection_fill: black(0.16),
-            selection_ring: black(0.16),
-            selection_edge: rgb(0x3a3a3a).into(),
+            element_filled: black(0.05),
+            element_filled_hover: black(0.08),
+            element_disabled: black(0.05),
+            element_inverse: rgb(0x171717).into(),
+            selection_fill: black(0.07),
+            selection_ring: black(0.10),
+            selection_edge: rgb(0x171717).into(),
 
-            border: black(0.07),
+            border: black(0.08),
             border_strong: black(0.12),
             border_focused: rgb(0x3a6ea5).into(),
-            shadow: black(0.14),
-            scrim: black(0.24),
+            shadow: black(0.12),
+            scrim: black(0.20),
 
-            text: rgb(0x262626).into(),
-            text_strong: rgb(0x141414).into(),
-            text_muted: rgb(0x5a5a5a).into(),
+            text: rgb(0x171717).into(),
+            text_strong: rgb(0x0a0a0a).into(),
+            text_muted: rgb(0x5c5c5c).into(),
             text_faint: rgb(0x6e6e6e).into(),
             text_placeholder: rgb(0x8f8f8f).into(),
             text_inverse: rgb(0xffffff).into(),
@@ -324,13 +325,13 @@ impl Colors {
             accent: rgb(0x2f6db3).into(),
             danger: rgb(0xb53b2f).into(),
             success: rgb(0x2e7d43).into(),
-            warning: rgb(0x9a6a12).into(),
+            warning: rgb(0x8f6210).into(),
             provider_claude: rgb(0xb4593a).into(),
             provider_codex: rgb(0x4a5fb5).into(),
 
-            code_text: rgb(0x555555).into(),
+            code_text: rgb(0x3d3d3d).into(),
             selection: rgba(0x3a6ea540).into(),
-            caret: rgb(0x262626).into(),
+            caret: rgb(0x171717).into(),
 
             tiles: tiles([
                 0xae4e47, 0x94603d, 0x32794a, 0x307674, 0x446da7, 0x7d58bb, 0xad4682,
@@ -395,6 +396,36 @@ mod tests {
                 assert!(contrast(tint.text, tint.fill) >= 4.5, "{:?}", tint.fill);
                 for surface in [colors.sidebar, colors.overlay, colors.background] {
                     assert!(contrast(tint.fill, surface) >= 3., "{:?}", tint.fill);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ink_text_reads_on_every_surface_in_both_themes() {
+        for (appearance, colors) in [("light", Colors::light()), ("dark", Colors::dark())] {
+            let action = contrast(colors.text_inverse, colors.element_inverse);
+            eprintln!("CONTRAST {appearance} text_inverse/element_inverse={action:.3}");
+            assert!(action >= 4.5, "{appearance} primary action: {action}");
+            for (surface_name, surface) in [
+                ("background", colors.background),
+                ("sidebar", colors.sidebar),
+                ("surface", colors.surface),
+                ("surface_raised", colors.surface_raised),
+                ("overlay", colors.overlay),
+                ("composer", colors.composer),
+            ] {
+                for (role, foreground) in [
+                    ("text", colors.text),
+                    ("text_strong", colors.text_strong),
+                    ("text_muted", colors.text_muted),
+                    ("text_faint", colors.text_faint),
+                    ("code_text", colors.code_text),
+                    ("element_inverse", colors.element_inverse),
+                ] {
+                    let ratio = contrast(foreground, surface);
+                    eprintln!("CONTRAST {appearance} {role}/{surface_name}={ratio:.3}");
+                    assert!(ratio >= 4.5, "{appearance} {role}/{surface_name}: {ratio}");
                 }
             }
         }

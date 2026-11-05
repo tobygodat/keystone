@@ -1,4 +1,4 @@
-# 0011. Run sessions on other machines through a headless host over SSH
+# 0012. Run sessions on other machines through a headless host over SSH
 
 Status: Proposed, 2026-11-02 (TOB-306). Builds on [ADR 0010](0010-terminal-browser-scheduling-editor-diffs-remote-devices.md), which brings remote environments into scope.
 

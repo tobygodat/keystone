@@ -1,6 +1,6 @@
 # Remote machines
 
-Status: Design, not built (TOB-306). The decision and the alternatives are in [ADR 0011](../adr/0011-remote-machines-through-a-headless-host.md). This document says how it works and what each slice builds.
+Status: Design, not built (TOB-306). The decision and the alternatives are in [ADR 0012](../adr/0012-remote-machines-through-a-headless-host.md). This document says how it works and what each slice builds.
 
 A session can run on another machine. Its `claude` or `codex` runs there, in a folder on that machine, with that machine's logins and configuration. The local window shows and drives it like any other session.
 

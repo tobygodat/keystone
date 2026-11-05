@@ -404,9 +404,8 @@ impl Render for DiagramState {
                 h_flex()
                     .pl_3()
                     .pr_1()
-                    .py_0p5()
+                    .pt_1()
                     .gap_2()
-                    .hairline_b(cx)
                     .child(
                         div()
                             .flex_1()
@@ -526,7 +525,7 @@ mod tests {
                 });
                 AtlasHarness {
                     diagram: Some(diagram),
-                    width: 224.,
+                    width: 222.,
                 }
             });
             let deadline = std::time::Instant::now() + Duration::from_secs(4);
