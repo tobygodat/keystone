@@ -9,7 +9,7 @@ use std::{
         mpsc::{self, SyncSender, TrySendError},
     },
     task::{Context as TaskContext, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use futures_channel::oneshot;
@@ -112,11 +112,48 @@ impl fmt::Display for DiagramError {
 
 impl std::error::Error for DiagramError {}
 
+struct WallDeadline(std::time::Instant);
+
+impl WallDeadline {
+    fn after(limit: Duration) -> Self {
+        Self(std::time::Instant::now() + limit)
+    }
+
+    fn passed(&self) -> bool {
+        std::time::Instant::now() >= self.0
+    }
+}
+
+#[cfg(not(test))]
+type Deadline = WallDeadline;
+
+#[cfg(test)]
+type Deadline = ManualDeadline;
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct ManualDeadline(Arc<AtomicBool>);
+
+#[cfg(test)]
+impl ManualDeadline {
+    fn after(_limit: Duration) -> Self {
+        Self::default()
+    }
+
+    fn passed(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn expire(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 struct Job {
     request: RenderRequest,
     measurer: Option<TextMeasurer>,
     cancel: Arc<AtomicBool>,
-    expires: Instant,
+    expires: Deadline,
     reply: oneshot::Sender<Result<RenderedDiagram, DiagramError>>,
 }
 
@@ -209,7 +246,7 @@ fn send(
         request,
         measurer,
         cancel,
-        expires: Instant::now() + WAIT_TIME,
+        expires: Deadline::after(WAIT_TIME),
         reply,
     };
     match sender.try_send(job) {
@@ -229,10 +266,17 @@ fn send(
 }
 
 fn wait_for_ticket(
-    mut ticket: RenderTicket,
+    ticket: RenderTicket,
     cancel: Arc<AtomicBool>,
 ) -> Result<RenderedDiagram, DiagramError> {
-    let deadline = Instant::now() + WAIT_TIME;
+    wait_until(ticket, cancel, Deadline::after(WAIT_TIME))
+}
+
+fn wait_until(
+    mut ticket: RenderTicket,
+    cancel: Arc<AtomicBool>,
+    deadline: Deadline,
+) -> Result<RenderedDiagram, DiagramError> {
     loop {
         check_cancel(&cancel)?;
         match ticket.response.try_recv() {
@@ -242,7 +286,7 @@ fn wait_for_ticket(
                     "Diagram worker stopped; restart the application",
                 ));
             }
-            Ok(None) if Instant::now() >= deadline => {
+            Ok(None) if deadline.passed() => {
                 cancel.store(true, Ordering::Relaxed);
                 return Err(DiagramError::request_timeout());
             }
@@ -380,7 +424,7 @@ fn process(
     images: &mut Cache<(LayoutKey, Palette), RenderedDiagram>,
 ) -> Result<RenderedDiagram, DiagramError> {
     check_cancel(&job.cancel)?;
-    if Instant::now() >= job.expires {
+    if job.expires.passed() {
         return Err(DiagramError::transient(
             "Diagram expired in the queue; retry",
         ));
@@ -436,7 +480,7 @@ fn process(
 }
 
 struct Budget {
-    deadline: Instant,
+    deadline: Deadline,
     cancel: Arc<AtomicBool>,
 }
 
@@ -449,11 +493,15 @@ struct Engine {
 
 impl Engine {
     fn new() -> Result<Self, DiagramError> {
+        Self::start(|| Deadline::after(RENDER_TIME))
+    }
+
+    fn start(init: impl FnOnce() -> Deadline) -> Result<Self, DiagramError> {
         let runtime = Runtime::new().map_err(js_error)?;
         runtime.set_memory_limit(64 * 1_048_576);
         runtime.set_max_stack_size(512 * 1024);
         let budget: Arc<Mutex<Option<Budget>>> = Arc::new(Mutex::new(Some(Budget {
-            deadline: Instant::now() + RENDER_TIME,
+            deadline: init(),
             cancel: Arc::new(AtomicBool::new(false)),
         })));
         let interrupt = budget.clone();
@@ -466,7 +514,7 @@ impl Engine {
             };
             let abort = guard
                 .as_ref()
-                .is_some_and(|b| b.cancel.load(Ordering::Relaxed) || Instant::now() >= b.deadline);
+                .is_some_and(|b| b.cancel.load(Ordering::Relaxed) || b.deadline.passed());
             if abort {
                 interrupt_flag.store(true, Ordering::Relaxed);
             }
@@ -501,7 +549,7 @@ impl Engine {
     fn layout(&self, job: &Job) -> Result<Layout, DiagramError> {
         self.interrupted.store(false, Ordering::Relaxed);
         *self.budget.lock().unwrap() = Some(Budget {
-            deadline: Instant::now() + RENDER_TIME,
+            deadline: Deadline::after(RENDER_TIME),
             cancel: job.cancel.clone(),
         });
         let result = self.context.with(|ctx| -> Result<Layout, DiagramError> {
@@ -589,7 +637,7 @@ impl Engine {
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|b| Instant::now() >= b.deadline);
+            .is_some_and(|b| b.deadline.passed());
         *self.budget.lock().unwrap() = None;
         self.runtime.run_gc();
         if result.is_err() {
@@ -1021,6 +1069,11 @@ fn allowed_attribute(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_zero_wall_clock_budget_has_already_expired() {
+        assert!(WallDeadline::after(Duration::ZERO).passed());
+    }
+
     const FLOW: &str = include_str!("../../tests/fixtures/diagrams/flowchart.mmd");
     const SEQUENCE: &str = include_str!("../../tests/fixtures/diagrams/sequence.mmd");
     const PIE: &str = include_str!("../../tests/fixtures/diagrams/pie.mmd");
@@ -1061,9 +1114,22 @@ mod tests {
             request,
             measurer: None,
             cancel: Arc::new(AtomicBool::new(false)),
-            expires: Instant::now() + WAIT_TIME,
+            expires: Deadline::after(WAIT_TIME),
             reply: oneshot::channel().0,
         }
+    }
+
+    fn expire_budget_from_js(engine: &Engine) {
+        let budget = engine.budget.clone();
+        engine.context.with(|ctx| {
+            let expire = Function::new(ctx.clone(), move || {
+                if let Some(budget) = budget.lock().unwrap().as_ref() {
+                    budget.deadline.expire();
+                }
+            })
+            .unwrap();
+            ctx.globals().set("__expireBudget", expire).unwrap();
+        });
     }
 
     #[test]
@@ -1364,22 +1430,37 @@ mod tests {
     #[test]
     fn interrupt_cancellation_memory_and_measurement_limits_are_enforced() {
         let engine = Engine::new().unwrap();
+        let deadline = Deadline::default();
         *engine.budget.lock().unwrap() = Some(Budget {
-            deadline: Instant::now() + Duration::from_millis(20),
+            deadline: deadline.clone(),
             cancel: Arc::new(AtomicBool::new(false)),
         });
-        let start = Instant::now();
+        expire_budget_from_js(&engine);
         assert!(
             engine
                 .context
-                .with(|ctx| ctx.eval::<(), _>("while(true) {}"))
+                .with(|ctx| ctx.eval::<(), _>("for (globalThis.n = 0; n < 200000; n++) {}"))
+                .is_ok(),
+            "a live budget lets work run across many interrupt polls"
+        );
+        assert!(
+            engine
+                .context
+                .with(|ctx| ctx.eval::<(), _>(
+                    "__expireBudget(); for (globalThis.n = 0; n < 100000000; n++) {}"
+                ))
                 .is_err()
         );
-        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(deadline.passed() && engine.interrupted.load(Ordering::Relaxed));
         *engine.budget.lock().unwrap() = None;
         engine.context.with(|ctx| {
             ctx.catch();
         });
+        let reached: f64 = engine.context.with(|ctx| ctx.eval("n")).unwrap();
+        assert!(
+            reached < 1_000_000.0,
+            "QuickJS polls the interrupt every 10000 ticks, so an expired budget stops the loop promptly: {reached}"
+        );
         assert!(
             engine
                 .context
@@ -1426,10 +1507,8 @@ mod tests {
                 .message
                 .contains("measurement")
         );
-        let expired = Job {
-            expires: Instant::now() - Duration::from_secs(1),
-            ..job(request(FLOW, 400, false))
-        };
+        let expired = job(request(FLOW, 400, false));
+        expired.expires.expire();
         assert!(
             process(
                 &expired,
@@ -1446,8 +1525,10 @@ mod tests {
     #[test]
     fn worker_queue_is_bounded_and_public_renders_measure_and_cancel() {
         let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let released = Arc::new(AtomicBool::new(false));
-        let release = released.clone();
+        let (release, released) = mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let held = Arc::new(AtomicBool::new(false));
+        let holding = held.clone();
         let first_call = Arc::new(AtomicBool::new(true));
         let worker = spawn_worker().unwrap();
         let submit = |request, measurer| {
@@ -1460,21 +1541,19 @@ mod tests {
                 cache_key: 99,
                 measure: Arc::new(move |text, size, _| {
                     if first_call.swap(false, Ordering::Relaxed) {
+                        holding.store(true, Ordering::Relaxed);
                         started_tx.send(()).unwrap();
-                        let until = Instant::now() + Duration::from_secs(2);
-                        while !release.load(Ordering::Relaxed) && Instant::now() < until {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
+                        let _ = released.lock().unwrap().recv();
+                        holding.store(false, Ordering::Relaxed);
                     }
                     text.len() as f32 * size * 0.6
                 }),
             },
         )
         .unwrap();
-        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        started_rx.recv().unwrap();
         let mut queued = Vec::new();
         let mut errors = Vec::new();
-        let start = Instant::now();
         for i in 0..12 {
             match submit(
                 request(PIE, 500 + i, false),
@@ -1487,7 +1566,10 @@ mod tests {
                 Err(error) => errors.push(error),
             }
         }
-        assert!(start.elapsed() < Duration::from_millis(500));
+        assert!(
+            held.load(Ordering::Relaxed),
+            "every submission returned while the worker stayed parked in the first job"
+        );
         assert_eq!(queued.len(), 8);
         assert_eq!(errors.len(), 4);
         assert!(
@@ -1504,10 +1586,12 @@ mod tests {
         let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
         let waker = futures_util::task::waker(wakes.clone());
         let mut context = TaskContext::from_waker(&waker);
-        let start = Instant::now();
         assert!(Pin::new(&mut queued[0]).poll(&mut context).is_pending());
-        assert!(start.elapsed() < Duration::from_millis(100));
-        released.store(true, Ordering::Relaxed);
+        assert!(
+            held.load(Ordering::Relaxed),
+            "polling returned while the worker stayed parked"
+        );
+        release.send(()).unwrap();
         wait_for_ticket(first, Arc::new(AtomicBool::new(false))).unwrap();
         for ticket in queued {
             wait_for_ticket(ticket, Arc::new(AtomicBool::new(false))).unwrap();
@@ -1586,9 +1670,12 @@ mod tests {
         assert!(error.resets_runtime());
         assert!(engine.is_none());
         engine = Some(Engine::new().unwrap());
+        expire_budget_from_js(engine.as_ref().unwrap());
         engine.as_ref().unwrap().context.with(|ctx| {
-            ctx.eval::<(), _>("globalThis.__keystoneRender = function() { while (true) {} }")
-                .unwrap()
+            ctx.eval::<(), _>(
+                "globalThis.__keystoneRender = function() { __expireBudget(); while (true) {} }",
+            )
+            .unwrap()
         });
         let error = process(
             &job(request(FLOW, 400, false)),
@@ -1600,18 +1687,20 @@ mod tests {
         assert!(error.message.contains("750 ms") && error.is_transient());
         assert!(engine.is_none());
         engine = Some(Engine::new().unwrap());
-        engine.as_ref().unwrap().context.with(|ctx| {
-            ctx.eval::<(), _>("globalThis.__keystoneRender = function() { while (true) {} }")
-                .unwrap()
-        });
         let cancelled = job(request(FLOW, 400, false));
         let cancel = cancelled.cancel.clone();
-        let cancelling = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            cancel.store(true, Ordering::Relaxed);
+        engine.as_ref().unwrap().context.with(|ctx| {
+            let callback = Function::new(ctx.clone(), move || {
+                cancel.store(true, Ordering::Relaxed);
+            })
+            .unwrap();
+            ctx.globals().set("__cancelRender", callback).unwrap();
+            ctx.eval::<(), _>(
+                "globalThis.__keystoneRender = function() { __cancelRender(); while (true) {} }",
+            )
+            .unwrap()
         });
         let error = process(&cancelled, &mut engine, &mut layouts, &mut images).unwrap_err();
-        cancelling.join().unwrap();
         assert!(error.message.contains("cancelled") && !error.is_transient());
         assert!(engine.is_none());
         process(
@@ -1627,8 +1716,8 @@ mod tests {
     #[test]
     fn queue_expiry_is_transient_and_does_not_shorten_the_render_budget() {
         let engine = Engine::new().unwrap();
-        let mut delayed = job(request(FLOW, 400, false));
-        delayed.expires = Instant::now() - Duration::from_millis(1);
+        let delayed = job(request(FLOW, 400, false));
+        delayed.expires.expire();
         assert!(engine.layout(&delayed).is_ok());
         let error = process(
             &delayed,
@@ -1641,6 +1730,33 @@ mod tests {
         assert!(DiagramError::request_timeout().is_transient());
         let mut invalid = request(FLOW, 1, false);
         assert!(!validate_request(&mut invalid).unwrap_err().is_transient());
+    }
+
+    #[test]
+    fn initialization_and_request_waits_fail_when_their_budgets_expire() {
+        let init = Deadline::default();
+        init.expire();
+        let error = Engine::start(|| init)
+            .err()
+            .expect("an expired initialization budget interrupts the bundle");
+        assert!(
+            error.message.contains("initialization exceeded 750 ms")
+                && error.is_transient()
+                && error.resets_runtime(),
+            "{error}"
+        );
+        assert!(Engine::start(Deadline::default).is_ok());
+        let (reply, response) = oneshot::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waited = Deadline::default();
+        waited.expire();
+        let error = wait_until(RenderTicket { response }, cancel.clone(), waited).unwrap_err();
+        assert_eq!(error, DiagramError::request_timeout());
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "an expired wait cancels the queued work"
+        );
+        drop(reply);
     }
 
     #[test]
