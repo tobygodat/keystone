@@ -423,17 +423,21 @@ fn secrets_in_arguments_and_urls_are_masked_and_left_out_unless_included() {
 
 #[test]
 fn names_say_secret_by_their_parts_and_switches_take_no_value() {
+    // Map order differs once GPUI turns on serde_json's `preserve_order`, as it does in
+    // a workspace build, so these compare only which names count.
+    let mut found = labels(
+        &json!({"env": {"DB_PASS": "a", "AWS_CREDENTIALS": "b", "OAUTH": "c", "AUTHOR": "d", "KEYMAP": "e"},
+                    "headers": {"Cookie": "f", "Authorization": "Basic Zm9v"}}),
+    );
+    found.sort();
     assert_eq!(
-        labels(
-            &json!({"env": {"DB_PASS": "a", "AWS_CREDENTIALS": "b", "OAUTH": "c", "AUTHOR": "d", "KEYMAP": "e"},
-                        "headers": {"Cookie": "f", "Authorization": "Basic Zm9v"}})
-        ),
+        found,
         [
             "AWS_CREDENTIALS",
-            "DB_PASS",
-            "OAUTH",
             "Authorization",
-            "Cookie"
+            "Cookie",
+            "DB_PASS",
+            "OAUTH"
         ]
     );
     assert!(
@@ -450,12 +454,11 @@ fn names_say_secret_by_their_parts_and_switches_take_no_value() {
         )
         .is_empty()
     );
-    assert_eq!(
-        labels(
-            &json!({"env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}", "NPM_TOKEN": "$NPM_TOKEN", "DSN": "postgres://u:p@h/db"}, "headers": {"X-Custom": "Bearer abcdef123456", "X-Ref": "bearer ${TOKEN}", "X-Var": "Bearer $GITHUB_TOKEN", "X-Plain": "on"}})
-        ),
-        ["DSN", "NPM_TOKEN", "X-Custom"]
+    let mut found = labels(
+        &json!({"env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}", "NPM_TOKEN": "$NPM_TOKEN", "DSN": "postgres://u:p@h/db"}, "headers": {"X-Custom": "Bearer abcdef123456", "X-Ref": "bearer ${TOKEN}", "X-Var": "Bearer $GITHUB_TOKEN", "X-Plain": "on"}}),
     );
+    found.sort();
+    assert_eq!(found, ["DSN", "NPM_TOKEN", "X-Custom"]);
 }
 
 #[test]
