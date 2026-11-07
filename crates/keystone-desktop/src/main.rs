@@ -6942,8 +6942,18 @@ mod tests {
                 "nothing reached Codex"
             );
         });
-        drop(writer);
         assert!(!started());
+        drop(writer);
+        let state = view.read_with(cx, |view, _| view.state.clone());
+        settle(&state, cx);
+        assert!(started());
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.composer.read(cx).value(), "hello");
+            assert!(
+                !view.state.read(cx).test_codex().unwrap().is_open(1),
+                "saving the model lock never sends the refused message"
+            );
+        });
 
         cx.simulate_keystrokes("secondary-enter");
         wait_until(cx, &view, |view, cx| {
@@ -7034,7 +7044,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let gate = dir.path().join("steer-gate");
-        std::fs::create_dir(&gate).unwrap();
         let codex = wrapper(
             dir.path(),
             "keystone-fake-codex",
@@ -7055,7 +7064,7 @@ mod tests {
         });
         click(cx, "welcome-codex");
         choose_mode(cx, ApprovalMode::FullAccess);
-        send_text(&view, cx, "end on steer");
+        send_text(&view, cx, "end on steer until stopped");
         wait_until(cx, &view, |view, cx| {
             view.state.read(cx).conversations()[&1]
                 .rows
@@ -7066,10 +7075,36 @@ mod tests {
                 })
         });
         send_text(&view, cx, "late");
-        let held = gate.join("steer-held");
-        wait_until(cx, &view, move |_, _| held.exists());
+        wait_until(cx, &view, |_, _| gate.exists());
+        assert_eq!(
+            std::fs::read_to_string(&gate).unwrap(),
+            "late",
+            "the message reached Codex as a steer"
+        );
+        view.read_with(cx, |view, cx| {
+            assert!(view.state.read(cx).conversations()[&1].running);
+        });
         choose_mode(cx, ApprovalMode::ReadOnly);
-        std::fs::write(gate.join("steer-release"), "").unwrap();
+        wait_until(cx, &view, |view, cx| {
+            let store = view.state.read(cx).store();
+            store.is_durable(store.revision())
+        });
+        let read_only = ApprovalMode::ReadOnly;
+        let (in_store, on_disk, _) = saved_mode(&view, cx);
+        assert_eq!((in_store, on_disk), (read_only, read_only), "mode saved");
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.state
+                    .read(cx)
+                    .test_codex()
+                    .unwrap()
+                    .approval(1)
+                    .map(|approval| approval.mode),
+                Some(read_only),
+                "the connection holds the mode"
+            );
+        });
+        std::fs::remove_file(&gate).unwrap();
         assert_eq!(
             setting_of_reply(&view, cx, "You wrote: late"),
             "on-request / readOnly"
@@ -7251,10 +7286,14 @@ mod tests {
     fn pending_work_never_runs_in_full_access_before_confirm(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
+        let gate = dir.path().join("steer-gate");
         let codex = wrapper(
             dir.path(),
             "keystone-fake-codex",
-            "KEYSTONE_FAKE_CODEX_DELAY_MS=20",
+            &format!(
+                "KEYSTONE_FAKE_CODEX_DELAY_MS=20 KEYSTONE_FAKE_CODEX_STEER_GATE='{}'",
+                gate.display()
+            ),
         );
         let (view, cx) = open_window(&path, cx);
         view.update(cx, |view, cx| {
@@ -7268,7 +7307,7 @@ mod tests {
         });
         click(cx, "welcome-codex");
         choose_mode(cx, ApprovalMode::ReadOnly);
-        send_text(&view, cx, "end on steer");
+        send_text(&view, cx, "end on steer until stopped");
         wait_until(cx, &view, |view, cx| {
             view.state.read(cx).conversations()[&1]
                 .rows
@@ -7279,9 +7318,32 @@ mod tests {
                 })
         });
         send_text(&view, cx, "late");
-        // Codex holds the steer for 300 ms; pick Full access while it waits there.
+        wait_until(cx, &view, |_, _| gate.exists());
+        assert_eq!(std::fs::read_to_string(&gate).unwrap(), "late");
+        view.read_with(cx, |view, cx| {
+            assert!(view.state.read(cx).conversations()[&1].running);
+        });
         pick_mode(cx, ApprovalMode::FullAccess);
         assert!(asking(&view, cx));
+        wait_until(cx, &view, |view, cx| {
+            let store = view.state.read(cx).store();
+            store.is_durable(store.revision())
+        });
+        let read_only = ApprovalMode::ReadOnly;
+        let (in_store, on_disk, _) = saved_mode(&view, cx);
+        assert_eq!((in_store, on_disk), (read_only, read_only));
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.state
+                    .read(cx)
+                    .test_codex()
+                    .unwrap()
+                    .approval(1)
+                    .map(|a| a.mode),
+                Some(read_only)
+            );
+        });
+        std::fs::remove_file(&gate).unwrap();
         assert_eq!(
             setting_of_reply(&view, cx, "You wrote: late"),
             "on-request / readOnly"
@@ -7298,6 +7360,10 @@ mod tests {
         click(cx, "full-access-dialog-confirm");
         assert!(!asking(&view, cx));
         assert!(composer_focused(&view, cx));
+        wait_until(cx, &view, |view, cx| {
+            let store = view.state.read(cx).store();
+            store.is_durable(store.revision())
+        });
         let full = ApprovalMode::FullAccess;
         assert_eq!(
             saved_mode(&view, cx),

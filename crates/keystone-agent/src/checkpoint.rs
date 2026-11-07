@@ -1591,6 +1591,7 @@ mod tests {
 
     fn init(root: &Path) {
         sh(root, &["init", "-q", "-b", "main"]);
+        sh(root, &["config", "maintenance.auto", "false"]);
         sh(root, &["config", "user.name", "Test"]);
         sh(root, &["config", "user.email", "test@example.com"]);
         sh(root, &["config", "commit.gpgsign", "false"]);

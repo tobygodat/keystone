@@ -17,6 +17,19 @@ const NO_MODE: ApprovalState = ApprovalState {
     overridden: false,
 };
 
+/// Writes through a child, so this process never holds a write fd a sibling test's fork can inherit.
+fn write_script(path: &std::path::Path, body: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "cat > \"$0\""])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    child.stdin.take().unwrap().write_all(body.as_ref())?;
+    assert!(child.wait()?.success());
+    Ok(())
+}
+
 fn connect() -> (CodexConnection, Receiver<()>) {
     // SAFETY: tests in this file set the same value and run no other code that reads it.
     unsafe { std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "20") };
@@ -286,7 +299,7 @@ fn connect_keeping_overrides(dir: &std::path::Path) -> (CodexConnection, Receive
     use std::os::unix::fs::PermissionsExt;
     unsafe { std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "20") };
     let script = dir.join("codex");
-    std::fs::write(
+    write_script(
         &script,
         format!(
             "#!/bin/sh\nKEYSTONE_FAKE_CODEX_STATE={} exec {} \"$@\"\n",
@@ -414,7 +427,7 @@ fn a_catalog_codex_cannot_list_fails_with_its_reason() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("codex");
-    std::fs::write(
+    write_script(
         &script,
         format!(
             "#!/bin/sh\nKEYSTONE_FAKE_CODEX_NO_CATALOG=1 exec {} \"$@\"\n",
@@ -534,33 +547,76 @@ fn provider_settings_after_a_restart_restore_the_users_own() {
 #[test]
 fn a_rejected_steer_retried_as_a_turn_uses_the_mode_chosen_since() {
     use keystone_core::ApprovalMode::{FullAccess, ReadOnly};
-    let (conn, wake) = connect();
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let gate = dir.path().join("steer-gate");
+    let script = dir.path().join("codex");
+    write_script(
+        &script,
+        format!(
+            "#!/bin/sh\nKEYSTONE_FAKE_CODEX_DELAY_MS=1 KEYSTONE_FAKE_CODEX_STEER_GATE='{}' exec '{}' \"$@\"\n",
+            gate.display(),
+            env!("CARGO_BIN_EXE_keystone-fake-codex")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (tx, wake) = channel();
+    let conn = CodexConnection::new(
+        Some(script),
+        "0.0.0-test",
+        Arc::new(move || {
+            let _ = tx.send(());
+        }),
+    );
+    let cwd = dir.path().to_str().unwrap();
     conn.send(
         1,
-        "/tmp",
+        cwd,
         None,
         &ModelChoice::default(),
         approval(FullAccess),
-        "end on steer".into(),
+        "end on steer until stopped".into(),
     );
     until(&conn, &wake, |e| matches!(e, Event::ItemDelta { .. }));
     conn.send(
         1,
-        "/tmp",
+        cwd,
         None,
         &ModelChoice::default(),
         approval(FullAccess),
         "late".into(),
     );
-    // Codex holds the steer for 300 ms. Choose the mode once it has gone out, so the
-    // change must reach the running driver, not only the queued send.
-    std::thread::sleep(Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !gate.exists() {
+        assert!(Instant::now() < deadline, "Codex did not receive the steer");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(std::fs::read_to_string(&gate).unwrap(), "late");
+    let held = conn.drain();
+    assert!(
+        !held.iter().any(|(_, event)| completed(event)),
+        "the first turn is still running"
+    );
     conn.set_approval(1, approval(ReadOnly));
-    // The turn ends without finishing its reply, then the steer comes back.
-    until(&conn, &wake, completed);
-    let events = until(&conn, &wake, completed);
-    assert!(events.iter().any(|e| matches!(e,
-        Event::ItemCompleted(item) if item.text.contains("You wrote: late"))));
+    assert_eq!(conn.approval(1), Some(approval(ReadOnly)));
+    std::fs::remove_file(gate).unwrap();
+    let turns = std::cell::Cell::new(0);
+    let events = until(&conn, &wake, |event| {
+        if completed(event) {
+            turns.set(turns.get() + 1);
+        }
+        turns.get() == 2
+    });
+    assert_eq!(events.iter().filter(|event| completed(event)).count(), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+        Event::ItemCompleted(item) if item.text.contains("You wrote: late")))
+            .count(),
+        1
+    );
     assert_eq!(policy_of(&events), "on-request / readOnly");
 }
 
@@ -620,7 +676,7 @@ fn connect_with_rate_limits(
             dir.join("rate-limits").display()
         )
     };
-    std::fs::write(
+    write_script(
         &script,
         format!(
             "#!/bin/sh\n{export}exec '{}' \"$@\"\n",
@@ -702,7 +758,7 @@ fn a_choice_changed_between_turns_runs_the_next_turn_on_it() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("codex");
-    std::fs::write(
+    write_script(
         &program,
         format!(
             "#!/bin/sh\nexport KEYSTONE_FAKE_CODEX_DELAY_MS=1 KEYSTONE_FAKE_CODEX_VERSION=0.166.0\nexec '{}' \"$@\"\n",

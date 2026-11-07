@@ -10,12 +10,11 @@
 //! resumes a thread with its override like real Codex. A turn whose prompt contains
 //! "end on steer" ends 300 ms after a steer arrives and then rejects it, as Codex does
 //! for a steer that reaches a turn that just ended. With `KEYSTONE_FAKE_CODEX_STEER_GATE`
-//! naming a folder, such a turn instead stays running until its steer arrives, writes
-//! `steer-held` there, and ends once `steer-release` exists. One whose prompt contains
-//! "until stopped" streams its reply, then stays running until interrupted. One whose
-//! prompt contains "until released" waits, before its last step, for the file
-//! `KEYSTONE_FAKE_CODEX_RELEASE` names to exist: its end, or with "end on steer", the
-//! steer's rejection after that end.
+//! naming a file, it writes the steer's text there instead and holds the steer until a
+//! test removes that file. One whose prompt contains "until stopped" streams its reply,
+//! then stays running until interrupted. One whose prompt contains "until released"
+//! waits, before its last step, for the file `KEYSTONE_FAKE_CODEX_RELEASE` names to
+//! exist: its end, or with "end on steer", the steer's rejection after that end.
 //! `KEYSTONE_FAKE_CODEX_REPLY` replaces the reply text exactly.
 //!
 //! `model/list` returns a scripted catalog (`fake-default`, `fake-fast`, and a hidden
@@ -778,6 +777,13 @@ fn main() {
             }
             "turn/steer" => {
                 let turn_id = params["expectedTurnId"].as_str().unwrap_or_default();
+                let input = params["input"].as_array().cloned().unwrap_or_default();
+                let text = input
+                    .iter()
+                    .find(|item| item["type"] == "text")
+                    .and_then(|item| item["text"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
                 let live = turns.lock().unwrap();
                 if let Some(turn) = live.get(turn_id).filter(|turn| turn.end_on_steer) {
                     // After a pause, so the client can change its mind meanwhile.
@@ -785,7 +791,7 @@ fn main() {
                     let (out, turns) = (out.clone(), turns.clone());
                     let (thread, turn_id) = (params["threadId"].clone(), turn_id.to_owned());
                     thread::spawn(move || {
-                        hold_steer();
+                        hold_steer(&text);
                         if let Some(turn) = turns.lock().unwrap().remove(&turn_id) {
                             turn.silent.store(true, Ordering::SeqCst);
                             turn.interrupt.store(true, Ordering::SeqCst);
@@ -808,14 +814,8 @@ fn main() {
                 }
                 match live.get(turn_id) {
                     Some(turn) => {
-                        let input = params["input"].as_array().cloned().unwrap_or_default();
-                        let text = input
-                            .iter()
-                            .find(|item| item["type"] == "text")
-                            .and_then(|item| item["text"].as_str())
-                            .unwrap_or_default();
                         images::record(&input.iter().filter_map(image_item).collect::<Vec<_>>());
-                        *turn.steer.lock().unwrap() = Some(text.to_owned());
+                        *turn.steer.lock().unwrap() = Some(text);
                         reply(json!({"turnId": turn_id}));
                     }
                     None => emit(
@@ -858,13 +858,15 @@ fn steer_gate() -> Option<std::path::PathBuf> {
 }
 
 /// Waits before answering a steer to an "end on steer" turn: 300 ms, or with a steer
-/// gate, from writing `steer-held` until the test writes `steer-release`.
-fn hold_steer() {
+/// gate, from publishing the received text until the test removes the file.
+fn hold_steer(text: &str) {
     let Some(gate) = steer_gate() else {
         return thread::sleep(Duration::from_millis(300));
     };
-    std::fs::write(gate.join("steer-held"), "").unwrap();
-    while !gate.join("steer-release").exists() {
+    let written = gate.with_extension("tmp");
+    std::fs::write(&written, text).unwrap();
+    std::fs::rename(written, &gate).unwrap();
+    while gate.exists() {
         thread::sleep(Duration::from_millis(5));
     }
 }
