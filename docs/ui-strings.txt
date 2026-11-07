@@ -1151,9 +1151,7 @@ crates/keystone-desktop/src/main.rs
 	Maximize
 	Minimize
 	Model not saved. {error}
-	Move out of active work
 	Needs action ({count})
-	New reply
 	New session
 	No matches
 	No session open.
@@ -1164,7 +1162,6 @@ crates/keystone-desktop/src/main.rs
 	Rename
 	Rename session
 	Retry
-	Return to active work
 	Saving…
 	Search
 	Send
@@ -1173,6 +1170,7 @@ crates/keystone-desktop/src/main.rs
 	Settings
 	Settings not saved. {error}
 	Settle
+	Settle: move out of active work
 	Settled
 	Settled ({count})
 	Show sidebar
@@ -1183,6 +1181,7 @@ crates/keystone-desktop/src/main.rs
 	Turn failed
 	Turn on Full access?
 	Un-settle
+	Un-settle: return to active work
 	Use recovered history
 	Waiting for approval
 	Waiting for your answer

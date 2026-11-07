@@ -113,7 +113,7 @@ const CONTENT_WIDTH: f32 = 720.;
 /// The top bar's height at Spacious density, which smaller densities scale down.
 const TOP_BAR: Pixels = px(48.);
 
-/// Keystone's mark: two muted side stones and the keystone in the accent colour.
+/// Keystone's mark: two muted side stones and the keystone in bright ink.
 fn arch_mark(size: Pixels) -> impl IntoElement {
     div()
         .relative()
@@ -124,7 +124,7 @@ fn arch_mark(size: Pixels) -> impl IntoElement {
             div().absolute().top_0().left_0().child(
                 Icon::new(IconName::ArchKeystone)
                     .size(size)
-                    .color(Color::Accent),
+                    .color(Color::Strong),
             ),
         )
 }
@@ -1643,7 +1643,7 @@ impl Keystone {
                         .child(arch_mark(px(20.)))
                         .child(
                             Label::new("keystone")
-                                .size(TextSize::Body)
+                                .size(TextSize::Base)
                                 .weight(FontWeight::SEMIBOLD),
                         )
                         .child(div().flex_1()),
@@ -3279,12 +3279,14 @@ impl Section {
     }
 }
 
-fn attention_reason(attention: Attention) -> (&'static str, Color) {
+/// The line under a row's title for a session that needs the user. An unseen reply has
+/// none: its dot and bright title say it.
+fn attention_reason(attention: Attention) -> Option<&'static str> {
     match attention {
-        Attention::Approval => ("Waiting for approval", Color::Warning),
-        Attention::Input => ("Waiting for your answer", Color::Warning),
-        Attention::Failed => ("Turn failed", Color::Warning),
-        Attention::Replied => ("New reply", Color::Default),
+        Attention::Approval => Some("Waiting for approval"),
+        Attention::Input => Some("Waiting for your answer"),
+        Attention::Failed => Some("Turn failed"),
+        Attention::Replied => None,
     }
 }
 
@@ -3331,7 +3333,7 @@ impl SessionSidebar {
                 .child(div().size(px(6.)).rounded_full().bg(cx.theme().colors.text))
                 .into_any_element(),
             (Some(_), false) => wedge(IconName::WedgeFilled, Color::Warning),
-            (None, false) => wedge(IconName::Wedge, Color::Accent),
+            (None, false) => wedge(IconName::Wedge, Color::Default),
         }
     }
 
@@ -3357,13 +3359,14 @@ impl SessionSidebar {
             pull_request_dot,
             time,
         } = row;
+        // Bright for what is new or selected, ink for what waits on the user, gray for
+        // the rest.
         let title = Label::new(title).truncate();
-        let title = if selected {
-            title.weight(FontWeight::MEDIUM).color(Color::Strong)
-        } else if settled {
-            title.color(Color::Muted)
-        } else {
-            title
+        let title = match attention.filter(|_| !settled) {
+            _ if selected => title.weight(FontWeight::MEDIUM).color(Color::Strong),
+            Some(Attention::Replied) => title.color(Color::Strong),
+            Some(_) => title,
+            None => title.color(Color::Muted),
         };
         let show_settle = selected || hovered;
         let branch = branch.map(|(branch, missing)| {
@@ -3386,17 +3389,14 @@ impl SessionSidebar {
                     .truncate(),
                 )
         });
-        let attention = attention.filter(|_| !settled);
+        let reason = attention.filter(|_| !settled).and_then(attention_reason);
         let has_detail =
-            attention.is_some() || account.is_some() || branch.is_some() || !excerpt.is_empty();
-        let detail = match attention {
-            Some(attention) => {
-                let (reason, color) = attention_reason(attention);
-                h_flex()
-                    .gap(px(6.))
-                    .child(Label::new(reason).size(TextSize::Sm).color(color))
-                    .children(branch)
-            }
+            reason.is_some() || account.is_some() || branch.is_some() || !excerpt.is_empty();
+        let detail = match reason {
+            Some(reason) => h_flex()
+                .gap(px(6.))
+                .child(Label::new(reason).size(TextSize::Sm).color(Color::Warning))
+                .children(branch),
             None => h_flex()
                 .gap(px(6.))
                 .children(account.map(|account| {
@@ -3488,7 +3488,7 @@ impl SessionSidebar {
                                                 .flex_none()
                                                 .size(px(6.))
                                                 .rounded_full()
-                                                .bg(cx.theme().colors.accent)
+                                                .bg(cx.theme().colors.warning)
                                                 .automation_id(format!(
                                                     "session-pull-request-dot-{id}"
                                                 )),
@@ -3509,26 +3509,22 @@ impl SessionSidebar {
                     )
                     .when(show_settle, |d| {
                         d.child(
-                            Button::new(
-                                ("settle", id),
-                                if settled { "Un-settle" } else { "Settle" },
-                            )
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Subtle)
-                            .icon(IconName::WedgeFilled)
-                            .debug_selector(move || format!("settle-{id}"))
-                            .tooltip(Tooltip::text(if settled {
-                                "Return to active work"
-                            } else {
-                                "Move out of active work"
-                            }))
-                            .on_click(move |_, _, cx| {
-                                let _ = settle.update(cx, |this, cx| {
-                                    if this.presentation.matches(activation) {
-                                        this.settle(id, !settled, cx);
-                                    }
-                                });
-                            }),
+                            IconButton::new(("settle", id), IconName::WedgeFilled)
+                                .size(ButtonSize::Compact)
+                                .aria_label(if settled { "Un-settle" } else { "Settle" })
+                                .debug_selector(move || format!("settle-{id}"))
+                                .tooltip(Tooltip::text(if settled {
+                                    "Un-settle: return to active work"
+                                } else {
+                                    "Settle: move out of active work"
+                                }))
+                                .on_click(move |_, _, cx| {
+                                    let _ = settle.update(cx, |this, cx| {
+                                        if this.presentation.matches(activation) {
+                                            this.settle(id, !settled, cx);
+                                        }
+                                    });
+                                }),
                         )
                     }),
             )
