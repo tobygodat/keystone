@@ -1571,7 +1571,7 @@ impl Keystone {
                             .min_h_0()
                             .overflow_y_scroll()
                             .track_scroll(&self.transcript_scroll)
-                            .child(self.transcript()),
+                            .child(self.transcript(cx)),
                     );
                 } else {
                     pane = pane.items_center().justify_center().gap_3().child(

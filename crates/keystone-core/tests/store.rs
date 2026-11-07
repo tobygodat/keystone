@@ -1,5 +1,7 @@
 use keystone_core::WorkingDirectory;
-use keystone_core::{Appearance, ApprovalMode, Density, Preferences, Provider, Store, ThemeMode};
+use keystone_core::{
+    ActionColor, Appearance, ApprovalMode, Density, Preferences, Provider, Store, ThemeMode,
+};
 use rusqlite::Connection;
 use std::fs;
 use tempfile::tempdir;
@@ -264,6 +266,8 @@ fn preferences_survive_restart_and_default_for_older_files() {
         ui_font: Some("Noto Sans".into()),
         mono_font: Some("JetBrains Mono".into()),
         text_size: Some(15),
+        action_color: ActionColor::Green,
+        transcript_size: Some(16),
     };
     store.set_appearance(appearance.clone()).unwrap();
     drop(store);
@@ -298,6 +302,8 @@ fn appearance_saved_before_mono_font_and_text_size_loads_with_their_defaults() {
             ui_font: Some("Noto Sans".into()),
             mono_font: None,
             text_size: None,
+            action_color: ActionColor::Ink,
+            transcript_size: None,
         }
     );
 }

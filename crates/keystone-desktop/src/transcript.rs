@@ -216,6 +216,7 @@ pub fn row(
         previews,
     } = controls;
     let colors = cx.theme().colors;
+    let (code_size, code_line) = cx.theme().transcript_code_text();
     match row {
         Row::Item(item) => match &item.kind {
             ItemKind::UserMessage
@@ -404,7 +405,8 @@ pub fn row(
                             .py_1()
                             .gap_2()
                             .font_mono(cx)
-                            .text_size(TextSize::Ui.px())
+                            .text_size(code_size)
+                            .line_height(code_line)
                             .text_color(colors.text_muted)
                             .child(div().flex_1().min_w_0().child(format!("$ {command}")))
                             .child(Label::new(status).size(TextSize::Sm).color(color))
@@ -431,7 +433,8 @@ pub fn row(
                                 .px_3()
                                 .pb_2p5()
                                 .font_mono(cx)
-                                .text_size(TextSize::Ui.px())
+                                .text_size(code_size)
+                                .line_height(code_line)
                                 .text_color(colors.text)
                                 .child(output.to_owned()),
                         )

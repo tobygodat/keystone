@@ -9,6 +9,70 @@ pub struct Theme {
     pub fonts: Fonts,
     /// Multiplies every [`crate::TextSize`]. 1.0 keeps the built-in sizes.
     pub text_scale: f32,
+    /// The transcript's text size. `None` follows [`crate::TextSize::Body`].
+    pub transcript_size: Option<Pixels>,
+}
+
+/// The fill of the primary action (Send, Allow, [`crate::ButtonStyle::Primary`]).
+/// `Ink` is the theme's own; the others are fixed hues with white text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActionColor {
+    #[default]
+    Ink,
+    Blue,
+    Green,
+    Orange,
+    Purple,
+    Pink,
+}
+
+impl ActionColor {
+    pub const ALL: [ActionColor; 6] = [
+        ActionColor::Ink,
+        ActionColor::Blue,
+        ActionColor::Green,
+        ActionColor::Orange,
+        ActionColor::Purple,
+        ActionColor::Pink,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ActionColor::Ink => "Ink",
+            ActionColor::Blue => "Blue",
+            ActionColor::Green => "Green",
+            ActionColor::Orange => "Orange",
+            ActionColor::Purple => "Purple",
+            ActionColor::Pink => "Pink",
+        }
+    }
+
+    /// The fill, and the text on it, in `appearance`.
+    pub fn tint(self, appearance: Appearance) -> Tint {
+        let fill = match self {
+            ActionColor::Ink => {
+                return match appearance {
+                    Appearance::Dark => Tint {
+                        fill: rgb(0xebebeb).into(),
+                        text: rgb(0x171717).into(),
+                    },
+                    Appearance::Light => Tint {
+                        fill: rgb(0x171717).into(),
+                        text: rgb(0xffffff).into(),
+                    },
+                };
+            }
+            ActionColor::Blue => 0x3761b3,
+            ActionColor::Green => 0x287045,
+            ActionColor::Orange => 0xa4491c,
+            ActionColor::Purple => 0x7149c2,
+            ActionColor::Pink => 0xad3a76,
+        };
+        Tint {
+            fill: rgb(fill).into(),
+            text: rgb(0xffffff).into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -218,7 +282,30 @@ impl Theme {
             },
             fonts,
             text_scale: 1.,
+            transcript_size: None,
         }
+    }
+
+    /// Replaces the primary action's fill and text.
+    pub fn with_action(mut self, action: ActionColor) -> Self {
+        let tint = action.tint(self.appearance);
+        self.colors.element_inverse = tint.fill;
+        self.colors.text_inverse = tint.text;
+        self
+    }
+
+    /// The transcript's text size and its whole-pixel line height, about 11:7.
+    pub fn transcript_text(&self) -> (Pixels, Pixels) {
+        let size = self
+            .transcript_size
+            .unwrap_or_else(|| crate::TextSize::Body.px());
+        (size, (size * 11. / 7. / 2.).round() * 2.)
+    }
+
+    /// Code blocks and tables in the transcript: 2 px under its text, on a 3:2 line.
+    pub fn transcript_code_text(&self) -> (Pixels, Pixels) {
+        let size = self.transcript_text().0 - px(2.);
+        (size, (size * 1.5 / 2.).round() * 2.)
     }
 
     pub fn dark() -> Self {
@@ -250,7 +337,7 @@ impl Colors {
             element_filled: white(0.08),
             element_filled_hover: white(0.12),
             element_disabled: white(0.06),
-            element_inverse: rgb(0xebebeb).into(),
+            element_inverse: ActionColor::Ink.tint(Appearance::Dark).fill,
             selection_fill: white(0.10),
             selection_ring: white(0.12),
             selection_edge: rgb(0xebebeb).into(),
@@ -266,7 +353,7 @@ impl Colors {
             text_muted: rgb(0xababab).into(),
             text_faint: rgb(0x969696).into(),
             text_placeholder: rgb(0x969696).into(),
-            text_inverse: rgb(0x171717).into(),
+            text_inverse: ActionColor::Ink.tint(Appearance::Dark).text,
 
             accent: rgb(0x7ea3e3).into(),
             danger: rgb(0xe5847a).into(),
@@ -304,7 +391,7 @@ impl Colors {
             element_filled: black(0.05),
             element_filled_hover: black(0.08),
             element_disabled: black(0.05),
-            element_inverse: rgb(0x171717).into(),
+            element_inverse: ActionColor::Ink.tint(Appearance::Light).fill,
             selection_fill: black(0.07),
             selection_ring: black(0.10),
             selection_edge: rgb(0x171717).into(),
@@ -320,7 +407,7 @@ impl Colors {
             text_muted: rgb(0x5c5c5c).into(),
             text_faint: rgb(0x6e6e6e).into(),
             text_placeholder: rgb(0x8f8f8f).into(),
-            text_inverse: rgb(0xffffff).into(),
+            text_inverse: ActionColor::Ink.tint(Appearance::Light).text,
 
             accent: rgb(0x2f6db3).into(),
             danger: rgb(0xb53b2f).into(),
@@ -399,6 +486,104 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `fill` drawn at `alpha` over `under`, as the primary button's hover and press do.
+    fn over(fill: Hsla, alpha: f32, under: Hsla) -> Hsla {
+        let (fill, under) = (fill.to_rgb(), under.to_rgb());
+        let mix = |a: f32, b: f32| a * alpha + b * (1. - alpha);
+        gpui::Rgba {
+            r: mix(fill.r, under.r),
+            g: mix(fill.g, under.g),
+            b: mix(fill.b, under.b),
+            a: 1.,
+        }
+        .into()
+    }
+
+    #[test]
+    fn every_action_color_keeps_its_label_readable_at_rest_hovered_and_pressed() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for action in ActionColor::ALL {
+                let theme =
+                    Theme::new(appearance, Density::Default, Fonts::default()).with_action(action);
+                let c = theme.colors;
+                for under in [
+                    c.background,
+                    c.sidebar,
+                    c.surface,
+                    c.surface_raised,
+                    c.overlay,
+                    c.composer,
+                ] {
+                    for alpha in [
+                        1.,
+                        crate::button::PRIMARY_HOVER_OPACITY,
+                        crate::button::PRIMARY_PRESSED_OPACITY,
+                    ] {
+                        let ratio = contrast(c.text_inverse, over(c.element_inverse, alpha, under));
+                        eprintln!(
+                            "ACTION_CONTRAST {appearance:?} {action:?} alpha={alpha} ratio={ratio:.4}"
+                        );
+                        assert!(
+                            ratio >= 4.5,
+                            "{action:?} in {appearance:?} at {alpha}: {ratio:.2}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transcript_text_follows_the_body_size_until_chosen() {
+        let mut theme = Theme::dark();
+        assert_eq!(theme.transcript_text(), (px(14.), px(22.)));
+        assert_eq!(theme.transcript_code_text(), (px(12.), px(18.)));
+        theme.transcript_size = Some(px(17.));
+        assert_eq!(theme.transcript_text(), (px(17.), px(26.)));
+        theme.transcript_size = Some(px(20.));
+        assert_eq!(theme.transcript_code_text(), (px(18.), px(28.)));
+        theme.transcript_size = Some(px(12.));
+        assert_eq!(theme.transcript_text(), (px(12.), px(18.)));
+    }
+
+    #[test]
+    fn transcript_sizes_keep_readable_whole_pixel_lines_and_follow_interface_when_unset() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for base in 11..=16 {
+                let mut theme = Theme::new(appearance, Density::Default, Fonts::default());
+                theme.text_scale = base as f32 / 13.;
+                crate::tokens::set_text_scale(theme.text_scale);
+                let (body, line) = theme.transcript_text();
+                assert_eq!(body, crate::TextSize::Body.px());
+                assert!(line > body);
+                assert_eq!(f32::from(line) % 2., 0.);
+                if base > 13 {
+                    assert!(
+                        line > px(22.),
+                        "larger interface needs a taller transcript line"
+                    );
+                }
+                let mut previous = (px(0.), px(0.));
+                for size in 12..=20 {
+                    theme.transcript_size = Some(px(size as f32));
+                    let body = theme.transcript_text();
+                    let code = theme.transcript_code_text();
+                    assert_eq!(body.0, px(size as f32));
+                    assert!(body.0 > previous.0 && body.1 >= previous.1);
+                    assert!(body.1 > body.0 && code.1 > code.0);
+                    assert!(code.0 < body.0 && code.0 >= px(10.));
+                    assert_eq!(f32::from(body.1) % 2., 0.);
+                    assert_eq!(f32::from(code.1) % 2., 0.);
+                    eprintln!(
+                        "TRANSCRIPT_PROPERTY {appearance:?} interface={base} chosen={size} body={body:?} code={code:?}"
+                    );
+                    previous = body;
+                }
+            }
+        }
+        crate::tokens::set_text_scale(1.);
     }
 
     #[test]

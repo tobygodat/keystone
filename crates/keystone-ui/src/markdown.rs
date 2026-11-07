@@ -879,7 +879,7 @@ fn render_block(block: &Block, ctx: &mut Ctx, window: &mut Window, cx: &mut App)
             let (size, line) = match level {
                 1 => (TextSize::Title.px(), px(28.)),
                 2 => (px(17.), px(24.)),
-                _ => (TextSize::Body.px(), px(22.)),
+                _ => cx.theme().transcript_text(),
             };
             let style = TextStyle {
                 font_weight: FontWeight::SEMIBOLD,
@@ -1017,8 +1017,8 @@ fn table(
     let mut table = v_flex()
         .surface(Elevation::Raised, cx)
         .overflow_hidden()
-        .text_size(TextSize::Ui.px())
-        .line_height(px(18.));
+        .text_size(cx.theme().transcript_code_text().0)
+        .line_height(cx.theme().transcript_code_text().1);
     for (index, cells) in std::iter::once(header)
         .chain(rows.iter().map(Vec::as_slice))
         .enumerate()
@@ -1053,6 +1053,7 @@ fn code_block(
     let n = ctx.code_blocks;
     let colors = cx.theme().colors;
     let mono = cx.theme().fonts.mono.clone();
+    let (code_size, code_line) = cx.theme().transcript_code_text();
     let code_style = TextStyle {
         font_family: mono.clone(),
         font_features: FontFeatures::default(),
@@ -1146,8 +1147,8 @@ fn code_block(
                         .whitespace_nowrap()
                         .font_family(mono)
                         .font_features(FontFeatures::default())
-                        .text_size(TextSize::Ui.px())
-                        .line_height(px(18.))
+                        .text_size(code_size)
+                        .line_height(code_line)
                         .text_color(colors.code_text)
                         .child(code_text),
                 ),

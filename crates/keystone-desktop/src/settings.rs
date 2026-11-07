@@ -1,8 +1,11 @@
 //! Maps saved preferences onto the keystone-ui theme.
 
 use gpui::{App, Window, WindowAppearance};
-use keystone_core::{Appearance as SavedAppearance, Density as SavedDensity, ThemeMode};
-use keystone_ui::{Appearance, Density, Fonts, Theme};
+use keystone_core::{
+    ActionColor as SavedActionColor, Appearance as SavedAppearance, Density as SavedDensity,
+    ThemeMode,
+};
+use keystone_ui::{ActionColor, Appearance, Density, Fonts, Theme};
 
 /// The interface's base text size in pixels when none is saved, `TextSize::Base` at a
 /// text scale of 1.
@@ -10,6 +13,19 @@ pub const DEFAULT_TEXT_SIZE: u8 = 13;
 
 /// The text sizes the settings page offers, in pixels.
 pub const TEXT_SIZES: std::ops::RangeInclusive<u8> = 11..=16;
+
+/// The transcript text sizes the settings page offers, in pixels.
+pub const TRANSCRIPT_SIZES: std::ops::RangeInclusive<u8> = 12..=20;
+
+/// The action colors the settings page offers, saved and shown, in display order.
+pub const ACTION_COLORS: [(SavedActionColor, ActionColor); 6] = [
+    (SavedActionColor::Ink, ActionColor::Ink),
+    (SavedActionColor::Blue, ActionColor::Blue),
+    (SavedActionColor::Green, ActionColor::Green),
+    (SavedActionColor::Orange, ActionColor::Orange),
+    (SavedActionColor::Purple, ActionColor::Purple),
+    (SavedActionColor::Pink, ActionColor::Pink),
+];
 
 /// Interface fonts offered in the settings page when they are installed. The default,
 /// the bundled Inter, is listed separately as "Default".
@@ -67,9 +83,14 @@ pub fn theme_for(saved: &SavedAppearance, window: &Window, cx: &App) -> Theme {
             fonts.mono = (*mono).into();
         }
     }
-    let mut theme = Theme::new(appearance, density, fonts);
+    let action = ACTION_COLORS
+        .iter()
+        .find(|(saved_color, _)| *saved_color == saved.action_color)
+        .map_or(ActionColor::Ink, |&(_, shown)| shown);
+    let mut theme = Theme::new(appearance, density, fonts).with_action(action);
     theme.text_scale =
         f32::from(saved.text_size.unwrap_or(DEFAULT_TEXT_SIZE)) / f32::from(DEFAULT_TEXT_SIZE);
+    theme.transcript_size = saved.transcript_size.map(|size| gpui::px(f32::from(size)));
     theme
 }
 

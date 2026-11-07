@@ -25,6 +25,7 @@ pub struct ControlsPage {
     focus: FocusHandle,
     switch: bool,
     slider: f32,
+    action: keystone_ui::ActionColor,
     fruit: Option<usize>,
     model: Option<usize>,
     models: Vec<SharedString>,
@@ -37,6 +38,7 @@ impl ControlsPage {
             focus: cx.focus_handle(),
             switch: false,
             slider: 40.,
+            action: keystone_ui::ActionColor::Ink,
             fruit: Some(0),
             model: None,
             models: (1..=500).map(|n| format!("Model {n:03}").into()).collect(),
@@ -128,6 +130,21 @@ impl Render for ControlsPage {
                             .automation_id("controls-slider-value")
                             .child(Label::new(format!("{}", self.slider))),
                     ),
+            ))
+            .child(field(
+                "Swatch",
+                h_flex()
+                    .gap_1()
+                    .children(keystone_ui::ActionColor::ALL.map(|action| {
+                        Swatch::new(action.name(), action.tint(cx.theme().appearance).fill)
+                            .selected(self.action == action)
+                            .tooltip(Tooltip::text(action.name()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.action = action;
+                                this.status = format!("swatch {}", action.name()).into();
+                                cx.notify();
+                            }))
+                    })),
             ))
             .child(field(
                 "Slider, disabled",

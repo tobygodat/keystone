@@ -3,7 +3,7 @@
 
 use crate::customization::OpenCustomize;
 use crate::notifications::Alert;
-use crate::settings::{self, DEFAULT_TEXT_SIZE, TEXT_SIZES};
+use crate::settings::{self, ACTION_COLORS, DEFAULT_TEXT_SIZE, TEXT_SIZES, TRANSCRIPT_SIZES};
 use crate::{
     FocusComposer, FocusSearch, Keystone, NewClaude, NewCodex, RenameSession, SendMessage,
     ToggleSettle, ToggleSidebar,
@@ -31,8 +31,10 @@ enum Field {
     Theme,
     UiFont,
     MonoFont,
+    ActionColor,
     Density,
     TextSize,
+    TranscriptSize,
     Notifications,
     TurnFinished,
     Approval,
@@ -66,8 +68,10 @@ const SECTIONS: [(Section, &str, &str, Rows); 8] = [
         "settings-section-appearance",
         &[
             ("Theme", Field::Theme),
+            ("Action color", Field::ActionColor),
             ("Density", Field::Density),
             ("Text size", Field::TextSize),
+            ("Transcript text", Field::TranscriptSize),
         ],
     ),
     (
@@ -133,8 +137,10 @@ pub(crate) struct SettingsPage {
     theme: FocusHandle,
     ui_font: FocusHandle,
     mono_font: FocusHandle,
+    action_color: [FocusHandle; ACTION_COLORS.len()],
     density: [FocusHandle; DENSITIES.len()],
     text_size: FocusHandle,
+    transcript_size: FocusHandle,
     pub(crate) accounts: crate::settings_accounts::AccountsPage,
     pub(crate) integrations: crate::integrations::IntegrationsPage,
     pub(crate) prompts: crate::settings_prompts::PromptsPage,
@@ -151,8 +157,10 @@ impl SettingsPage {
             theme: stop(),
             ui_font: stop(),
             mono_font: stop(),
+            action_color: std::array::from_fn(|_| stop()),
             density: std::array::from_fn(|_| stop()),
             text_size: stop(),
+            transcript_size: stop(),
             accounts: crate::settings_accounts::AccountsPage::new(cx),
             integrations: crate::integrations::IntegrationsPage::new(cx),
             prompts: crate::settings_prompts::PromptsPage::new(cx),
@@ -542,6 +550,33 @@ impl Keystone {
                 |appearance, font| appearance.mono_font = font,
                 cx,
             ),
+            Field::ActionColor => h_flex()
+                .flex_shrink_0()
+                .gap_1()
+                .children(
+                    ACTION_COLORS
+                        .iter()
+                        .zip(&page.action_color)
+                        .enumerate()
+                        .map(|(n, (&(saved_color, shown), focus))| {
+                            let id = format!("settings-action-color-{n}");
+                            Swatch::new(
+                                gpui::SharedString::from(id.clone()),
+                                shown.tint(cx.theme().appearance).fill,
+                            )
+                            .selected(saved.action_color == saved_color)
+                            .track_focus(focus)
+                            .tooltip(Tooltip::text(shown.name()))
+                            .aria_label(shown.name())
+                            .debug_selector(|| id)
+                            .on_click(
+                                self.change(cx, move |appearance, _| {
+                                    appearance.action_color = saved_color
+                                }),
+                            )
+                        }),
+                )
+                .into_any_element(),
             Field::Density => h_flex()
                 .flex_shrink_0()
                 .gap_1()
@@ -599,6 +634,38 @@ impl Keystone {
                     .into_any_element()
             }
             Field::Sounds | Field::Volume | Field::Sound(_) => self.sound_control(field, cx),
+            Field::TranscriptSize => {
+                let size = saved
+                    .transcript_size
+                    .unwrap_or_else(|| f32::from(cx.theme().transcript_text().0) as u8);
+                h_flex()
+                    .w(px(220.))
+                    .gap_2()
+                    .child(
+                        div().flex_1().child(
+                            Slider::new(
+                                "settings-transcript-size",
+                                f32::from(size),
+                                f32::from(*TRANSCRIPT_SIZES.start())
+                                    ..=f32::from(*TRANSCRIPT_SIZES.end()),
+                                1.,
+                            )
+                            .track_focus(&page.transcript_size)
+                            .on_change(self.change(
+                                cx,
+                                |appearance, &size: &f32| {
+                                    appearance.transcript_size = Some(size as u8)
+                                },
+                            )),
+                        ),
+                    )
+                    .child(
+                        Label::new(format!("{size} px"))
+                            .size(TextSize::Ui)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element()
+            }
             Field::TextSize => {
                 let size = saved.text_size.unwrap_or(DEFAULT_TEXT_SIZE);
                 h_flex()
@@ -743,27 +810,45 @@ impl Keystone {
                 self.show_section(next, window, cx);
             }
             "left" | "right" => {
-                let Some(at) = focused(&page.density) else {
-                    return false;
+                let step = |at: usize, len: usize| {
+                    if keystroke.key == "right" {
+                        (at + 1).min(len - 1)
+                    } else {
+                        at.saturating_sub(1)
+                    }
                 };
-                let next = if keystroke.key == "right" {
-                    (at + 1).min(DENSITIES.len() - 1)
-                } else {
-                    at.saturating_sub(1)
-                };
-                window.focus(&page.density[next], cx);
-                let density = DENSITIES[next].0;
-                if self
+                let saved = self
                     .state
                     .read(cx)
                     .store()
                     .workspace()
                     .preferences()
                     .appearance()
-                    .density
-                    != density
-                {
-                    self.update_appearance(|appearance| appearance.density = density, window, cx);
+                    .clone();
+                if let Some(at) = focused(&page.density) {
+                    let next = step(at, DENSITIES.len());
+                    window.focus(&page.density[next], cx);
+                    let density = DENSITIES[next].0;
+                    if saved.density != density {
+                        self.update_appearance(
+                            |appearance| appearance.density = density,
+                            window,
+                            cx,
+                        );
+                    }
+                } else if let Some(at) = focused(&page.action_color) {
+                    let next = step(at, ACTION_COLORS.len());
+                    window.focus(&page.action_color[next], cx);
+                    let color = ACTION_COLORS[next].0;
+                    if saved.action_color != color {
+                        self.update_appearance(
+                            |appearance| appearance.action_color = color,
+                            window,
+                            cx,
+                        );
+                    }
+                } else {
+                    return false;
                 }
             }
             _ => return false,
@@ -892,10 +977,29 @@ mod tests {
         let writer = crate::tests::lock_database(&path);
         click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
+        click(cx, "settings-action-color-2");
+        let track = cx.debug_bounds("settings-transcript-size").unwrap();
+        cx.simulate_click(
+            point(track.right() - px(1.), track.center().y),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
         let state = view.read_with(cx, |view, _| view.state.clone());
         crate::tests::settle(&state, cx);
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
+            let appearance = view
+                .state
+                .read(cx)
+                .store()
+                .workspace()
+                .preferences()
+                .appearance();
+            assert_eq!(appearance.action_color, keystone_core::ActionColor::Green);
+            assert_eq!(appearance.transcript_size, Some(20));
+            assert_eq!(cx.theme().transcript_text().0, px(20.));
+            let tint = keystone_ui::ActionColor::Green.tint(cx.theme().appearance);
+            assert_eq!(cx.theme().colors.element_inverse, tint.fill);
             assert!(view.status_line(cx).unwrap().0.starts_with("Not saved."));
             assert_eq!(
                 view.state
@@ -912,7 +1016,10 @@ mod tests {
         drop(writer);
         click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
-        assert_eq!(saved(&path).theme, ThemeMode::Light);
+        let repaired = saved(&path);
+        assert_eq!(repaired.theme, ThemeMode::Light);
+        assert_eq!(repaired.action_color, keystone_core::ActionColor::Green);
+        assert_eq!(repaired.transcript_size, Some(20));
         crate::tests::settle(&state, cx);
         cx.run_until_parked();
         assert!(
@@ -1326,6 +1433,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn action_color_and_transcript_text_apply_and_persist(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        seeded(&path);
+        let (_view, cx) = open_window(&path, cx);
+        keys(cx, "secondary-,");
+
+        click(cx, "settings-action-color-2");
+        assert_eq!(saved(&path).action_color, keystone_core::ActionColor::Green);
+        cx.update(|_, cx| {
+            let theme = cx.theme();
+            let green = keystone_ui::ActionColor::Green.tint(theme.appearance);
+            assert_eq!(theme.colors.element_inverse, green.fill);
+            assert_eq!(theme.colors.text_inverse, green.text);
+        });
+        click(cx, "settings-action-color-0");
+        assert_eq!(saved(&path).action_color, keystone_core::ActionColor::Ink);
+
+        cx.update(|_, cx| assert_eq!(cx.theme().transcript_text(), (px(14.), px(22.))));
+        let track = cx.debug_bounds("settings-transcript-size").unwrap();
+        cx.simulate_click(
+            point(track.right() - px(1.), track.center().y),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(saved(&path).transcript_size, Some(20));
+        cx.update(|_, cx| {
+            assert_eq!(cx.theme().transcript_text(), (px(20.), px(32.)));
+            assert_eq!(TextSize::Base.px(), px(13.), "the interface keeps its size");
+        });
+    }
+
+    #[gpui::test]
     fn settings_work_from_the_keyboard_alone(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
@@ -1338,8 +1478,15 @@ mod tests {
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
         // Appearance's row holds focus; next come Fonts, Notifications, Sounds, Accounts,
-        // Integrations, Prompts, Scheduled, Theme, then Compact.
+        // Integrations, Prompts, Scheduled, Theme, then the first action color.
         keys(cx, "tab tab tab tab tab tab tab tab tab");
+        keys(cx, "right right");
+        assert_eq!(saved(&path).action_color, keystone_core::ActionColor::Green);
+        keys(cx, "left left");
+        assert_eq!(saved(&path).action_color, keystone_core::ActionColor::Ink);
+
+        // Past the six action colors to Compact.
+        keys(cx, "tab tab tab tab tab tab");
         press(cx, "space");
         assert_eq!(saved(&path).density, Density::Compact);
         keys(cx, "right");
@@ -1353,12 +1500,9 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, Theme, Scheduled, Prompts, Integrations, Accounts,
-        // Sounds, Notifications, Fonts, and Appearance to Back.
-        keys(
-            cx,
-            "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab",
-        );
+        // From Default back past Compact, the six action colors, Theme, Scheduled, Prompts,
+        // Integrations, Accounts, Sounds, Notifications, Fonts, and Appearance to Back.
+        keys(cx, &["shift-tab"; 17].join(" "));
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
         assert!(composer_focused(&view, cx));

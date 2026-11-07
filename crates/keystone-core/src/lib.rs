@@ -568,6 +568,18 @@ pub enum Density {
     Spacious,
 }
 
+/// The fill of the primary action, such as Send and Allow. `Ink` is the theme's own.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ActionColor {
+    #[default]
+    Ink,
+    Blue,
+    Green,
+    Orange,
+    Purple,
+    Pink,
+}
+
 /// Missing fields load as defaults, so older state files stay valid.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
@@ -580,6 +592,9 @@ pub struct Appearance {
     pub mono_font: Option<String>,
     /// The interface's base text size in pixels. `None` uses the built-in 13.
     pub text_size: Option<u8>,
+    pub action_color: ActionColor,
+    /// The transcript's text size in pixels. `None` follows the interface text size.
+    pub transcript_size: Option<u8>,
 }
 
 /// Which desktop notifications Keystone sends. Each is sent only for a session the

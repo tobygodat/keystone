@@ -29,7 +29,7 @@ mod tooltip;
 pub mod tree;
 pub mod virtual_list;
 
-pub use button::{Button, ButtonSize, ButtonStyle, IconButton};
+pub use button::{Button, ButtonSize, ButtonStyle, IconButton, Swatch};
 pub use color::Color;
 pub use command_palette::{CommandPalette, CommandPaletteState, PaletteItem};
 pub use dialog::{ConfirmDialog, DialogFocus};
@@ -47,7 +47,7 @@ pub use styled_ext::{StyledExt, h_flex, v_flex};
 pub use switch::Switch;
 pub use tabs::{DraggedTab, Tab, TabBar, TabDot};
 pub use text_input::{InputMode, TextInput};
-pub use theme::{ActiveTheme, Appearance, Colors, Density, Fonts, Theme, Tint};
+pub use theme::{ActionColor, ActiveTheme, Appearance, Colors, Density, Fonts, Theme, Tint};
 pub use tokens::{Elevation, TextSize, radius, spacing};
 pub use tooltip::Tooltip;
 pub use tree::{NodeId, NodeKind, Tree, TreeEntry, TreeModel, TreeState};
@@ -102,7 +102,7 @@ pub mod prelude {
     pub use crate::{
         ActiveTheme, Button, ButtonSize, ButtonStyle, Color, ConfirmDialog, DialogFocus, Elevation,
         Icon, IconButton, IconName, Kbd, Label, ListItem, Markdown, MenuHeader, MenuItem,
-        MenuSeparator, Monogram, PopoverMenu, StyledExt, TextSize, Tooltip, h_flex, radius,
+        MenuSeparator, Monogram, PopoverMenu, StyledExt, Swatch, TextSize, Tooltip, h_flex, radius,
         spacing, v_flex,
     };
     pub use crate::{CommandPalette, CommandPaletteState, PaletteItem};

@@ -9,6 +9,11 @@ use gpui::{
     Stateful, Styled, Window, div, prelude::*, px,
 };
 
+/// How opaque the primary fill is while hovered and pressed. The theme's contrast test
+/// checks every action color's label at both.
+pub(crate) const PRIMARY_HOVER_OPACITY: f32 = 0.94;
+pub(crate) const PRIMARY_PRESSED_OPACITY: f32 = 0.88;
+
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -83,7 +88,7 @@ impl Common {
         let (rest, hover) = match (self.style, self.selected) {
             (ButtonStyle::Primary, _) => (
                 Some(colors.element_inverse),
-                colors.element_inverse.opacity(0.94),
+                colors.element_inverse.opacity(PRIMARY_HOVER_OPACITY),
             ),
             (ButtonStyle::Filled, _) => (Some(colors.element_filled), colors.element_filled_hover),
             (_, true) => (Some(colors.selection_fill), colors.selection_fill),
@@ -91,7 +96,7 @@ impl Common {
             (ButtonStyle::Ghost, false) => (None, colors.element_hover),
         };
         let active = match (self.style, self.selected) {
-            (ButtonStyle::Primary, _) => colors.element_inverse.opacity(0.88),
+            (ButtonStyle::Primary, _) => colors.element_inverse.opacity(PRIMARY_PRESSED_OPACITY),
             (ButtonStyle::Ghost | ButtonStyle::Subtle, true) => colors.selection_fill,
             _ => colors.element_active,
         };
@@ -331,6 +336,46 @@ impl RenderOnce for IconButton {
             .base(cx)
             .w(side)
             .child(Icon::new(self.icon).color(color))
+    }
+}
+
+/// A color choice: a dot on the button shell, ringed in text color while selected.
+#[derive(IntoElement)]
+pub struct Swatch {
+    common: Common,
+    fill: Hsla,
+}
+
+impl Swatch {
+    pub fn new(id: impl Into<ElementId>, fill: Hsla) -> Self {
+        Self {
+            common: Common::new(id.into()),
+            fill,
+        }
+    }
+
+    common_builders!();
+}
+
+impl RenderOnce for Swatch {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let side = self.common.size.height(cx);
+        let text = cx.theme().colors.text;
+        let ring = if self.common.selected {
+            text
+        } else {
+            text.opacity(0.)
+        };
+        let fill = self.fill;
+        self.common.base(cx).w(side).child(
+            div()
+                .size(px(20.))
+                .p(px(2.))
+                .rounded_full()
+                .border_2()
+                .border_color(ring)
+                .child(div().size_full().rounded_full().bg(fill)),
+        )
     }
 }
 

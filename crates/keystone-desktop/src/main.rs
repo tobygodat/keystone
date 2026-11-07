@@ -1245,11 +1245,12 @@ impl Keystone {
         self.refresh(cx);
     }
 
-    fn transcript(&self) -> gpui::Div {
+    fn transcript(&self, cx: &App) -> gpui::Div {
+        let (size, line) = cx.theme().transcript_text();
         v_flex()
             .gap_5()
-            .text_size(TextSize::Body.px())
-            .line_height(px(22.))
+            .text_size(size)
+            .line_height(line)
             .child(
                 Label::new("Interface preview · sample transcript")
                     .size(TextSize::Ui)
@@ -2806,6 +2807,7 @@ impl Keystone {
             Some(Row::Item(item)) if item.kind == ItemKind::UserMessage
         );
         let density = cx.theme().density;
+        let (transcript_size, transcript_line) = cx.theme().transcript_text();
         let app = cx.weak_entity();
         let activation = self.presentation.activation();
         h_flex()
@@ -2863,8 +2865,8 @@ impl Keystone {
                     .when(index > 0, |d| {
                         d.pt(density.space(if starts_turn { px(32.) } else { px(12.) }))
                     })
-                    .text_size(TextSize::Body.px())
-                    .line_height(px(22.))
+                    .text_size(transcript_size)
+                    .line_height(transcript_line)
                     .child(content),
             )
             .into_any_element()
