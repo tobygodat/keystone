@@ -1397,7 +1397,12 @@ impl Keystone {
                         self.scoped_listener(cx, move |this, _, _, cx| this.activate(id, cx)),
                     );
                 }
-                if let Some(session) = self.view_session(id, cx) {
+                let diff = self
+                    .view_session(id, cx)
+                    .and_then(|session| self.diff_in(ViewKey { view: id, session }));
+                if let Some(diff) = diff {
+                    pane = pane.child(div().flex_1().min_h_0().w_full().child(diff));
+                } else if let Some(session) = self.view_session(id, cx) {
                     self.state
                         .update(cx, |state, _| state.ensure_history(session));
                     let key = ViewKey { view: id, session };
@@ -1487,6 +1492,12 @@ impl Keystone {
                             cx,
                             move |this, _: &crate::restore::RestoreToHere, window, cx| {
                                 this.restore_focused_row(key, window, cx)
+                            },
+                        ))
+                        .on_action(self.scoped_listener(
+                            cx,
+                            move |this, _: &crate::diff_view::ViewChanges, window, cx| {
+                                this.view_changes_focused_row(key, window, cx)
                             },
                         ))
                         .on_mouse_down(

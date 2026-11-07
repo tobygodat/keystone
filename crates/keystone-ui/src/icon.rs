@@ -45,6 +45,7 @@ icons! {
     Folder => "icons/folder.svg", "<path d='M2.25 6.75h6l1.5 3h12v10.5H2.25Z M2.25 6.75v-3h6l1.5 1.5h9v4.5'/>";
     Refresh => "icons/refresh.svg", "<path d='M20.25 12a8.25 8.25 0 1 1-2.42-5.83 M20.25 3.75v6h-6'/>";
     Restore => "icons/restore.svg", "<path d='M3.75 12a8.25 8.25 0 1 0 2.42-5.83 M3.75 3.75v6h6'/>";
+    Diff => "icons/diff.svg", "<path d='M11.25 3v7.5 M7.5 6.75h7.5 M7.5 17.25h7.5'/>";
     Copy => "icons/copy.svg", "<rect x='8.25' y='8.25' width='12' height='12' rx='2'/><path d='M15.75 8.25v-4.5h-12v12h4.5'/>";
     Close => "icons/close.svg", "<path d='m6 6 12 12 M18 6 6 18'/>";
     Minus => "icons/minus.svg", "<path d='M5.25 11.25h13.5'/>";

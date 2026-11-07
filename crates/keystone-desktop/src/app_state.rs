@@ -44,7 +44,8 @@ pub(crate) enum Phase {
 enum SendKind {
     /// The composer's draft, cleared once it is sent.
     Draft,
-    /// A widget's action, or the continue after a usage limit. The draft stays.
+    /// A widget's action, the continue after a usage limit, or review comments from a
+    /// diff. The draft stays.
     Widget,
     /// A launched session's result. Only ever a new turn, never a steer.
     Result,
@@ -3019,6 +3020,28 @@ impl AppState {
 
     pub(crate) fn send_message(&mut self, draft: ComposerDraft, cx: &mut Context<Self>) -> bool {
         self.send_message_from(draft, None, SendKind::Draft, cx) == Sent::Yes
+    }
+
+    /// Sends review comments from a diff as a message of their own. The draft stays.
+    /// A refusal gives the reason the session's transcript shows, when it has one.
+    pub(crate) fn send_review(
+        &mut self,
+        session: u64,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Option<String>> {
+        let draft = ComposerDraft {
+            session,
+            text,
+            attachments: Vec::new(),
+        };
+        if self.send_message_from(draft, None, SendKind::Widget, cx) == Sent::Yes {
+            return Ok(());
+        }
+        Err(self
+            .conversations
+            .get(&session)
+            .and_then(|conversation| conversation.error.clone()))
     }
 
     /// Sends [`CONTINUE_TEXT`] to a session whose last turn hit its usage limit, at the

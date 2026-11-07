@@ -8,6 +8,7 @@ mod commands;
 mod conversation;
 mod customization;
 mod customization_agent;
+mod diff_view;
 mod excerpt;
 mod file_view;
 mod files;
@@ -496,6 +497,8 @@ struct Keystone {
     rename_input: Entity<TextInput>,
     worktree_dialog: Option<worktrees::WorktreeDialog>,
     restore_dialog: Option<restore::RestoreDialog>,
+    /// The diff shown in place of a conversation view.
+    diff: diff_view::Diffs,
     worktree_input: Entity<TextInput>,
     /// The image open over the window, from a thumbnail in a conversation.
     preview: Option<preview::Open>,
@@ -917,6 +920,7 @@ impl Keystone {
             rename_input,
             worktree_dialog: None,
             restore_dialog: None,
+            diff: Default::default(),
             worktree_input,
             preview: None,
             window_drag: false,
@@ -2753,6 +2757,12 @@ impl Keystone {
                                     this.open_restore(key, index, window, cx)
                                 },
                             )),
+                            view_changes: Box::new(self.scoped_listener(
+                                cx,
+                                move |this, _, window, cx| {
+                                    this.open_turn_diff(key, index, window, cx)
+                                },
+                            )),
                         }),
                         // Said once, on the latest turn.
                         State::Unavailable if conversation.latest_checkpoint() == Some(turn) => {
@@ -3877,6 +3887,14 @@ impl Render for Keystone {
                     this.toggle_changes(window, cx)
                 }),
             )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &diff_view::ViewUncommitted, window, cx| {
+                    if let Ok(folder) = this.files_root(cx) {
+                        this.open_working_diff(folder, None, window, cx)
+                    }
+                },
+            ))
             .on_action(self.scoped_listener(
                 cx,
                 |this, _: &pull_request::TogglePullRequest, window, cx| {
@@ -10593,6 +10611,11 @@ mod tests {
         include!("restore_tests.rs");
     }
 
+    mod diff_view {
+        use super::*;
+        include!("diff_view_tests.rs");
+    }
+
     mod second_opinion {
         use super::*;
         include!("second_opinion_tests.rs");
@@ -11242,6 +11265,7 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys(commands::bindings());
     files::bind_keys(cx);
     file_view::bind_keys(cx);
+    diff_view::bind_keys(cx);
     changes::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new(

@@ -177,6 +177,27 @@ impl AppState {
         }
     }
 
+    /// The job that reads what the session's `turn` changed, for a diff. Naming the
+    /// checkpoints may wait for the writer, so that happens in the job too.
+    pub(crate) fn turn_diff(
+        &self,
+        session: u64,
+        turn: u64,
+    ) -> Result<crate::diff_view::Load, String> {
+        let root = match self.checkpoints.get(&session) {
+            Some(State::Saved(saved)) => saved.root.clone(),
+            Some(State::Failed(error)) => return Err(error.clone()),
+            _ => return Err(UNAVAILABLE.into()),
+        };
+        let names = self.checkpoint_store.clone();
+        Ok(Box::new(move || {
+            names
+                .session(session)
+                .and_then(|key| checkpoint::turn_diff(&root, &key, turn))
+                .map_err(|error| error.to_string())
+        }))
+    }
+
     fn session_connection(&mut self, session: u64) -> Option<&dyn Connection> {
         let saved = self.session(session)?;
         let (provider, account) = (saved.provider(), saved.account().cloned());

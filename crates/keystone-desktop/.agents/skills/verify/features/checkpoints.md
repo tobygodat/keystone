@@ -4,7 +4,7 @@ In a git folder, each turn's end saves the session's files as a checkpoint, and 
 
 ## Entry points
 
-- The Restore to here button (`restore-<row>`, a counter-clockwise arrow) under each turn's last reply, with how many files that turn changed beside it (`checkpoint-files-<row>`) when it changed any.
+- The Restore to here button (`restore-<row>`, a counter-clockwise arrow) under each turn's last reply, with how many files that turn changed beside it (`checkpoint-files-<row>`) when it changed any. That count is a button that opens the turn's diff (see [diff](diff.md)).
 - The command palette: "Transcript: restore to the focused turn", or Ctrl+Shift+Z, with the transcript focused on that reply.
 
 ## Expected behaviour

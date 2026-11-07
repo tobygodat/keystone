@@ -11,6 +11,7 @@ pub mod claude;
 pub mod codex;
 mod commands;
 mod connection;
+pub mod diff;
 mod driver;
 pub mod find;
 pub mod git;

@@ -4,6 +4,7 @@
 
 use crate::app_state::AppState;
 use crate::arrangement_editor::FILES_WIDTH;
+use crate::diff_view::ViewChanges;
 use crate::{Keystone, SendMessage};
 use futures::channel::oneshot;
 use gpui::{
@@ -42,6 +43,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("space", ToggleStaged, Some(LIST_CONTEXT)),
         KeyBinding::new("secondary-shift-c", CopyChangePath, Some(LIST_CONTEXT)),
+        KeyBinding::new("secondary-shift-d", ViewChanges, Some(LIST_CONTEXT)),
     ]);
 }
 
@@ -65,7 +67,8 @@ impl Changes {
         if let Some(panel) = self.panels.borrow().get(folder) {
             return panel.clone();
         }
-        let panel = cx.new(|cx| ChangesPanel::new(folder.to_owned(), state, cx));
+        let keystone = cx.weak_entity();
+        let panel = cx.new(|cx| ChangesPanel::new(folder.to_owned(), state, keystone, cx));
         cx.subscribe(&panel, |_, _, _: &CountChanged, cx| cx.notify())
             .detach();
         self.panels
@@ -321,6 +324,8 @@ pub(crate) struct ChangesPanel {
     /// after a stage sees it.
     worker: Option<Worker>,
     state: WeakEntity<AppState>,
+    /// The window whose conversation pane shows this folder's diff.
+    keystone: WeakEntity<Keystone>,
     /// `None` until the first status arrives.
     status: Option<Result<Status, git::Error>>,
     rows: Rc<Vec<Row>>,
@@ -353,7 +358,12 @@ impl Drop for ChangesPanel {
 }
 
 impl ChangesPanel {
-    fn new(folder: PathBuf, state: &Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        folder: PathBuf,
+        state: &Entity<AppState>,
+        keystone: WeakEntity<Keystone>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let draft = folder
             .to_str()
             .map(|key| state.read(cx).commit_draft(key))
@@ -378,6 +388,7 @@ impl ChangesPanel {
         let mut panel = Self {
             worker: Some(Worker::new("keystone-git")),
             state: state.downgrade(),
+            keystone,
             status: None,
             rows: Rc::default(),
             list: cx.new(|cx| VirtualListState::new(0, cx)),
@@ -549,6 +560,21 @@ impl ChangesPanel {
                 })
         };
         cx.notify();
+    }
+
+    /// Shows the uncommitted changes in place of the conversation, from `file`.
+    /// Deferred until this panel's update ends: bringing the conversation forward from
+    /// a tab beside this panel reads the panel's focus.
+    fn view_diff(&self, file: Option<String>, window: &mut Window, cx: &mut App) {
+        let root = self
+            .status()
+            .map_or_else(|| self.folder.clone(), |status| status.root.clone());
+        let keystone = self.keystone.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = keystone.update(cx, |keystone, cx| {
+                keystone.open_working_diff(root, file, window, cx)
+            });
+        });
     }
 
     fn copy_path(file: &File, cx: &mut App) {
@@ -1041,6 +1067,17 @@ impl ChangesPanel {
                     ),
             )
             .child(
+                IconButton::new("changes-diff", IconName::Diff)
+                    .size(ButtonSize::Compact)
+                    .debug_selector(|| "changes-diff".into())
+                    .aria_label("View uncommitted changes")
+                    .tooltip(Tooltip::with_key(
+                        "View uncommitted changes",
+                        keystone_ui::shortcut_text("secondary-alt-u"),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.view_diff(None, window, cx))),
+            )
+            .child(
                 IconButton::new("changes-refresh", IconName::Refresh)
                     .size(ButtonSize::Compact)
                     .debug_selector(|| "changes-refresh".into())
@@ -1236,6 +1273,10 @@ impl ChangesPanel {
                     Self::copy_path(&file, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ViewChanges, window, cx| {
+                let file = this.highlighted_file(cx).map(|file| file.shown);
+                this.view_diff(file, window, cx);
+            }))
             .child(
                 VirtualList::new(
                     "changes-list",
@@ -1348,7 +1389,8 @@ fn row(
                 Group::Conflicted => (IconName::Plus, "Mark resolved"),
                 Group::Unstaged | Group::Untracked => (IconName::Plus, "Stage"),
             };
-            let (copy, stage) = (file.clone(), file.clone());
+            let (copy, stage, diff) = (file.clone(), file.clone(), file.shown.clone());
+            let viewer = panel.clone();
             let selector = format!("changes-stage-{}-{}", file.group.id(), file.shown);
             base.child(
                 div().w(px(12.)).flex_shrink_0().child(
@@ -1382,6 +1424,24 @@ fn row(
             )
             .when(highlighted, |d| {
                 d.child(
+                    IconButton::new(("changes-diff-file", index), IconName::Diff)
+                        .size(ButtonSize::Compact)
+                        .debug_selector(|| "changes-diff-file".into())
+                        .aria_label("View diff")
+                        .tooltip(Tooltip::with_key(
+                            "View diff",
+                            keystone_ui::shortcut_text("secondary-shift-d"),
+                        ))
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(panel) = viewer.upgrade() {
+                                panel.update(cx, |panel, cx| {
+                                    panel.view_diff(Some(diff.clone()), window, cx)
+                                });
+                            }
+                        }),
+                )
+                .child(
                     IconButton::new(("changes-copy", index), IconName::Copy)
                         .size(ButtonSize::Compact)
                         .debug_selector(|| "changes-copy".into())

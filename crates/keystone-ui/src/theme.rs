@@ -194,6 +194,10 @@ pub struct Colors {
     pub code_text: Hsla,
     pub selection: Hsla,
     pub caret: Hsla,
+    /// Washes under a diff's added and removed lines. The `+` and `-` marks carry
+    /// `success` and `danger`.
+    pub diff_added: Hsla,
+    pub diff_removed: Hsla,
 
     /// Project tiles, in the order of `keystone_core::ProjectColor::ALL`.
     pub tiles: [Tint; 7],
@@ -365,6 +369,8 @@ impl Colors {
             code_text: rgb(0xc8c8c8).into(),
             selection: rgba(0x5b87d660).into(),
             caret: rgb(0xebebeb).into(),
+            diff_added: rgba(0x7fbf8e1a).into(),
+            diff_removed: rgba(0xe5847a1a).into(),
 
             tiles: tiles([
                 0xaa5a54, 0x946749, 0x3e7d53, 0x3c7b78, 0x5072a3, 0x7f62b2, 0xaa5386,
@@ -419,6 +425,8 @@ impl Colors {
             code_text: rgb(0x3d3d3d).into(),
             selection: rgba(0x3a6ea540).into(),
             caret: rgb(0x171717).into(),
+            diff_added: rgba(0x2e7d4314).into(),
+            diff_removed: rgba(0xb53b2f14).into(),
 
             tiles: tiles([
                 0xae4e47, 0x94603d, 0x32794a, 0x307674, 0x446da7, 0x7d58bb, 0xad4682,

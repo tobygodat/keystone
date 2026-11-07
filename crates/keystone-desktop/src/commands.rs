@@ -5,6 +5,7 @@ use crate::app_state::setup::{CancelSetup, EditSetupScript, RetrySetup, SkipSetu
 use crate::attachments::AttachFiles;
 use crate::changes::{CopyPullRequestLink, ToggleChanges};
 use crate::customization::OpenCustomize;
+use crate::diff_view::{ViewChanges, ViewUncommitted};
 use crate::excerpt::{SEND_SELECTION, SendSelection, Taken};
 use crate::files::ToggleFiles;
 use crate::fork::ForkFromHere;
@@ -84,6 +85,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-j"],
         context: Some(APP),
         action: || Box::new(ToggleNotes),
+    },
+    Command {
+        id: "view-uncommitted",
+        label: "View uncommitted changes",
+        keys: &["secondary-alt-u"],
+        context: Some(APP),
+        action: || Box::new(ViewUncommitted),
     },
     Command {
         id: "toggle-changes",
@@ -455,6 +463,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-z"],
         context: Some(TRANSCRIPT),
         action: || Box::new(RestoreToHere),
+    },
+    Command {
+        id: "view-changes",
+        label: "Transcript: view the focused turn's changes",
+        keys: &["secondary-shift-d"],
+        context: Some(TRANSCRIPT),
+        action: || Box::new(ViewChanges),
     },
     Command {
         id: "transcript-focus-latest",

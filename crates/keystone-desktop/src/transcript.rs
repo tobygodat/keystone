@@ -47,10 +47,12 @@ pub struct RowControls {
 }
 
 pub enum RestoreControl {
-    /// Restore to here, with how many files the turn changed, when known.
+    /// Restore to here, with how many files the turn changed, when known, and what
+    /// showing those changes does.
     Offered {
         files: Option<usize>,
         on_click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+        view_changes: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
     },
     /// The session has no checkpoints; the tooltip says why, and a click does nothing.
     Unavailable(&'static str),
@@ -58,9 +60,13 @@ pub enum RestoreControl {
 
 /// A turn's checkpoint: Restore to here, and how many files the turn changed.
 fn restore_button(index: usize, control: RestoreControl, quiet: bool) -> AnyElement {
-    let (label, files, on_click) = match control {
-        RestoreControl::Offered { files, on_click } => ("Restore to here", files, Some(on_click)),
-        RestoreControl::Unavailable(why) => (why, None, None),
+    let (label, files, on_click, view_changes) = match control {
+        RestoreControl::Offered {
+            files,
+            on_click,
+            view_changes,
+        } => ("Restore to here", files, Some(on_click), Some(view_changes)),
+        RestoreControl::Unavailable(why) => (why, None, None, None),
     };
     let files = files.filter(|files| *files > 0).map(|files| match files {
         1 => "1 file".to_owned(),
@@ -85,11 +91,23 @@ fn restore_button(index: usize, control: RestoreControl, quiet: bool) -> AnyElem
                         }),
                 ),
         )
-        .when_some(files, |d, files| {
+        .when_some(files.zip(view_changes), |d, (files, view_changes)| {
             d.child(
                 div()
                     .automation_id(format!("checkpoint-files-{index}"))
-                    .child(Label::new(files).size(TextSize::Sm).color(Color::Muted)),
+                    .child(
+                        Button::new(("checkpoint-files", index), files)
+                            .style(ButtonStyle::Ghost)
+                            .size(ButtonSize::Compact)
+                            .icon(IconName::Diff)
+                            .aria_label("View this turn's changes")
+                            .tooltip(Tooltip::with_key(
+                                "View this turn's changes",
+                                keystone_ui::shortcut_text("secondary-shift-d"),
+                            ))
+                            .debug_selector(move || format!("view-changes-{index}"))
+                            .on_click(move |event, window, cx| view_changes(event, window, cx)),
+                    ),
             )
         })
         .into_any_element()

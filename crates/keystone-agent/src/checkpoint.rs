@@ -7,6 +7,7 @@
 //! index, HEAD and stash are never touched. Checkpoints older than [`KEEP_DAYS`] go as
 //! each new one is saved, in every workspace's store. Every call blocks.
 
+use crate::diff;
 use crate::git::{self, Cancel, Output, Until, git, path, run, run_until};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -34,6 +35,9 @@ const REFS: &str = "refs/keystone/checkpoints";
 const BEFORE_RESTORE: &str = "before-restore";
 /// The line of a checkpoint's message naming the blob that lists what it left out.
 const LEFT_OUT: &str = "Left out: ";
+/// The line of a checkpoint's message naming the tree its turn started from. A parent
+/// commit of that tree keeps it from git's garbage collection.
+const START: &str = "Start: ";
 /// A submodule's entry in a tree. Its files belong to its own repository.
 const GITLINK: &str = "160000";
 /// How the files Keystone keeps in the git folder while it works are named.
@@ -393,16 +397,16 @@ fn changed(root: &Path, from: &str, to: &str) -> Result<usize> {
 /// Commits `tree` with `message` and points `name` at it. With `create`, an existing
 /// ref is left as it is and the save fails.
 fn save(repo: Repo, name: &str, tree: &str, message: String, create: bool) -> Result<()> {
-    let commit = commit(repo, tree, None, message)?;
+    let commit = commit(repo, tree, &[], message)?;
     point(repo, name, &commit, create)
 }
 
-/// Commits `tree` with `message`, on `parent` when there is one, dated now, which
-/// is how [`expire`] tells its age.
-fn commit(repo: Repo, tree: &str, parent: Option<&str>, message: String) -> Result<String> {
+/// Commits `tree` with `message`, on `parents`, dated now, which is how [`expire`]
+/// tells its age.
+fn commit(repo: Repo, tree: &str, parents: &[String], message: String) -> Result<String> {
     let mut commit = repo.git();
     commit.args(["commit-tree", "--no-gpg-sign", tree, "-F", "-"]);
-    if let Some(parent) = parent {
+    for parent in parents {
         commit.args(["-p", parent]);
     }
     commit
@@ -583,10 +587,11 @@ pub fn record(
     let tree = &snapshot.tree;
     let files = start.map(|start| changed(root, start, tree)).transpose()?;
     let mut message = format!("Keystone checkpoint: session {}, turn {turn}\n", session.id);
-    if let Some(files) = files {
-        message.push_str(&format!("\nFiles: {files}\n"));
+    let mut parents = Vec::new();
+    if let (Some(files), Some(start)) = (files, start) {
+        message.push_str(&format!("\nFiles: {files}\n{START}{start}\n"));
+        parents.push(commit(repo, start, &[], START.trim_end().to_owned())?);
     }
-    let mut parent = None;
     if !snapshot.left_out.is_empty() {
         let mut blob = git(root);
         blob.args(["hash-object", "-w", "--stdin"]);
@@ -602,14 +607,52 @@ pub fn record(
             Some(format!("100644 blob {blob}\tleft-out\n").into_bytes()),
             Output::Separate,
         )?);
-        parent = Some(commit(repo, &list, None, LEFT_OUT.to_owned())?);
+        parents.push(commit(repo, &list, &[], LEFT_OUT.to_owned())?);
         message.push_str(&format!("{LEFT_OUT}{blob}\n"));
     }
-    let checkpoint = commit(repo, tree, parent.as_deref(), message)?;
+    let checkpoint = commit(repo, tree, &parents, message)?;
     point(repo, &session.name(turn), &checkpoint, true)?;
     prune(root, session, keep)?;
     expire(root, SystemTime::now());
     list(root, session)
+}
+
+/// What the session's `turn` changed in the repository at `root`: from the tree it
+/// started from to the checkpoint it ended with. `None` when the checkpoint has no
+/// start, as one saved before starts were kept, or one whose start was never read.
+pub fn turn_diff(root: &Path, session: &Session, turn: u64) -> Result<Option<diff::Patch>> {
+    let name = session.name(turn);
+    let mut read = git(root);
+    read.args(["cat-file", "commit", &name]);
+    let message = run(read, None, Output::Separate).map_err(|_| Error::Gone)?;
+    let start = String::from_utf8_lossy(&message)
+        .lines()
+        .find_map(|line| line.strip_prefix(START).map(str::to_owned));
+    let Some(start) = start else {
+        return Ok(None);
+    };
+    Ok(Some(diff::between(
+        root,
+        &start,
+        &format!("{name}^{{tree}}"),
+    )?))
+}
+
+/// What the working tree at `root` changes from its HEAD commit: tracked and untracked
+/// files as a checkpoint sees them. A repository without commits starts empty.
+pub fn working_tree_diff(root: &Path) -> Result<diff::Patch> {
+    let snapshot = snapshot(root)?;
+    let mut head = git(root);
+    head.args(["rev-parse", "--verify", "--quiet", "HEAD^{tree}"]);
+    let head = match run(head, None, Output::Separate) {
+        Ok(head) => text(&head),
+        Err(_) => {
+            let mut empty = git(root);
+            empty.args(["hash-object", "-t", "tree", "--stdin"]);
+            text(&run(empty, Some(Vec::new()), Output::Separate)?)
+        }
+    };
+    Ok(diff::between(root, &head, &snapshot.tree)?)
 }
 
 /// Puts the working tree at `root` back the way the session's checkpoint for `turn`
@@ -1724,6 +1767,84 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         sh(root, &["update-ref", name, text(&output.stdout).as_str()]);
+    }
+
+    #[test]
+    fn a_turns_diff_runs_from_its_start_to_its_checkpoint() {
+        let dir = repository();
+        let root = dir.path();
+        let start = snapshot(root).unwrap().tree;
+        write(root, "edited.txt", "changed by the turn\n");
+        write(root, "new.txt", "new\n");
+        save_turn(root, 1, 1, Some(&start), 5);
+        write(root, "edited.txt", "changed after the turn\n");
+        let patch = turn_diff(root, &session(1), 1).unwrap().unwrap();
+        let files: Vec<_> = patch
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.change))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("edited.txt", diff::Change::Modified),
+                ("new.txt", diff::Change::Added)
+            ]
+        );
+        let added: Vec<_> = patch.files[0].hunks[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind == diff::Kind::Added)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(
+            added,
+            ["changed by the turn"],
+            "the turn's own change, not later edits"
+        );
+
+        sh(root, &["gc", "-q", "--prune=now"]);
+        assert!(
+            turn_diff(root, &session(1), 1).is_ok(),
+            "the start outlives gc"
+        );
+        save_turn(root, 1, 2, None, 5);
+        assert!(
+            turn_diff(root, &session(1), 2).unwrap().is_none(),
+            "no start, no diff"
+        );
+        assert!(matches!(turn_diff(root, &session(1), 9), Err(Error::Gone)));
+    }
+
+    #[test]
+    fn the_working_tree_diff_includes_untracked_files_and_leaves_ignored_ones_out() {
+        let dir = repository();
+        let root = dir.path();
+        let before = untouched(root);
+        let patch = working_tree_diff(root).unwrap();
+        let files: Vec<_> = patch
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.change))
+            .collect();
+        assert_eq!(files, [("staged.txt", diff::Change::Added)]);
+        write(root, "untracked.txt", "u\n");
+        let patch = working_tree_diff(root).unwrap();
+        assert_eq!(patch.files.len(), 2);
+        assert_eq!(
+            untouched(root),
+            before,
+            "the index, HEAD and stash are as they were"
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        init(empty.path());
+        write(empty.path(), "first.txt", "first\n");
+        let patch = working_tree_diff(empty.path()).unwrap();
+        assert_eq!(
+            patch.files[0].path, "first.txt",
+            "no commit yet: all of it is new"
+        );
     }
 
     #[test]
