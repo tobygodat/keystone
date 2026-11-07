@@ -1,61 +1,93 @@
-//! A read-only view of one file in Files. Lines are selected whole and sent to the
-//! agent with their path and numbers. It never edits or saves the file.
+//! The Files editor: one file in a [`CodeEditor`], saved only over what Keystone last
+//! read or wrote, with outside changes reloaded or shown as a conflict.
 
 use crate::Keystone;
 use crate::excerpt::Excerpt;
+use crate::file_disk::{self, Disk, Saved, Version};
 use gpui::{
-    App, AppContext, ClipboardItem, Context, DismissEvent, EventEmitter, FocusHandle, Focusable,
-    IntoElement, KeyBinding, KeyDownEvent, ListAlignment, ListState, MouseButton, Pixels, Render,
-    WeakEntity, Window, div, list, prelude::*, px,
+    App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, KeyDownEvent, MouseButton, Render, Subscription, Task, WeakEntity, Window, div,
+    prelude::*, px,
 };
+use keystone_ui::code_editor::{self, CodeEditor};
+use keystone_ui::highlight::Language;
 use keystone_ui::prelude::*;
-use std::io::Read;
-use std::ops::RangeInclusive;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::SystemTime;
+use std::time::Duration;
 
-gpui::actions!(file_view, [Up, Down, SelectUp, SelectDown, SelectAll, Copy]);
+gpui::actions!(file_view, [Save]);
+
+/// The Save command's id. Its keys come from the keymap, so the user can rebind it.
+pub(crate) const SAVE_FILE: &str = "save-file";
 
 const CONTEXT: &str = "FileView";
 
-/// Bigger files open only in the editor.
-const MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// How often an open file is checked for changes made outside Keystone.
+const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Characters of a line drawn; the rest of a longer line is still sent.
-const MAX_SHOWN: usize = 2000;
-
-pub(crate) fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("up", Up, Some(CONTEXT)),
-        KeyBinding::new("down", Down, Some(CONTEXT)),
-        KeyBinding::new("shift-up", SelectUp, Some(CONTEXT)),
-        KeyBinding::new("shift-down", SelectDown, Some(CONTEXT)),
-        KeyBinding::new("secondary-a", SelectAll, Some(CONTEXT)),
-        KeyBinding::new("secondary-c", Copy, Some(CONTEXT)),
-    ]);
-}
-
-#[derive(Debug, PartialEq)]
 enum Content {
-    Loading,
-    Lines(Vec<String>),
+    Loading { _read: Task<()> },
     Unreadable(&'static str),
+    Open(Box<Open>),
 }
 
-/// The file's size and modification time when it was read.
-type Stamp = Option<(u64, SystemTime)>;
-
-/// Selected lines, 0-based: where the selection started and where it ends now.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Selected {
-    anchor: usize,
-    head: usize,
+struct Open {
+    editor: Entity<CodeEditor>,
+    /// What the file held when Keystone last read or wrote it.
+    version: Version,
+    /// The editor revision that matches `version`; edited means `editor.revision() != saved`.
+    saved: u64,
+    outside: Option<Outside>,
+    saving: Option<Saving>,
+    _changed: Subscription,
+    _watch: Task<()>,
 }
 
-impl Selected {
-    fn range(self) -> RangeInclusive<usize> {
-        self.anchor.min(self.head)..=self.anchor.max(self.head)
+/// A save still writing.
+struct Saving {
+    _task: Task<()>,
+    /// Back was pressed meanwhile: close once the save lands, if it leaves nothing unsaved.
+    close: bool,
+}
+
+/// What the file on disk holds when it no longer matches `version`.
+enum Outside {
+    /// `None` when the new contents can no longer be read as text.
+    Changed(Option<(String, Version)>),
+    Deleted,
+}
+
+impl Outside {
+    fn from_disk(disk: Disk) -> Option<Self> {
+        match disk {
+            Disk::Unchanged(_) => None,
+            Disk::Changed(file_disk::Read::Text(text, version)) => {
+                Some(Self::Changed(Some((text, version))))
+            }
+            Disk::Changed(file_disk::Read::Unreadable(_)) => Some(Self::Changed(None)),
+            Disk::Deleted => Some(Self::Deleted),
+        }
+    }
+}
+
+impl Open {
+    fn edited(&self, cx: &App) -> bool {
+        self.editor.read(cx).revision() != self.saved
+    }
+
+    /// Whether quitting or closing the window now could lose what the user sees: edits
+    /// not yet saved, or a save still writing, which exiting would cut off.
+    fn unsettled(&self, cx: &App) -> bool {
+        self.edited(cx) || self.saving.is_some()
+    }
+
+    /// Shows `text` as what the file now holds.
+    fn take(&mut self, text: &str, version: Version, cx: &mut App) {
+        self.editor.update(cx, |editor, cx| editor.reload(text, cx));
+        self.saved = self.editor.read(cx).revision();
+        self.version = version;
+        self.outside = None;
     }
 }
 
@@ -64,15 +96,9 @@ pub(crate) struct FileView {
     /// The path an excerpt names: relative to the Files root.
     name: String,
     content: Content,
-    stamp: Stamp,
-    selection: Option<Selected>,
-    /// Whether a press in this view started the drag the pointer is making.
-    dragging: bool,
-    /// The read in flight; replacing it drops an older one.
-    loading: Option<gpui::Task<()>>,
-    list: ListState,
+    /// Open while asking whether to discard unsaved edits.
+    discard: Option<DialogFocus>,
     focus: FocusHandle,
-    gutter: Pixels,
     notice: Option<String>,
     keystone: WeakEntity<Keystone>,
 }
@@ -80,8 +106,11 @@ pub(crate) struct FileView {
 impl EventEmitter<DismissEvent> for FileView {}
 
 impl Focusable for FileView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match &self.content {
+            Content::Open(open) => open.editor.focus_handle(cx),
+            _ => self.focus.clone(),
+        }
     }
 }
 
@@ -90,143 +119,292 @@ impl FileView {
         path: PathBuf,
         name: String,
         keystone: WeakEntity<Keystone>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut view = Self {
+        let read = cx.background_spawn({
+            let path = path.clone();
+            async move { file_disk::read(&path) }
+        });
+        let loading = cx.spawn_in(window, async move |this, cx| {
+            let read = read.await;
+            let _ = this.update_in(cx, |this, window, cx| this.opened(read, window, cx));
+        });
+        Self {
             path,
             name,
-            content: Content::Loading,
-            stamp: None,
-            selection: None,
-            dragging: false,
-            loading: None,
-            list: ListState::new(0, ListAlignment::Top, px(200.)),
+            content: Content::Loading { _read: loading },
+            discard: None,
             focus: cx.focus_handle(),
-            gutter: px(0.),
             notice: None,
             keystone,
-        };
-        view.load(cx);
-        view
+        }
     }
 
-    fn load(&mut self, cx: &mut Context<Self>) {
-        let path = self.path.clone();
-        let read = cx.background_spawn(async move {
-            let stamp = stamp(&path);
-            (read_lines(&path), stamp)
+    fn opened(&mut self, read: file_disk::Read, window: &mut Window, cx: &mut Context<Self>) {
+        let (text, version) = match read {
+            file_disk::Read::Text(text, version) => (text, version),
+            file_disk::Read::Unreadable(why) => {
+                self.content = Content::Unreadable(why);
+                return cx.notify();
+            }
+        };
+        let language = Language::for_path(&self.path);
+        let editor = cx.new(|cx| {
+            let mut editor = CodeEditor::new(cx).with_id("file-editor");
+            editor.set_text(&text, cx);
+            editor.set_language(language, cx);
+            editor
         });
-        self.loading = Some(cx.spawn(async move |this, cx| {
-            let (content, stamp) = read.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Content::Lines(lines) = &content {
-                    this.list.reset(lines.len());
-                }
-                (this.content, this.stamp, this.selection) = (content, stamp, None);
-                this.loading = None;
-                cx.notify();
-            });
+        let saved = editor.read(cx).revision();
+        let changed = cx.subscribe(&editor, |_, _, _: &code_editor::Changed, cx| cx.notify());
+        if self.focus.is_focused(window) {
+            window.focus(&editor.focus_handle(cx), cx);
+        }
+        self.content = Content::Open(Box::new(Open {
+            editor,
+            version,
+            saved,
+            outside: None,
+            saving: None,
+            _changed: changed,
+            _watch: self.watch(cx),
         }));
+        cx.notify();
     }
 
-    /// Reads the file again when it changed since it was shown, so a selection never
-    /// names lines that are no longer there. Says whether it did.
-    fn reload_if_changed(&mut self, cx: &mut Context<Self>) -> bool {
-        let changed = !self.fresh();
-        if changed && self.loading.is_none() {
-            self.selection = None;
-            self.load(cx);
-        }
-        changed
-    }
-
-    /// Whether what is shown is what the file holds now, as far as its size and time tell.
-    fn fresh(&self) -> bool {
-        self.loading.is_none() && stamp(&self.path) == self.stamp
-    }
-
-    fn selected_text(&self) -> Option<(RangeInclusive<usize>, String)> {
-        let (Content::Lines(lines), Some(selection)) = (&self.content, self.selection) else {
-            return None;
-        };
-        let range = selection.range();
-        Some((range.clone(), lines[range].join("\n")))
-    }
-
-    /// The selected lines with this file's path and their 1-based numbers, unless the
-    /// file changed since it was shown.
-    pub(crate) fn excerpt(&self) -> Option<Excerpt> {
-        if !self.fresh() {
-            return None;
-        }
-        let (range, text) = self.selected_text()?;
-        Some(Excerpt::file(
-            self.name.clone(),
-            range.start() + 1..=range.end() + 1,
-            &text,
-        ))
-    }
-
-    fn line_count(&self) -> usize {
+    fn open(&self) -> Option<&Open> {
         match &self.content {
-            Content::Lines(lines) => lines.len(),
-            _ => 0,
+            Content::Open(open) => Some(open),
+            _ => None,
         }
     }
 
-    fn select(&mut self, line: usize, extend: bool, cx: &mut Context<Self>) {
-        let line = line.min(self.line_count().saturating_sub(1));
-        self.selection = Some(match self.selection {
-            Some(selection) if extend => Selected {
-                head: line,
-                ..selection
-            },
-            _ => Selected {
-                anchor: line,
-                head: line,
-            },
+    fn open_mut(&mut self) -> Option<&mut Open> {
+        match &mut self.content {
+            Content::Open(open) => Some(open),
+            _ => None,
+        }
+    }
+
+    /// Whether focus is anywhere in the view: the editor, or its header after a click.
+    pub(crate) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.contains_focused(window, cx)
+    }
+
+    /// The name of the file while it holds edits that aren't saved.
+    pub(crate) fn unsaved(&self, cx: &App) -> Option<&str> {
+        self.open()
+            .filter(|open| open.unsettled(cx))
+            .map(|_| self.name.as_str())
+    }
+
+    /// Checks the file for an outside change every [`WATCH_INTERVAL`]. The size and
+    /// time decide when to read it again, and each stamp is read once.
+    fn watch(&self, cx: &mut Context<Self>) -> Task<()> {
+        let path = self.path.clone();
+        cx.spawn(async move |this, cx| {
+            let mut checked = None;
+            loop {
+                cx.background_executor().timer(WATCH_INTERVAL).await;
+                let stamp = file_disk::stamp(&path);
+                let Ok(Some(known)) = this.read_with(cx, |this, _| {
+                    this.open()
+                        .filter(|open| open.saving.is_none())
+                        .map(|open| open.version.clone())
+                }) else {
+                    if this.upgrade().is_none() {
+                        return;
+                    }
+                    continue;
+                };
+                if stamp == known.stamp || checked.as_ref() == Some(&stamp) {
+                    continue;
+                }
+                checked = Some(stamp);
+                let disk = cx
+                    .background_spawn({
+                        let (path, known) = (path.clone(), known.clone());
+                        async move { file_disk::check(&path, &known) }
+                    })
+                    .await;
+                let applied = this.update(cx, |this, cx| this.outside_changed(&known, disk, cx));
+                if applied.is_err() {
+                    return;
+                }
+            }
+        })
+    }
+
+    /// Applies a check made against `known`. An unedited file takes the new text at
+    /// once, so an agent's edit just shows up; an edited one keeps its text and asks.
+    fn outside_changed(&mut self, known: &Version, disk: Disk, cx: &mut Context<Self>) {
+        let Some(open) = self.open_mut() else {
+            return;
+        };
+        // A save or reload since the check began makes it stale.
+        if open.version != *known || open.saving.is_some() {
+            return;
+        }
+        match disk {
+            Disk::Unchanged(version) => {
+                open.version = version;
+                open.outside = None;
+            }
+            Disk::Changed(file_disk::Read::Text(text, version)) if !open.edited(cx) => {
+                open.take(&text, version, cx)
+            }
+            disk => open.outside = Outside::from_disk(disk),
+        }
+        cx.notify();
+    }
+
+    fn can_save(&self, cx: &App) -> bool {
+        self.open()
+            .is_some_and(|open| open.saving.is_none() && open.edited(cx))
+    }
+
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.can_save(cx) {
+            self.write(false, window, cx);
+        }
+    }
+
+    /// Writes the editor's text, over whatever the file holds when `overwrite`, and
+    /// otherwise only while it still holds `version`.
+    fn write(&mut self, overwrite: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        let Some(open) = self.open_mut() else {
+            return;
+        };
+        if open.saving.is_some() {
+            return;
+        }
+        let editor = open.editor.read(cx);
+        let (revision, text) = (editor.revision(), editor.text());
+        let known = (!overwrite).then(|| open.version.clone());
+        let saved =
+            cx.background_spawn(async move { file_disk::save(&path, &text, known.as_ref()) });
+        open.saving = Some(Saving {
+            _task: cx.spawn_in(window, async move |this, cx| {
+                let saved = saved.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.written(revision, saved, window, cx)
+                });
+            }),
+            close: false,
         });
         cx.notify();
     }
 
-    fn step(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
-        if self.line_count() == 0 || self.reload_if_changed(cx) {
-            return;
-        }
-        let line = match self.selection {
-            None => self.list.logical_scroll_top().item_ix,
-            Some(Selected { head, .. }) if down => head + 1,
-            Some(Selected { head, .. }) => head.saturating_sub(1),
-        };
-        self.select(line, extend, cx);
-        self.list
-            .scroll_to_reveal_item(line.min(self.line_count() - 1));
-    }
-
-    fn press(&mut self, line: usize, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus, cx);
-        self.dragging = !self.reload_if_changed(cx);
-        if self.dragging {
-            self.select(line, extend, cx);
-        }
-    }
-
-    /// A right click keeps a selection it lands in and otherwise selects its line.
-    fn open_menu(
+    fn written(
         &mut self,
-        line: usize,
-        position: gpui::Point<Pixels>,
+        revision: u64,
+        saved: Saved,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus, cx);
-        if self.reload_if_changed(cx) {
+        let Content::Open(open) = &mut self.content else {
             return;
+        };
+        let close = open.saving.take().is_some_and(|saving| saving.close);
+        match saved {
+            Saved::Written(version) => {
+                open.version = version;
+                open.saved = revision;
+                open.outside = None;
+                self.notice = None;
+                let path = self.path.clone();
+                let _ = self
+                    .keystone
+                    .update(cx, |keystone, cx| keystone.file_saved(&path, cx));
+            }
+            Saved::Conflict(disk) => open.outside = Outside::from_disk(disk),
+            Saved::Failed(why) => self.notice = Some(why),
         }
-        if !self.selection.is_some_and(|s| s.range().contains(&line)) {
-            self.select(line, false, cx);
+        // Back was pressed during the save. Edits typed since still need the question
+        // Back asks; a conflict or a failed write stays open to show why.
+        if close && open.outside.is_none() && self.notice.is_none() {
+            if open.edited(cx) {
+                self.discard = Some(DialogFocus::new(window, cx));
+            } else {
+                cx.emit(DismissEvent);
+            }
         }
-        let excerpt = self.excerpt();
+        cx.notify();
+    }
+
+    /// Replaces the editor's text with what the file now holds.
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.open_mut() else {
+            return;
+        };
+        if let Some(Outside::Changed(Some((text, version)))) = &open.outside {
+            let (text, version) = (text.clone(), version.clone());
+            open.take(&text, version, cx);
+        }
+        self.focus_editor(window, cx);
+        cx.notify();
+    }
+
+    fn focus_editor(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus_handle(cx), cx);
+    }
+
+    /// Closes the view, asking first when that would lose edits. During a save it waits
+    /// for the save instead, which may still find a conflict the user has to settle.
+    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.open_mut() {
+            Some(Open {
+                saving: Some(saving),
+                ..
+            }) => saving.close = true,
+            Some(open) if open.edited(cx) => {
+                self.discard = Some(DialogFocus::new(window, cx));
+                cx.notify();
+            }
+            _ => cx.emit(DismissEvent),
+        }
+    }
+
+    /// The whole lines the selection covers, with their 1-based numbers, while they are
+    /// the lines the file holds on disk.
+    pub(crate) fn excerpt(&self, cx: &App) -> Option<Excerpt> {
+        let open = self.open()?;
+        if open.edited(cx) || open.outside.is_some() {
+            return None;
+        }
+        if file_disk::stamp(&self.path) != open.version.stamp {
+            return None;
+        }
+        let editor = open.editor.read(cx);
+        let selection = editor.selection();
+        if selection.is_empty() {
+            return None;
+        }
+        let first = selection.start.line;
+        let last = if selection.end.column == 0 && selection.end.line > first {
+            selection.end.line - 1
+        } else {
+            selection.end.line
+        };
+        let text = editor.text();
+        let lines: Vec<&str> = text.lines().skip(first).take(last - first + 1).collect();
+        Some(Excerpt::file(
+            self.name.clone(),
+            first + 1..=last + 1,
+            &lines.join("\n"),
+        ))
+    }
+
+    fn open_menu(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_editor(window, cx);
+        let excerpt = self.excerpt(cx);
         let _ = self.keystone.update(cx, |keystone, cx| {
             let taken =
                 excerpt.and_then(|excerpt| Some((keystone.selected(cx)?, Rc::new(excerpt))));
@@ -235,10 +413,7 @@ impl FileView {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.reload_if_changed(cx) {
-            return;
-        }
-        let Some(excerpt) = self.excerpt() else {
+        let Some(excerpt) = self.excerpt(cx) else {
             return;
         };
         let _ = self.keystone.update(cx, |keystone, cx| {
@@ -253,78 +428,105 @@ impl FileView {
         cx.notify();
     }
 
-    fn row(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Content::Lines(lines) = &self.content else {
-            return div().into_any_element();
+    fn conflict_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let open = self.open()?;
+        let outside = open.outside.as_ref()?;
+        let message = match outside {
+            Outside::Changed(_) => "This file changed on disk.",
+            Outside::Deleted => "This file was deleted on disk.",
         };
-        let colors = cx.theme().colors;
-        let selected = self.selection.is_some_and(|s| s.range().contains(&index));
-        h_flex()
-            .id(("file-line", index))
-            .automation_id(format!("file-line-{index}"))
-            .items_start()
-            .w_full()
-            .min_h(TextSize::Sm.line_height())
-            .px(px(8.))
-            .when(selected, |d| d.bg(colors.selection))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    this.press(index, event.modifiers.shift, window, cx)
-                }),
+        let saving = open.saving.is_some();
+        Some(
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .px(px(14.))
+                .py(px(4.))
+                .border_b_1()
+                .border_color(cx.theme().colors.border)
+                .automation_id("file-editor-conflict")
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Label::new(message).size(TextSize::Ui).color(Color::Warning)),
+                )
+                .when(matches!(outside, Outside::Changed(Some(_))), |bar| {
+                    bar.child(
+                        Button::new("file-editor-reload", "Reload")
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .disabled(saving)
+                            .debug_selector(|| "file-editor-reload".into())
+                            .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
+                    )
+                })
+                .child(
+                    Button::new("file-editor-overwrite", "Overwrite")
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .disabled(saving)
+                        .debug_selector(|| "file-editor-overwrite".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.write(true, window, cx);
+                            this.focus_editor(window, cx);
+                        })),
+                ),
+        )
+    }
+
+    fn discard_dialog(&self, cx: &mut Context<Self>) -> Option<ConfirmDialog> {
+        let focus = self.discard.as_ref()?;
+        let view = cx.weak_entity();
+        let cancel = view.clone();
+        Some(
+            ConfirmDialog::new(
+                "file-editor-discard",
+                focus,
+                "Discard changes?",
+                format!("Your edits to {} aren't saved.", self.name),
             )
-            .on_mouse_move(
-                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    this.dragging &= event.pressed_button == Some(MouseButton::Left);
-                    if this.dragging && this.selection.is_some_and(|s| s.head != index) {
-                        this.select(index, true, cx);
-                    }
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    this.open_menu(index, event.position, window, cx)
-                }),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(self.gutter)
-                    .pr(px(12.))
-                    .whitespace_nowrap()
-                    .text_right()
-                    .text_color(colors.text_faint)
-                    .child((index + 1).to_string()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_color(colors.code_text)
-                    .child(shown(&lines[index])),
-            )
-            .into_any_element()
+            .confirm_label("Discard")
+            .on_cancel(move |window, cx| {
+                let _ = cancel.update(cx, |this, cx| {
+                    this.discard = None;
+                    this.focus_editor(window, cx);
+                    cx.notify();
+                });
+            })
+            .on_confirm(move |_, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    this.discard = None;
+                    cx.emit(DismissEvent);
+                });
+            }),
+        )
+    }
+}
+
+/// Save's tooltip, with the key the user bound it to.
+fn save_tooltip(cx: &App) -> Tooltip {
+    let keys = crate::commands::hint(SAVE_FILE, cx);
+    if keys.is_empty() {
+        Tooltip::text("Save")
+    } else {
+        Tooltip::with_key("Save", keys)
     }
 }
 
 impl Render for FileView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (colors, mono) = (theme.colors, theme.fonts.mono.clone());
-        let digits = self.line_count().max(1).to_string().len() as f32;
-        let font = window.text_system().resolve_font(&gpui::font(mono.clone()));
-        let digit = window
-            .text_system()
-            .advance(font, TextSize::Sm.px(), '0')
-            .map_or(TextSize::Sm.px(), |size| size.width);
-        self.gutter = (digit * digits).ceil() + px(13.);
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
         let label = self
             .keystone
             .upgrade()
             .and_then(|keystone| keystone.read(cx).send_label(cx));
+        let edited = self.open().is_some_and(|open| open.edited(cx));
+        let can_send = self.open().is_some_and(|open| {
+            !edited && open.outside.is_none() && !open.editor.read(cx).selection().is_empty()
+        });
         let body = match &self.content {
-            Content::Loading => div().flex_1().into_any_element(),
+            Content::Loading { .. } => div().flex_1().into_any_element(),
             Content::Unreadable(why) => div()
                 .flex_1()
                 .px(px(14.))
@@ -332,71 +534,35 @@ impl Render for FileView {
                 .automation_id("file-view-unreadable")
                 .child(Label::new(*why).size(TextSize::Ui).color(Color::Muted))
                 .into_any_element(),
-            Content::Lines(_) => {
-                let view = cx.weak_entity();
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .py_1()
-                    .font_family(mono)
-                    .text_size(TextSize::Sm.px())
-                    .line_height(TextSize::Sm.line_height())
-                    .automation_id("file-view-lines")
-                    .child(
-                        list(self.list.clone(), move |index, _, cx| {
-                            view.update(cx, |view, cx| view.row(index, cx))
-                                .unwrap_or_else(|_| div().into_any_element())
-                        })
-                        .size_full(),
-                    )
-                    .into_any_element()
-            }
+            Content::Open(open) => div()
+                .flex_1()
+                .min_h_0()
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                        this.open_menu(event.position, window, cx)
+                    }),
+                )
+                .child(open.editor.clone())
+                .into_any_element(),
         };
         v_flex()
             .size_full()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             // Bubbling after the window's capture, so Escape closes an open menu first.
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    cx.emit(DismissEvent);
                     cx.stop_propagation();
+                    this.back(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
             .on_action(
                 cx.listener(|this, _: &crate::excerpt::SendSelection, window, cx| {
                     this.send(window, cx)
                 }),
             )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.dragging = false),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.dragging = false),
-            )
-            .on_action(cx.listener(|this, _: &Up, _, cx| this.step(false, false, cx)))
-            .on_action(cx.listener(|this, _: &Down, _, cx| this.step(true, false, cx)))
-            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.step(false, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.step(true, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                if this.reload_if_changed(cx) {
-                    return;
-                }
-                if let Some(last) = this.line_count().checked_sub(1) {
-                    this.selection = Some(Selected {
-                        anchor: 0,
-                        head: last,
-                    });
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &Copy, _, cx| {
-                if let Some((_, text)) = this.selected_text() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
-            }))
             .child(
                 h_flex()
                     .flex_none()
@@ -411,7 +577,7 @@ impl Render for FileView {
                             .debug_selector(|| "file-view-back".into())
                             .aria_label("Back")
                             .tooltip(Tooltip::with_key("Back", "Esc"))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                            .on_click(cx.listener(|this, _, window, cx| this.back(window, cx))),
                     )
                     .child(
                         div()
@@ -419,8 +585,32 @@ impl Render for FileView {
                             .min_w_0()
                             .automation_id("file-view-name")
                             .child(Label::new(self.name.clone()).size(TextSize::Ui).truncate()),
-                    ),
+                    )
+                    .when(edited, |header| {
+                        header.child(
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .automation_id("file-editor-edited")
+                                .child(Label::new("Edited").size(TextSize::Ui).color(Color::Muted)),
+                        )
+                    })
+                    .when(self.open().is_some(), |header| {
+                        header.child(
+                            Button::new("file-editor-save", "Save")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .disabled(!self.can_save(cx))
+                                .debug_selector(|| "file-editor-save".into())
+                                .tooltip(save_tooltip(cx))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.save(window, cx);
+                                    this.focus_editor(window, cx);
+                                })),
+                        )
+                    }),
             )
+            .children(self.conflict_bar(cx))
             .children(self.notice.as_ref().map(|notice| {
                 div()
                     .flex_none()
@@ -445,7 +635,7 @@ impl Render for FileView {
                         Button::new("file-view-send", label)
                             .style(ButtonStyle::Subtle)
                             .size(ButtonSize::Compact)
-                            .disabled(self.selection.is_none())
+                            .disabled(!can_send)
                             .debug_selector(|| "file-view-send".into())
                             .tooltip(Tooltip::text(crate::commands::hint(
                                 crate::excerpt::SEND_SELECTION,
@@ -461,112 +651,10 @@ impl Render for FileView {
                             .on_click(cx.listener(|this, _, _, cx| this.open_in_editor(cx))),
                     ),
             )
+            .children(self.discard_dialog(cx))
     }
 }
 
-fn stamp(path: &Path) -> Stamp {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.len(), meta.modified().ok()?))
-}
-
-/// The file's lines, or why they cannot be shown. Only regular files are read, and no
-/// more than [`MAX_BYTES`] of them, so a pipe or a device never blocks or fills memory.
-fn read_lines(path: &Path) -> Content {
-    match std::fs::metadata(path) {
-        Ok(meta) if !meta.is_file() => return Content::Unreadable("Not a text file."),
-        Ok(_) => {}
-        Err(_) => return Content::Unreadable("Couldn't read this file."),
-    }
-    let Ok(file) = std::fs::File::open(path) else {
-        return Content::Unreadable("Couldn't read this file.");
-    };
-    let mut bytes = Vec::new();
-    if file.take(MAX_BYTES + 1).read_to_end(&mut bytes).is_err() {
-        return Content::Unreadable("Couldn't read this file.");
-    }
-    if bytes.len() as u64 > MAX_BYTES {
-        return Content::Unreadable("Too large to show.");
-    }
-    let Ok(text) = String::from_utf8(bytes) else {
-        return Content::Unreadable("Not a text file.");
-    };
-    if text.contains('\0') {
-        return Content::Unreadable("Not a text file.");
-    }
-    Content::Lines(text.lines().map(str::to_owned).collect())
-}
-
-/// A line as drawn: tabs as four spaces, and at most [`MAX_SHOWN`] characters.
-fn shown(line: &str) -> String {
-    let mut shown: String = line.chars().take(MAX_SHOWN).collect();
-    if shown.len() < line.len() {
-        shown.push('…');
-    }
-    shown.replace('\t', "    ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn lines(content: Content) -> Vec<String> {
-        match content {
-            Content::Lines(lines) => lines,
-            other => panic!("not lines: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn text_files_read_as_lines_without_line_endings() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("a.txt");
-        std::fs::write(&file, "one\r\n\ttwo\r\n\nfour").unwrap();
-        assert_eq!(lines(read_lines(&file)), ["one", "\ttwo", "", "four"]);
-        std::fs::write(&file, "").unwrap();
-        assert_eq!(lines(read_lines(&file)), Vec::<String>::new());
-    }
-
-    #[test]
-    fn binary_large_missing_and_special_files_are_not_shown() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("f");
-        std::fs::write(&file, b"a\0b").unwrap();
-        assert_eq!(read_lines(&file), Content::Unreadable("Not a text file."));
-        std::fs::write(&file, [0xff, 0xfe, b'a']).unwrap();
-        assert_eq!(read_lines(&file), Content::Unreadable("Not a text file."));
-        std::fs::write(&file, vec![b'a'; MAX_BYTES as usize + 1]).unwrap();
-        assert_eq!(read_lines(&file), Content::Unreadable("Too large to show."));
-        assert_eq!(
-            read_lines(&dir.path().join("missing")),
-            Content::Unreadable("Couldn't read this file.")
-        );
-        assert_eq!(
-            read_lines(dir.path()),
-            Content::Unreadable("Not a text file.")
-        );
-        let fifo = dir.path().join("fifo");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let (done, wait) = std::sync::mpsc::channel();
-        std::thread::spawn(move || done.send(read_lines(&fifo)).unwrap());
-        assert_eq!(
-            wait.recv_timeout(std::time::Duration::from_secs(5)),
-            Ok(Content::Unreadable("Not a text file.")),
-            "a pipe is refused without waiting for a writer"
-        );
-    }
-
-    #[test]
-    fn long_lines_are_drawn_short_and_tabs_as_spaces() {
-        assert_eq!(shown("\tx"), "    x");
-        let long = "é".repeat(MAX_SHOWN + 5);
-        let drawn = shown(&long);
-        assert_eq!(drawn.chars().count(), MAX_SHOWN + 1);
-        assert!(drawn.ends_with('…'));
-    }
-}
+#[cfg(all(test, feature = "ui-tests"))]
+#[path = "file_view_tests.rs"]
+mod ui_tests;

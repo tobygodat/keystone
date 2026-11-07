@@ -910,6 +910,7 @@ crates/keystone-desktop/src/commands.rs
 	Rename session
 	Retry recovery
 	Retry setup script
+	Save file
 	Second opinion…
 	Send selection to agent
 	Settle session
@@ -1071,22 +1072,35 @@ crates/keystone-desktop/src/excerpt.rs
 	lines {}-{}
 	{path} {lines}:\n{fence}\n{}\n{fence}
 
+crates/keystone-desktop/src/file_disk.rs
+	Couldn't read this file.
+	Couldn't save: {error}
+	Not a text file.
+	Too large to edit here.
+	too many symlinks
+
 crates/keystone-desktop/src/file_view.rs
 	Back
-	Couldn't read this file.
+	Discard
+	Discard changes?
+	Edited
 	Esc
-	Not a text file.
 	Open in editor
-	Too large to show.
+	Overwrite
+	Reload
+	Save
+	This file changed on disk.
+	This file was deleted on disk.
+	Your edits to {} aren't saved.
 
 crates/keystone-desktop/src/files.rs
 	Copy path
 	Couldn't read {}: {error}
 	Couldn't run {command}: {error}
+	Edit
 	Mention in composer
 	No project folder to browse. {error}
 	Space
-	View
 
 crates/keystone-desktop/src/fork.rs
 	Choose a message to fork from.
@@ -1287,6 +1301,7 @@ crates/keystone-desktop/src/main.rs
 	Turn on Full access?
 	Un-settle
 	Un-settle: return to active work
+	Unsaved changes in {name}. Save or discard them first.
 	Use recovered history
 	Waiting for approval
 	Waiting for your answer
@@ -1911,6 +1926,12 @@ crates/keystone-ui/src/dialog.rs
 	Cancel
 	Confirm
 
+crates/keystone-ui/src/highlight.rs
+	Bash
+	Go
+	Python
+	Rust
+
 crates/keystone-ui/src/kbd.rs
 	Ctrl
 
@@ -1932,6 +1953,7 @@ crates/keystone-ui/src/select.rs
 
 crates/keystone-ui/src/text_input.rs
 	delete text
+	indent or move focus
 	move the cursor
 	select all
 	send what you typed

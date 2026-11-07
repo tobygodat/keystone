@@ -10,6 +10,7 @@ mod customization;
 mod customization_agent;
 mod diff_view;
 mod excerpt;
+mod file_disk;
 mod file_view;
 mod files;
 mod fork;
@@ -276,6 +277,13 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
     let Some(view) = root.upgrade() else {
         return true;
     };
+    if let Some(name) = view.read(cx).unsaved_file(cx) {
+        view.update(cx, |view, cx| {
+            view.error = Some(unsaved_file_message(&name));
+            view.refresh(cx);
+        });
+        return false;
+    }
     let others = open_windows(cx)
         .into_iter()
         .filter(|other| other != &view)
@@ -358,6 +366,10 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
     true
 }
 
+fn unsaved_file_message(name: &str) -> String {
+    format!("Unsaved changes in {name}. Save or discard them first.")
+}
+
 fn request_quit(cx: &mut App) {
     let Some(app) = cx.try_global::<DesktopApp>() else {
         return;
@@ -390,6 +402,16 @@ fn save_on_system_quit(cx: &mut App) {
 /// Returns whether Keystone may exit. When `can_cancel`, a failed save keeps
 /// Keystone open with the error showing, so Quit can be retried.
 fn save_and_teardown(state: &Entity<AppState>, can_cancel: bool, cx: &mut App) -> bool {
+    if can_cancel
+        && let Some(name) = open_windows(cx)
+            .iter()
+            .find_map(|view| view.read(cx).unsaved_file(cx))
+    {
+        state.update(cx, |state, cx| {
+            state.quit_failed(unsaved_file_message(&name), cx)
+        });
+        return false;
+    }
     if let Err(error) = quick::keep_open(cx) {
         if can_cancel {
             state.update(cx, |state, cx| state.quit_failed(error, cx));
@@ -11303,7 +11325,6 @@ fn bind_keys(cx: &mut App) {
     let commands = commands::bindings(keymap::current(cx));
     cx.bind_keys(commands);
     files::bind_keys(cx);
-    file_view::bind_keys(cx);
     diff_view::bind_keys(cx);
     changes::bind_keys(cx);
     cx.bind_keys([

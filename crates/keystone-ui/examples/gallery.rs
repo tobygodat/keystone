@@ -16,12 +16,15 @@ enum Page {
     Tree,
     Palette,
     Diagrams,
+    Editor,
 }
 
 #[path = "gallery/controls.rs"]
 mod controls;
 #[path = "gallery/diagrams.rs"]
 mod diagrams;
+#[path = "gallery/editor.rs"]
+mod editor;
 #[path = "gallery/palette.rs"]
 mod palette;
 #[path = "gallery/tabs.rs"]
@@ -44,6 +47,7 @@ struct Gallery {
     controls: Entity<controls::ControlsPage>,
     tree: Entity<tree::TreePage>,
     diagrams: Entity<diagrams::DiagramsPage>,
+    editor: Entity<editor::EditorPage>,
 }
 
 const MARKDOWN: &str = "## Heading\n\nA paragraph with **strong**, *emphasis*, `inline code`, ~~struck~~, and a [link](https://example.com).\n\n- A bullet\n  1. A nested number\n- Another bullet\n\n> A quoted line.\n\n| Left | Center | Right |\n| :-- | :-: | --: |\n| `a` | b | 1 |\n| c | d | 22 |\n\n```rust\nfn main() {\n    println!(\"A long line that scrolls sideways instead of wrapping, as in an editor, so code keeps its shape.\");\n}\n```\n\n---\n";
@@ -423,6 +427,7 @@ impl Render for Gallery {
             (Page::Controls, "Controls", "gallery-page-controls"),
             (Page::Tree, "Tree", "gallery-page-tree"),
             (Page::Diagrams, "Diagrams", "gallery-page-diagrams"),
+            (Page::Editor, "Editor", "gallery-page-editor"),
         ]
         .map(|(target, name, id)| {
             Button::new(id, name)
@@ -442,6 +447,9 @@ impl Render for Gallery {
                     }
                     if target == Page::Diagrams {
                         window.focus(&this.focus, cx);
+                    }
+                    if target == Page::Editor {
+                        window.focus(&this.editor.focus_handle(cx), cx);
                     }
                     cx.notify();
                 }))
@@ -550,6 +558,7 @@ impl Render for Gallery {
                 Page::Controls => d.child(self.controls.clone()),
                 Page::Tree => d.child(self.tree.clone()),
                 Page::Diagrams => d.child(self.diagrams.clone()),
+                Page::Editor => d.child(self.editor.clone()),
             })
             .when_some(self.split.as_ref(), |d, page| {
                 d.child(self.split_page(page, cx))
@@ -577,6 +586,7 @@ fn main() {
         .run(|cx: &mut App| {
             keystone_ui::init(cx);
             TextInput::bind_keys(cx);
+            automation::serve_inbox(cx);
             let bounds = Bounds::centered(None, size(px(1100.), px(900.)), cx);
             cx.open_window(
                 WindowOptions {
@@ -604,11 +614,14 @@ fn main() {
                             controls: cx.new(controls::ControlsPage::new),
                             tree: cx.new(tree::TreePage::new),
                             diagrams: cx.new(diagrams::DiagramsPage::new),
+                            editor: cx.new(editor::EditorPage::new),
                         }
                     })
                 },
             )
             .expect("open gallery window");
-            cx.activate(true);
+            if !automation::background() {
+                cx.activate(true);
+            }
         });
 }

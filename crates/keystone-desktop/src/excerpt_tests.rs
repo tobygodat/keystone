@@ -1,4 +1,4 @@
-//! Send to the agent from a Files view and from a reply, by shortcut, menu, palette and
+//! Send to the agent from a Files editor and from a reply, by shortcut, menu, palette and
 //! button, with the scripted Claude logging anything it is sent.
 
 use super::*;
@@ -9,7 +9,6 @@ use gpui::{
 };
 use keystone_agent::{Event, Item, ItemKind, ItemStatus};
 use keystone_core::{ProjectId, Provider, Store, WindowId, WorkingDirectory};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const LIB: &str = "one\ntwo\n\tthree ```\nfour\n";
@@ -19,8 +18,10 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// The scripted Claude, logging its messages in the session folder.
-fn claude(dir: &Path) -> PathBuf {
+/// The scripted Claude, logging its messages in the session folder `folder`, where a
+/// settings file shortens its pause between words. It runs as built, with no wrapper
+/// script for the test to write and then execute.
+fn claude(folder: &Path) -> PathBuf {
     let binary = std::env::current_exe()
         .unwrap()
         .parent()
@@ -32,22 +33,13 @@ fn claude(dir: &Path) -> PathBuf {
         binary.exists(),
         "build keystone-fake-claude first: cargo build -p keystone-agent --bins"
     );
-    let script = dir.join("claude-excerpt-wrapper");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/usr/bin/python3\nimport os, sys\nos.environ['KEYSTONE_FAKE_CLAUDE_DELAY_MS'] = '2'\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
-            serde_json::to_string(&binary).unwrap()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    script
+    write(&folder.join(".fake-claude-delay-ms"), "2");
+    binary
 }
 
-struct Run {
+pub(crate) struct Run {
     _dir: tempfile::TempDir,
-    folder: PathBuf,
+    pub(crate) folder: PathBuf,
 }
 
 impl Run {
@@ -59,7 +51,7 @@ impl Run {
 
 /// A window on a project whose `src/lib.rs` holds `lib`, showing its Claude session
 /// when `selected`, with the composer focused.
-fn launch<'a>(
+pub(crate) fn launch<'a>(
     lib: &str,
     selected: bool,
     cx: &'a mut TestAppContext,
@@ -75,7 +67,7 @@ fn launch<'a>(
     store
         .open_project(WindowId::FIRST, &project, None, selected.then_some(id), 10)
         .unwrap();
-    let claude = claude(dir.path());
+    let claude = claude(&folder);
     cx.executor().allow_parking();
     cx.update(|cx| {
         keystone_ui::init(cx);
@@ -100,7 +92,7 @@ fn launch<'a>(
     (Run { _dir: dir, folder }, view, cx)
 }
 
-fn composer(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> String {
+pub(crate) fn composer(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> String {
     view.read_with(cx, |view, cx| view.composer.read(cx).value().to_owned())
 }
 
@@ -109,7 +101,12 @@ fn composer_focused(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> bool
     cx.update(|window, _| handle.is_focused(window))
 }
 
-fn click(cx: &mut VisualTestContext, id: &'static str, button: MouseButton, modifiers: Modifiers) {
+pub(crate) fn click(
+    cx: &mut VisualTestContext,
+    id: &'static str,
+    button: MouseButton,
+    modifiers: Modifiers,
+) {
     let at = cx
         .debug_bounds(id)
         .unwrap_or_else(|| panic!("{id} is shown"))
@@ -119,8 +116,8 @@ fn click(cx: &mut VisualTestContext, id: &'static str, button: MouseButton, modi
     cx.run_until_parked();
 }
 
-/// Opens Files and shows `src/lib.rs` read-only.
-fn view_lib(cx: &mut VisualTestContext) {
+/// Opens Files and opens `src/lib.rs` in the editor, which takes focus.
+pub(crate) fn view_lib(cx: &mut VisualTestContext) {
     cx.simulate_keystrokes("secondary-shift-e");
     cx.run_until_parked();
     // Rows: the project folder, then src; Right expands src and steps into lib.rs.
@@ -130,15 +127,29 @@ fn view_lib(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("file-line-0").is_some(), "the file shows");
+    assert!(cx.debug_bounds("file-editor").is_some(), "the file shows");
 }
 
-fn fenced(lines: std::ops::RangeInclusive<usize>, text: &str) -> String {
+/// Focuses the editor and selects lines `first` to `last`, 0-based, from the start of
+/// the first to the start of the line after the last.
+pub(crate) fn select_lines(cx: &mut VisualTestContext, first: usize, last: usize) {
+    click(cx, "file-editor", MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("secondary-home");
+    for _ in 0..first {
+        cx.simulate_keystrokes("down");
+    }
+    for _ in first..=last {
+        cx.simulate_keystrokes("shift-down");
+    }
+    cx.run_until_parked();
+}
+
+pub(crate) fn fenced(lines: std::ops::RangeInclusive<usize>, text: &str) -> String {
     Excerpt::file("src/lib.rs".into(), lines, text).prompt()
 }
 
-/// Lines picked in a Files view go into the composer with their path and numbers by
-/// the shortcut, the menu, the palette and the button, and nothing is sent.
+/// Lines selected in a Files editor go into the composer with their path and numbers
+/// by the shortcut, the menu, the palette and the button, and nothing is sent.
 #[gpui::test]
 fn files_lines_go_into_the_composer_by_every_entry_point(cx: &mut TestAppContext) {
     let (run, view, cx) = launch(LIB, true, cx);
@@ -149,15 +160,15 @@ fn files_lines_go_into_the_composer_by_every_entry_point(cx: &mut TestAppContext
         "the view offers Send"
     );
 
-    click(cx, "file-line-1", MouseButton::Left, Modifiers::none());
-    click(cx, "file-line-2", MouseButton::Left, Modifiers::shift());
+    select_lines(cx, 1, 2);
     cx.simulate_keystrokes("secondary-shift-a");
     cx.run_until_parked();
     let two = fenced(2..=3, "two\n\tthree ```");
     assert_eq!(composer(&view, cx), format!("Look at\n{two}"));
     assert!(composer_focused(&view, cx), "the composer has focus");
 
-    click(cx, "file-line-3", MouseButton::Right, Modifiers::none());
+    select_lines(cx, 3, 3);
+    click(cx, "file-editor", MouseButton::Right, Modifiers::none());
     assert!(
         cx.debug_bounds("menu-send-selection").is_some(),
         "the menu opens"
@@ -169,10 +180,10 @@ fn files_lines_go_into_the_composer_by_every_entry_point(cx: &mut TestAppContext
         "Escape closes the menu"
     );
     assert!(
-        cx.debug_bounds("file-line-3").is_some(),
+        cx.debug_bounds("file-editor").is_some(),
         "and keeps the file shown"
     );
-    click(cx, "file-line-3", MouseButton::Right, Modifiers::none());
+    click(cx, "file-editor", MouseButton::Right, Modifiers::none());
     click(
         cx,
         "menu-send-selection",
@@ -186,7 +197,7 @@ fn files_lines_go_into_the_composer_by_every_entry_point(cx: &mut TestAppContext
         "the menu closes"
     );
 
-    click(cx, "file-line-0", MouseButton::Left, Modifiers::none());
+    select_lines(cx, 0, 0);
     cx.simulate_keystrokes("secondary-k");
     cx.simulate_input("Send selection");
     cx.simulate_keystrokes("enter");
@@ -197,7 +208,7 @@ fn files_lines_go_into_the_composer_by_every_entry_point(cx: &mut TestAppContext
         format!("Look at\n{two}\n{four}\n{one}")
     );
 
-    click(cx, "file-line-3", MouseButton::Left, Modifiers::none());
+    select_lines(cx, 3, 3);
     click(cx, "file-view-send", MouseButton::Left, Modifiers::none());
     assert_eq!(
         composer(&view, cx),
@@ -214,40 +225,46 @@ fn files_lines_go_into_the_composer_by_every_entry_point(cx: &mut TestAppContext
     assert_eq!(
         composer(&view, cx),
         before,
-        "the view's lines go only while it has focus"
+        "the editor's lines go only while it has focus"
     );
 
-    click(cx, "file-line-0", MouseButton::Left, Modifiers::none());
+    click(cx, "file-editor", MouseButton::Left, Modifiers::none());
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("file-line-0").is_none(),
+        cx.debug_bounds("file-editor").is_none(),
         "Escape shows the tree"
     );
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
     click(cx, "file-view-back", MouseButton::Left, Modifiers::none());
     assert!(
-        cx.debug_bounds("file-line-0").is_none(),
+        cx.debug_bounds("file-editor").is_none(),
         "Back shows the tree"
     );
     assert!(cx.debug_bounds("files-tree-row-1").is_some());
 }
 
-/// Dragging over lines selects them all, and Ctrl+A every line.
+/// A selection sends every line it touches whole, and a selection that ends at the
+/// start of a line leaves that line out.
 #[gpui::test]
-fn dragging_and_select_all_pick_whole_lines(cx: &mut TestAppContext) {
+fn a_selection_sends_the_whole_lines_it_covers(cx: &mut TestAppContext) {
     let (_run, view, cx) = launch(LIB, true, cx);
     view_lib(cx);
-    let from = cx.debug_bounds("file-line-0").unwrap().center();
-    let to = cx.debug_bounds("file-line-2").unwrap().center();
-    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("down right shift-right");
     cx.simulate_keystrokes("secondary-shift-a");
     cx.run_until_parked();
-    assert_eq!(composer(&view, cx), fenced(1..=3, "one\ntwo\n\tthree ```"));
-    click(cx, "file-line-0", MouseButton::Left, Modifiers::none());
+    let two = fenced(2..=2, "two");
+    assert_eq!(composer(&view, cx), two, "part of a line sends the line");
+
+    click(cx, "file-editor", MouseButton::Left, Modifiers::none());
+    cx.simulate_keystrokes("secondary-home down end shift-down shift-down shift-right");
+    cx.simulate_keystrokes("secondary-shift-a");
+    cx.run_until_parked();
+    let both = fenced(2..=4, "two\n\tthree ```\nfour");
+    assert_eq!(composer(&view, cx), format!("{two}\n{both}"));
+
+    click(cx, "file-editor", MouseButton::Left, Modifiers::none());
     cx.simulate_keystrokes("secondary-a secondary-shift-a");
     cx.run_until_parked();
     assert!(composer(&view, cx).ends_with(&fenced(1..=4, LIB.trim_end())));
@@ -261,7 +278,6 @@ fn a_large_selection_is_capped_at_both_ends(cx: &mut TestAppContext) {
     assert!(lib.len() >= 100 * 1024);
     let (_run, view, cx) = launch(&lib, true, cx);
     view_lib(cx);
-    click(cx, "file-line-0", MouseButton::Left, Modifiers::none());
     cx.simulate_keystrokes("secondary-a secondary-shift-a");
     cx.run_until_parked();
     let text = lib.trim_end();
@@ -386,7 +402,7 @@ fn a_reply_selection_goes_into_the_composer_quoted(cx: &mut TestAppContext) {
     assert_eq!(run.received(), "", "nothing is sent");
 }
 
-/// A right click on a reply offers only that reply's own selection. Here the Files view
+/// A right click on a reply offers only that reply's own selection. Here the Files editor
 /// has focus with a line selected, which the shortcut would send, and the reply was
 /// never selected; the reply's menu must not offer the line.
 #[gpui::test]
@@ -394,12 +410,12 @@ fn a_reply_menu_never_offers_another_views_selection(cx: &mut TestAppContext) {
     let (run, view, cx) = launch(LIB, true, cx);
     show_reply(&view, "Plain **bold** words here.", cx);
     view_lib(cx);
-    click(cx, "file-line-1", MouseButton::Left, Modifiers::none());
+    select_lines(cx, 1, 1);
     let taken = view.update_in(cx, |view, window, cx| view.take_selection(window, cx));
     assert_eq!(
         taken.map(|(_, excerpt)| excerpt.prompt()),
         Some(fenced(2..=2, "two")),
-        "the Files view has focus and its line is selected"
+        "the Files editor has focus and its line is selected"
     );
     let at = cx
         .debug_bounds("reply-0-selection-surface")
@@ -416,24 +432,28 @@ fn a_reply_menu_never_offers_another_views_selection(cx: &mut TestAppContext) {
     assert_eq!(run.received(), "", "nothing is sent");
 }
 
-/// Lines selected before the file changed on disk are never sent: the next send reads
-/// the file again and clears the selection, by the shortcut and by the palette.
+/// Lines selected before the file changed on disk are never sent: their numbers may
+/// no longer match, by the shortcut and by the palette. Once the editor has taken the
+/// new text, lines send again.
 #[gpui::test]
-fn a_file_changed_since_it_was_shown_is_read_again_before_sending(cx: &mut TestAppContext) {
+fn a_file_changed_since_it_was_shown_is_not_sent_until_reloaded(cx: &mut TestAppContext) {
     let (run, view, cx) = launch(LIB, true, cx);
     view_lib(cx);
     let lib = run.folder.join("src/lib.rs");
-    click(cx, "file-line-1", MouseButton::Left, Modifiers::none());
+    select_lines(cx, 1, 1);
     std::fs::write(&lib, "zero\none\ntwo, longer now\n").unwrap();
     cx.simulate_keystrokes("secondary-shift-a");
     cx.run_until_parked();
     assert_eq!(composer(&view, cx), "", "the old line 2 is not sent");
-    click(cx, "file-line-1", MouseButton::Left, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    select_lines(cx, 1, 1);
     cx.simulate_keystrokes("secondary-shift-a");
     cx.run_until_parked();
     assert_eq!(composer(&view, cx), fenced(2..=2, "one"));
 
-    click(cx, "file-line-2", MouseButton::Left, Modifiers::none());
+    select_lines(cx, 2, 2);
     std::fs::write(&lib, "changed again\n").unwrap();
     cx.simulate_keystrokes("secondary-k");
     cx.simulate_input("Send selection");
@@ -455,7 +475,8 @@ fn a_selection_menu_closes_when_the_session_changes(cx: &mut TestAppContext) {
     cx.run_until_parked();
     click(cx, "session-1", MouseButton::Left, Modifiers::none());
     view_lib(cx);
-    click(cx, "file-line-1", MouseButton::Right, Modifiers::none());
+    select_lines(cx, 1, 1);
+    click(cx, "file-editor", MouseButton::Right, Modifiers::none());
     assert!(cx.debug_bounds("menu-send-selection").is_some());
     cx.update(|_, cx| cx.defer(|cx| crate::notifications::show(2, cx)));
     cx.run_until_parked();
@@ -475,7 +496,7 @@ fn the_palette_sends_only_into_the_session_it_was_opened_on(cx: &mut TestAppCont
     click(cx, "session-1", MouseButton::Left, Modifiers::none());
     view_lib(cx);
     let palette_over_line_2 = |cx: &mut VisualTestContext| {
-        click(cx, "file-line-1", MouseButton::Left, Modifiers::none());
+        select_lines(cx, 1, 1);
         cx.simulate_keystrokes("secondary-k");
         cx.simulate_input("Send selection");
         cx.run_until_parked();
@@ -514,7 +535,7 @@ fn the_palette_sends_only_into_the_session_it_was_opened_on(cx: &mut TestAppCont
 fn a_blank_line_is_sent(cx: &mut TestAppContext) {
     let (_run, view, cx) = launch("one\n\nthree\n", true, cx);
     view_lib(cx);
-    click(cx, "file-line-1", MouseButton::Left, Modifiers::none());
+    select_lines(cx, 1, 1);
     cx.simulate_keystrokes("secondary-shift-a");
     cx.run_until_parked();
     assert_eq!(composer(&view, cx), fenced(2..=2, ""));

@@ -1838,3 +1838,328 @@ fn palette_click_inside_keeps_open_and_row_click_confirms(cx: &mut TestAppContex
         assert!(!host.dismissed);
     });
 }
+
+struct EditorHost {
+    editor: gpui::Entity<CodeEditor>,
+    changes: usize,
+    escaped: bool,
+}
+
+impl Render for EditorHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, _| {
+                this.escaped |= event.keystroke.key == "escape";
+            }))
+            .child(self.editor.clone())
+    }
+}
+
+fn code_editor<'a>(
+    cx: &'a mut TestAppContext,
+    text: &str,
+) -> (
+    gpui::Entity<EditorHost>,
+    gpui::Entity<CodeEditor>,
+    &'a mut gpui::VisualTestContext,
+) {
+    cx.update(keystone_ui::init);
+    let text = text.to_owned();
+    let (host, cx) = cx.add_window_view(move |window, cx| {
+        let editor = cx.new(|cx| {
+            let mut editor = CodeEditor::new(cx);
+            editor.set_text(&text, cx);
+            editor
+        });
+        cx.subscribe(
+            &editor,
+            |host: &mut EditorHost, _, _: &keystone_ui::code_editor::Changed, _| host.changes += 1,
+        )
+        .detach();
+        window.focus(&gpui::Focusable::focus_handle(editor.read(cx), cx), cx);
+        EditorHost {
+            editor,
+            changes: 0,
+            escaped: false,
+        }
+    });
+    cx.run_until_parked();
+    let editor = host.read_with(cx, |host, _| host.editor.clone());
+    (host, editor, cx)
+}
+
+fn editor_text(editor: &gpui::Entity<CodeEditor>, cx: &mut gpui::VisualTestContext) -> String {
+    editor.read_with(cx, |editor, _| editor.text())
+}
+
+fn at(line: usize, column: usize) -> keystone_ui::code_editor::Point {
+    keystone_ui::code_editor::Point::new(line, column)
+}
+
+#[gpui::test]
+fn code_editor_types_and_a_new_line_keeps_the_indent(cx: &mut TestAppContext) {
+    let (host, editor, cx) = code_editor(cx, "fn main() {\n    let x = 1;\n}");
+    cx.simulate_keystrokes("down end enter");
+    cx.simulate_input("y");
+    assert_eq!(
+        editor_text(&editor, cx),
+        "fn main() {\n    let x = 1;\n    y\n}"
+    );
+    cx.simulate_keystrokes("home");
+    editor.read_with(cx, |editor, _| {
+        assert_eq!(
+            editor.selection(),
+            at(2, 4)..at(2, 4),
+            "Home stops at the indent first"
+        )
+    });
+    cx.simulate_keystrokes("home backspace");
+    assert_eq!(
+        editor_text(&editor, cx),
+        "fn main() {\n    let x = 1;    y\n}",
+        "Backspace at a line start joins it to the line above"
+    );
+    editor.read_with(cx, |editor, _| {
+        assert_eq!(editor.selection(), at(1, 14)..at(1, 14))
+    });
+    cx.simulate_keystrokes("escape");
+    host.read_with(cx, |host, _| {
+        assert!(host.escaped, "Escape reaches the host");
+        assert_eq!(host.changes, 3);
+    });
+}
+
+#[gpui::test]
+fn code_editor_tab_indents_selected_lines_and_shift_tab_outdents(cx: &mut TestAppContext) {
+    let (_, editor, cx) = code_editor(cx, "a\nb\nc\nd");
+    cx.simulate_keystrokes("shift-down shift-down shift-end tab");
+    assert_eq!(editor_text(&editor, cx), "    a\n    b\n    c\nd");
+    editor.read_with(cx, |editor, _| {
+        assert_eq!(editor.selected_text(), "    a\n    b\n    c")
+    });
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(editor_text(&editor, cx), "a\nb\nc\nd");
+    cx.simulate_keystrokes("secondary-z");
+    assert_eq!(editor_text(&editor, cx), "    a\n    b\n    c\nd");
+    cx.simulate_keystrokes("secondary-z");
+    assert_eq!(
+        editor_text(&editor, cx),
+        "a\nb\nc\nd",
+        "indenting is one undo step"
+    );
+
+    cx.simulate_keystrokes("secondary-home shift-down shift-down tab");
+    assert_eq!(
+        editor_text(&editor, cx),
+        "    a\n    b\nc\nd",
+        "a selection ending at a line start leaves that line alone"
+    );
+
+    editor.update(cx, |editor, cx| editor.set_text("\tx\ny", cx));
+    cx.simulate_keystrokes("down tab");
+    assert_eq!(
+        editor_text(&editor, cx),
+        "\tx\n\ty",
+        "a file indented with tabs gets tabs"
+    );
+}
+
+#[gpui::test]
+fn code_editor_up_and_down_keep_the_column_across_a_short_line(cx: &mut TestAppContext) {
+    let (_, editor, cx) = code_editor(cx, "abcdef\nab\nabcdef\n\tx");
+    cx.simulate_keystrokes("end down");
+    editor.read_with(cx, |editor, _| {
+        assert_eq!(editor.selection(), at(1, 2)..at(1, 2))
+    });
+    cx.simulate_keystrokes("down");
+    editor.read_with(cx, |editor, _| {
+        assert_eq!(editor.selection(), at(2, 6)..at(2, 6))
+    });
+    cx.simulate_keystrokes("left left down");
+    editor.read_with(cx, |editor, _| {
+        assert_eq!(
+            editor.selection(),
+            at(3, 1)..at(3, 1),
+            "a tab is four columns wide"
+        )
+    });
+    cx.simulate_keystrokes("up up");
+    editor.read_with(cx, |editor, _| {
+        assert_eq!(editor.selection(), at(1, 2)..at(1, 2))
+    });
+}
+
+#[gpui::test]
+fn code_editor_undo_returns_to_the_saved_revision(cx: &mut TestAppContext) {
+    let (host, editor, cx) = code_editor(cx, "saved");
+    let saved = editor.read_with(cx, |editor, _| editor.revision());
+    cx.simulate_keystrokes("secondary-end");
+    cx.simulate_input("!?");
+    assert_eq!(editor_text(&editor, cx), "saved!?");
+    assert_ne!(editor.read_with(cx, |editor, _| editor.revision()), saved);
+    cx.simulate_keystrokes("secondary-z");
+    assert_eq!(editor_text(&editor, cx), "saved");
+    assert_eq!(editor.read_with(cx, |editor, _| editor.revision()), saved);
+    cx.simulate_keystrokes("secondary-shift-z");
+    assert_eq!(editor_text(&editor, cx), "saved!?");
+    assert_ne!(editor.read_with(cx, |editor, _| editor.revision()), saved);
+    host.read_with(cx, |host, _| {
+        assert_eq!(host.changes, 4, "two keys, an undo and a redo")
+    });
+}
+
+#[gpui::test]
+fn code_editor_copies_a_selection_and_read_only_refuses_edits(cx: &mut TestAppContext) {
+    let (host, editor, cx) = code_editor(cx, "one\r\ntwo");
+    editor.update(cx, |editor, _| editor.set_read_only(true));
+    let clip = |cx: &mut gpui::VisualTestContext, text: &str| {
+        let item = gpui::ClipboardItem::new_string(text.into());
+        cx.update(|_, cx| cx.write_to_clipboard(item))
+    };
+    clip(cx, "x\ny");
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("enter tab backspace delete secondary-v secondary-z");
+    cx.simulate_keystrokes("secondary-a secondary-x");
+    assert_eq!(editor_text(&editor, cx), "one\r\ntwo");
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(
+        copied.as_deref(),
+        Some("one\ntwo"),
+        "cut in read-only only copies"
+    );
+    host.read_with(cx, |host, _| assert_eq!(host.changes, 0));
+
+    editor.update(cx, |editor, _| editor.set_read_only(false));
+    clip(cx, "x\ny");
+    cx.simulate_keystrokes("secondary-v");
+    assert_eq!(
+        editor_text(&editor, cx),
+        "x\r\ny",
+        "pasted lines take the file's line ending"
+    );
+}
+
+#[gpui::test]
+fn code_editor_clicks_place_select_and_drag(cx: &mut TestAppContext) {
+    let (_, editor, cx) = code_editor(cx, "alpha beta\ngamma\ndelta");
+    let bounds = cx.debug_bounds("code-editor").expect("editor");
+    let line_height = TextSize::Sm.line_height();
+    let line = |n: usize| bounds.top() + line_height * n + line_height / 2.;
+    let right = bounds.right() - gpui::px(4.);
+    let press = |cx: &mut gpui::VisualTestContext, y, clicks, shift| {
+        let position = gpui::point(right, y);
+        let modifiers = Modifiers {
+            shift,
+            ..Modifiers::none()
+        };
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            modifiers,
+            click_count: clicks,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            modifiers,
+            click_count: clicks,
+        });
+    };
+    let selection = |cx: &mut gpui::VisualTestContext| editor.read_with(cx, |e, _| e.selection());
+
+    press(cx, line(1), 1, false);
+    assert_eq!(
+        selection(cx),
+        at(1, 5)..at(1, 5),
+        "a click past a line's end"
+    );
+    press(cx, line(0), 1, true);
+    assert_eq!(selection(cx), at(0, 10)..at(1, 5), "Shift extends");
+    press(cx, line(0), 2, false);
+    assert_eq!(
+        selection(cx),
+        at(0, 6)..at(0, 10),
+        "a double click selects a word"
+    );
+    press(cx, line(1), 3, false);
+    assert_eq!(
+        selection(cx),
+        at(1, 0)..at(2, 0),
+        "a triple click selects the line"
+    );
+
+    cx.simulate_mouse_down(
+        gpui::point(right, line(0)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(
+        gpui::point(right, line(2)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_up(
+        gpui::point(right, line(2)),
+        gpui::MouseButton::Left,
+        Modifiers::none(),
+    );
+    assert_eq!(selection(cx), at(0, 10)..at(2, 5), "a drag selects");
+    cx.simulate_input("!");
+    assert_eq!(editor_text(&editor, cx), "alpha beta!");
+}
+
+#[gpui::test]
+fn code_editor_input_methods_compose_with_document_offsets(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+    let (_, editor, cx) = code_editor(cx, "a\n😀b");
+    cx.simulate_keystrokes("secondary-end");
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.replace_and_mark_text_in_range(None, "か", Some(1..1), window, cx);
+            assert_eq!(editor.marked_text_range(window, cx), Some(5..6));
+            assert_eq!(
+                editor
+                    .selected_text_range(false, window, cx)
+                    .map(|s| s.range),
+                Some(6..6)
+            );
+            editor.replace_text_in_range(None, "漢", window, cx);
+            assert_eq!(editor.marked_text_range(window, cx), None);
+            editor.replace_text_in_range(Some(2..4), "x", window, cx);
+            assert_eq!(editor.text(), "a\nxb漢");
+            let mut actual = None;
+            assert_eq!(
+                editor
+                    .text_for_range(0..4, &mut actual, window, cx)
+                    .as_deref(),
+                Some("a\nxb")
+            );
+        })
+    });
+}
+
+#[gpui::test]
+fn code_editor_edits_the_end_of_a_200k_line_file_quickly(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (_, editor, cx) = code_editor(cx, "");
+    let text: String = (0..200_000).map(|n| format!("line {n}\n")).collect();
+    let started = std::time::Instant::now();
+    editor.update(cx, |editor, cx| editor.set_text(&text, cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("secondary-end");
+    cx.simulate_input("last");
+    cx.simulate_keystrokes("pageup pagedown up");
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    let elapsed = started.elapsed();
+    editor.read_with(cx, |editor, _| {
+        assert_eq!(editor.line_count(), 200_001);
+        assert!(editor.text().ends_with("\nline 199998\nlinex 199999\nlast"));
+    });
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "took {elapsed:?}"
+    );
+}

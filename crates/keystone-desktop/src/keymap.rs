@@ -28,15 +28,19 @@ pub(crate) const TRANSCRIPT: &[&str] = &[ROOT, "Conversation"];
 pub(crate) const SIDEBAR: &[&str] = &[ROOT];
 pub(crate) const DIALOG: &[&str] = &[ROOT, "Dialog"];
 const SURFACES: [&[&str]; 4] = [COMPOSER, TRANSCRIPT, SIDEBAR, DIALOG];
+/// The Files editor's stack: a [`keystone_ui::CodeEditor`] inside the Files view.
+pub(crate) const EDITOR: &[&str] = &[ROOT, "FileView", "CodeEditor"];
 /// The stacks a focused text field dispatches through where a command can tie with the
 /// field's editing keys: the composer, which stands for every field outside a dialog
-/// such as search; a dialog's field, such as Rename; and the palette's query. A field
-/// inside the transcript, such as a widget's, is left out: the transcript's commands
-/// match there at `Conversation`, above the field, so its own keys win.
-pub(crate) const TEXT_FIELDS: [&[&str]; 3] = [
+/// such as search; a dialog's field, such as Rename; the palette's query; and the Files
+/// editor, where Save runs. A field inside the transcript, such as a widget's, is left
+/// out: the transcript's commands match there at `Conversation`, above the field, so its
+/// own keys win.
+pub(crate) const TEXT_FIELDS: [&[&str]; 4] = [
     COMPOSER,
     &[ROOT, "Dialog", "TextInput"],
     &[ROOT, "CommandPalette", "TextInput"],
+    EDITOR,
 ];
 
 pub(crate) const REFUSED: &str =

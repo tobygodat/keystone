@@ -84,6 +84,54 @@ fn a_saved_key_with_no_key_name_is_skipped_and_keeps_its_default() {
     assert!(!skipped.contains("types in the composer"), "{skipped}");
 }
 
+/// Save runs in the Files editor, so the user can move it to any key the editor doesn't
+/// type or edit with, and to none that it does, Tab included.
+#[test]
+fn save_never_takes_a_key_the_files_editor_types_or_edits_with() {
+    let save = command_with(crate::file_view::SAVE_FILE);
+    for keys in [
+        "tab",
+        "shift-tab",
+        "enter",
+        "backspace",
+        "secondary-a",
+        "secondary-c",
+        "secondary-v",
+        "secondary-z",
+        "secondary-y",
+        "secondary-shift-home",
+        "alt-left",
+        "cmd-down",
+        "pagedown",
+        "shift-pageup",
+    ] {
+        let reason = refusal(save, &keystroke(keys)).unwrap_or_else(|| panic!("{keys} is refused"));
+        assert!(
+            reason.starts_with("Text fields use that key to "),
+            "{keys}: {reason}"
+        );
+    }
+    for keys in ["s", "shift-s", "alt-s", "space", "1"] {
+        assert_eq!(
+            refusal(save, &keystroke(keys)).as_deref(),
+            Some(TYPED),
+            "{keys}"
+        );
+    }
+    for keys in ["secondary-s", "secondary-alt-s", "secondary-shift-w", "f6"] {
+        assert_eq!(refusal(save, &keystroke(keys)), None, "{keys}");
+    }
+    assert!(
+        refused(command_with("new-claude"), &keystroke("tab")),
+        "no command that runs in the editor takes Tab"
+    );
+    // An app-wide command outranks Save in the editor, so moving Save onto one's key
+    // names it as a clash.
+    let keymap = Keymap::parse(&json!({"save-file": "secondary-alt-s"}));
+    let bindings = gpui::Keymap::new(commands::bindings(&keymap));
+    assert_eq!(keymap.clashes(save, &bindings), ["Capture screenshot"]);
+}
+
 #[test]
 fn a_text_fields_editing_keys_are_refused_for_a_command_that_runs_in_one() {
     // Select all, clipboard, undo and redo, Send and new lines, cursor movement and
@@ -427,12 +475,12 @@ fn conflicts_name_other_bindings_that_share_a_key_and_a_surface() {
 
 #[cfg(feature = "ui-tests")]
 mod surfaces {
-    use super::super::{COMPOSER, DIALOG, SIDEBAR, TEXT_FIELDS, TRANSCRIPT, stack};
+    use super::super::{COMPOSER, DIALOG, EDITOR, SIDEBAR, TEXT_FIELDS, TRANSCRIPT, stack};
     use crate::{Keystone, bind_keys};
     use gpui::{AppContext, Entity, Focusable, TestAppContext, VisualTestContext};
     use keystone_core::{Provider, Store, WorkingDirectory};
-    /// A window on one Codex session whose project is an empty temporary folder, so no
-    /// panel reads the real checkout or runs `git` or `gh` on it.
+    /// A window on one Codex session whose project is a temporary folder holding one
+    /// file, so no panel reads the real checkout or runs `git` or `gh` on it.
     fn open<'a>(
         dir: &tempfile::TempDir,
         cx: &'a mut TestAppContext,
@@ -441,6 +489,8 @@ mod surfaces {
         let mut store = Store::open(&path).unwrap();
         let folder = dir.path().join("project");
         std::fs::create_dir(&folder).unwrap();
+        // One file, so Files has a row to open in its editor.
+        std::fs::write(folder.join("notes.txt"), "a note\n").unwrap();
         let project = WorkingDirectory::new(&folder).unwrap();
         store.create(Provider::Codex, &project, 1).unwrap();
         cx.update(|cx| {
@@ -520,5 +570,21 @@ mod surfaces {
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         assert_stack(cx, DIALOG, "dialog");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        view.update_in(cx, |view, window, cx| view.focus.focus(window, cx));
+        cx.run_until_parked();
+        // Rows: the project folder, then notes.txt, which Space opens in the editor.
+        cx.simulate_keystrokes("secondary-shift-e");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down space");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("file-editor").is_some(),
+            "the editor is open"
+        );
+        assert_stack(cx, EDITOR, "files editor");
+        assert_eq!(EDITOR, TEXT_FIELDS[3]);
     }
 }

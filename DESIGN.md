@@ -44,6 +44,7 @@
 | `Tree`, `TreeState`, `TreeModel` | A keyboard-driven tree of any size that loads children lazily and draws only its visible rows. See below. |
 | `Markdown`, `markdown::Document` | Agent replies. `Document::parse` turns CommonMark with tables and strikethrough into plain data; `Markdown` renders it. See below. |
 | `TextInput`, `InputMode` | An editable text field. `InputMode::SingleLine` propagates the Enter action to its container (for submit), refuses inserted newlines and emits `text_input::RejectedMultiline`, so search typing and paste stay on one line. `InputMode::Multiline` wraps, and arrows, Home, and End move by visual row. Every edit emits `text_input::Changed`. Call `TextInput::bind_keys` once at startup. Bound keys reach the input as actions before any key listener runs, so a host that needs Up, Down, or Enter first, such as a list or palette, wraps it in a div with `capture_action` for `text_input::Up`, `Down`, or `Newline` and stops propagation. |
+| `CodeEditor`, `code_editor::Point` | An editor for one file of up to several megabytes, with line numbers, undo, and highlight spans. See below. |
 | `Tooltip` | A hover card with an optional shortcut. |
 | `Split`, `SplitState`, `PaneEdge`, `Edge` | Resizable panes with draggable dividers and pane-edge drop zones. See below. |
 | `TabBar`, `Tab`, `TabDot`, `DraggedTab` | A row of tabs that scrolls sideways, with close, a status dot, and drag reorder. See below. |
@@ -124,6 +125,21 @@ The gallery's Controls page shows every state, including a 500-option select.
 - Debug selectors are `{id}-row-{index}` and `{id}-chevron-{index}`.
 
 The gallery's Tree page shows a 50,000-node tree with a 10,000-file folder, nested folders, and a lazy folder that loads after a moment.
+
+## Code editor
+
+`CodeEditor` edits one file as lines and shapes only the lines on screen, so a file of 200,000 lines edits as quickly as a short one. The host keeps `Entity<CodeEditor>` made with `cx.new(|cx| CodeEditor::new(cx).with_id("file-editor"))` and calls `set_text` with the file's contents. `reload` takes the file's new contents after an outside change and keeps the cursor and scroll position. `text` returns the text with the line ending the file was read with, so an unedited file writes back byte for byte.
+
+- `revision` names the text's state through its history. The host stores it when it saves and compares it to know whether the file is clean, so typing and then undoing back reads clean. Every edit, undo and redo emits `code_editor::Changed`.
+- Undo takes back a word of typing at a time. A space or line break after other characters, a deletion after typing, a paste, and any cursor move start a new step. Undoing a deletion selects the text it brings back.
+- `set_language` highlights the text on a background thread, 50 ms after the last edit. Spans from an earlier pass stay until the next one arrives, clamped to each line.
+- Text is `fonts.mono` at `TextSize::Sm` in `code_text`, with spans in `syntax` colors. The gutter right-aligns line numbers in `text_faint`, and the cursor's line number in `text_muted`. Tabs draw four columns wide. Long lines scroll sideways instead of wrapping.
+- Arrows, Home, End, PageUp, and PageDown move the cursor, and Shift extends the selection. Home goes to the first non-blank character, then to the line start. Up and Down keep the column across short lines. Option and an arrow, or Ctrl off macOS, move by word, and Option or Ctrl with Backspace or Delete deletes a word. Enter keeps the line's indent. Tab inserts a tab if the file's first indented line starts with one and four spaces otherwise, and indents every selected line when the selection spans lines. Shift+Tab outdents. Undo, redo, select all, copy, cut, and paste use their usual shortcuts. Keys are bound in key context `CodeEditor` by `code_editor::bindings`, and every one is in `text_input::editing_keys`, so the desktop's keymap refuses each of them for a command that runs in the editor. The editor binds no save and no Escape, so both reach the host; the Files editor's Save is a palette command the user can rebind.
+- A click places the cursor and Shift+click extends the selection. A double click selects a word and a triple click selects the line. Dragging selects, and dragging past the top or bottom edge scrolls. Input methods compose in place, with the marked text underlined.
+- `set_read_only(true)` keeps selection and copy and ignores every edit.
+- The debug selector is the id given to `with_id`, `code-editor` by default.
+
+The gallery's Editor page shows a sample Rust file and a status line with the cursor and whether the text differs from the sample.
 
 ## Split
 

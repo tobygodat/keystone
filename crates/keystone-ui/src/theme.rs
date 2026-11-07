@@ -1,3 +1,4 @@
+use crate::highlight::Syntax;
 use gpui::{App, FontFeatures, Global, Hsla, Pixels, SharedString, hsla, px, rgb, rgba};
 use std::sync::Arc;
 
@@ -198,9 +199,46 @@ pub struct Colors {
     /// `success` and `danger`.
     pub diff_added: Hsla,
     pub diff_removed: Hsla,
+    /// Highlighted code. Unhighlighted code stays `code_text`.
+    pub syntax: SyntaxColors,
 
     /// Project tiles, in the order of `keystone_core::ProjectColor::ALL`.
     pub tiles: [Tint; 7],
+}
+
+/// The color of each [`Syntax`]: muted hues, none of them the interface blue, each at
+/// 4.5:1 or more on the background.
+#[derive(Clone, Copy)]
+pub struct SyntaxColors {
+    pub comment: Hsla,
+    pub keyword: Hsla,
+    pub string: Hsla,
+    pub escape: Hsla,
+    pub number: Hsla,
+    pub kind: Hsla,
+    pub function: Hsla,
+    pub property: Hsla,
+    pub attribute: Hsla,
+    pub tag: Hsla,
+    pub punctuation: Hsla,
+}
+
+impl SyntaxColors {
+    pub fn color(&self, syntax: Syntax) -> Hsla {
+        match syntax {
+            Syntax::Comment => self.comment,
+            Syntax::Keyword => self.keyword,
+            Syntax::String => self.string,
+            Syntax::Escape => self.escape,
+            Syntax::Number | Syntax::Constant => self.number,
+            Syntax::Type => self.kind,
+            Syntax::Function => self.function,
+            Syntax::Property => self.property,
+            Syntax::Attribute => self.attribute,
+            Syntax::Tag => self.tag,
+            Syntax::Operator | Syntax::Punctuation => self.punctuation,
+        }
+    }
 }
 
 /// A colored tile and the text on it.
@@ -371,6 +409,19 @@ impl Colors {
             caret: rgb(0xebebeb).into(),
             diff_added: rgba(0x7fbf8e1a).into(),
             diff_removed: rgba(0xe5847a1a).into(),
+            syntax: SyntaxColors {
+                comment: rgb(0x8a8a8a).into(),
+                keyword: rgb(0xc49bd6).into(),
+                string: rgb(0x9fc490).into(),
+                escape: rgb(0xd9b072).into(),
+                number: rgb(0xd9a272).into(),
+                kind: rgb(0x7fc2bd).into(),
+                function: rgb(0xdcc68a).into(),
+                property: rgb(0xc8c8c8).into(),
+                attribute: rgb(0xd99a9a).into(),
+                tag: rgb(0xe39b8f).into(),
+                punctuation: rgb(0x9a9a9a).into(),
+            },
 
             tiles: tiles([
                 0xaa5a54, 0x946749, 0x3e7d53, 0x3c7b78, 0x5072a3, 0x7f62b2, 0xaa5386,
@@ -427,6 +478,19 @@ impl Colors {
             caret: rgb(0x171717).into(),
             diff_added: rgba(0x2e7d4314).into(),
             diff_removed: rgba(0xb53b2f14).into(),
+            syntax: SyntaxColors {
+                comment: rgb(0x6e6e6e).into(),
+                keyword: rgb(0x8a3fa8).into(),
+                string: rgb(0x3f7a2c).into(),
+                escape: rgb(0x8a5a12).into(),
+                number: rgb(0x9a5418).into(),
+                kind: rgb(0x1f7570).into(),
+                function: rgb(0x7a6410).into(),
+                property: rgb(0x3d3d3d).into(),
+                attribute: rgb(0xa13d4a).into(),
+                tag: rgb(0xa8402f).into(),
+                punctuation: rgb(0x666666).into(),
+            },
 
             tiles: tiles([
                 0xae4e47, 0x94603d, 0x32794a, 0x307674, 0x446da7, 0x7d58bb, 0xad4682,

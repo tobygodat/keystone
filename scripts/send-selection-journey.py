@@ -6,7 +6,7 @@
 REPO is this checkout with target/debug/keystone-desktop, keystone-fake-claude and keystone-fake-codex
 built; OUT gets the screenshots, journey.json (every check and what each screenshot proves) and the
 driver's live recording of the whole run. DRIVER is the computer-use driver scripts/native-driver.py runs.
-Lines picked in a Files view go in by the menu, a reply's text by the palette, and a 135 KiB file by the
+Lines selected in the Files editor go in by the menu, a reply's text by the palette, and a 135 KiB file by the
 shortcut; each draft must reach the scripted Claude unchanged after Send, and nothing before it.
 """
 import json, os, queue, re, shutil, subprocess, sys, threading, time
@@ -84,6 +84,10 @@ def typed(text):
     tool('input', actions=[{'action': 'type', 'text': text}]); time.sleep(0.6)
 def draft(session):
     return next(s for s in tool('workspace')['workspace']['sessions'] if s['id'] == session).get('draft', '')
+def select_lines(first, last):
+    click('file-editor'); key('ctrl', 'Home')
+    for _ in range(first): key('Down')
+    for _ in range(first, last + 1): key('shift', 'Down')
 def received(): return [json.loads(l) for l in RECEIPT.read_text().splitlines()]
 log = []
 def shot(name, proves):
@@ -126,13 +130,11 @@ try:
     # Files: src/upload.rs lines 13-20, by the context menu.
     key('ctrl', 'shift', 'e'); wait('files-tree-row-1')
     click('files-tree-row-1'); wait('files-tree-row-2')
-    key('Down'); click('view-file'); wait('file-line-19')
-    check('file-view-send' in ids() and 'file-view-open' in ids(), 'the view offers Send and Open in editor')
-    rows = {e['id']: e['bounds']['h'] for e in elements() if e['id'] in ('file-line-0', 'file-line-10')}
-    check(rows['file-line-0'] == rows['file-line-10'], f'line 11 is one row high like line 1, its number unwrapped: {rows}')
-    click('file-line-12'); click('file-line-19', keys=['shift'])
-    shot('01-files-lines-selected', 'Light theme: src/upload.rs read-only in Files, lines 13-20 selected by click and Shift+click.')
-    click('file-line-15', button='right'); wait('menu-send-selection')
+    key('Down'); click('view-file'); wait('file-editor')
+    check('file-view-send' in ids() and 'file-view-open' in ids(), 'the editor offers Send and Open in editor')
+    select_lines(12, 19)
+    shot('01-files-lines-selected', 'Light theme: src/upload.rs in the Files editor, lines 13-20 selected with Shift+Down.')
+    click('file-editor', button='right'); wait('menu-send-selection')
     shot('02-files-menu', 'A right click on the selection offers "Send to Claude Code".')
     click('menu-send-selection')
     expected = fenced('src/upload.rs', (13, 20), '\n'.join(UPLOAD[12:20]))
@@ -164,7 +166,7 @@ try:
     # big.log, 135 KiB: Space, Ctrl+A and the shortcut.
     click('file-view-back'); wait('files-tree-row-3')
     click('files-tree-row-1'); until(lambda: 'files-tree-row-3' not in ids(), 'src collapses')
-    key('Down'); key('space'); wait('file-line-0')
+    key('Down'); key('space'); wait('file-editor')
     key('ctrl', 'a'); key('ctrl', 'shift', 'a')
     until(lambda: 'LAST-LINE' in draft(1), 'the big selection reaches the draft')
     text = draft(1)
@@ -179,12 +181,12 @@ try:
     theme(2)
     if 'file-view-back' not in ids(): key('ctrl', 'shift', 'e')
     click('file-view-back'); wait('files-tree-row-2')
-    click('files-tree-row-1'); wait('files-tree-row-3'); key('Down'); key('space'); wait('file-line-19')
-    click('file-line-12'); click('file-line-19', keys=['shift']); click('file-line-15', button='right'); wait('menu-send-selection')
-    shot('08-dark-files-menu', 'Dark theme: the read-only view, the selected lines and the menu.')
+    click('files-tree-row-1'); wait('files-tree-row-3'); key('Down'); key('space'); wait('file-editor')
+    select_lines(12, 19); click('file-editor', button='right'); wait('menu-send-selection')
+    shot('08-dark-files-menu', 'Dark theme: the editor, the selected lines and the menu.')
     key('Escape')
     until(lambda: 'menu-send-selection' not in ids(), 'Escape closes the menu')
-    check('file-line-19' in ids(), 'Escape on the menu keeps the file shown')
+    check('file-editor' in ids(), 'Escape on the menu keeps the file shown')
     running = 'stop' in ids()
     sent = len(received())
     click('file-view-send')

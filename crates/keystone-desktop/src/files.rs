@@ -277,7 +277,7 @@ pub(crate) struct FileBrowser {
     notice: Option<Notice>,
     /// The window whose composer "Mention in composer" writes to.
     keystone: WeakEntity<Keystone>,
-    /// The file shown read-only in the tree's place.
+    /// The file open for editing in the tree's place.
     view: Option<(Entity<FileView>, Subscription)>,
 }
 
@@ -380,7 +380,7 @@ impl FileBrowser {
             .update(cx, |keystone, cx| keystone.mention_file(&path, window, cx));
     }
 
-    /// Shows the file `node` read-only in the tree's place, until Back or Escape.
+    /// Opens the file `node` for editing in the tree's place, until Back or Escape.
     fn view(&mut self, node: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.paths[node as usize].clone();
         let name = path
@@ -389,10 +389,14 @@ impl FileBrowser {
             .to_string_lossy()
             .into_owned();
         let keystone = self.keystone.clone();
-        let view = cx.new(|cx| FileView::new(path, name, keystone, cx));
-        let back = cx.subscribe_in(&view, window, |this, _, _: &DismissEvent, window, cx| {
+        let view = cx.new(|cx| FileView::new(path, name, keystone, window, cx));
+        let back = cx.subscribe_in(&view, window, |this, view, _: &DismissEvent, window, cx| {
+            // A view that closes once a save lands may have lost focus to the composer
+            // by then, and keeps it there.
+            if view.read(cx).contains_focus(window, cx) {
+                window.focus(&this.tree.read(cx).focus_handle(cx), cx);
+            }
             this.view = None;
-            window.focus(&this.tree.read(cx).focus_handle(cx), cx);
             cx.notify();
         });
         window.focus(&view.focus_handle(cx), cx);
@@ -481,11 +485,11 @@ impl Render for FileBrowser {
                             .when(highlighted && entry.kind == NodeKind::File, |d| {
                                 let browser = browser.clone();
                                 d.child(
-                                    IconButton::new(("view-file", id as usize), IconName::Eye)
+                                    IconButton::new(("view-file", id as usize), IconName::Pencil)
                                         .size(ButtonSize::Compact)
                                         .debug_selector(|| "view-file".into())
-                                        .aria_label("View")
-                                        .tooltip(Tooltip::with_key("View", "Space"))
+                                        .aria_label("Edit")
+                                        .tooltip(Tooltip::with_key("Edit", "Space"))
                                         .on_click(move |_, window, cx| {
                                             cx.stop_propagation();
                                             if let Some(browser) = browser.upgrade() {
@@ -571,7 +575,7 @@ impl Keystone {
         }
     }
 
-    /// The lines selected in this window's Files view, while it has focus.
+    /// The lines selected in this window's Files editor, while it has focus.
     pub(crate) fn file_view_excerpt(&self, window: &Window, cx: &App) -> Option<Excerpt> {
         let root = self.files_root(cx).ok()?;
         let browser = self.files.browsers.borrow().get(&root)?.clone();
@@ -579,8 +583,23 @@ impl Keystone {
         let view = view.read(cx);
         view.focus_handle(cx)
             .contains_focused(window, cx)
-            .then(|| view.excerpt())
+            .then(|| view.excerpt(cx))
             .flatten()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_view(&self, cx: &App) -> Option<Entity<FileView>> {
+        let root = self.files_root(cx).ok()?;
+        let browser = self.files.browsers.borrow().get(&root)?.clone();
+        browser.read(cx).view.as_ref().map(|(view, _)| view.clone())
+    }
+
+    /// The name of a file with unsaved edits in this window's Files editors.
+    pub(crate) fn unsaved_file(&self, cx: &App) -> Option<String> {
+        self.files.browsers.borrow().values().find_map(|browser| {
+            let (view, _) = browser.read(cx).view.as_ref()?;
+            view.read(cx).unsaved(cx).map(str::to_owned)
+        })
     }
 
     pub(crate) fn focus_files(&self, window: &mut Window, cx: &mut Context<Self>) {

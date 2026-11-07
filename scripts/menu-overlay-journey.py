@@ -145,8 +145,8 @@ try:
     check('preview-overlay' not in ids() and MENU not in ids(), 'one Escape closes the preview')
 
     key('ctrl', 'shift', 'e'); wait('files-tree-row-1')
-    click('files-tree-row-1'); wait('files-tree-row-2'); key('Down'); key('space'); wait('file-line-1')
-    click('file-line-1')
+    click('files-tree-row-1'); wait('files-tree-row-2'); key('Down'); key('space'); wait('file-editor')
+    click('file-editor'); key('ctrl', 'Home'); key('Down'); key('shift', 'Down')
     reply = next(e for e in elements() if re.fullmatch(r'reply-\d+-selection-surface', e['id']))['visible']
     click_at({'x': reply['x'] + 4, 'y': reply['y'] + 9}, button='right')
     check('menu-send-selection' not in ids(), "a right click on a reply never offers the Files view's selected line")
@@ -156,7 +156,8 @@ try:
     click_at({'x': reply['x'] + 4, 'y': y}, button='right')
     check('menu-send-selection' in ids(), "the same right click offers the reply's own selected text")
     key('Escape')
-    click('file-line-1'); click('file-line-1', button='right'); wait('menu-send-selection')
+    click('file-editor'); key('ctrl', 'Home'); key('Down'); key('shift', 'Down')
+    click('file-editor', button='right'); wait('menu-send-selection')
     shot('07-files-menu', "The Files view's own right click offers Send to Claude Code.")
     key('ctrl', 'n')
     until(lambda: 'session-2' in ids(), 'Ctrl+N shows a new session')

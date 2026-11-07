@@ -168,7 +168,7 @@ impl TextLayout {
 /// a field has focus. Each is listed with `secondary-` (Command on macOS, Control
 /// elsewhere) and with `cmd-`, which the field binds on every platform, and arrows with
 /// Alt too for words on macOS, so a shortcut saved on one platform means the same on the
-/// other.
+/// other. The code editor binds only keys from this list too.
 pub fn editing_keys() -> Vec<(String, &'static str)> {
     let mut keys = Vec::new();
     for modifier in ["secondary", "cmd"] {
@@ -189,6 +189,10 @@ pub fn editing_keys() -> Vec<(String, &'static str)> {
     }
     for key in ["enter", "shift-enter"] {
         keys.push((key.to_owned(), "start a new line"));
+    }
+    // The code editor indents with Tab and Shift+Tab; other fields move focus with them.
+    for key in ["tab", "shift-tab"] {
+        keys.push((key.to_owned(), "indent or move focus"));
     }
     for key in ["backspace", "delete"] {
         for modifier in ["", "shift-", "alt-"] {

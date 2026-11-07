@@ -4,11 +4,13 @@
 
 pub mod automation;
 mod button;
+pub mod code_editor;
 mod color;
 pub mod command_palette;
 pub mod diagram;
 mod dialog;
 pub mod fuzzy;
+pub mod highlight;
 mod icon;
 mod kbd;
 mod label;
@@ -31,6 +33,7 @@ pub mod tree;
 pub mod virtual_list;
 
 pub use button::{Button, ButtonSize, ButtonStyle, IconButton, Swatch};
+pub use code_editor::CodeEditor;
 pub use color::Color;
 pub use command_palette::{CommandPalette, CommandPaletteState, PaletteItem};
 pub use dialog::{ConfirmDialog, DialogFocus};
@@ -49,7 +52,9 @@ pub use styled_ext::{StyledExt, h_flex, v_flex};
 pub use switch::Switch;
 pub use tabs::{DraggedTab, Tab, TabBar, TabDot};
 pub use text_input::{InputMode, TextInput};
-pub use theme::{ActionColor, ActiveTheme, Appearance, Colors, Density, Fonts, Theme, Tint};
+pub use theme::{
+    ActionColor, ActiveTheme, Appearance, Colors, Density, Fonts, SyntaxColors, Theme, Tint,
+};
 pub use tokens::{Elevation, TextSize, radius, spacing};
 pub use tooltip::Tooltip;
 pub use tree::{NodeId, NodeKind, Tree, TreeEntry, TreeModel, TreeState};
@@ -95,6 +100,7 @@ pub fn bind_keys(cx: &mut gpui::App) {
     command_palette::bind_keys(cx);
     select::bind_keys(cx);
     tree::bind_keys(cx);
+    code_editor::bind_keys(cx);
     markdown::selection::bind_keys(cx);
 }
 
@@ -109,10 +115,10 @@ pub mod prelude {
     pub use crate::automation::AutomationExt;
     pub use crate::text_input::{InputMode, TextInput};
     pub use crate::{
-        ActiveTheme, Button, ButtonSize, ButtonStyle, Color, ConfirmDialog, DialogFocus, Elevation,
-        Icon, IconButton, IconName, Kbd, Label, ListItem, Markdown, MenuHeader, MenuItem,
-        MenuSeparator, Monogram, PopoverMenu, StyledExt, Swatch, TextSize, Tooltip, h_flex, radius,
-        spacing, v_flex,
+        ActiveTheme, Button, ButtonSize, ButtonStyle, CodeEditor, Color, ConfirmDialog,
+        DialogFocus, Elevation, Icon, IconButton, IconName, Kbd, Label, ListItem, Markdown,
+        MenuHeader, MenuItem, MenuSeparator, Monogram, PopoverMenu, StyledExt, Swatch, TextSize,
+        Tooltip, h_flex, radius, spacing, v_flex,
     };
     pub use crate::{CommandPalette, CommandPaletteState, PaletteItem};
     pub use crate::{DraggedTab, Tab, TabBar, TabDot};

@@ -1600,6 +1600,14 @@ impl Keystone {
         }
     }
 
+    /// Re-reads the changes of the repository holding `path`, which the Files editor just
+    /// wrote, so Changes and the uncommitted diff opened from it show the edit.
+    pub(crate) fn file_saved(&self, path: &Path, cx: &mut App) {
+        if let Some(folder) = path.parent() {
+            self.changes.refresh(folder, cx);
+        }
+    }
+
     /// Re-reads the changes of each session folder an agent may just have written to.
     pub(crate) fn agent_changed_files(&self, sessions: &[u64], cx: &mut App) {
         for &session in sessions {
@@ -2211,6 +2219,50 @@ mod ui_tests {
         assert_eq!(
             reopened.workspace().commit_draft(key.as_str()),
             "half written"
+        );
+    }
+
+    /// A save from the Files editor shows in Changes at once, without waiting for the
+    /// window to lose and regain focus.
+    #[gpui::test]
+    fn a_file_saved_in_the_files_editor_shows_in_changes(cx: &mut gpui::TestAppContext) {
+        let (project, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let repo = project.path();
+        fixture(repo);
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "-m", "second"]);
+        let (view, cx) = open_keystone(repo, state.path(), cx);
+        cx.simulate_keystrokes("secondary-shift-e");
+        cx.run_until_parked();
+        click(cx, "surface-add");
+        click(cx, "surface-add-changes");
+        until(cx, "first status", |cx| settled(&view, cx));
+        assert!(
+            !shown(&view, cx)
+                .iter()
+                .any(|row| row.ends_with(" added.txt")),
+            "the tree starts clean: {:?}",
+            shown(&view, cx)
+        );
+
+        // Files comes forward with the tree focused. Rows: the project folder, then
+        // added.txt, which Space opens in the editor.
+        cx.simulate_keystrokes("secondary-shift-e");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down space");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("file-editor").is_some(),
+            "the editor is open"
+        );
+        cx.simulate_input("saved ");
+        cx.simulate_keystrokes("secondary-s");
+        until(cx, "the save shows in Changes", |cx| {
+            settled(&view, cx) && shown(&view, cx).iter().any(|row| row == "M added.txt")
+        });
+        assert_eq!(
+            fs::read_to_string(repo.join("added.txt")).unwrap(),
+            "saved new\n"
         );
     }
 

@@ -150,7 +150,7 @@ impl Keystone {
 
 #[cfg(all(test, feature = "ui-tests"))]
 #[path = "excerpt_tests.rs"]
-mod ui_tests;
+pub(crate) mod ui_tests;
 
 #[cfg(test)]
 mod tests {

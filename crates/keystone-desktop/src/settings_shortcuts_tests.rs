@@ -815,8 +815,8 @@ fn recording_a_letter_on_a_transcript_command_is_refused(cx: &mut TestAppContext
     }
 }
 
-/// Every key a text field binds, wherever it is bound, is one the keymap refuses for a
-/// command that ties with the field, so no rebinding can shadow it.
+/// Every key a text field or the code editor binds, wherever it is bound, is one the
+/// keymap refuses for a command that ties with the field, so no rebinding can shadow it.
 #[gpui::test]
 fn every_key_bound_in_a_text_field_is_an_editing_key(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -825,17 +825,19 @@ fn every_key_bound_in_a_text_field_is_an_editing_key(cx: &mut TestAppContext) {
         let bindings = cx.key_bindings();
         let bindings = bindings.borrow();
         let mut outside = Vec::new();
+        let mut editor = false;
         for binding in bindings.bindings() {
             let Some(context) = binding.predicate() else {
                 continue;
             };
             let context = context.to_string();
-            if !context.contains("TextInput") {
+            if !context.contains("TextInput") && !context.contains("CodeEditor") {
                 continue;
             }
-            if context != "TextInput" {
+            if context != "TextInput" && context != "CodeEditor" {
                 outside.push(context.clone());
             }
+            editor |= context == "CodeEditor";
             for keystroke in binding.keystrokes() {
                 assert!(
                     keystone_ui::text_input::editing_key(keystroke.inner()).is_some(),
@@ -850,5 +852,6 @@ fn every_key_bound_in_a_text_field_is_an_editing_key(cx: &mut TestAppContext) {
                 .any(|context| context.contains("QuickComposer")),
             "the quick composer's own field key is checked too: {outside:?}"
         );
+        assert!(editor, "the Files editor's keys are checked too");
     });
 }

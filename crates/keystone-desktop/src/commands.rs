@@ -7,6 +7,7 @@ use crate::changes::{CopyPullRequestLink, ToggleChanges};
 use crate::customization::OpenCustomize;
 use crate::diff_view::{ViewChanges, ViewUncommitted};
 use crate::excerpt::{SEND_SELECTION, SendSelection, Taken};
+use crate::file_view::{SAVE_FILE, Save};
 use crate::files::ToggleFiles;
 use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
@@ -50,6 +51,8 @@ pub(crate) struct Command {
 /// behind an open overlay.
 const APP: &str = "!Dialog && !CommandPalette";
 const TRANSCRIPT: &str = "Conversation && !Dialog && !CommandPalette";
+/// The Files editor, where Save runs.
+const FILE_EDITOR: &str = "FileView && !Dialog && !CommandPalette";
 
 pub(crate) const COMMANDS: &[Command] = &[
     Command {
@@ -128,6 +131,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-a"],
         context: Some(APP),
         action: || Box::new(SendSelection),
+    },
+    Command {
+        id: SAVE_FILE,
+        label: "Save file",
+        keys: &["secondary-s"],
+        context: Some(FILE_EDITOR),
+        action: || Box::new(Save),
     },
     Command {
         id: "focus-composer",
