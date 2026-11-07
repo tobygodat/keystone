@@ -109,7 +109,7 @@ impl Keystone {
                     .size(TextSize::Ui)
                     .weight(gpui::FontWeight::MEDIUM),
             )
-            .tooltip(Tooltip::text(keystone_ui::shortcut_text("secondary-alt-g")).builder())
+            .tooltip(Tooltip::text(crate::commands::hint("new-worktree-session", cx)).builder())
             .on_click(
                 self.scoped_listener(cx, |this, _, window, cx| this.open_new_worktree(window, cx)),
             )

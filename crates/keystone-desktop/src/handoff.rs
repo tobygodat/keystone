@@ -7,8 +7,8 @@ use crate::model_selector::{account_label, provider_name};
 use crate::view_state::ViewKey;
 use crate::{Keystone, arrangement, now_ms};
 use gpui::{
-    AnyElement, Context, Focusable, FontWeight, IntoElement, ParentElement, Styled, Window, div,
-    prelude::*, px,
+    AnyElement, App, Context, Focusable, FontWeight, IntoElement, ParentElement, Styled, Window,
+    div, prelude::*, px,
 };
 use keystone_agent::{ItemKind, ItemStatus, TurnStatus};
 use keystone_core::{Place, Provider, SessionContext};
@@ -278,12 +278,12 @@ pub(crate) fn build_as(
 }
 
 /// The top bar's Hand off control.
-pub(crate) fn button() -> impl IntoElement {
+pub(crate) fn button(cx: &App) -> impl IntoElement + use<> {
     IconButton::new("hand-off", IconName::Handoff)
         .debug_selector(|| "hand-off".into())
         .tooltip(Tooltip::with_key(
             "Hand off…",
-            keystone_ui::shortcut_text("secondary-shift-h"),
+            crate::commands::hint("hand-off", cx),
         ))
         .on_click(|_, window, cx| window.dispatch_action(Box::new(HandOff), cx))
 }

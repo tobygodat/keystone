@@ -59,7 +59,7 @@ pub enum RestoreControl {
 }
 
 /// A turn's checkpoint: Restore to here, and how many files the turn changed.
-fn restore_button(index: usize, control: RestoreControl, quiet: bool) -> AnyElement {
+fn restore_button(index: usize, control: RestoreControl, quiet: bool, cx: &App) -> AnyElement {
     let (label, files, on_click, view_changes) = match control {
         RestoreControl::Offered {
             files,
@@ -103,7 +103,7 @@ fn restore_button(index: usize, control: RestoreControl, quiet: bool) -> AnyElem
                             .aria_label("View this turn's changes")
                             .tooltip(Tooltip::with_key(
                                 "View this turn's changes",
-                                keystone_ui::shortcut_text("secondary-shift-d"),
+                                crate::commands::hint("view-changes", cx),
                             ))
                             .debug_selector(move || format!("view-changes-{index}"))
                             .on_click(move |event, window, cx| view_changes(event, window, cx)),
@@ -319,7 +319,7 @@ pub fn row(
                         h_flex()
                             .when(item.status == ItemStatus::InProgress, |d| d.invisible())
                             .when_some(restore.filter(|_| row_copy), |d, restore| {
-                                d.child(restore_button(index, restore, !selected))
+                                d.child(restore_button(index, restore, !selected, cx))
                             })
                             .child(
                                 h_flex()
@@ -356,7 +356,7 @@ pub fn row(
                                                 )
                                                 .tooltip(Tooltip::with_key(
                                                     "Second opinion…",
-                                                    keystone_ui::shortcut_text("secondary-alt-o"),
+                                                    crate::commands::hint("second-opinion", cx),
                                                 ))
                                                 .debug_selector(move || selector)
                                                 .on_click(move |event, window, cx| {

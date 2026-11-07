@@ -50,6 +50,7 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Notes](notes.md) covers the Notes surface: opening it from the palette, Ctrl+Shift+J and the + menu, one note per project kept in Keystone's database, autosave and restart, and Add to draft for a selection or the whole note.
 - [Import sessions](import.md) covers listing an account's own Claude Code or Codex conversations for the project folder with title, time and turn count, importing one as a session that resumes it with its newest 50 turns, the older-history line, the Imported mark that prevents a second copy, and that provider stores stay unchanged.
 - [Command palette](palette.md) covers opening with Ctrl+K or Ctrl+Shift+P, filtering, running a command, dismissing with focus restored, and dialog blocking.
+- [Shortcuts](shortcuts.md) covers Settings → Shortcuts: recording new keys for a palette command, keys the composer types being refused, conflicts, reset and Reset all, hints that follow the binding, relaunch, and bad saved entries being skipped.
 
 ## Coverage rules
 

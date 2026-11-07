@@ -11,6 +11,7 @@ use crate::files::ToggleFiles;
 use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
 use crate::import::ImportSessions;
+use crate::keymap::{self, Keymap};
 use crate::model_selector::{NextEffort, NextModel, ToggleFastMode};
 use crate::notes::ToggleNotes;
 use crate::projects::{ChangeProjectColor, OpenProject, SwitchProject};
@@ -29,8 +30,8 @@ use crate::{
     Quit, RenameSession, RetryRecovery, ToggleSettle, ToggleSidebar,
 };
 use gpui::{
-    Action, AppContext, Context, DummyKeyboardMapper, Entity, FocusHandle, Focusable, IntoElement,
-    KeyBinding, KeyBindingContextPredicate, Window,
+    Action, App, AppContext, Context, DummyKeyboardMapper, Entity, FocusHandle, Focusable,
+    IntoElement, KeyBinding, KeyBindingContextPredicate, Window,
 };
 use keystone_core::ViewId;
 use keystone_ui::{CommandPalette, CommandPaletteState, PaletteItem};
@@ -487,39 +488,56 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
 ];
 
-pub(crate) fn bindings() -> Vec<KeyBinding> {
+pub(crate) fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
     COMMANDS
         .iter()
         .flat_map(|command| {
-            command.keys.iter().map(|keys| {
-                let context = command
-                    .context
-                    .map(|context| KeyBindingContextPredicate::parse(context).unwrap().into());
-                KeyBinding::load(
-                    keys,
-                    (command.action)(),
-                    context,
-                    false,
-                    None,
-                    &DummyKeyboardMapper,
-                )
-                .unwrap()
-            })
+            let keys: &[&str] = if keymap.overridden(command.id) {
+                &[keymap.keys(command)]
+            } else {
+                command.keys
+            };
+            keys.iter()
+                .map(|keys| {
+                    let context = command
+                        .context
+                        .map(|context| KeyBindingContextPredicate::parse(context).unwrap().into());
+                    KeyBinding::load(
+                        keys,
+                        (command.action)(),
+                        context,
+                        false,
+                        None,
+                        &DummyKeyboardMapper,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
 
-pub(crate) fn palette_items() -> Vec<PaletteItem> {
+pub(crate) fn palette_items(keymap: &Keymap) -> Vec<PaletteItem> {
     COMMANDS
         .iter()
         .map(|command| {
             let item = PaletteItem::new(command.id, command.label);
-            match command.keys.first() {
-                Some(keys) => item.kbd(keystone_ui::shortcut_text(keys)),
-                None => item,
+            match keymap.keys(command) {
+                "" => item,
+                keys => item.kbd(keystone_ui::shortcut_text(keys)),
             }
         })
         .collect()
+}
+
+/// The shortcut hint for command `id`, as the user bound it. An id that names no
+/// command shows no hint; `command_hints_follow_the_users_binding` catches one.
+pub(crate) fn hint(id: &str, cx: &App) -> String {
+    let command = keymap::command(id);
+    debug_assert!(command.is_some(), "{id} is not a command");
+    command.map_or_else(String::new, |command| {
+        keystone_ui::shortcut_text(keymap::current(cx).keys(command))
+    })
 }
 
 pub(crate) fn action(id: &str) -> Option<Box<dyn Action>> {
@@ -560,7 +578,8 @@ impl Keystone {
         self.approval_menu = false;
         self.attach.menu = false;
         self.model_menu = None;
-        self.open_palette(palette_items(), Listing::Commands, window, cx);
+        let items = palette_items(keymap::current(cx));
+        self.open_palette(items, Listing::Commands, window, cx);
     }
 
     pub(crate) fn open_palette(
@@ -699,7 +718,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_bound_action() {
-        let bindings = bindings();
+        let bindings = bindings(&Keymap::parse(&serde_json::Value::Null));
         let mut ids = HashSet::new();
         let mut actions = HashSet::new();
         for command in COMMANDS {
@@ -734,8 +753,17 @@ mod tests {
 
     #[test]
     fn palette_kbd_matches_binding() {
-        let bindings = bindings();
-        for (command, item) in COMMANDS.iter().zip(palette_items()) {
+        for saved in [
+            serde_json::Value::Null,
+            serde_json::json!({"new-claude": "secondary-j", "next-model": "secondary-alt-shift-m"}),
+        ] {
+            palette_kbd_matches(&Keymap::parse(&saved));
+        }
+    }
+
+    fn palette_kbd_matches(keymap: &Keymap) {
+        let bindings = bindings(keymap);
+        for (command, item) in COMMANDS.iter().zip(palette_items(keymap)) {
             let name = (command.action)().name();
             let Some(binding) = bindings
                 .iter()
@@ -756,5 +784,80 @@ mod tests {
                 Some(keystone_ui::shortcut_text(&keys).as_str())
             );
         }
+    }
+
+    /// The string literal passed first to each `call` in `text`.
+    fn literals<'a>(text: &'a str, call: &'static str) -> impl Iterator<Item = &'a str> {
+        text.match_indices(call).filter_map(move |(at, _)| {
+            if text[..at].ends_with('"') {
+                return None;
+            }
+            let rest = text[at + call.len()..].trim_start();
+            rest.strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+        })
+    }
+
+    /// The string literal passed second to each `call` in `text`, such as the keys a
+    /// tooltip shows beside its label.
+    fn second_literals<'a>(text: &'a str, call: &'static str) -> impl Iterator<Item = &'a str> {
+        text.match_indices(call).filter_map(move |(at, _)| {
+            let args = &text[at + call.len()..];
+            let (mut depth, mut quoted) = (0, false);
+            let comma = args.char_indices().find_map(|(index, character)| {
+                match character {
+                    '"' => quoted = !quoted,
+                    '(' | '[' | '{' if !quoted => depth += 1,
+                    ')' | ']' | '}' if !quoted => {
+                        if depth == 0 {
+                            return Some(None);
+                        }
+                        depth -= 1;
+                    }
+                    ',' if !quoted && depth == 0 => return Some(Some(index)),
+                    _ => {}
+                }
+                None
+            })??;
+            args[comma + 1..]
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+        })
+    }
+
+    /// A hint written as a command's default keys would go stale once the user rebinds
+    /// it, and a hint naming no command would show nothing.
+    #[test]
+    fn command_hints_follow_the_users_binding() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stale = Vec::new();
+        for file in std::fs::read_dir(source).unwrap() {
+            let path = file.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for keys in literals(&text, "shortcut_text(") {
+                if let Some(command) = COMMANDS.iter().find(|c| c.keys.contains(&keys)) {
+                    stale.push(format!("{name}: use commands::hint(\"{}\")", command.id));
+                }
+            }
+            for shown in second_literals(&text, "with_key(") {
+                if let Some(command) = COMMANDS.iter().find(|c| {
+                    c.keys.first().map(|keys| keystone_ui::shortcut_text(keys))
+                        == Some(shown.to_owned())
+                }) {
+                    stale.push(format!("{name}: use commands::hint(\"{}\")", command.id));
+                }
+            }
+            for id in literals(&text, "commands::hint(") {
+                if keymap::command(id).is_none() {
+                    stale.push(format!("{name}: \"{id}\" is not a command"));
+                }
+            }
+        }
+        assert!(stale.is_empty(), "{}", stale.join("\n"));
     }
 }

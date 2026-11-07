@@ -39,12 +39,23 @@ const ROW_HEIGHT: f32 = 26.;
 /// How long typing must pause before the commit message is saved, as for drafts.
 const DRAFT_DELAY: Duration = Duration::from_millis(250);
 
+/// The list's own keys. View diff takes the keys the user gave "view-changes", so its
+/// tooltip and the transcript's agree.
 pub(crate) fn bind_keys(cx: &mut App) {
+    let view_changes = crate::keymap::command("view-changes")
+        .map(|command| crate::keymap::current(cx).keys(command).to_owned())
+        .unwrap_or_default();
     cx.bind_keys([
         KeyBinding::new("space", ToggleStaged, Some(LIST_CONTEXT)),
         KeyBinding::new("secondary-shift-c", CopyChangePath, Some(LIST_CONTEXT)),
-        KeyBinding::new("secondary-shift-d", ViewChanges, Some(LIST_CONTEXT)),
     ]);
+    if !view_changes.is_empty() {
+        cx.bind_keys([KeyBinding::new(
+            &view_changes,
+            ViewChanges,
+            Some(LIST_CONTEXT),
+        )]);
+    }
 }
 
 /// One Changes panel per folder, so switching sessions keeps each folder's message
@@ -1073,7 +1084,7 @@ impl ChangesPanel {
                     .aria_label("View uncommitted changes")
                     .tooltip(Tooltip::with_key(
                         "View uncommitted changes",
-                        keystone_ui::shortcut_text("secondary-alt-u"),
+                        crate::commands::hint("view-uncommitted", cx),
                     ))
                     .on_click(cx.listener(|this, _, window, cx| this.view_diff(None, window, cx))),
             )
@@ -1430,7 +1441,7 @@ fn row(
                         .aria_label("View diff")
                         .tooltip(Tooltip::with_key(
                             "View diff",
-                            keystone_ui::shortcut_text("secondary-shift-d"),
+                            crate::commands::hint("view-changes", cx),
                         ))
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();

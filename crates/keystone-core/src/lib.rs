@@ -698,8 +698,16 @@ pub struct Preferences {
     windows: SavedWindows,
     #[serde(skip_serializing_if = "QuickDraft::is_empty")]
     quick: QuickDraft,
+    /// Command id to keystrokes. Kept raw so a bad entry, or one a later version
+    /// wrote, never fails the workspace load; the desktop parses it.
+    #[serde(skip_serializing_if = "shortcuts_unset")]
+    shortcuts: Value,
     #[serde(flatten)]
     unknown: Map<String, Value>,
+}
+
+fn shortcuts_unset(shortcuts: &Value) -> bool {
+    shortcuts.is_null() || shortcuts.as_object().is_some_and(Map::is_empty)
 }
 
 impl Preferences {
@@ -717,6 +725,10 @@ impl Preferences {
 
     pub fn sounds(&self) -> Sounds {
         self.sounds
+    }
+
+    pub fn shortcuts(&self) -> &Value {
+        &self.shortcuts
     }
 
     pub fn sidebar_layout(&self) -> &SavedLayout {
@@ -1484,6 +1496,25 @@ impl Store {
 
     pub fn set_sounds(&mut self, sounds: Sounds) -> StoreResult<Applied<()>> {
         self.update_preferences(|preferences| preferences.sounds = sounds)
+    }
+
+    /// Saves `keys` as `command`'s shortcut, or removes its entry for `None`. Every
+    /// other entry stays, including ones this version cannot read.
+    pub fn set_shortcut(&mut self, command: &str, keys: Option<&str>) -> StoreResult<Applied<()>> {
+        self.update_preferences(|preferences| {
+            if !preferences.shortcuts.is_object() {
+                preferences.shortcuts = Value::Object(Map::new());
+            }
+            let entries = preferences.shortcuts.as_object_mut().expect("an object");
+            match keys {
+                Some(keys) => entries.insert(command.into(), keys.into()),
+                None => entries.remove(command),
+            };
+        })
+    }
+
+    pub fn reset_shortcuts(&mut self) -> StoreResult<Applied<()>> {
+        self.update_preferences(|preferences| preferences.shortcuts = Value::Null)
     }
 
     /// Saves exactly `layout`, readable or not, over the latest preferences, leaving
@@ -3252,6 +3283,70 @@ mod tests {
             reopened.workspace().preferences().notifications(),
             Notifications::default(),
             "sounds leave notifications as they are"
+        );
+    }
+
+    #[test]
+    fn shortcuts_round_trip_and_keep_entries_this_version_cannot_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":1,"workspace":{"sessions":[],"preferences":{"shortcuts":{"later-command":{"keys":"f9"},"quit":7}}}}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store
+            .set_shortcut("new-claude", Some("secondary-j"))
+            .unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.workspace().preferences().shortcuts(),
+            &serde_json::json!({
+                "later-command": {"keys": "f9"},
+                "quit": 7,
+                "new-claude": "secondary-j",
+            })
+        );
+
+        store.set_shortcut("new-claude", None).unwrap();
+        store.set_shortcut("quit", None).unwrap();
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .workspace()
+                .preferences()
+                .shortcuts(),
+            &serde_json::json!({"later-command": {"keys": "f9"}})
+        );
+        store.reset_shortcuts().unwrap();
+        assert!(!json(&path).to_string().contains("shortcuts"));
+    }
+
+    #[test]
+    fn shortcuts_of_the_wrong_type_still_load_the_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next_id":1,"workspace":{"sessions":[],"preferences":{"shortcuts":["secondary-j"],"sounds":{"enabled":true}}}}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.workspace().preferences().sounds().enabled);
+        assert_eq!(
+            store.workspace().preferences().shortcuts(),
+            &serde_json::json!(["secondary-j"])
+        );
+        store.set_shortcut("quit", Some("secondary-alt-q")).unwrap();
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .workspace()
+                .preferences()
+                .shortcuts(),
+            &serde_json::json!({"quit": "secondary-alt-q"}),
+            "a value that is not an object is replaced by one"
         );
     }
 

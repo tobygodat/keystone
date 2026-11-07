@@ -85,10 +85,17 @@ pub fn register_fonts(text_system: &gpui::TextSystem) -> anyhow::Result<()> {
 pub fn init(cx: &mut gpui::App) {
     register_fonts(cx.text_system()).expect("the bundled fonts load");
     set_theme(Theme::dark(), cx);
+    bind_keys(cx);
+}
+
+/// Binds the components' own keys. A host that clears the keymap to rebind it calls
+/// this again.
+pub fn bind_keys(cx: &mut gpui::App) {
     virtual_list::bind_keys(cx);
     command_palette::bind_keys(cx);
     select::bind_keys(cx);
     tree::bind_keys(cx);
+    markdown::selection::bind_keys(cx);
 }
 
 /// Replaces the active theme and redraws every window, including cached views.

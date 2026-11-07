@@ -55,10 +55,14 @@ pub(super) fn focused_text(window: &Window, cx: &App) -> Option<String> {
     (state.is_focused(window) && !state.range().is_empty()).then(|| state.selected_text())
 }
 
-fn bind_keys(cx: &mut App) {
-    if cx.has_global::<Bindings>() {
-        return;
+/// Binds the selection keys once, for a host that never called [`crate::bind_keys`].
+fn ensure_keys(cx: &mut App) {
+    if !cx.has_global::<Bindings>() {
+        bind_keys(cx);
     }
+}
+
+pub(crate) fn bind_keys(cx: &mut App) {
     cx.set_global(Bindings);
     cx.bind_keys([
         KeyBinding::new("secondary-c", Copy, Some("MarkdownText && selection")),
@@ -255,7 +259,7 @@ impl Selection {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
-        bind_keys(cx);
+        ensure_keys(cx);
         let state = window.use_keyed_state(
             ElementId::Name(format!("{id}-selection").into()),
             cx,

@@ -162,6 +162,62 @@ impl TextLayout {
     }
 }
 
+/// Keys a text field keeps for editing, with what each does there, on every platform.
+/// A host's shortcut on one of them would win or lose against the field's own binding by
+/// the order the two were registered, so a host keeps them off anything that runs while
+/// a field has focus. Each is listed with `secondary-` (Command on macOS, Control
+/// elsewhere) and with `cmd-`, which the field binds on every platform, and arrows with
+/// Alt too for words on macOS, so a shortcut saved on one platform means the same on the
+/// other.
+pub fn editing_keys() -> Vec<(String, &'static str)> {
+    let mut keys = Vec::new();
+    for modifier in ["secondary", "cmd"] {
+        for (key, what) in [
+            ("a", "select all"),
+            ("c", "copy"),
+            ("x", "cut"),
+            ("v", "paste"),
+            ("z", "undo"),
+            ("shift-z", "redo"),
+            ("y", "redo"),
+            ("enter", "send what you typed"),
+            ("backspace", "delete text"),
+            ("delete", "delete text"),
+        ] {
+            keys.push((format!("{modifier}-{key}"), what));
+        }
+    }
+    for key in ["enter", "shift-enter"] {
+        keys.push((key.to_owned(), "start a new line"));
+    }
+    for key in ["backspace", "delete"] {
+        for modifier in ["", "shift-", "alt-"] {
+            keys.push((format!("{modifier}{key}"), "delete text"));
+        }
+    }
+    for key in [
+        "left", "right", "up", "down", "home", "end", "pageup", "pagedown",
+    ] {
+        for modifier in ["", "alt-", "secondary-", "cmd-"] {
+            for shift in ["", "shift-"] {
+                keys.push((format!("{modifier}{shift}{key}"), "move the cursor"));
+            }
+        }
+    }
+    keys
+}
+
+/// What `keystroke` does in a text field, when it is one of [`editing_keys`]. The Fn
+/// modifier, which macOS reports with arrow keys, makes no difference.
+pub fn editing_key(keystroke: &gpui::Keystroke) -> Option<&'static str> {
+    let mut modifiers = keystroke.modifiers;
+    modifiers.function = false;
+    editing_keys().into_iter().find_map(|(keys, what)| {
+        let editing = gpui::Keystroke::parse(&keys).expect("an editing key parses");
+        (editing.modifiers == modifiers && editing.key == keystroke.key).then_some(what)
+    })
+}
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
@@ -360,7 +416,13 @@ impl TextInput {
     }
 
     pub fn bind_keys(cx: &mut App) {
-        cx.bind_keys([
+        cx.bind_keys(Self::bindings());
+    }
+
+    /// Every key a text field binds. Each is one of [`EDITING_KEYS`], so a host that keeps
+    /// those off its own shortcuts never takes one from a field.
+    fn bindings() -> Vec<KeyBinding> {
+        let bindings = vec![
             KeyBinding::new("backspace", Backspace, Some("TextInput")),
             KeyBinding::new("delete", Delete, Some("TextInput")),
             KeyBinding::new("left", Left, Some("TextInput")),
@@ -387,17 +449,22 @@ impl TextInput {
             KeyBinding::new("down", Down, Some("TextInput")),
             KeyBinding::new("shift-up", SelectUp, Some("TextInput")),
             KeyBinding::new("shift-down", SelectDown, Some("TextInput")),
-        ]);
+        ];
         // Mac keyboards have no Home or End key; Command and an arrow stand in for them.
         #[cfg(target_os = "macos")]
-        cx.bind_keys([
-            KeyBinding::new("cmd-left", Home, Some("TextInput")),
-            KeyBinding::new("cmd-right", End, Some("TextInput")),
-            KeyBinding::new("cmd-shift-left", SelectHome, Some("TextInput")),
-            KeyBinding::new("cmd-shift-right", SelectEnd, Some("TextInput")),
-            KeyBinding::new("cmd-up", DocumentHome, Some("TextInput")),
-            KeyBinding::new("cmd-down", DocumentEnd, Some("TextInput")),
-        ]);
+        let bindings = {
+            let mut bindings = bindings;
+            bindings.extend([
+                KeyBinding::new("cmd-left", Home, Some("TextInput")),
+                KeyBinding::new("cmd-right", End, Some("TextInput")),
+                KeyBinding::new("cmd-shift-left", SelectHome, Some("TextInput")),
+                KeyBinding::new("cmd-shift-right", SelectEnd, Some("TextInput")),
+                KeyBinding::new("cmd-up", DocumentHome, Some("TextInput")),
+                KeyBinding::new("cmd-down", DocumentEnd, Some("TextInput")),
+            ]);
+            bindings
+        };
+        bindings
     }
 
     fn cursor_offset(&self) -> usize {
@@ -1641,5 +1708,61 @@ mod tests {
         input.read_with(cx, |input, _| {
             assert!(input.tokens().is_empty(), "a token must stand alone");
         });
+    }
+}
+
+#[cfg(test)]
+mod editing_keys {
+    use super::*;
+
+    #[test]
+    fn every_key_a_field_binds_is_an_editing_key() {
+        for binding in TextInput::bindings() {
+            let [keystroke] = binding.keystrokes() else {
+                panic!("a field binds single keystrokes");
+            };
+            assert!(
+                editing_key(keystroke.inner()).is_some(),
+                "{} is in editing_keys",
+                keystroke.inner().unparse()
+            );
+        }
+    }
+
+    #[test]
+    fn editing_keys_cover_control_and_command_alike() {
+        for keys in [
+            "secondary-a",
+            "cmd-a",
+            "secondary-v",
+            "cmd-v",
+            "cmd-shift-z",
+            "secondary-y",
+            "alt-left",
+            "secondary-shift-right",
+            "cmd-left",
+            "cmd-up",
+            "alt-backspace",
+            "cmd-backspace",
+            "secondary-enter",
+            "cmd-enter",
+            "shift-enter",
+        ] {
+            let keystroke = gpui::Keystroke::parse(keys).unwrap();
+            assert!(editing_key(&keystroke).is_some(), "{keys}");
+        }
+        let mut arrow = gpui::Keystroke::parse("cmd-left").unwrap();
+        arrow.modifiers.function = true;
+        assert_eq!(editing_key(&arrow), Some("move the cursor"));
+        for keys in [
+            "secondary-j",
+            "cmd-shift-a",
+            "secondary-alt-left",
+            "f2",
+            "secondary-shift-enter",
+        ] {
+            let keystroke = gpui::Keystroke::parse(keys).unwrap();
+            assert_eq!(editing_key(&keystroke), None, "{keys}");
+        }
     }
 }

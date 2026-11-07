@@ -31,7 +31,7 @@ use std::time::Duration;
 
 mod incremental;
 mod mend;
-mod selection;
+pub(crate) mod selection;
 
 pub use incremental::IncrementalParser;
 

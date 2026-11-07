@@ -54,6 +54,7 @@ enum Section {
     Accounts,
     Integrations,
     Prompts,
+    Shortcuts,
     Scheduled,
     Project,
 }
@@ -62,7 +63,7 @@ enum Section {
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 9] = [
+const SECTIONS: [(Section, &str, &str, Rows); 10] = [
     (
         Section::Appearance,
         "Appearance",
@@ -122,6 +123,12 @@ const SECTIONS: [(Section, &str, &str, Rows); 9] = [
     ),
     (Section::Prompts, "Prompts", "settings-section-prompts", &[]),
     (
+        Section::Shortcuts,
+        "Shortcuts",
+        "settings-section-shortcuts",
+        &[],
+    ),
+    (
         Section::Scheduled,
         "Scheduled",
         "settings-section-scheduled",
@@ -146,6 +153,7 @@ pub(crate) struct SettingsPage {
     pub(crate) accounts: crate::settings_accounts::AccountsPage,
     pub(crate) integrations: crate::integrations::IntegrationsPage,
     pub(crate) prompts: crate::settings_prompts::PromptsPage,
+    pub(crate) shortcuts: crate::settings_shortcuts::ShortcutsPage,
     pub(crate) scheduled: crate::settings_scheduled::ScheduledPage,
     pub(crate) project: crate::settings_project::ProjectPage,
 }
@@ -167,6 +175,7 @@ impl SettingsPage {
             accounts: crate::settings_accounts::AccountsPage::new(cx),
             integrations: crate::integrations::IntegrationsPage::new(cx),
             prompts: crate::settings_prompts::PromptsPage::new(cx),
+            shortcuts: crate::settings_shortcuts::ShortcutsPage::new(cx),
             scheduled: crate::settings_scheduled::ScheduledPage::new(cx),
             project: crate::settings_project::ProjectPage::new(cx),
         }
@@ -346,6 +355,9 @@ impl Keystone {
             return;
         };
         let opened = page.section != SECTIONS[at].0;
+        if opened {
+            page.shortcuts.stop_recording();
+        }
         page.section = SECTIONS[at].0;
         window.focus(&page.sections[at], cx);
         let section = page.section;
@@ -399,15 +411,16 @@ impl Keystone {
             Section::Accounts => Some(self.accounts_section(page, cx).into_any_element()),
             Section::Integrations => Some(self.integrations_section(page, cx).into_any_element()),
             Section::Prompts => Some(self.prompts_section(page, cx).into_any_element()),
+            Section::Shortcuts => Some(self.shortcuts_section(page, cx)),
             Section::Scheduled => Some(self.scheduled_section(page, cx).into_any_element()),
             Section::Project => Some(self.project_section(page, cx)),
             _ => None,
         };
-        let content = div()
+        let scrolled = div()
             .id("settings-content")
             .flex_1()
-            .min_w_0()
-            .h_full()
+            .min_h_0()
+            .w_full()
             .overflow_y_scroll()
             .child(
                 v_flex()
@@ -437,14 +450,27 @@ impl Keystone {
                             .surface(Elevation::Surface, cx)
                             .p(spacing::LG)
                             .child(section)
-                    }))
-                    .children(self.error_line(cx).map(|error| {
-                        div()
-                            .pt(spacing::MD)
-                            .automation_id("settings-error")
-                            .child(error)
                     })),
             );
+        // A save that fails says so below the scrolled section, as the status line does
+        // under the composer, so it shows wherever in a long section the change was made.
+        let content = v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(scrolled)
+            .children(self.error_line(cx).map(|error| {
+                div().flex_none().w_full().hairline_t(cx).child(
+                    div()
+                        .w_full()
+                        .max_w(px(640.))
+                        .mx_auto()
+                        .px(spacing::LG)
+                        .py(spacing::MD)
+                        .automation_id("settings-error")
+                        .child(error),
+                )
+            }));
         Some(
             h_flex()
                 .flex_1()
@@ -1498,10 +1524,10 @@ mod tests {
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
         // Appearance's row holds focus; next come Fonts, Notifications, Sounds, Accounts,
-        // Integrations, Prompts, Scheduled, Project, then System, the first theme. Right
-        // and Left move the choice; three more Tabs pass Light and Dark to the first action
-        // color.
-        keys(cx, "tab tab tab tab tab tab tab tab tab");
+        // Integrations, Prompts, Shortcuts, Scheduled, Project, then System, the first
+        // theme. Right and Left move the choice; three more Tabs pass Light and Dark to the
+        // first action color.
+        keys(cx, &["tab"; 10].join(" "));
         keys(cx, "right");
         assert_eq!(saved(&path).theme, ThemeMode::Light);
         keys(cx, "left");
@@ -1528,9 +1554,9 @@ mod tests {
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
         // From Default back past Compact, the six action colors, Theme's three choices,
-        // Project, Scheduled, Prompts, Integrations, Accounts, Sounds, Notifications, Fonts,
-        // and Appearance to Back.
-        keys(cx, &["shift-tab"; 20].join(" "));
+        // Project, Scheduled, Shortcuts, Prompts, Integrations, Accounts, Sounds,
+        // Notifications, Fonts, and Appearance to Back.
+        keys(cx, &["shift-tab"; 21].join(" "));
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
         assert!(composer_focused(&view, cx));
@@ -1543,8 +1569,11 @@ mod tests {
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
         // Fonts' row holds focus; Notifications', Sounds', Accounts', Integrations', Prompts',
-        // Scheduled's and Project's rows come before the first font menu.
-        keys(cx, "secondary-, down tab tab tab tab tab tab tab tab down");
+        // Shortcuts', Scheduled's and Project's rows come before the first font menu.
+        keys(
+            cx,
+            "secondary-, down tab tab tab tab tab tab tab tab tab down",
+        );
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");

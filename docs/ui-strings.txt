@@ -1170,6 +1170,19 @@ crates/keystone-desktop/src/integrations.rs
 	{} in {}
 	{} is no longer there.
 
+crates/keystone-desktop/src/keymap.rs
+	Conversation
+	Dialog
+	Keystone
+	Text fields type that key, so it can't run this command.
+	Text fields use that key to {what}, so it can't run this command.
+	That key types in the composer, so it can't run this command there.
+	The saved shortcuts are not a list of commands, so none were read.
+	{label}: {keys} is not a shortcut.
+	{label}: {reason}
+	{label}: “{keys}” is not a shortcut.
+	“{id}” is not a command.
+
 crates/keystone-desktop/src/limit.rs
 	 · continues at {}
 	 · reset {}
@@ -1203,7 +1216,6 @@ crates/keystone-desktop/src/main.rs
 	Could not check the provider's record: {reason}.
 	Deny
 	Draft not saved. {error}
-	F2
 	Filter sessions
 	Hide sidebar
 	Import…
@@ -1563,6 +1575,7 @@ crates/keystone-desktop/src/settings_page.rs
 	Pull request checks and reviews
 	Scheduled
 	Settings not saved. {error}
+	Shortcuts
 	Sounds
 	Spacious
 	System
@@ -1645,6 +1658,17 @@ crates/keystone-desktop/src/settings_scheduled.rs
 	{when}, run now: {}
 	{when}{late}: {}
 	{} · {} · {} · {next}
+
+crates/keystone-desktop/src/settings_shortcuts.rs
+	Also bound to {}
+	Not set
+	Press a shortcut…
+	Reset all
+	Reset to default
+	Select a shortcut, then press the keys to run it with.
+	Settings not saved. {error}
+	Skipped saved shortcuts
+	{} and {last}
 
 crates/keystone-desktop/src/setup.rs
 	Cancel
@@ -1865,6 +1889,13 @@ crates/keystone-ui/src/markdown.rs
 
 crates/keystone-ui/src/select.rs
 	Choose…
+
+crates/keystone-ui/src/text_input.rs
+	delete text
+	move the cursor
+	select all
+	send what you typed
+	start a new line
 
 crates/keystone-ui/src/tree.rs
 	Loading…

@@ -766,7 +766,7 @@ impl Keystone {
                 .debug_selector(|| "split-right".into())
                 .tooltip(Tooltip::with_key(
                     "Split right",
-                    keystone_ui::shortcut_text("secondary-\\"),
+                    crate::commands::hint("split-right", cx),
                 ))
                 .on_click(
                     self.scoped_listener(cx, |this, _, window, cx| this.split_right(window, cx)),

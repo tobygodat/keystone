@@ -16,6 +16,7 @@ mod fork;
 mod handoff;
 mod import;
 mod integrations;
+mod keymap;
 mod limit;
 mod mentions;
 mod model_selector;
@@ -40,6 +41,7 @@ mod settings_page;
 mod settings_project;
 mod settings_prompts;
 mod settings_scheduled;
+mod settings_shortcuts;
 mod slash_menu;
 mod sounds;
 mod transcript;
@@ -1470,7 +1472,13 @@ impl Keystone {
                                     .color(Color::Strong)
                                     .truncate(),
                             )
-                            .tooltip(Tooltip::with_key("Rename session", "F2").builder())
+                            .tooltip(
+                                Tooltip::with_key(
+                                    "Rename session",
+                                    commands::hint("rename-session", cx),
+                                )
+                                .builder(),
+                            )
                             .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                                 this.open_rename(window, cx)
                             })),
@@ -1485,8 +1493,8 @@ impl Keystone {
             })
             .child(div().flex_1())
             .when(in_session, |d| {
-                d.child(self.own_press(handoff::button(), cx))
-                    .child(self.own_press(second_opinion::button(), cx))
+                d.child(self.own_press(handoff::button(cx), cx))
+                    .child(self.own_press(second_opinion::button(cx), cx))
             })
             .when(self.settings.is_none(), |d| {
                 d.children(self.split_toggle(cx))
@@ -1515,7 +1523,7 @@ impl Keystone {
                                     .debug_selector(|| "close".into())
                                     .tooltip(Tooltip::with_key(
                                         "Close window",
-                                        keystone_ui::shortcut_text("secondary-shift-w"),
+                                        commands::hint("close-window", cx),
                                     ))
                                     .on_click({
                                         let root = cx.weak_entity();
@@ -1771,7 +1779,7 @@ impl Keystone {
         }))
         .child(
             MenuItem::new("new-claude", "Claude Code")
-                .kbd(keystone_ui::shortcut_text("secondary-n"))
+                .kbd(commands::hint("new-claude", cx))
                 .debug_selector(|| "new-claude".into())
                 .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                     this.start(Provider::Claude, window, cx)
@@ -1779,7 +1787,7 @@ impl Keystone {
         )
         .child(
             MenuItem::new("new-codex", "Codex")
-                .kbd(keystone_ui::shortcut_text("secondary-shift-n"))
+                .kbd(commands::hint("new-codex", cx))
                 .debug_selector(|| "new-codex".into())
                 .on_click(self.scoped_listener(cx, |this, _, window, cx| {
                     this.start(Provider::Codex, window, cx)
@@ -1787,7 +1795,7 @@ impl Keystone {
         )
         .child(
             MenuItem::new("new-worktree", "In worktree…")
-                .kbd(keystone_ui::shortcut_text("secondary-alt-g"))
+                .kbd(commands::hint("new-worktree-session", cx))
                 .debug_selector(|| "new-worktree".into())
                 .on_click(
                     self.scoped_listener(cx, |this, _, window, cx| {
@@ -1797,7 +1805,7 @@ impl Keystone {
         )
         .child(
             MenuItem::new("import-sessions", "Import…")
-                .kbd(keystone_ui::shortcut_text("secondary-alt-i"))
+                .kbd(commands::hint("import-sessions", cx))
                 .debug_selector(|| "import-sessions".into())
                 .on_click(
                     self.scoped_listener(cx, |this, _, window, cx| this.open_import(window, cx)),
@@ -2023,11 +2031,8 @@ impl Keystone {
     fn welcome_pill(&self, provider: Provider, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let (id, key) = match provider {
-            Provider::Claude => ("welcome-claude", keystone_ui::shortcut_text("secondary-n")),
-            Provider::Codex => (
-                "welcome-codex",
-                keystone_ui::shortcut_text("secondary-shift-n"),
-            ),
+            Provider::Claude => ("welcome-claude", commands::hint("new-claude", cx)),
+            Provider::Codex => ("welcome-codex", commands::hint("new-codex", cx)),
         };
         h_flex()
             .id(id)
@@ -3116,9 +3121,7 @@ impl Keystone {
                                     "Use recovered history",
                                 )
                                 .style(ButtonStyle::Primary)
-                                .tooltip(Tooltip::text(keystone_ui::shortcut_text(
-                                    "secondary-shift-enter",
-                                )))
+                                .tooltip(Tooltip::text(commands::hint("continue-recovery", cx)))
                                 .when(keyboard, |b| b.track_focus(&continue_focus))
                                 .debug_selector(move || {
                                     arrangement::selector("recovery-continue", key.view).to_string()
@@ -3137,9 +3140,7 @@ impl Keystone {
                                     "Retry",
                                 )
                                 .style(ButtonStyle::Subtle)
-                                .tooltip(Tooltip::text(keystone_ui::shortcut_text(
-                                    "secondary-shift-r",
-                                )))
+                                .tooltip(Tooltip::text(commands::hint("retry-recovery", cx)))
                                 .when(keyboard, |b| b.track_focus(&retry_focus))
                                 .debug_selector(move || {
                                     arrangement::selector("recovery-retry", key.view).to_string()
@@ -11262,11 +11263,14 @@ fn send_button(
         })
 }
 
-/// The app's keyboard shortcuts, shared by `main` and the GPUI tests.
+/// Every key binding the app has, shared by `main` and the GPUI tests. `keymap::apply`
+/// clears the keymap and calls this again, so a binding made anywhere else is lost.
 fn bind_keys(cx: &mut App) {
+    keystone_ui::bind_keys(cx);
     TextInput::bind_keys(cx);
     customization::bind_keys(cx);
-    cx.bind_keys(commands::bindings());
+    let commands = commands::bindings(keymap::current(cx));
+    cx.bind_keys(commands);
     files::bind_keys(cx);
     file_view::bind_keys(cx);
     diff_view::bind_keys(cx);
@@ -11311,6 +11315,7 @@ fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new("enter", quick::SendQuick, Some("QuickComposer > TextInput")),
         gpui::KeyBinding::new("escape", quick::DismissQuick, Some("QuickComposer")),
     ]);
+    platform::bind_menus(cx);
 }
 
 fn state_path() -> Result<PathBuf, String> {
@@ -11382,9 +11387,19 @@ fn main() {
     application.on_reopen(reopen_from_dock);
     application.run(move |cx: &mut App| {
         keystone_ui::init(cx);
-        bind_keys(cx);
         platform::install_menus(cx);
         let state = install_app_state(store, cx);
+        let shortcuts = state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .shortcuts()
+            .clone();
+        keymap::apply(&shortcuts, cx);
+        for reason in keymap::current(cx).skipped() {
+            eprintln!("Skipped a saved shortcut. {reason}");
+        }
         cx.on_app_quit(|cx| {
             save_on_system_quit(cx);
             async {}

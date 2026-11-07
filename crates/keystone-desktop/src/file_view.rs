@@ -447,8 +447,9 @@ impl Render for FileView {
                             .size(ButtonSize::Compact)
                             .disabled(self.selection.is_none())
                             .debug_selector(|| "file-view-send".into())
-                            .tooltip(Tooltip::text(keystone_ui::shortcut_text(
-                                "secondary-shift-a",
+                            .tooltip(Tooltip::text(crate::commands::hint(
+                                crate::excerpt::SEND_SELECTION,
+                                cx,
                             )))
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
                     }))

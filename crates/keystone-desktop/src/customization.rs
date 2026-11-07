@@ -262,9 +262,7 @@ impl Keystone {
             .size(ButtonSize::Compact)
             .selected(open)
             .debug_selector(|| "customize-toggle".into())
-            .tooltip(Tooltip::text(keystone_ui::shortcut_text(
-                "secondary-shift-l",
-            )))
+            .tooltip(Tooltip::text(crate::commands::hint("customize-layout", cx)))
             .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                 this.customize(if open { Action::Close } else { Action::Open }, window, cx)
             }))

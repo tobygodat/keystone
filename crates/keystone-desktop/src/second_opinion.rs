@@ -11,7 +11,8 @@ use crate::model_selector::provider_name;
 use crate::view_state::ViewKey;
 use crate::{Keystone, arrangement, now_ms};
 use gpui::{
-    AnyElement, Context, Focusable, IntoElement, ParentElement, Styled, Window, div, prelude::*,
+    AnyElement, App, Context, Focusable, IntoElement, ParentElement, Styled, Window, div,
+    prelude::*,
 };
 use keystone_agent::recovery::{Outcome, TurnEvidence};
 use keystone_agent::{ItemKind, ItemStatus, TurnStatus};
@@ -166,12 +167,12 @@ impl Progress {
 }
 
 /// The top bar's Second opinion control.
-pub(crate) fn button() -> impl IntoElement {
+pub(crate) fn button(cx: &App) -> impl IntoElement + use<> {
     IconButton::new("second-opinion", IconName::Chat)
         .debug_selector(|| "second-opinion".into())
         .tooltip(Tooltip::with_key(
             "Second opinion…",
-            keystone_ui::shortcut_text("secondary-alt-o"),
+            crate::commands::hint("second-opinion", cx),
         ))
         .on_click(|_, window, cx| window.dispatch_action(Box::new(AskAboutConversation), cx))
 }

@@ -351,7 +351,7 @@ impl Keystone {
             .collect();
         items.push(
             PaletteItem::new(OPEN_FOLDER, "Open folder…")
-                .kbd(keystone_ui::shortcut_text("secondary-shift-o")),
+                .kbd(crate::commands::hint("open-project", cx)),
         );
         items
     }
@@ -525,7 +525,8 @@ impl Keystone {
             .hover(|d| d.bg(colors.element_hover))
             .when(self.projects.is_none() && self.palette.is_none(), |d| {
                 d.tooltip(
-                    Tooltip::with_key(tooltip, keystone_ui::shortcut_text("secondary-o")).builder(),
+                    Tooltip::with_key(tooltip, crate::commands::hint("switch-project", cx))
+                        .builder(),
                 )
             })
             .on_click(self.scoped_listener(cx, |this, _, window, cx| {

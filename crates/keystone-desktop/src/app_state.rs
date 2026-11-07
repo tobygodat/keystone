@@ -950,6 +950,32 @@ impl AppState {
         result
     }
 
+    pub(crate) fn set_shortcut(
+        &mut self,
+        command: &str,
+        keys: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self.store.set_shortcut(command, keys);
+        self.publish(cx);
+        result
+    }
+
+    pub(crate) fn reset_shortcuts(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+        let result = self.store.reset_shortcuts();
+        self.publish(cx);
+        result
+    }
+
     pub(crate) fn set_settled(
         &mut self,
         id: u64,

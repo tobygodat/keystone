@@ -176,9 +176,6 @@ mod menus {
 
     gpui::actions!(keystone, [Hide, HideOthers, ShowAll, Minimize, Zoom]);
 
-    /// The app menu and Window menu every Mac app has. Copy, paste and the rest stay
-    /// on their shortcuts, which text fields and the transcript bind to their own
-    /// actions.
     pub(crate) fn install(cx: &mut App) {
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
@@ -193,6 +190,13 @@ mod menus {
                 let _ = window.update(cx, |_, window, _| window.zoom_window());
             }
         });
+    }
+
+    /// The app menu and Window menu every Mac app has. Copy, paste and the rest stay
+    /// on their shortcuts, which text fields and the transcript bind to their own
+    /// actions. A menu shows the key bound when it is set, so this runs after every
+    /// rebinding.
+    pub(crate) fn bind(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("cmd-alt-h", HideOthers, None),
@@ -218,10 +222,18 @@ mod menus {
     }
 }
 
-/// Installs the macOS menu bar. Linux has none.
+/// Handles the macOS menu bar's own actions. Linux has none.
 pub(crate) fn install_menus(cx: &mut gpui::App) {
     #[cfg(target_os = "macos")]
     menus::install(cx);
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
+}
+
+/// Binds the macOS menu keys and sets the menu bar with the keys bound now.
+pub(crate) fn bind_menus(cx: &mut gpui::App) {
+    #[cfg(target_os = "macos")]
+    menus::bind(cx);
     #[cfg(not(target_os = "macos"))]
     let _ = cx;
 }
