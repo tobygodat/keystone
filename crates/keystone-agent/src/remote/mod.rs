@@ -1,0 +1,45 @@
+//! Sessions on other machines. `keystone-host` runs there: [`attach`] joins an SSH
+//! session to its daemon, and [`serve`] is the daemon, which runs the provider
+//! processes and journals their events. Here, a [`Link`] reaches one machine and a
+//! [`RemoteConnection`] is the [`crate::Connection`] for each provider and account on
+//! it. See `docs/design/remote.md`.
+
+mod attach;
+mod connection;
+pub mod frame;
+mod journal;
+mod link;
+mod paths;
+mod reap;
+mod serve;
+
+pub use attach::attach;
+pub use connection::RemoteConnection;
+pub use frame::PROTOCOL;
+pub use link::{Link, Status, ssh};
+pub use reap::reap;
+pub use serve::serve;
+
+use keystone_core::Provider;
+
+/// Which connection on a machine an event or call belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Route {
+    pub provider: Provider,
+    pub account: Option<String>,
+}
+
+/// Whether the test-only fault `name` is on: `KEYSTONE_HOST_FAULTS` names a folder, and
+/// a file of that name in it turns the fault on. A release build, such as one `cargo
+/// install` makes, has no faults.
+#[cfg(debug_assertions)]
+pub(crate) fn fault(name: &str) -> bool {
+    std::env::var_os("KEYSTONE_HOST_FAULTS")
+        .filter(|dir| !dir.is_empty())
+        .is_some_and(|dir| std::path::Path::new(&dir).join(name).exists())
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn fault(_name: &str) -> bool {
+    false
+}

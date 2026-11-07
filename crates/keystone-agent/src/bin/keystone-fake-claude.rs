@@ -3,7 +3,8 @@
 //!
 //! It speaks the subset of Claude Code's stream-json and control protocol Keystone
 //! uses and replies with labeled test text. A prompt containing "run" asks approval
-//! for a command first. A message with priority "now" aborts the reply, as Claude does.
+//! for a command first, and closing stdin withdraws an approval that waits. A message
+//! with priority "now" aborts the reply, as Claude does.
 //! Set `KEYSTONE_FAKE_CLAUDE_DELAY_MS` (or a working directory's `.fake-claude-delay-ms`)
 //! to change the pause between streamed words,
 //! and `KEYSTONE_FAKE_CLAUDE_SIGNED_OUT=1` to answer like a Claude with no login.
@@ -126,7 +127,10 @@
 //! "hook" starts a hook that outlives the turn until `.fake-claude-release-hook`
 //! exists; and "hold tool" keeps a Bash call running until `.fake-claude-release-tool`
 //! exists. A `child` setting of `1` starts a `sleep` child at launch and appends its
-//! ID to `.fake-claude-children`, so a test can check the whole tree ends.
+//! ID to `.fake-claude-children`, so a test can check the whole tree ends; `group` starts
+//! it in a process group of its own, and `session` in a session of its own, as Claude
+//! Code starts its shells. A `child-term` setting of `ignore` makes that child ignore
+//! SIGTERM.
 //!
 //! `mcp_set_servers` takes Keystone's `keystone` HTTP server and its `keystone_ui` SDK
 //! server, as Claude Code 2.1.301 does. For the SDK server it then sends `initialize`,
@@ -687,8 +691,33 @@ fn main() {
     let skip_init = setting("skip-init").as_deref() == Some("1");
     let quiesce = setting("quiesce");
     let mut initializes = 0;
-    if setting("child").as_deref() == Some("1")
-        && let Ok(child) = std::process::Command::new("sleep").arg("3600").spawn()
+    let child = setting("child");
+    let mut sleep = std::process::Command::new("sleep");
+    sleep.arg("3600");
+    match child.as_deref() {
+        Some("group") => {
+            std::os::unix::process::CommandExt::process_group(&mut sleep, 0);
+        }
+        // SAFETY: setsid is async-signal-safe.
+        Some("session") => unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut sleep, || {
+                libc::setsid();
+                Ok(())
+            });
+        },
+        _ => {}
+    }
+    if setting("child-term").as_deref() == Some("ignore") {
+        // SAFETY: signal is async-signal-safe.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut sleep, || {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+    }
+    if matches!(child.as_deref(), Some("1" | "group" | "session"))
+        && let Ok(child) = sleep.spawn()
         && let Ok(mut children) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -988,7 +1017,13 @@ fn main() {
             _ => {}
         }
     }
-    shared.state.lock().unwrap().closed = true;
+    {
+        let mut state = shared.state.lock().unwrap();
+        state.closed = true;
+        // A waiting approval holds the turn open; with no input left it can't be
+        // answered, so it is withdrawn and the process can exit.
+        state.approval = None;
+    }
     shared.wake.notify_all();
     let _ = worker.join();
 }

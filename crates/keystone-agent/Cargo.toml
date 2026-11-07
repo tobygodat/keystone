@@ -13,10 +13,10 @@ sha2 = "0.10"
 subtle = "2"
 getrandom = "0.2"
 toml_edit = "0.25"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }

@@ -44,10 +44,12 @@ struct ClaudeCapabilityFrame {
 #[doc(hidden)]
 pub type StartHook = Arc<dyn Fn(u64) + Send + Sync>;
 
-/// Runs once a provider process has started, with its session and PID, which a test
-/// needs when the process is ended before it can report itself.
+/// Runs once a provider process has started, before it gets any input, with its
+/// session and PID. A test needs the PID when the process is ended before it can
+/// report itself, and `keystone-host` starts the process's watcher. An error ends the
+/// process and fails the start with it.
 #[doc(hidden)]
-pub type SpawnHook = Arc<dyn Fn(u64, u32) + Send + Sync>;
+pub type SpawnHook = Arc<dyn Fn(u64, u32) -> Result<(), String> + Send + Sync>;
 
 /// What the UI needs from any provider. Commands run on the connection's worker in the
 /// order they were given, and a provider that cannot start reports [`Event::Failed`]
@@ -178,7 +180,7 @@ fn commands_failed(message: String) -> Event {
     Event::Commands(Commands::Failed(message))
 }
 
-fn command_session(command: &Command) -> u64 {
+pub(crate) fn command_session(command: &Command) -> u64 {
     match command {
         Command::Open { session, .. }
         | Command::Send { session, .. }
@@ -1566,6 +1568,49 @@ impl ClaudeConnection {
         std::mem::take(&mut self.starter.inbox.lock().unwrap())
     }
 
+    /// Ends the session's process, after every command given before this, if no turn
+    /// runs in it and no message waits to start one. A Claude approval belongs to a
+    /// turn, so none waits either. The conversation, approval state and model stay, so
+    /// the next message resumes it. `keystone-host` does this while no app is attached.
+    pub fn end_idle(&self, session: u64) {
+        self.starter.on_worker(session, move |starter| {
+            let mut shared = starter.shared.lock().unwrap();
+            let idle = !shared.queued.contains_key(&session)
+                && shared.live.get(&session).is_some_and(|live| {
+                    live.process.is_some() && !live.replacing && !live.driver.is_running()
+                });
+            if !idle {
+                return;
+            }
+            let live = shared.live.remove(&session).expect("checked above");
+            if let Some(issuer) = &shared.mcp {
+                issuer.set_running(session, false);
+            }
+            starter
+                .inbox
+                .lock()
+                .unwrap()
+                .push((session, Event::ModelLost));
+            drop(shared);
+            (starter.wake)();
+            if live.process.as_ref().is_some_and(Process::has_foreign) {
+                drop(live);
+            } else {
+                live.retire();
+            }
+        });
+    }
+
+    /// Whether a process of this connection runs or starts, or a message waits to start
+    /// one.
+    pub fn is_busy(&self) -> bool {
+        let shared = self.starter.shared.lock().unwrap();
+        !shared.live.is_empty()
+            || !shared.queued.is_empty()
+            || shared.starting > 0
+            || !shared.catalog_probes.is_empty()
+    }
+
     #[doc(hidden)]
     pub fn hold_starts(&self, hook: StartHook) {
         self.starter.shared.lock().unwrap().before_start = Some(hook);
@@ -2258,7 +2303,7 @@ impl ClaudeStarter {
             .map_err(|e| format!("Could not start Claude Code at {}. {e}", program.display()))?;
         let hook = self.shared.lock().unwrap().after_spawn.clone();
         if let Some(hook) = hook {
-            hook(session, process.pid());
+            hook(session, process.pid())?;
         }
         Ok(process)
     }

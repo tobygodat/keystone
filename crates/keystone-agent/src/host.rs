@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Bytes of stderr kept for error messages.
 const STDERR_TAIL: usize = 4 * 1024;
@@ -548,6 +548,147 @@ pub fn process_parent(pid: u32) -> Option<u32> {
     os::stat(pid).map(|stat| stat.ppid)
 }
 
+/// When process `pid` started, in the platform's own units, or `None` once nothing
+/// holds that PID. A PID that holds a process with the same start time is the same
+/// process.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn process_start(pid: u32) -> Option<u64> {
+    os::stat(pid).map(|stat| stat.start)
+}
+
+/// A provider some other process started, with every process seen below it while it
+/// was watched, each pinned so a reused PID is never signalled. `keystone-host reap`
+/// keeps one per provider, so it can end the whole tree if the daemon that started
+/// the provider dies.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct Watched {
+    root: os::Pin,
+    found: Vec<os::Pin>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Watched {
+    /// Pins `pid` while it still holds the process that started at `start`.
+    pub fn new(pid: u32, start: u64) -> Option<Self> {
+        let seen = os::stat(pid).filter(|stat| stat.start == start)?;
+        Some(Self {
+            root: os::pin(&seen)?,
+            found: Vec::new(),
+        })
+    }
+
+    /// Forgets what exited and adds what is new: every child of a process it holds, in
+    /// any group or session, and while the provider runs, every member of its group.
+    /// Returns whether it added any. A process that left the tree before a scan saw
+    /// it, such as one whose parent had already exited, is out of reach.
+    pub fn scan(&mut self) -> bool {
+        // The provider sits in the walk through a borrow, never moved, so it stays
+        // pinned however the scan ends.
+        enum Held<'a> {
+            Root(&'a os::Pin),
+            Found(os::Pin),
+        }
+        impl Held<'_> {
+            fn pin(&self) -> &os::Pin {
+                match self {
+                    Held::Root(pin) => pin,
+                    Held::Found(pin) => pin,
+                }
+            }
+        }
+        let all = os::all();
+        let root = self.root.pid;
+        let mut nodes = vec![tree::Node {
+            pid: root,
+            pin: Some(Held::Root(&self.root)),
+        }];
+        nodes.extend(
+            self.found
+                .drain(..)
+                .filter(os::Pin::exists)
+                .map(|pin| tree::Node {
+                    pid: pin.pid,
+                    pin: Some(Held::Found(pin)),
+                }),
+        );
+        let before = nodes.len();
+        let members: Vec<os::Pin> = all
+            .iter()
+            .filter(|s| s.group == root && !nodes.iter().any(|n| n.pid == s.pid))
+            .filter_map(os::pin)
+            .collect();
+        // Pinned while the provider, the group's leader, still lives: the group's ID
+        // was its own the whole time.
+        if self.root.is_alive() {
+            nodes.extend(members.into_iter().map(|pin| tree::Node {
+                pid: pin.pid,
+                pin: Some(Held::Found(pin)),
+            }));
+        }
+        tree::adopt(
+            &mut nodes,
+            root,
+            &all,
+            |seen| os::pin(seen).map(Held::Found),
+            |held| held.pin().exists(),
+        );
+        let added = nodes.len() > before;
+        self.found = nodes
+            .into_iter()
+            .filter_map(|node| match node.pin {
+                Some(Held::Found(pin)) => Some(pin),
+                _ => None,
+            })
+            .collect();
+        added
+    }
+
+    /// Ends everything it holds, as [`Process::end`] does: freezes it with SIGSTOP,
+    /// rescanning once all of it has stopped until a scan finds nothing new, then sends
+    /// SIGKILL. Each signal goes only to a process still the one pinned. Returns
+    /// whether all of it exited by `deadline`. A process Keystone may not signal isn't
+    /// waited for to stop, and it hasn't exited until it does so on its own.
+    pub fn end(&mut self, deadline: Instant) -> bool {
+        self.scan();
+        loop {
+            self.signal(libc::SIGSTOP);
+            if !self.wait(|pin| pin.is(Targets::stopped), deadline) || !self.scan() {
+                break;
+            }
+        }
+        self.signal(libc::SIGKILL);
+        self.wait(|pin| !pin.exists(), deadline)
+    }
+
+    /// The processes it holds that haven't exited, including any Keystone may not
+    /// signal.
+    pub fn left(&self) -> Vec<u32> {
+        std::iter::once(&self.root)
+            .chain(&self.found)
+            .filter(|pin| pin.exists())
+            .map(|pin| pin.pid)
+            .collect()
+    }
+
+    fn signal(&self, signal: libc::c_int) {
+        std::iter::once(&self.root)
+            .chain(&self.found)
+            .for_each(|pin| pin.signal(signal));
+    }
+
+    fn wait(&self, done: impl Fn(&os::Pin) -> bool, deadline: Instant) -> bool {
+        loop {
+            if std::iter::once(&self.root).chain(&self.found).all(&done) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
 /// Choosing which processes belong to a provider's tree, from a scan of every process.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tree {
@@ -580,11 +721,6 @@ mod tree {
         open: impl Fn(&Stat) -> Option<F>,
         alive: impl Fn(&F) -> bool,
     ) -> Vec<F> {
-        struct Node<F> {
-            pid: u32,
-            /// `None` only for the unreaped root, which cannot be replaced.
-            pin: Option<F>,
-        }
         let mut nodes: Vec<Node<F>> = Vec::new();
         if root_unreaped {
             nodes.push(Node {
@@ -603,6 +739,25 @@ mod tree {
                 });
             }
         }
+        adopt(&mut nodes, root, all, open, alive);
+        nodes.into_iter().filter_map(|n| n.pin).collect()
+    }
+
+    pub struct Node<F> {
+        pub pid: u32,
+        /// `None` only for an unreaped child of this process, which cannot be replaced.
+        pub pin: Option<F>,
+    }
+
+    /// Adds every process `all` shows below `nodes`, other than `root`, by the rule
+    /// [`select`] gives for a child.
+    pub fn adopt<F>(
+        nodes: &mut Vec<Node<F>>,
+        root: u32,
+        all: &[Stat],
+        open: impl Fn(&Stat) -> Option<F>,
+        alive: impl Fn(&F) -> bool,
+    ) {
         let mut next = 0;
         while next < nodes.len() {
             let parent = nodes[next].pid;
@@ -620,7 +775,6 @@ mod tree {
             }
             next += 1;
         }
-        nodes.into_iter().filter_map(|n| n.pin).collect()
     }
 
     #[cfg(test)]
@@ -754,6 +908,26 @@ mod pidfd {
             }
         }
 
+        /// Whether the pinned process hasn't exited, though Keystone may not signal it,
+        /// such as a command run through `sudo`: only `ESRCH` means it is gone. A
+        /// zombie has exited. The state is read first, so it is the pinned process's
+        /// whenever the pin still holds it after.
+        pub fn exists(&self) -> bool {
+            let state = state(self.pid);
+            // SAFETY: the descriptor is valid for the lifetime of `self`.
+            let sent = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.fd.as_raw_fd(),
+                    0,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                ) == 0
+            };
+            let held = sent || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+            held && !matches!(state, Some('Z' | 'X'))
+        }
+
         /// Whether Keystone may not signal the pinned process, such as one running as
         /// another user.
         pub fn is_foreign(&self) -> bool {
@@ -807,6 +981,14 @@ mod pidfd {
             .collect()
     }
 
+    /// Pins the process a scan saw, if its PID still holds it.
+    pub fn pin(seen: &Stat) -> Option<Pidfd> {
+        let fd = Pidfd::open(seen.pid)?;
+        // The pidfd now pins whatever holds this PID. Keep it only if that is still
+        // the process the scan found.
+        (stat(seen.pid)? == *seen).then_some(fd)
+    }
+
     /// The live processes to signal for `root`'s tree, each pinned by a pidfd.
     pub fn descendants(root: u32, root_unreaped: bool, group_reserved: bool) -> Vec<Pidfd> {
         let all = all();
@@ -815,14 +997,24 @@ mod pidfd {
             root_unreaped,
             group_reserved,
             &all,
-            |seen| {
-                let fd = Pidfd::open(seen.pid)?;
-                // The pidfd now pins whatever holds this PID. Keep it only if that is
-                // still the process the scan found.
-                (stat(seen.pid)? == *seen).then_some(fd)
-            },
+            pin,
             Pidfd::is_alive,
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// init runs as root, so a user's process may not signal it, and it still runs.
+        #[test]
+        fn a_process_keystone_may_not_signal_still_exists() {
+            assert!(pin(&stat(1).unwrap()).unwrap().exists());
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pinned = pin(&stat(child.id()).unwrap()).unwrap();
+            child.wait().unwrap();
+            assert!(!pinned.exists(), "one that exited is gone");
+        }
     }
 }
 
@@ -898,6 +1090,30 @@ mod libproc {
             }
         }
 
+        /// Whether the process hasn't exited, though Keystone may not signal it, such
+        /// as a command run through `sudo`. macOS refuses the full read of another
+        /// user's process, so then whatever holds the PID counts until it exits: one
+        /// that only took the PID over holds its session rather than free it unproven.
+        pub fn exists(&self) -> bool {
+            if stat(self.seen.pid).is_some() {
+                return self.is_alive();
+            }
+            let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+            // SAFETY: proc_pidinfo writes at most `size` bytes into `info`. This
+            // flavor is the one macOS gives for any user's process.
+            let written = unsafe {
+                libc::proc_pidinfo(
+                    self.seen.pid as libc::c_int,
+                    libc::PROC_PIDT_SHORTBSDINFO,
+                    0,
+                    (&raw mut info).cast(),
+                    size,
+                )
+            };
+            written == size && info.pbsi_status != libc::SZOMB
+        }
+
         /// Whether Keystone may not signal the process, such as one running as
         /// another user.
         pub fn is_foreign(&self) -> bool {
@@ -931,6 +1147,11 @@ mod libproc {
             .collect()
     }
 
+    /// Pins the process a scan saw, if its PID still holds it.
+    pub fn pin(seen: &Stat) -> Option<Pin> {
+        Pin::open(seen)
+    }
+
     /// The live processes to signal for `root`'s tree, each pinned.
     pub fn descendants(root: u32, root_unreaped: bool, group_reserved: bool) -> Vec<Pin> {
         let all = all();
@@ -939,9 +1160,44 @@ mod libproc {
             root_unreaped,
             group_reserved,
             &all,
-            Pin::open,
+            pin,
             Pin::is_alive,
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// launchd runs as root, so a user's process may neither read it in full nor
+        /// signal it, and it still runs.
+        #[test]
+        fn a_process_keystone_may_not_signal_still_exists() {
+            // SAFETY: geteuid only reads.
+            if unsafe { libc::geteuid() } == 0 {
+                eprintln!("skipped: root may read and signal launchd");
+                return;
+            }
+            let seen = Stat {
+                pid: 1,
+                ppid: 0,
+                group: 1,
+                start: 0,
+            };
+            assert!(stat(1).is_none(), "macOS refuses the full read");
+            assert!(Pin { pid: 1, seen }.exists());
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let seen = stat(child.id()).unwrap();
+            child.wait().unwrap();
+            assert!(
+                !Pin {
+                    pid: seen.pid,
+                    seen
+                }
+                .exists(),
+                "one that exited is gone"
+            );
+        }
     }
 }
 
@@ -952,8 +1208,8 @@ mod tests {
     use std::time::Instant;
 
     fn alive(pid: u32) -> bool {
-        // Zombies count as gone.
-        !matches!(process_state(pid), None | Some('Z'))
+        // Exited processes count as gone.
+        !matches!(process_state(pid), None | Some('Z' | 'X'))
     }
 
     fn children_of(pid: u32) -> Vec<u32> {

@@ -273,7 +273,7 @@ pub struct ForkPoint {
 /// What a session asks its provider to run. Each field is the provider's own value, from
 /// its catalog; `None` sends nothing, so the provider's own configuration (or, after an
 /// earlier choice, what the conversation already has) decides.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelChoice {
     /// Claude's `value`, such as `opus`, or Codex's `model`.
     pub model: Option<String>,

@@ -3,12 +3,13 @@
 
 use crate::item::{Event, RequestId};
 use keystone_core::{ApprovalMode, ModelChoice};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The approval mode a session's next turns run under. Each driver maps the mode to its
 /// provider's own settings; see "Approval modes" in `docs/design/providers.md`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalState {
     pub mode: ApprovalMode,
     /// Whether an earlier process may have sent the conversation an override that the
@@ -16,7 +17,7 @@ pub struct ApprovalState {
     pub overridden: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     /// Open the session's conversation in `cwd`, resuming `resume` when given, with the
     /// model the session's latest [`Command::Choose`] asked for.
@@ -62,11 +63,12 @@ pub enum Command {
 
 /// An image sent after a message's text. Codex reads `path` itself. Claude is sent
 /// `base64`, the file's bytes in base64, which its connection reads and encodes before
-/// the driver needs them, since drivers do no IO.
-#[derive(Clone, Debug, PartialEq)]
+/// the driver needs them, since drivers do no IO. The bytes never cross the wire.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Image {
     pub path: PathBuf,
     pub media_type: String,
+    #[serde(skip)]
     pub base64: Option<Arc<str>>,
 }
 

@@ -3,7 +3,8 @@
 //! Drivers translate a provider's wire protocol into [`Event`]s and never do IO. The
 //! [`host`] module owns child processes, [`log`] stores completed items, [`worker`]
 //! keeps blocking work off the UI thread, and [`git`] and [`github`] run the user's
-//! own git and gh. See `docs/design/providers.md`.
+//! own git and gh, and [`remote`] runs sessions on other machines through
+//! `keystone-host`. See `docs/design/providers.md`.
 
 pub mod checkpoint;
 pub mod claude;
@@ -22,6 +23,7 @@ pub mod log;
 pub mod mcp;
 mod profile;
 pub mod recovery;
+pub mod remote;
 pub mod surface;
 mod version;
 pub mod worker;

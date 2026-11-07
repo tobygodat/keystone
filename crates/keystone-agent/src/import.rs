@@ -6,6 +6,7 @@
 use crate::item::{ItemKind, TurnStatus};
 use crate::log::Entry;
 use crate::recovery::{self, Limit, Snapshot};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
@@ -16,7 +17,7 @@ pub const TURNS: usize = 50;
 pub const LISTED: usize = 50;
 
 /// One conversation a provider has for a folder.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Listed {
     /// The provider's own ID, which the imported session resumes.
     pub id: String,

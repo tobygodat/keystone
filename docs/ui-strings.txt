@@ -305,6 +305,120 @@ crates/keystone-agent/src/recovery/claude.rs
 crates/keystone-agent/src/recovery/codex.rs
 	Codex returned history in a form Keystone does not recognize
 
+crates/keystone-agent/src/remote/attach.rs
+	Could not open {}: {e}
+	Could not start keystone-host serve: {e}
+	keystone-host serve did not start within 5 s ({error}). Its log is {}
+
+crates/keystone-agent/src/remote/connection.rs
+	Images can't be sent to a session on another machine yet
+
+crates/keystone-agent/src/remote/frame.rs
+	a frame is over 16 MiB
+	a {} byte frame is over 16 MiB
+	bad frame: {e}
+	the stream ended inside a frame
+
+crates/keystone-agent/src/remote/journal.rs
+	Claude
+	Codex
+	Could not create {}: {e}
+	Could not make {file} private: {error}
+	Could not open {}: {e}
+	call {id} was already answered
+	journal: call {id}: {e}
+	journal: {e}
+	keystone-host left out an event it couldn't send: {reason}
+	keystone-host restarted, so the turn ended
+	{} was written by a newer keystone-host
+
+crates/keystone-agent/src/remote/link.rs
+	BatchMode=yes
+	ConnectTimeout=10
+	Could not run {}: {error}
+	Host key verification failed
+	Keystone never accepts a host key. Run ssh with this destination once in a terminal to accept it.
+	No command reaches this machine
+	Part of this session's transcript was lost: the machine couldn't keep all of it until Keystone received it
+	Permission denied
+	SSH refused the login. Keystone signs in with keys and the SSH agent only, so add a key for this machine.
+	ServerAliveCountMax=3
+	ServerAliveInterval=5
+	The machine isn't connected, so the message wasn't sent
+	The machine's keystone-host {} speaks protocol {}, and Keystone needs {PROTOCOL}. Install the matching version there: {INSTALL}
+	cargo install --locked --path crates/keystone-agent --bin keystone-host
+	keystone-host isn't installed on that machine. Install it there from a Keystone checkout: {INSTALL}
+	sh -lc "exec keystone-host attach"
+	{destination:?} isn't an SSH destination
+
+crates/keystone-agent/src/remote/paths.rs
+	Could not create {}: {e}
+	Could not read {}: {error}
+	Library/Application Support/Keystone Host
+	keystone-host needs HOME or KEYSTONE_HOST_DIR to find its folders
+	{} belongs to another user
+	{} can be opened by other users (mode {:o}); it must be 0700
+	{} is not a directory
+	{}: {e}
+
+crates/keystone-agent/src/remote/reap.rs
+	Could not open {}: {e}
+	Could not start keystone-host reap: {e}
+	Could not write {}: {e}
+	couldn't watch provider {pid} again: {error}
+	keystone-host reap couldn't take over watching it
+	provider {pid}'s processes {left:?} haven't exited yet
+	reap: descriptor {fd} doesn't hold the lock of {path}
+	reap: descriptor {fd} isn't open
+	reap: provider {pid} has already exited
+	reap: refusing to watch (test fault)
+	reap: {text:?} is not a whole number
+	the daemon stopped, so ending what is left of provider {pid}
+	the provider exited before it could be watched
+	usage: keystone-host reap <file> <fd> <ready> <pid> <start> <daemon>
+	{} is already locked
+	{} names no session ({error})
+
+crates/keystone-agent/src/remote/serve.rs
+	--version did not answer
+	--version failed with {}
+	Codex sessions can't run on another machine yet
+	Could not find keystone-host itself: {e}
+	Could not listen on {}: {e}
+	Could not open {}: {e}
+	Images can't be sent to a session on another machine yet
+	KEYSTONE_HOST_QUEUE_LIMIT must be at least {QUEUE_FLOOR} bytes, not {queue_limit}
+	Sessions on another machine run as its default login; other accounts aren't supported there yet
+	The machine can't save events, and so many wait to be saved that it starts no more turns until it can
+	The machine can't stop processes {} of this session's last run, so the session can't go on until they exit
+	The machine can't stop the processes of this session's last run, so the session can't go on until they exit
+	The machine couldn't save this session's latest events, so they wait there and arrive once it can
+	The machine is still stopping the processes of this session's last run, so it can't start another turn yet
+	The machine lost track of this call when keystone-host stopped, so it may or may not have run
+	The watcher of this session's last run stopped unexpectedly, so processes its Claude Code (process {pid}) started may still be running
+	a client id must be 1 to 256 bytes
+	closing a link that sent an unexpected frame: {frame:?}
+	closing a link that went silent
+	closing a link: {error}
+	could not send a frame: {error}
+	disconnecting a link that fell {behind} bytes behind; it catches up from the journal
+	exiting idle with {unsaved} events the journal never took; the next daemon ends any turn they leave running
+	journal: appends fail (test fault)
+	keystone-host couldn't record this call, so it didn't run it: {error}
+	keystone-host couldn't watch Claude Code, so it stopped it: {e}
+	not on PATH
+	protocol {protocol} is needed, this host speaks {PROTOCOL} (keystone-host {})
+	session {session} still waits for processes {pids:?} of its last run
+	session {session}'s last run has ended
+	session {session}'s last watcher stopped before provider {pid}'s processes were gone; they may still run
+	session {} waits for the last run's processes to end
+	the journal took the events that waited
+	{BACKLOGGED} ({error})
+	{UNSAVED} ({error})
+	{bytes} bytes of events wait for the journal, so no turn starts until it takes them ({error})
+	{error}; events wait for the journal
+	{name} must be a whole number, not {value:?}
+
 crates/keystone-agent/src/version.rs
 	 (Claude Code)
 	Claude Code

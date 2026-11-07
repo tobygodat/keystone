@@ -218,7 +218,7 @@ impl Location {
 }
 
 /// A server's connection as a running provider reported it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Health {
     Connected,
     Pending,
@@ -240,7 +240,7 @@ impl Health {
 }
 
 /// One MCP server's status from a running session.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ServerStatus {
     pub name: String,
     pub health: Health,

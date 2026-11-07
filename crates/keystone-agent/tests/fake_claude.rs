@@ -781,6 +781,7 @@ fn spawned(conn: &ClaudeConnection, session: u64) -> Arc<Mutex<Vec<u32>>> {
         if started == session {
             recorded.lock().unwrap().push(pid);
         }
+        Ok(())
     }));
     pids
 }

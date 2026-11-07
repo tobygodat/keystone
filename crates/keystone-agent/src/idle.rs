@@ -2,6 +2,7 @@
 //! scheduler a connection owns. What counts as idle is the connection's and driver's
 //! business; this module only keeps time.
 
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -87,7 +88,7 @@ impl IdlePolicy {
 /// everything before it, then to confirm with [`crate::Connection::evict_idle`]. It
 /// names the process generation, the activity epoch the proof holds for, and the
 /// conversation that a later message resumes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdleCandidate {
     pub generation: u64,
     pub epoch: u64,

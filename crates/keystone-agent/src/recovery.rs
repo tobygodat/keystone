@@ -17,14 +17,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// What a provider recorded for a session, oldest turn first.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub turns: Vec<SnapshotTurn>,
     /// What the read could not cover.
     pub limits: Vec<Limit>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotTurn {
     /// Items with the IDs a live session gives them. A tool call with no recorded
     /// result is [`ItemStatus::Interrupted`].

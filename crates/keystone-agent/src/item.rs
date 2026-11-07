@@ -53,11 +53,11 @@ pub enum TurnStatus {
 }
 
 /// A JSON-RPC request ID, kept as its raw JSON text so the answer echoes it exactly.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub String);
 
 /// The provider is waiting for the user to allow or deny an action.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Approval {
     pub request: RequestId,
     pub item_id: Option<String>,
@@ -68,7 +68,7 @@ pub struct Approval {
 }
 
 /// One model a provider offers.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelInfo {
     /// What is sent to run it: Claude's `value`, Codex's `model`.
     pub model: String,
@@ -86,14 +86,14 @@ pub struct ModelInfo {
 }
 
 /// A speed a model offers: the value its driver sends and the catalog's label.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Speed {
     pub value: String,
     pub label: String,
 }
 
 /// The models a provider reports it can run, or why it could not say.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Catalog {
     Ready {
         models: Vec<ModelInfo>,
@@ -104,7 +104,7 @@ pub enum Catalog {
 }
 
 /// What a driver reports for one session.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     /// The provider conversation exists. Save the ID to resume it later.
     ThreadReady {

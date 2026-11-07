@@ -4,12 +4,12 @@
 //! recorded in `docs/research/slash-commands-probe.md`.
 
 use keystone_core::Provider;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
 /// Where a command comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandSource {
     BuiltIn,
     User,
@@ -19,7 +19,7 @@ pub enum CommandSource {
 }
 
 /// One command or skill, as the composer's menu lists it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlashCommand {
     /// What a message starts with to run it: `/name` for Claude, `$name` for a Codex
     /// skill.
@@ -42,7 +42,7 @@ impl SlashCommand {
 }
 
 /// The commands an account lists for a folder, or why it could not say.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Commands {
     Ready(Vec<SlashCommand>),
     Failed(String),
