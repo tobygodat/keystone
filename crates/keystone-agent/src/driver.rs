@@ -40,6 +40,12 @@ pub enum Command {
         request: RequestId,
         allow: bool,
     },
+    /// Answers a question, one [`crate::Answer`] per field, or declines it with `None`.
+    Reply {
+        session: u64,
+        request: RequestId,
+        answers: Option<Vec<crate::Answer>>,
+    },
     /// Returns a widget's action as the result of the `show_ui` call that waits for
     /// it, or reports [`crate::Event::ActionUndelivered`] when none does.
     Act {

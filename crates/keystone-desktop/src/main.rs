@@ -28,6 +28,7 @@ mod preview;
 mod projects;
 mod prompts;
 mod pull_request;
+mod questions;
 mod quick;
 mod relative_time;
 mod restore;
@@ -481,6 +482,8 @@ struct Keystone {
     /// The recovery card's Use recovered history and Retry buttons, in the view the composer
     /// sends to, so Tab reaches them.
     recovery_focus: (FocusHandle, FocusHandle),
+    /// The question cards' focus handles and text editors.
+    question_controls: Rc<RefCell<questions::Controls>>,
     setup_focus: app_state::setup::SetupFocus,
     /// Usage-limit resets a redraw is already waiting for, in unix milliseconds.
     limit_wakes: std::cell::RefCell<std::collections::HashSet<u64>>,
@@ -640,6 +643,19 @@ impl Keystone {
         self.composer.focus_handle(cx).focus(window, cx);
         self.state
             .update(cx, |state, cx| state.answer(id, request, allow, cx));
+    }
+    /// Sends the question's answers, or declines it, and returns to the composer.
+    fn reply(
+        &mut self,
+        id: u64,
+        request: &RequestId,
+        decline: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer.focus_handle(cx).focus(window, cx);
+        self.state
+            .update(cx, |state, cx| state.reply(id, request, decline, cx));
     }
     /// Lets the next message go after a partial recovery, and returns to the composer
     /// with the draft as it was.
@@ -911,6 +927,7 @@ impl Keystone {
                 cx.focus_handle().tab_stop(true),
                 cx.focus_handle().tab_stop(true),
             ),
+            question_controls: Default::default(),
             setup_focus: app_state::setup::SetupFocus::new(cx),
             new_menu: false,
             filter_menu: false,
@@ -1835,7 +1852,8 @@ impl Keystone {
         let edge = density.space(px(12.));
         let conversation = current.and_then(|(id, _)| self.state.read(cx).conversations().get(&id));
         let running = conversation.is_some_and(|c| c.running);
-        let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
+        let waiting =
+            conversation.is_some_and(|c| !c.approvals.is_empty() || !c.questions.is_empty());
         let mode = self.selected_session(cx).map(|s| s.approval_mode());
         let can_send = current.is_some_and(|(id, _)| !self.importing(id))
             && (!self.composer.read(cx).value().trim().is_empty()
@@ -2904,6 +2922,9 @@ impl Keystone {
         let colors = cx.theme().colors;
         let mut view = v_flex().gap_4();
         let mut empty = true;
+        self.question_controls
+            .borrow_mut()
+            .retain_waiting(self.state.read(cx).conversations().values());
         if let Some(card) = self.setup_card(key, cx) {
             empty = false;
             view = view.child(card);
@@ -2967,6 +2988,30 @@ impl Keystone {
                             ),
                     ),
             );
+        } else if let Some(asked) = conversation.questions.first() {
+            empty = false;
+            let request = asked.question.request.clone();
+            let listener = cx.listener(move |this, decline: &bool, window, cx| {
+                this.reply(session, &request, *decline, window, cx)
+            });
+            view = view.child(questions::QuestionCard {
+                asked: asked.clone(),
+                more: conversation.questions.len() - 1,
+                agent: self
+                    .provider(session, cx)
+                    .map_or("The agent", provider_name),
+                key,
+                keyboard: self.selected(cx) == Some(session)
+                    && self
+                        .presentation
+                        .current
+                        .views
+                        .send_target(&self.showing(session, cx), session)
+                        == Some(key),
+                controls: self.question_controls.clone(),
+                state: self.state.clone(),
+                done: Rc::new(move |decline, window, cx| listener(&decline, window, cx)),
+            });
         } else if let Some(recovery) = &conversation.recovery {
             empty = false;
             view = view.child(self.recovery_card(key, recovery, cx));
@@ -3662,7 +3707,7 @@ impl SessionSidebar {
                 branch: worktrees::branch(session),
                 attention: session.attention(
                     live.is_some_and(|c| !c.approvals.is_empty()),
-                    live.is_some_and(Conversation::awaiting_widget),
+                    live.is_some_and(Conversation::awaiting_input),
                     live.is_some_and(|c| c.running),
                 ),
                 pull_request_dot: this.state.read(cx).pull_request_unseen(session.id()),
@@ -11297,6 +11342,17 @@ fn bind_keys(cx: &mut App) {
             "shift-tab",
             PreviousFocus,
             Some("(Recovery || Setup) && !Dialog && !CommandPalette"),
+        ),
+        // A question card's Tab moves between its options, fields and buttons.
+        gpui::KeyBinding::new(
+            "tab",
+            NextFocus,
+            Some("Question && !Dialog && !CommandPalette"),
+        ),
+        gpui::KeyBinding::new(
+            "shift-tab",
+            PreviousFocus,
+            Some("Question && !Dialog && !CommandPalette"),
         ),
         gpui::KeyBinding::new(
             "secondary-enter",

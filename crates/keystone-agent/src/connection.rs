@@ -186,6 +186,7 @@ pub(crate) fn command_session(command: &Command) -> u64 {
         | Command::Send { session, .. }
         | Command::Interrupt { session }
         | Command::Answer { session, .. }
+        | Command::Reply { session, .. }
         | Command::Configure { session, .. }
         | Command::Choose { session, .. }
         | Command::Act { session, .. } => *session,

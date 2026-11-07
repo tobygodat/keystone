@@ -13,6 +13,7 @@ use crate::item::{
     cap_output,
 };
 use crate::mcp::{Caller, Issuer};
+use crate::question::{Answer, Choice, Field, Form, Input, Question};
 use crate::surface;
 use keystone_core::integrations::{Health, ServerStatus};
 use keystone_core::{ApprovalMode, ForkPoint, LimitWindow, ModelChoice};
@@ -183,6 +184,28 @@ struct QueuedMessage {
     authorization: Option<(Issuer, Caller)>,
 }
 
+/// How an approval's answer is written.
+enum Approving {
+    /// A command or file change, denied with this decision.
+    Decision { deny: &'static str },
+    /// An MCP elicitation with no fields, such as Codex asking to run an MCP tool:
+    /// allowing accepts the empty form, and denying declines.
+    Consent,
+}
+
+/// A question waiting for the user, and what its answer is written as.
+struct Asked {
+    fields: Vec<Field>,
+    native: Native,
+}
+
+enum Native {
+    /// `request_user_input`, answered by each question's ID.
+    Input { ids: Vec<String> },
+    /// An MCP form, answered with its properties' values.
+    Form(Form),
+}
+
 #[derive(Default)]
 struct Session {
     thread: Option<String>,
@@ -198,8 +221,10 @@ struct Session {
     stopped: bool,
     /// Counts stops. A steer sent before a stop must not start a turn after it.
     epoch: u64,
-    /// Open approval requests and the decision that denies each one.
-    approvals: HashMap<RequestId, &'static str>,
+    /// Open approval requests and how each one's answer is written.
+    approvals: HashMap<RequestId, Approving>,
+    /// Open questions and how each one's answer is written.
+    questions: HashMap<RequestId, Asked>,
     /// `show_ui` calls that wait for a Button press: Codex's request ID by call ID.
     ui_calls: HashMap<String, RequestId>,
     /// Every `show_ui` call ID the running turn made, answered or not.
@@ -513,16 +538,56 @@ impl CodexDriver {
                 let Some(state) = self.sessions.get_mut(&session) else {
                     return;
                 };
-                let Some(deny) = state.approvals.remove(&request) else {
+                let Some(approving) = state.approvals.remove(&request) else {
                     return;
                 };
-                let decision = if allow { "accept" } else { deny };
-                // "decline" lets the turn go on; "cancel" ends it.
-                state.stopped |= decision == "cancel";
-                out.writes.push(format!(
-                    r#"{{"id":{},"result":{{"decision":"{decision}"}}}}"#,
-                    request.0
-                ));
+                let result = match approving {
+                    Approving::Decision { deny } => {
+                        let decision = if allow { "accept" } else { deny };
+                        // "decline" lets the turn go on; "cancel" ends it.
+                        state.stopped |= decision == "cancel";
+                        json!({"decision": decision})
+                    }
+                    Approving::Consent if allow => json!({"action": "accept", "content": {}}),
+                    Approving::Consent => json!({"action": "decline"}),
+                };
+                out.writes
+                    .push(format!(r#"{{"id":{},"result":{result}}}"#, request.0));
+            }
+            Command::Reply {
+                session,
+                request,
+                answers,
+            } => {
+                let Some(asked) = self
+                    .sessions
+                    .get_mut(&session)
+                    .and_then(|state| state.questions.remove(&request))
+                else {
+                    return;
+                };
+                let result = match (asked.native, answers) {
+                    (Native::Input { ids }, Some(answers)) => {
+                        let blank = Answer::default();
+                        let answered: serde_json::Map<String, Value> = ids
+                            .into_iter()
+                            .zip(&asked.fields)
+                            .enumerate()
+                            .map(|(index, (id, field))| {
+                                let values = field.values(answers.get(index).unwrap_or(&blank));
+                                (id, json!({"answers": values}))
+                            })
+                            .collect();
+                        json!({"answers": answered})
+                    }
+                    (Native::Input { .. }, None) => json!({"answers": {}}),
+                    (Native::Form(form), Some(answers)) => {
+                        json!({"action": "accept", "content": form.content(&answers)})
+                    }
+                    (Native::Form(_), None) => json!({"action": "decline"}),
+                };
+                out.writes
+                    .push(format!(r#"{{"id":{},"result":{result}}}"#, request.0));
             }
         }
     }
@@ -1410,7 +1475,8 @@ impl CodexDriver {
                         state.ui_calls.clear();
                         state.ui_seen.clear();
                         // Requests from this turn can no longer be answered.
-                        for request in state.approvals.drain().map(|(r, _)| r) {
+                        let questions = state.questions.drain().map(|(r, _)| r);
+                        for request in state.approvals.drain().map(|(r, _)| r).chain(questions) {
                             out.event(session, Event::ApprovalResolved { request });
                         }
                     }
@@ -1492,6 +1558,7 @@ impl CodexDriver {
                     let request = RequestId(note.request_id.to_string());
                     if let Some(state) = self.sessions.get_mut(&session) {
                         state.approvals.remove(&request);
+                        state.questions.remove(&request);
                         state.ui_calls.retain(|call, waiting| {
                             let waits = *waiting != request;
                             if !waits {
@@ -1598,8 +1665,11 @@ impl CodexDriver {
 
     fn on_server_request(&mut self, method: &str, id: Value, line: &[u8], out: &mut Outputs) {
         let request = RequestId(id.to_string());
-        if method == "item/tool/call" {
-            return self.on_tool_call(request, line, out);
+        match method {
+            "item/tool/call" => return self.on_tool_call(request, line, out),
+            "item/tool/requestUserInput" => return self.on_user_input(request, line, out),
+            "mcpServer/elicitation/request" => return self.on_elicitation(request, line, out),
+            _ => {}
         }
         let approval = match method {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
@@ -1641,7 +1711,9 @@ impl CodexDriver {
             (None, _) => "Run a command".to_owned(),
         };
         if let Some(state) = self.sessions.get_mut(&session) {
-            state.approvals.insert(request.clone(), deny);
+            state
+                .approvals
+                .insert(request.clone(), Approving::Decision { deny });
         }
         out.event(
             session,
@@ -1656,6 +1728,164 @@ impl CodexDriver {
 }
 
 impl CodexDriver {
+    /// `request_user_input`, shown as a question. Codex has no multiple choice, and
+    /// `isOther` lets typed text answer. A question for a secret is declined, since
+    /// Keystone does not take secrets.
+    fn on_user_input(&mut self, request: RequestId, line: &[u8], out: &mut Outputs) {
+        let answer = |result: Value| format!(r#"{{"id":{},"result":{result}}}"#, request.0);
+        let Some(params) = params::<UserInputParams>(line) else {
+            self.unknown += 1;
+            return out.writes.push(answer(json!({"answers": {}})));
+        };
+        let Some(session) = self.session_for(&params.thread_id) else {
+            return out.writes.push(answer(json!({"answers": {}})));
+        };
+        if params.questions.iter().any(|q| q.is_secret) || params.questions.is_empty() {
+            out.writes.push(answer(json!({"answers": {}})));
+            let message = if params.questions.is_empty() {
+                "Codex asked a question with nothing to answer, so it was declined."
+            } else {
+                "Codex asked for a secret, which Keystone doesn't take, so the question was declined."
+            };
+            return out.event(
+                session,
+                Event::Warning {
+                    message: message.into(),
+                },
+            );
+        }
+        let (ids, fields): (Vec<_>, Vec<_>) = params
+            .questions
+            .into_iter()
+            .map(|question| {
+                let options: Vec<Choice> = question
+                    .options
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|option| Choice {
+                        description: option
+                            .description
+                            .filter(|d| !d.trim().is_empty() && *d != option.label),
+                        label: option.label,
+                    })
+                    .collect();
+                let input = if options.is_empty() {
+                    Input::Text
+                } else {
+                    Input::Choice {
+                        options,
+                        multiple: false,
+                        other: question.is_other,
+                    }
+                };
+                let header = if question.header.trim().is_empty() {
+                    question.question.clone()
+                } else {
+                    question.header
+                };
+                let field = Field {
+                    prompt: (question.question != header).then_some(question.question),
+                    header,
+                    input,
+                    required: true,
+                    bounds: Default::default(),
+                };
+                (question.id, field)
+            })
+            .unzip();
+        self.ask(
+            session,
+            request,
+            None,
+            None,
+            Asked {
+                fields,
+                native: Native::Input { ids },
+            },
+            out,
+        );
+    }
+
+    /// An MCP server's request for input, which Codex also sends to ask before running
+    /// an MCP tool. A form with fields is a question; one with none only asks to go
+    /// ahead, so it is an approval. Anything Keystone cannot show is declined, and the
+    /// transcript says so.
+    fn on_elicitation(&mut self, request: RequestId, line: &[u8], out: &mut Outputs) {
+        let answer = |result: Value| format!(r#"{{"id":{},"result":{result}}}"#, request.0);
+        let Some(params) = params::<ElicitationParams>(line) else {
+            self.unknown += 1;
+            return out.writes.push(answer(json!({"action": "decline"})));
+        };
+        let Some(session) = self.session_for(&params.thread_id) else {
+            return out.writes.push(answer(json!({"action": "decline"})));
+        };
+        let form = match params.mode.as_str() {
+            "form" | "openai/form" | "openaiForm" => Form::read(
+                params.requested_schema.as_ref().unwrap_or(&Value::Null),
+                None,
+            ),
+            mode => Err(format!(
+                "it asks for a {mode} answer, which Keystone can't give"
+            )),
+        };
+        let server = params.server_name;
+        let message = Some(params.message.trim().to_owned()).filter(|m| !m.is_empty());
+        let form = match form {
+            Ok(form) => form,
+            Err(reason) => {
+                out.writes.push(answer(json!({"action": "decline"})));
+                return out.event(
+                    session,
+                    Event::Warning {
+                        message: format!(
+                            "Declined a request from the {server} MCP server: {reason}."
+                        ),
+                    },
+                );
+            }
+        };
+        if form.fields.is_empty() {
+            if let Some(state) = self.sessions.get_mut(&session) {
+                state.approvals.insert(request.clone(), Approving::Consent);
+            }
+            return out.event(
+                session,
+                Event::ApprovalRequested(Approval {
+                    request,
+                    item_id: None,
+                    action: message.unwrap_or_else(|| "Continue".into()),
+                    detail: Some(format!("From the {server} MCP server")),
+                }),
+            );
+        }
+        let asked = Asked {
+            fields: form.fields.clone(),
+            native: Native::Form(form),
+        };
+        self.ask(session, request, Some(server), message, asked, out);
+    }
+
+    fn ask(
+        &mut self,
+        session: u64,
+        request: RequestId,
+        server: Option<String>,
+        message: Option<String>,
+        asked: Asked,
+        out: &mut Outputs,
+    ) {
+        let question = Question {
+            request: request.clone(),
+            server,
+            message,
+            fields: asked.fields.clone(),
+        };
+        if let Some(state) = self.sessions.get_mut(&session) {
+            state.questions.insert(request, asked);
+        }
+        out.event(session, Event::QuestionAsked(question));
+    }
+
     /// A dynamic tool call. `show_ui` is answered at once unless its surface waits
     /// for a Button press; any other tool is refused.
     fn on_tool_call(&mut self, request: RequestId, line: &[u8], out: &mut Outputs) {
@@ -1903,6 +2133,45 @@ struct DeltaNote {
     thread_id: String,
     item_id: String,
     delta: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserInputParams {
+    thread_id: String,
+    #[serde(default)]
+    questions: Vec<WireQuestion>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireQuestion {
+    id: String,
+    #[serde(default)]
+    header: String,
+    question: String,
+    #[serde(default)]
+    is_other: bool,
+    #[serde(default)]
+    is_secret: bool,
+    options: Option<Vec<WireOption>>,
+}
+
+#[derive(Deserialize)]
+struct WireOption {
+    label: String,
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ElicitationParams {
+    thread_id: String,
+    server_name: String,
+    mode: String,
+    #[serde(default)]
+    message: String,
+    requested_schema: Option<Value>,
 }
 
 #[derive(Deserialize)]

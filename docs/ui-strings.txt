@@ -28,6 +28,7 @@ crates/keystone-agent/src/claude.rs
 	Bash
 	Bearer {token}
 	Claude Code
+	Claude Code asked questions Keystone could not read, so they were declined.
 	Claude Code asked to leave plan mode. Choose another approval mode to let it make changes.
 	Claude Code cannot steer this turn yet. Send again in a moment.
 	Claude Code could not configure Keystone tools
@@ -52,21 +53,27 @@ crates/keystone-agent/src/claude.rs
 	Claude Code sent activity Keystone could not read or attribute
 	Claude Code {version}
 	Claude Code {} a message
+	Continue
 	Could not fork this Claude Code conversation: {}. Hand off ({}) to continue it.
 	Could not resume this Claude Code conversation: {}. Start a new Claude session to continue.
 	Could not stop the turn
+	Declined a request from the {server} MCP server: {reason}.
 	Edit
 	Exit code 
 	Extra usage
 	Fast
+	From the {server} MCP server
+	Keystone could not read these questions.
 	Keystone does not support {} yet
 	Keystone hosts no SDK MCP server named {}
 	Keystone tools are being configured
 	Keystone's approval mode is Read only, so Claude Code stays in plan mode and cannot make changes. Present the plan and stop; the user can choose another approval mode to carry it out.
 	MCP servers
 	Method not found
+	Question {}
 	Standard
 	The launching agent no longer has permission to send this message
+	The user declined to answer.
 	The user denied this in Keystone.
 	This Claude Code version cannot steer a running turn (it lacks interrupt_cancel_queued_v1). Send after the turn ends.
 	This Claude Code version cannot steer a running turn (it lacks msg_lifecycle_v1). Send after the turn ends.
@@ -90,6 +97,7 @@ crates/keystone-agent/src/claude.rs
 	did not list its slash commands at startup, so Keystone could not confirm they were off
 	did not list its {label}, so Keystone could not confirm they were off
 	did not report system/init tools and MCP servers, so Keystone could not confirm the helper restrictions
+	it asks for a {mode} answer, which Keystone can't give
 	it has no conversation ID yet
 	it has not finished starting
 	it is the layout helper
@@ -115,6 +123,8 @@ crates/keystone-agent/src/codex.rs
 	Apply file changes
 	Authorization
 	Bearer {token}
+	Codex asked a question with nothing to answer, so it was declined.
+	Codex asked for a secret, which Keystone doesn't take, so the question was declined.
 	Codex could not initialize: {}. Check the CLI version, then restart Keystone.
 	Codex could not list its conversations: {message}
 	Codex could not list its skills: {}
@@ -123,10 +133,13 @@ crates/keystone-agent/src/codex.rs
 	Codex listed no skills.
 	Codex returned more than {CATALOG_PAGES} pages of models
 	Codex sent no history in its reply
+	Continue
 	Could not fork this Codex conversation: {reason}. Hand off ({}) to continue it.
 	Could not read your Codex approval settings. Choose an approval mode.
 	Could not resume this Codex conversation: {reason}. Start a new Codex session to continue.
 	Could not steer the running turn: {}
+	Declined a request from the {server} MCP server: {reason}.
+	From the {server} MCP server
 	Keystone
 	Keystone could not read this tool call
 	Keystone has no tool named {}
@@ -143,6 +156,7 @@ crates/keystone-agent/src/codex.rs
 	busy: Codex cannot steer this turn immediately
 	busy: Codex has no running turn to steer
 	busy: The target is not running
+	it asks for a {mode} answer, which Keystone can't give
 	it sent no list
 	no models in the reply
 	no thread in the reply
@@ -305,6 +319,22 @@ crates/keystone-agent/src/profile.rs
 	{name} is not installed. Install the {cli} CLI. {sign_in}.
 	{variable}={} {command}
 	{variable}={} {program}
+
+crates/keystone-agent/src/question.rs
+	Answer {header}.
+	No
+	Yes
+	a number
+	a whole number
+	at least {}
+	at most {}
+	from {} to {}
+	its field {key} has a type Keystone can't show
+	its form has no readable fields
+	{header} needs {kind} {}.
+	{header} needs {kind}.
+	{header} needs {} characters.
+	{header}: choose {}.
 
 crates/keystone-agent/src/recovery/claude.rs
 	Claude Code has no saved conversation for this session in this account's folder
@@ -910,6 +940,7 @@ crates/keystone-desktop/src/commands.rs
 
 crates/keystone-desktop/src/conversation.rs
 	Answer the approval request before settling this session.
+	Answer the question before settling this session.
 	Answer the widget before settling this session.
 	Could not read this conversation's history: {error}.
 	Keystone closed during this turn
@@ -1253,6 +1284,7 @@ crates/keystone-desktop/src/main.rs
 	Show sidebar
 	Steer
 	Stop
+	The agent
 	The provider
 	Title not saved. {error}
 	Turn failed
@@ -1316,6 +1348,7 @@ crates/keystone-desktop/src/notifications.rs
 	New review
 	Turn failed
 	Turn finished
+	Waiting for your answer
 	session-{session}{PULL_REQUEST_TAG}
 
 crates/keystone-desktop/src/platform.rs
@@ -1426,6 +1459,17 @@ crates/keystone-desktop/src/pull_request.rs
 	{} into {}
 	{}h {}m
 	{}m {}s
+
+crates/keystone-desktop/src/questions.rs
+	A number
+	Choose any that apply
+	Decline
+	Other answer
+	Submit
+	The {server} MCP server asks
+	Your answer
+	{asker} · {n} more waiting
+	{} asks
 
 crates/keystone-desktop/src/quick.rs
 	Choose a project.

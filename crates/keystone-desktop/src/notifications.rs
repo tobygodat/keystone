@@ -1,6 +1,6 @@
 //! Desktop notifications, through the platform's notification service
 //! (org.freedesktop.Notifications on Linux), for a session the user cannot see: its
-//! turn finished, it asks for approval, or its turn failed. A session is seen while an
+//! turn finished, it asks for approval or asks a question, or its turn failed. A session is seen while an
 //! active Keystone window shows it, so nothing is sent for it then. Each session sends
 //! each kind once until the user sees it again. Activating one shows its session. A
 //! failed check or a new review on its pull request notifies the same way. Sounds,
@@ -24,6 +24,9 @@ pub(crate) enum Alert {
     TurnFinished,
     TurnFailed,
     Approval,
+    /// The agent or an MCP server asks the user a question. Follows the approval
+    /// settings, since both wait for the user.
+    Question,
     /// A check on the session's pull request failed.
     CheckFailed,
     /// A review or review comment on the session's pull request arrived.
@@ -36,6 +39,7 @@ impl Alert {
     pub(crate) fn of(event: &Event) -> Option<Self> {
         match event {
             Event::ApprovalRequested(_) => Some(Self::Approval),
+            Event::QuestionAsked(_) => Some(Self::Question),
             Event::TurnCompleted { stopped: true, .. } => None,
             Event::TurnCompleted { status, .. } => Some(match status {
                 TurnStatus::Completed => Self::TurnFinished,
@@ -54,7 +58,7 @@ impl Alert {
         settings.enabled
             && match self {
                 Self::TurnFinished => settings.turn_finished,
-                Self::Approval => settings.approval,
+                Self::Approval | Self::Question => settings.approval,
                 Self::TurnFailed => settings.turn_failed,
                 Self::CheckFailed | Self::Review => settings.pull_requests,
             }
@@ -64,7 +68,7 @@ impl Alert {
         settings.enabled
             && match self {
                 Self::TurnFinished => settings.turn_finished,
-                Self::Approval => settings.approval,
+                Self::Approval | Self::Question => settings.approval,
                 Self::TurnFailed => settings.turn_failed,
                 Self::CheckFailed | Self::Review => false,
             }
@@ -74,6 +78,7 @@ impl Alert {
         match self {
             Self::TurnFinished => "Turn finished",
             Self::Approval => "Approval requested",
+            Self::Question => "Waiting for your answer",
             Self::TurnFailed => "Turn failed",
             Self::CheckFailed => "Check failed",
             Self::Review => "New review",

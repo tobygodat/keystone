@@ -23,6 +23,7 @@ mod item;
 pub mod log;
 pub mod mcp;
 mod profile;
+mod question;
 pub mod recovery;
 pub mod remote;
 #[cfg(unix)]
@@ -58,3 +59,4 @@ pub use profile::{
     ConfigEnv, LaunchProfile, default_home, default_sign_in_command, run_config_cli,
     sign_in_command, terminal_command,
 };
+pub use question::{Answer, Bounds, Choice, Field, Input, Question};

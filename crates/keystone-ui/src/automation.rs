@@ -330,7 +330,13 @@ fn run(command: &str, cx: &mut gpui::App) -> Result<(), String> {
             "key" => {
                 for stroke in rest.split_whitespace() {
                     let stroke = Keystroke::parse(stroke).map_err(|e| e.to_string())?;
-                    window.dispatch_keystroke(stroke, cx);
+                    window.dispatch_keystroke(stroke.clone(), cx);
+                    // A key is released too, as a person's is: a focused control
+                    // clicks on the release of Enter or Space.
+                    window.dispatch_event(
+                        PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke: stroke }),
+                        cx,
+                    );
                 }
                 Ok(())
             }

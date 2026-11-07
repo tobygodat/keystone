@@ -137,7 +137,7 @@ impl Progress {
                 live.recovery,
                 Some(Recovery::Review(_) | Recovery::Unavailable(_) | Recovery::Unsaved(_))
             );
-            return if choice || live.awaiting_approval() || live.awaiting_widget() {
+            return if choice || live.awaiting_approval() || live.awaiting_input() {
                 Self::Waiting
             } else {
                 Self::Running

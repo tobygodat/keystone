@@ -342,6 +342,66 @@ mod tests {
     }
 
     #[test]
+    fn a_question_and_its_reply_cross_the_wire() {
+        use crate::{Answer, Bounds, Choice, Field, Input, Question};
+        let field = |header: &str, input| Field {
+            header: header.into(),
+            prompt: Some(format!("{header}?")),
+            input,
+            required: true,
+            bounds: Bounds {
+                min: Some(1.),
+                max: None,
+            },
+        };
+        let question = Question {
+            request: RequestId("\"q1\"".into()),
+            server: Some("docs".into()),
+            message: Some("Pick".into()),
+            fields: vec![
+                field(
+                    "Color",
+                    Input::Choice {
+                        options: vec![Choice {
+                            label: "Blue".into(),
+                            description: None,
+                        }],
+                        multiple: true,
+                        other: true,
+                    },
+                ),
+                field("Note", Input::Text),
+                field("Count", Input::Number { integer: true }),
+            ],
+        };
+        round_trip(Frame::Event(Routed {
+            seq: 3,
+            provider: Provider::Codex,
+            account: None,
+            session: 12,
+            event: Event::QuestionAsked(question),
+        }));
+        for answers in [
+            Some(vec![Answer {
+                chosen: vec![0],
+                text: "teal".into(),
+            }]),
+            None,
+        ] {
+            round_trip(Frame::Call(Call {
+                id: 10,
+                provider: Provider::Codex,
+                account: None,
+                op: Op::Command(Command::Reply {
+                    session: 12,
+                    request: RequestId("\"q1\"".into()),
+                    answers,
+                }),
+            }));
+        }
+    }
+
+    #[test]
     fn a_frame_that_breaks_the_rules_is_an_error() {
         let mut buffer = Vec::new();
         for input in [

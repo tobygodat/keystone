@@ -590,13 +590,13 @@ fn unknown_server_requests_get_an_error_and_exit_fails_the_running_turn() {
     let mut driver = opened();
     let mut out = Outputs::default();
     driver.on_line(
-        br#"{"id":"r1","method":"mcpServer/elicitation/request","params":{}}"#,
+        br#"{"id":"r1","method":"account/chatgptAuthTokens/refresh","params":{}}"#,
         &mut out,
     );
     assert_eq!(
         out.writes,
         vec![
-            r#"{"id":"r1","error":{"code":-32601,"message":"Keystone does not support mcpServer/elicitation/request yet"}}"#
+            r#"{"id":"r1","error":{"code":-32601,"message":"Keystone does not support account/chatgptAuthTokens/refresh yet"}}"#
         ]
     );
 

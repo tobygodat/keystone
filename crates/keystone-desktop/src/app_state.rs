@@ -2100,6 +2100,7 @@ impl AppState {
                 || matches!(
                     event,
                     Event::ApprovalRequested(_)
+                        | Event::QuestionAsked(_)
                         | Event::ApprovalResolved { .. }
                         | Event::SurfaceShown { .. }
                         | Event::SurfaceStopped { .. }
@@ -3583,6 +3584,48 @@ impl AppState {
             });
         }
         self.refresh(cx);
+    }
+
+    /// Sends the answers given to question `request`, or declines it. Answers that
+    /// are not complete yet are not sent.
+    pub(crate) fn reply(
+        &mut self,
+        id: u64,
+        request: &RequestId,
+        decline: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        let conversation = self.conversation(id);
+        let ready = conversation.questions.iter().any(|q| {
+            &q.question.request == request && (decline || q.question.problem(&q.answers).is_none())
+        });
+        let Some(asked) = ready.then(|| conversation.take_question(request)).flatten() else {
+            return;
+        };
+        if let Some(connection) = self.started(id) {
+            connection.command(Command::Reply {
+                session: id,
+                request: asked.question.request,
+                answers: (!decline).then_some(asked.answers),
+            });
+        }
+        self.refresh(cx);
+    }
+
+    /// Changes the answer to one field of a waiting question.
+    pub(crate) fn edit_answer(
+        &mut self,
+        id: u64,
+        request: &RequestId,
+        field: usize,
+        edit: impl FnOnce(&mut keystone_agent::Answer),
+        cx: &mut Context<Self>,
+    ) {
+        self.conversation(id).edit_answer(request, field, edit);
+        cx.notify();
     }
 
     pub(crate) fn conversation_folder(&self, session: u64) -> Option<ConversationFolder> {

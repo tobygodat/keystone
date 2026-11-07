@@ -462,7 +462,7 @@ fn unknown_control_requests_are_refused() {
     ready(&mut driver, &mut out, ApprovalMode::Provider);
     out.writes.clear();
     driver.on_line(
-        br#"{"type":"control_request","request_id":"r9","request":{"subtype":"elicitation"}}"#,
+        br#"{"type":"control_request","request_id":"r9","request":{"subtype":"request_user_dialog"}}"#,
         &mut out,
     );
     let reply = parse(&out.writes[0]);

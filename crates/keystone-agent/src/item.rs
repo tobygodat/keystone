@@ -132,7 +132,11 @@ pub enum Event {
     },
     ItemCompleted(Item),
     ApprovalRequested(Approval),
-    /// The provider no longer waits for this request, whether answered here or not.
+    /// The provider waits for the user to answer, or decline, a question
+    /// ([`crate::Command::Reply`]).
+    QuestionAsked(crate::Question),
+    /// The provider no longer waits for this approval or question, whether answered
+    /// here or not.
     ApprovalResolved {
         request: RequestId,
     },

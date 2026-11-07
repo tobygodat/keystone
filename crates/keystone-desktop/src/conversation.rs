@@ -1,5 +1,5 @@
 //! Per-session conversation state: rows to show, the running turn, and pending
-//! approvals. Provider events are applied here in batches.
+//! approvals and questions. Provider events are applied here in batches.
 //!
 //! Nothing here touches the disk. Entries to log collect in an outbox that the app
 //! hands to [`keystone_agent::log::Logs`], and saved history arrives through
@@ -9,7 +9,8 @@ use keystone_agent::log::{Entry, Write, lost_count, with_lost_count};
 use keystone_agent::recovery::{Operation, RecoveryBatch, RecoveryReport};
 use keystone_agent::surface::{self, Status, Surface};
 use keystone_agent::{
-    Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, RequestId, TurnStatus, cap_output,
+    Answer, Approval, Event, Item, ItemKind, ItemStatus, OUTPUT_CAP, Question, RequestId,
+    TurnStatus, cap_output,
 };
 use keystone_core::{ForkPoint, UsageLimit};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -104,6 +105,14 @@ pub enum Recovery {
     Unsaved(RecoveryBatch),
 }
 
+/// A question the provider waits on, and the answers the user has given so far, one
+/// per field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Asked {
+    pub question: Question,
+    pub answers: Vec<Answer>,
+}
+
 #[derive(Default)]
 pub struct Conversation {
     /// In the order they first appeared. Rows are only appended or replaced in place.
@@ -111,6 +120,9 @@ pub struct Conversation {
     pub running: bool,
     /// Approval requests waiting for an answer, oldest first.
     pub approvals: Vec<Approval>,
+    /// Questions waiting for an answer, oldest first. Answers in progress live here,
+    /// with the app, so closing a window loses none of them.
+    pub questions: Vec<Asked>,
     pub error: Option<String>,
     pub provider_notice: Option<String>,
     /// The model the provider last said this session runs on, in this run of the app.
@@ -244,11 +256,36 @@ impl Conversation {
         !waiting.is_empty()
     }
 
-    /// Why the session cannot be settled now: a request or widget still waits for the
-    /// user, and settling never answers either.
+    /// Whether a question still waits for an answer, counting questions that arrived
+    /// while the history loads and are not shown yet.
+    pub fn awaiting_question(&self) -> bool {
+        let mut waiting: Vec<&RequestId> =
+            self.questions.iter().map(|q| &q.question.request).collect();
+        for pending in self.pending.iter().flatten() {
+            match pending {
+                Pending::Event(Event::QuestionAsked(question)) => waiting.push(&question.request),
+                Pending::Event(Event::ApprovalResolved { request }) => {
+                    waiting.retain(|waiting| *waiting != request)
+                }
+                Pending::Event(Event::TurnCompleted { .. }) => waiting.clear(),
+                _ => {}
+            }
+        }
+        !waiting.is_empty()
+    }
+
+    /// Whether the user's answer is awaited: a question or a widget waits for it.
+    pub fn awaiting_input(&self) -> bool {
+        self.awaiting_question() || self.awaiting_widget()
+    }
+
+    /// Why the session cannot be settled now: a request, question or widget still
+    /// waits for the user, and settling never answers any of them.
     pub fn settle_blocker(&self) -> Option<&'static str> {
         if self.awaiting_approval() {
             Some("Answer the approval request before settling this session.")
+        } else if self.awaiting_question() {
+            Some("Answer the question before settling this session.")
         } else if self.awaiting_widget() {
             Some("Answer the widget before settling this session.")
         } else {
@@ -1115,7 +1152,14 @@ impl Conversation {
                 self.log_item(index, item);
             }
             Event::ApprovalRequested(approval) => self.approvals.push(approval),
-            Event::ApprovalResolved { request } => self.approvals.retain(|a| a.request != request),
+            Event::QuestionAsked(question) => {
+                let answers = vec![Answer::default(); question.fields.len()];
+                self.questions.push(Asked { question, answers });
+            }
+            Event::ApprovalResolved { request } => {
+                self.approvals.retain(|a| a.request != request);
+                self.questions.retain(|q| q.question.request != request);
+            }
             Event::SurfaceShown { surface, .. } => {
                 let index = match self.surface_row(&surface.call) {
                     Some(index) => {
@@ -1153,6 +1197,7 @@ impl Conversation {
                 self.running = false;
                 self.turn_ended = true;
                 self.approvals.clear();
+                self.questions.clear();
                 self.settle_unfinished();
                 if let Some((rows, first, last)) = self.turn_span() {
                     let turn = self.last_checkpoint + 1;
@@ -1337,6 +1382,32 @@ impl Conversation {
             allowed,
         });
         Some(approval)
+    }
+
+    /// Removes the question `request` to answer it, when it still waits.
+    pub fn take_question(&mut self, request: &RequestId) -> Option<Asked> {
+        let index = self
+            .questions
+            .iter()
+            .position(|q| &q.question.request == request)?;
+        Some(self.questions.remove(index))
+    }
+
+    /// Changes the answer to field `field` of the question `request`.
+    pub fn edit_answer(
+        &mut self,
+        request: &RequestId,
+        field: usize,
+        edit: impl FnOnce(&mut Answer),
+    ) {
+        if let Some(answer) = self
+            .questions
+            .iter_mut()
+            .find(|q| &q.question.request == request)
+            .and_then(|q| q.answers.get_mut(field))
+        {
+            edit(answer);
+        }
     }
 
     /// Entries to append to the session's log, in order.
@@ -3272,6 +3343,51 @@ mod tests {
             !live.awaiting_approval(),
             "a finished turn clears its requests"
         );
+    }
+
+    #[test]
+    fn a_question_waits_unsaved_with_its_answers_and_ends_with_its_turn() {
+        let question = |id: &str| keystone_agent::Question {
+            request: RequestId(id.into()),
+            server: None,
+            message: None,
+            fields: vec![keystone_agent::Field {
+                header: "Color".into(),
+                prompt: None,
+                input: keystone_agent::Input::Text,
+                required: true,
+                bounds: Default::default(),
+            }],
+        };
+        let mut live = Conversation::loading();
+        live.apply(Event::TurnStarted);
+        live.apply(Event::QuestionAsked(question("1")));
+        assert!(live.questions.is_empty(), "held until the history loads");
+        assert!(live.awaiting_question() && live.awaiting_input());
+        live.restore(Ok(Vec::new()));
+        assert_eq!(
+            live.settle_blocker(),
+            Some("Answer the question before settling this session.")
+        );
+        live.edit_answer(&RequestId("1".into()), 0, |a| a.text = "Blue".into());
+        assert_eq!(live.questions[0].answers[0].text, "Blue");
+        assert!(
+            live.take_writes()
+                .iter()
+                .all(|w| !format!("{w:?}").contains("Color")),
+            "a question is never saved, so after a restart none is shown that nothing waits for"
+        );
+        live.apply(Event::ApprovalResolved {
+            request: RequestId("1".into()),
+        });
+        assert!(live.questions.is_empty(), "the provider withdrew it");
+        live.apply(Event::QuestionAsked(question("2")));
+        live.apply(completed());
+        assert!(
+            live.questions.is_empty() && !live.awaiting_input(),
+            "a finished turn clears its questions"
+        );
+        assert!(live.take_question(&RequestId("2".into())).is_none());
     }
 
     #[test]

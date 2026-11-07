@@ -217,7 +217,9 @@ fn bundled(alert: Alert) -> Option<(&'static str, &'static [u8])> {
             "turn-finished.wav",
             include_bytes!("../sounds/turn-finished.wav"),
         )),
-        Alert::Approval => Some(("approval.wav", include_bytes!("../sounds/approval.wav"))),
+        Alert::Approval | Alert::Question => {
+            Some(("approval.wav", include_bytes!("../sounds/approval.wav")))
+        }
         Alert::TurnFailed => Some((
             "turn-failed.wav",
             include_bytes!("../sounds/turn-failed.wav"),

@@ -16,6 +16,7 @@ use crate::item::{
     cap_output,
 };
 use crate::mcp::{Caller, Issuer};
+use crate::question::{Answer, Choice, Field, Form, Input, Question};
 use crate::surface;
 use keystone_core::integrations::{Health, ServerStatus};
 use keystone_core::{ApprovalMode, LimitWindow, ModelChoice, UsageLimit};
@@ -261,7 +262,32 @@ struct Pending {
     tool_use_id: Option<String>,
     /// Whether allowing it leaves plan mode.
     exits_plan: bool,
+    /// An MCP elicitation with no fields, which asks only to go ahead: allowing it
+    /// accepts the form empty, and denying it declines.
+    consent: bool,
 }
+
+/// A question waiting for the user, and what its answer is written as.
+struct Asked {
+    request_id: Value,
+    fields: Vec<Field>,
+    native: Native,
+}
+
+enum Native {
+    /// `AskUserQuestion`: the tool's input, sent back with the answers keyed by each
+    /// question's text.
+    Ask {
+        input: Value,
+        keys: Vec<String>,
+        tool_use_id: Option<String>,
+    },
+    /// An MCP form, answered with its properties' values.
+    Form(Form),
+}
+
+/// What Claude is told when the user declines its question.
+const DECLINED: &str = "The user declined to answer.";
 
 pub struct ClaudeDriver {
     cancel_queued: bool,
@@ -295,6 +321,7 @@ pub struct ClaudeDriver {
     /// Tool calls the user denied, so their results show as declined.
     denied: HashSet<String>,
     approvals: HashMap<RequestId, Pending>,
+    questions: HashMap<RequestId, Asked>,
     /// An API error Claude reported as a synthetic assistant message, for the result.
     api_error: Option<String>,
     /// The usage limit that refused this turn's request, for its end.
@@ -441,6 +468,7 @@ impl ClaudeDriver {
             tools: HashMap::new(),
             denied: HashSet::new(),
             approvals: HashMap::new(),
+            questions: HashMap::new(),
             api_error: None,
             limit: None,
             reported: HashSet::new(),
@@ -767,7 +795,13 @@ impl ClaudeDriver {
                 let Some(pending) = self.approvals.remove(&request) else {
                     return;
                 };
-                let response = if allow && self.launch == Launch::Chat {
+                let response = if pending.consent {
+                    if allow {
+                        json!({"action": "accept", "content": {}})
+                    } else {
+                        json!({"action": "decline"})
+                    }
+                } else if allow && self.launch == Launch::Chat {
                     // Claude leaves plan mode when the tool runs, at a time no later line
                     // is ordered against, so nothing more is written in this turn.
                     if pending.exits_plan {
@@ -783,6 +817,47 @@ impl ClaudeDriver {
                 out.writes.push(
                     json!({"type": "control_response", "response":
                         {"subtype": "success", "request_id": pending.request_id, "response": response}})
+                    .to_string(),
+                );
+            }
+            Command::Reply {
+                request, answers, ..
+            } => {
+                let Some(asked) = self.questions.remove(&request) else {
+                    return;
+                };
+                let response = match (asked.native, answers) {
+                    (Native::Ask { input, keys, .. }, Some(answers)) => {
+                        let blank = Answer::default();
+                        let answered: serde_json::Map<String, Value> = keys
+                            .into_iter()
+                            .zip(&asked.fields)
+                            .enumerate()
+                            .map(|(index, (key, field))| {
+                                let values = field.values(answers.get(index).unwrap_or(&blank));
+                                (key, json!(values.join(", ")))
+                            })
+                            .collect();
+                        let mut input = input;
+                        if let Some(object) = input.as_object_mut() {
+                            object.insert("answers".into(), Value::Object(answered));
+                        }
+                        json!({"behavior": "allow", "updatedInput": input})
+                    }
+                    (Native::Ask { tool_use_id, .. }, None) => {
+                        if let Some(id) = tool_use_id {
+                            self.denied.insert(id);
+                        }
+                        json!({"behavior": "deny", "message": DECLINED})
+                    }
+                    (Native::Form(form), Some(answers)) => {
+                        json!({"action": "accept", "content": form.content(&answers)})
+                    }
+                    (Native::Form(_), None) => json!({"action": "decline"}),
+                };
+                out.writes.push(
+                    json!({"type": "control_response", "response":
+                        {"subtype": "success", "request_id": asked.request_id, "response": response}})
                     .to_string(),
                 );
             }
@@ -895,7 +970,9 @@ impl ClaudeDriver {
                         waits
                     });
                     let request = self.request_id(&cancel.request_id);
-                    if self.approvals.remove(&request).is_some() {
+                    if self.approvals.remove(&request).is_some()
+                        | self.questions.remove(&request).is_some()
+                    {
                         out.event(self.session, Event::ApprovalResolved { request });
                     }
                 }
@@ -1489,7 +1566,11 @@ impl ClaudeDriver {
         self.api_error = None;
         self.rejected = None;
         // Requests from this turn can no longer be answered.
-        for request in std::mem::take(&mut self.approvals).into_keys() {
+        let questions = std::mem::take(&mut self.questions).into_keys();
+        for request in std::mem::take(&mut self.approvals)
+            .into_keys()
+            .chain(questions)
+        {
             out.event(self.session, Event::ApprovalResolved { request });
         }
         if let Some(limit) = self.limit.take()
@@ -1987,6 +2068,14 @@ impl ClaudeDriver {
                 },
             );
         }
+        if request.subtype == "can_use_tool"
+            && request.tool_name.as_deref() == Some("AskUserQuestion")
+        {
+            return self.on_ask(control.request_id, request, out);
+        }
+        if request.subtype == "elicitation" {
+            return self.on_elicitation(control.request_id, request, out);
+        }
         if request.subtype != "can_use_tool" {
             // Answer everything else with an error, so Claude never waits forever.
             out.writes.push(
@@ -2033,6 +2122,7 @@ impl ClaudeDriver {
                 input,
                 tool_use_id: request.tool_use_id.clone(),
                 exits_plan,
+                consent: false,
             },
         );
         out.event(
@@ -2042,6 +2132,190 @@ impl ClaudeDriver {
                 item_id: request.tool_use_id,
                 action,
                 detail,
+            }),
+        );
+    }
+
+    /// `AskUserQuestion`, shown as a question. Claude offers typed "Other" text with
+    /// every question itself, so each field takes it.
+    fn on_ask(&mut self, request_id: Value, request: ControlBody, out: &mut Outputs) {
+        let input = request.input.unwrap_or(Value::Null);
+        let asked = input
+            .get("questions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, question)| {
+                let text = |key: &str| {
+                    question
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                };
+                let prompt = text("question")?;
+                let header =
+                    text("header").map_or_else(|| format!("Question {}", index + 1), str::to_owned);
+                let options: Vec<Choice> = question
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|option| {
+                        let label = option.get("label")?.as_str()?.trim();
+                        let description = option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|d| !d.is_empty() && *d != label);
+                        (!label.is_empty()).then(|| Choice {
+                            label: label.to_owned(),
+                            description: description.map(str::to_owned),
+                        })
+                    })
+                    .collect();
+                let input = if options.is_empty() {
+                    Input::Text
+                } else {
+                    Input::Choice {
+                        options,
+                        multiple: question.get("multiSelect") == Some(&json!(true)),
+                        other: true,
+                    }
+                };
+                let field = Field {
+                    prompt: (prompt != header).then(|| prompt.to_owned()),
+                    header,
+                    input,
+                    required: true,
+                    bounds: Default::default(),
+                };
+                Some((prompt.to_owned(), field))
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|asked| !asked.is_empty());
+        let Some(asked) = asked else {
+            if let Some(id) = &request.tool_use_id {
+                self.denied.insert(id.clone());
+            }
+            out.writes.push(
+                json!({"type": "control_response", "response": {"subtype": "success",
+                    "request_id": request_id,
+                    "response": {"behavior": "deny", "message": "Keystone could not read these questions."}}})
+                .to_string(),
+            );
+            return out.event(
+                self.session,
+                Event::Warning {
+                    message: "Claude Code asked questions Keystone could not read, so they were declined.".into(),
+                },
+            );
+        };
+        self.ensure_turn(out);
+        let (keys, fields): (Vec<_>, Vec<_>) = asked.into_iter().unzip();
+        let id = self.request_id(&request_id);
+        self.questions.insert(
+            id.clone(),
+            Asked {
+                request_id,
+                fields: fields.clone(),
+                native: Native::Ask {
+                    input,
+                    keys,
+                    tool_use_id: request.tool_use_id,
+                },
+            },
+        );
+        out.event(
+            self.session,
+            Event::QuestionAsked(Question {
+                request: id,
+                server: None,
+                message: None,
+                fields,
+            }),
+        );
+    }
+
+    /// An MCP server's request for input. A form with fields is a question; one with
+    /// none only asks to go ahead, so it is an approval. Anything Keystone cannot show
+    /// is declined, and the transcript says so.
+    fn on_elicitation(&mut self, request_id: Value, request: ControlBody, out: &mut Outputs) {
+        let server = request.mcp_server_name.unwrap_or_else(|| "unnamed".into());
+        let message = request
+            .message
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_owned);
+        let form = match request.mode.as_deref() {
+            Some("form") | None => Form::read(
+                request.requested_schema.as_ref().unwrap_or(&Value::Null),
+                request.property_order.as_deref(),
+            ),
+            Some(mode) => Err(format!(
+                "it asks for a {mode} answer, which Keystone can't give"
+            )),
+        };
+        let form = match form {
+            Ok(form) => form,
+            Err(reason) => {
+                out.writes.push(
+                    json!({"type": "control_response", "response": {"subtype": "success",
+                        "request_id": request_id, "response": {"action": "decline"}}})
+                    .to_string(),
+                );
+                return out.event(
+                    self.session,
+                    Event::Warning {
+                        message: format!(
+                            "Declined a request from the {server} MCP server: {reason}."
+                        ),
+                    },
+                );
+            }
+        };
+        self.ensure_turn(out);
+        let id = self.request_id(&request_id);
+        if form.fields.is_empty() {
+            self.approvals.insert(
+                id.clone(),
+                Pending {
+                    request_id,
+                    input: Value::Null,
+                    tool_use_id: None,
+                    exits_plan: false,
+                    consent: true,
+                },
+            );
+            return out.event(
+                self.session,
+                Event::ApprovalRequested(Approval {
+                    request: id,
+                    item_id: None,
+                    action: message.unwrap_or_else(|| "Continue".into()),
+                    detail: Some(format!("From the {server} MCP server")),
+                }),
+            );
+        }
+        let fields = form.fields.clone();
+        self.questions.insert(
+            id.clone(),
+            Asked {
+                request_id,
+                fields: fields.clone(),
+                native: Native::Form(form),
+            },
+        );
+        out.event(
+            self.session,
+            Event::QuestionAsked(Question {
+                request: id,
+                server: Some(server),
+                message,
+                fields,
             }),
         );
     }
@@ -2934,6 +3208,10 @@ struct ControlBody {
     tool_use_id: Option<String>,
     server_name: Option<String>,
     message: Option<Value>,
+    mcp_server_name: Option<String>,
+    mode: Option<String>,
+    requested_schema: Option<Value>,
+    property_order: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

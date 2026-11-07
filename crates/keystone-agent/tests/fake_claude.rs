@@ -1810,3 +1810,65 @@ fn chosen(model: &str) -> ModelChoice {
         ..ModelChoice::default()
     }
 }
+
+/// The fake can ask its questions while a command's approval waits, as parallel tool
+/// calls can. Answering them leaves the approval waiting, and Deny still denies it.
+#[test]
+fn questions_asked_while_an_approval_waits_leave_it_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let (conn, wake) = connect();
+    conn.send(
+        7,
+        cwd,
+        None,
+        &ModelChoice::default(),
+        NO_MODE,
+        "run it and ask during approval".into(),
+    )
+    .unwrap();
+    let events = until(&conn, &wake, |e| matches!(e, Event::QuestionAsked(_)));
+    let approval = approval(&events);
+    let Some(Event::QuestionAsked(question)) = events.last() else {
+        unreachable!()
+    };
+    conn.command(Command::Reply {
+        session: 7,
+        request: question.request.clone(),
+        answers: Some(vec![
+            keystone_agent::Answer {
+                chosen: vec![1],
+                text: String::new(),
+            },
+            keystone_agent::Answer {
+                chosen: vec![0, 2],
+                text: String::new(),
+            },
+        ]),
+    });
+    let events = until(
+        &conn,
+        &wake,
+        |e| matches!(e, Event::ItemCompleted(item) if item.text.contains("Your questions have been answered")),
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e,
+            Event::ApprovalResolved { request } if *request == approval.request)),
+        "answering the questions leaves the approval waiting: {events:?}"
+    );
+    assert!(!events.iter().any(completed));
+    conn.command(Command::Answer {
+        session: 7,
+        request: approval.request,
+        allow: false,
+    });
+    let events = until(&conn, &wake, completed);
+    let said = reply(&events).unwrap();
+    assert!(
+        said.contains("Answers: \"Which color do you prefer?\"=\"Blue\"")
+            && said.contains("Did not run it."),
+        "{said}"
+    );
+    assert!(events.iter().any(|e| matches!(e,
+        Event::ItemCompleted(item) if item.status == ItemStatus::Declined)));
+}

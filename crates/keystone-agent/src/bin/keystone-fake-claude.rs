@@ -38,6 +38,12 @@
 //! `.fake-claude-ignore-initialize` file holding `all` leaves every `initialize`
 //! unanswered, and `probe` only Keystone's settings probe (`keystone-probe`).
 //!
+//! A prompt containing "ask me" first asks two questions with `AskUserQuestion`, as
+//! Claude Code 2.1.316 does: a single choice and a multiple choice, each taking typed
+//! "Other" text. The reply names the answers, or says the questions were declined.
+//! One containing "run" and "ask during approval" asks them while the command's
+//! approval waits, and the reply also says whether the command ran.
+//!
 //! An `echo` setting of `1` disables scripts selected by prompt text. The default
 //! reply still repeats the prompt. Other settings and environment variables still
 //! apply.
@@ -354,6 +360,8 @@ struct State {
     abort: Option<Abort>,
     /// The approval waiting for an answer: its request ID and where the answer goes.
     approval: Option<(String, Sender<bool>)>,
+    /// The question waiting for an answer: its request ID and where the response goes.
+    question: Option<(String, Sender<Value>)>,
     closed: bool,
 }
 
@@ -962,6 +970,15 @@ fn main() {
                 }
                 let allow = message["response"]["response"]["behavior"] == "allow";
                 let mut state = shared.state.lock().unwrap();
+                if state
+                    .question
+                    .as_ref()
+                    .is_some_and(|(pending, _)| pending == id)
+                    && let Some((_, tx)) = state.question.take()
+                {
+                    let _ = tx.send(message["response"]["response"].clone());
+                    continue;
+                }
                 let applied = state
                     .approval
                     .as_ref()
@@ -1519,6 +1536,12 @@ fn answer(
     if shared.idle {
         idle_scripts(out, shared, session, turn, text);
     }
+    if text.contains("ask me") {
+        match ask_questions(out, shared, turn) {
+            Some(answered) => reply = format!("{answered} {reply}"),
+            None => return stopped(out),
+        }
+    }
     if text.contains("run") {
         let message = format!("fake-tool-{}-{turn}", std::process::id());
         let tool = format!("fake-toolu-{}-{turn}", std::process::id());
@@ -1560,6 +1583,21 @@ fn answer(
                     "description": "Print a scripted line", "tool_use_id": tool}}),
             );
         }
+        // Asked while the approval waits, as parallel tool calls can.
+        let mut during = None;
+        if text.contains("ask during approval") && mode != "bypassPermissions" {
+            match ask_questions(out, shared, turn) {
+                Some(answered) => during = Some(answered),
+                None => {
+                    shared.state.lock().unwrap().approval = None;
+                    emit(
+                        out,
+                        json!({"type": "control_cancel_request", "request_id": request}),
+                    );
+                    return stopped(out);
+                }
+            }
+        }
         let allow = loop {
             match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(allow) => break Some(allow),
@@ -1585,6 +1623,10 @@ fn answer(
         } else {
             ("The user denied this in Keystone.", true)
         };
+        if let Some(answered) = during {
+            let ran = if allow { "Ran it." } else { "Did not run it." };
+            reply = format!("{answered} {ran} {reply}");
+        }
         let uuid = store(
             "user",
             json!({"role": "user", "content":
@@ -1906,6 +1948,86 @@ fn limit(out: &Out, session: &str, turn: u64, reset: u64) -> &'static str {
                "api_error_status": 429, "api_error": "usage_limit_reached"}),
     );
     "completed"
+}
+
+/// Asks the scripted `AskUserQuestion` and waits for the answer. Returns what the
+/// reply says about it, or `None` when Stop withdrew the question.
+fn ask_questions(out: &Out, shared: &Arc<Shared>, turn: u64) -> Option<String> {
+    let tool = format!("fake-ask-toolu-{}-{turn}", std::process::id());
+    let message = format!("fake-ask-{}-{turn}", std::process::id());
+    let input = json!({"questions": [
+        {"question": "Which color do you prefer?", "header": "Color", "multiSelect": false,
+         "options": [{"label": "Red", "description": "A warm color"}, {"label": "Blue", "description": "A cool color"}]},
+        {"question": "Which fruits do you like?", "header": "Fruit", "multiSelect": true,
+         "options": [{"label": "Apple", "description": "Apple"}, {"label": "Banana", "description": "Banana"}, {"label": "Cherry", "description": "Cherry"}]}
+    ]});
+    let content =
+        json!([{"type": "tool_use", "id": tool, "name": "AskUserQuestion", "input": input}]);
+    let uuid = store(
+        "assistant",
+        json!({"id": message, "role": "assistant", "content": content}),
+        None,
+    );
+    emit(
+        out,
+        json!({"type": "assistant", "message": {"id": message, "content": content},
+               "parent_tool_use_id": null, "uuid": uuid}),
+    );
+    let (tx, rx) = mpsc::channel();
+    let request = format!("fake-question-{turn}");
+    shared.state.lock().unwrap().question = Some((request.clone(), tx));
+    emit(
+        out,
+        json!({"type": "control_request", "request_id": request, "request":
+           {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "display_name": "AskUserQuestion",
+            "input": input, "tool_use_id": tool, "requires_user_interaction": true}}),
+    );
+    let response: Value = loop {
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(response) => break response,
+            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => {
+                if shared.state.lock().unwrap().abort == Some(Abort::Stop) {
+                    shared.state.lock().unwrap().question = None;
+                    emit(
+                        out,
+                        json!({"type": "control_cancel_request", "request_id": request}),
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+    let answers = &response["updatedInput"]["answers"];
+    let (result, is_error, said) = if response["behavior"] == "allow" {
+        let pairs: Vec<String> = answers
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(question, answer)| {
+                format!("\"{question}\"=\"{}\"", answer.as_str().unwrap_or_default())
+            })
+            .collect();
+        let pairs = pairs.join(", ");
+        (
+            format!(
+                "Your questions have been answered: {pairs}. You can now continue with these answers in mind."
+            ),
+            false,
+            format!("Answers: {pairs}."),
+        )
+    } else {
+        let message = response["message"].as_str().unwrap_or_default().to_owned();
+        (message, true, "The questions were declined.".to_owned())
+    };
+    let content = json!([{"type": "tool_result", "tool_use_id": tool, "content": result, "is_error": is_error}]);
+    let uuid = store("user", json!({"role": "user", "content": content}), None);
+    emit(
+        out,
+        json!({"type": "user", "message": {"role": "user", "content": content},
+               "parent_tool_use_id": null, "uuid": uuid}),
+    );
+    Some(said)
 }
 
 fn stopped(out: &Out) -> &'static str {

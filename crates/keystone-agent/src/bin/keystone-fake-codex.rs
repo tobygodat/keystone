@@ -17,6 +17,13 @@
 //! exist: its end, or with "end on steer", the steer's rejection after that end.
 //! `KEYSTONE_FAKE_CODEX_REPLY` replaces the reply text exactly.
 //!
+//! A prompt containing "ask me" first asks two questions through
+//! `item/tool/requestUserInput`, and one containing "fill a form" asks for an MCP form
+//! through `mcpServer/elicitation/request`, in codex-cli 0.166's shapes. The form has
+//! a whole number, text, a yes or no, a required single choice and a multiple choice
+//! (Toppings). The reply
+//! names the answers, or says they were declined. Stop withdraws either.
+//!
 //! `model/list` returns a scripted catalog (`fake-default`, `fake-fast`, and a hidden
 //! entry) in two pages, as Codex pages: the first answer holds `fake-default` and
 //! `"nextCursor": "page-2"`, the answer to cursor `page-2` holds the rest with a null
@@ -993,6 +1000,69 @@ fn run_turn(
         }
     }
 
+    let mut answered = String::new();
+    for (asks, method, params) in [
+        (
+            text.contains("ask me"),
+            "item/tool/requestUserInput",
+            json!({"itemId": format!("call-ask-{turn_id}"), "questions": [
+                {"id": "color", "header": "Color", "question": "Which color do you prefer?", "isOther": true, "isSecret": false,
+                 "options": [{"label": "Red", "description": "A warm color."}, {"label": "Blue", "description": "A cool color."}]},
+                {"id": "name", "header": "Name", "question": "What should the file be called?", "isOther": true, "isSecret": false,
+                 "options": [{"label": "notes.txt", "description": "Use notes.txt."}, {"label": "todo.txt", "description": "Use todo.txt."}]}
+            ], "isBlocking": false, "autoResolutionMs": null}),
+        ),
+        (
+            text.contains("fill a form"),
+            "mcpServer/elicitation/request",
+            json!({"serverName": "probe", "mode": "form", "_meta": null, "message": "Choose a plan for the probe",
+                   "requestedSchema": {"type": "object", "properties": {
+                       "count": {"type": "integer", "title": "Count"},
+                       "note": {"type": "string", "title": "Note", "description": "Anything else"},
+                       "rush": {"type": "boolean", "title": "Rush order"},
+                       "size": {"type": "string", "title": "Size", "description": "Which size to use", "enum": ["small", "large"], "enumNames": ["Small", "Large"]},
+                       "toppings": {"type": "array", "title": "Toppings", "items": {"type": "string", "enum": ["cheese", "olives", "basil"]}}
+                   }, "required": ["size"]}}),
+        ),
+    ] {
+        if !asks {
+            continue;
+        }
+        let (tx, rx): (Sender<Value>, Receiver<Value>) = mpsc::channel();
+        *turn.answers.lock().unwrap() = Some(tx);
+        let request = next.fetch_add(1, Ordering::Relaxed) + 1000;
+        emit(
+            out,
+            json!({"id": request, "method": method, "params": with(params)}),
+        );
+        let answer = loop {
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(answer) => break Some(answer),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+                Err(mpsc::RecvTimeoutError::Timeout) if turn.interrupt.load(Ordering::Relaxed) => {
+                    break None;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
+        *turn.answers.lock().unwrap() = None;
+        notify(
+            out,
+            "serverRequest/resolved",
+            json!({"threadId": thread, "requestId": request}),
+        );
+        let Some(answer) = answer else {
+            return finish(out, thread, turn_id, "interrupted");
+        };
+        let result = &answer["result"];
+        let declined = result["answers"] == json!({}) || result["action"] == "decline";
+        answered = if declined {
+            "The questions were declined. ".into()
+        } else {
+            format!("Answers: {result}. ")
+        };
+    }
+
     let calls = widgets::calls(text);
     let mut results = Vec::new();
     for (n, arguments) in calls.iter().enumerate().filter(|_| widgets) {
@@ -1072,6 +1142,7 @@ fn run_turn(
              **Approvals:** `{policy}` **Model:** `{model}`{settings}{images}"
         )
     });
+    let words = format!("{answered}{words}");
     let mut steer = None;
     let message_id = format!("msg-{turn_id}");
     let streamed = stream(out, &with, &message_id, &words, turn, delay, &mut steer);
