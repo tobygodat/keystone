@@ -6,7 +6,7 @@ Change the theme, fonts, density, and text size, and keep the choice across rest
 
 - `settings-open` opens the page with Ctrl+Comma, the sidebar's cog, or the palette's "Open settings", and closes it with Back, the page's cog, Escape, or Ctrl+Comma again.
 - `settings-sections` switches between the Appearance, Fonts, Notifications, Sounds, Accounts, Integrations, Prompts and Scheduled sections. Notifications is covered in [notifications](notifications.md), Sounds in [sounds](sounds.md), Accounts in [usage](usage.md), Integrations in [integrations](integrations.md), Prompts in [prompts](prompts.md) and Scheduled in [scheduled](scheduled.md). The app menu's **Settings…** opens the page too.
-- `settings-theme` switches between System, Light, and Dark.
+- `settings-theme` switches between System, Light, and Dark on a segmented control, by click or by keyboard.
 - `settings-font` picks the interface font and the code font, each with "Default" first.
 - `settings-action-color` picks the fill of Send, Allow and other primary buttons: Ink (the default), Blue, Green, Orange, Purple or Pink, by click or by keyboard.
 - `settings-density` picks Compact, Default, or Spacious, by click or by keyboard.
@@ -18,13 +18,13 @@ Change the theme, fonts, density, and text size, and keep the choice across rest
 - Press Ctrl+Comma, or click the cog at the bottom left of the sidebar. The settings page takes the place of the workspace below the top bar, whose breadcrumb reads **keystone / Settings**.
 - The page's left column, as wide as the sidebar, lists Back, then the sections. The selected section is highlighted, and the cog stays at the bottom left, shown selected.
 - Appearance holds Theme, Action color, Density, Text size, and Transcript text. Fonts holds Interface font and Code font.
-- Tab and Shift+Tab move through Back, the sections, then the shown section's controls. Up and Down on a focused section move the selection. Space or Enter activates a focused row or button. Left and Right move a focused action color or density choice, and change the text size on a slider. Tab in an open menu closes it and moves on.
+- Tab and Shift+Tab move through Back, the sections, then the shown section's controls. Up and Down on a focused section move the selection. Space or Enter activates a focused row or button. Left and Right move a focused theme, action color or density choice, and change the text size on a slider. Tab in an open menu closes it and moves on.
 - Escape closes an open menu first, then the page. Focus returns to the composer, or to the window on the welcome screen.
 
 ## Driving it with keystone-verify
 
 - Call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","comma"]}]}`. `wait_for` `{"id":"settings-page"}`. Close it with `click` `{"id":"settings-back"}`, reopen with `click` `{"id":"settings"}`, and require the cog to show selected and keep its place.
-- `click` `{"id":"settings-theme"}`, then `{"id":"settings-theme-option-1"}` for Light. Capture and require the light palette. Option 0 is System, option 2 Dark.
+- `click` `{"id":"settings-theme-option-1"}` for Light. Capture and require the light palette. Option 0 is System, option 2 Dark.
 - `click` `{"id":"settings-action-color-2"}` for Green. Require Send to turn green once the composer has a draft, and an approval's Allow too. Option 0 is Ink. With a swatch focused, Left and Right move the choice.
 - `click` the right end of `{"id":"settings-transcript-size"}` for 20 px. Require larger transcript text while the sidebar and composer keep their size.
 - `click` `{"id":"density-compact"}`. Require the cog to shrink at once (24 px compact, 28 px default, 32 px spacious), and the sidebar rows after closing.

@@ -775,7 +775,8 @@ impl Keystone {
                 cx.notify()
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
-                this.save_placement_soon(window, cx)
+                this.save_placement_soon(window, cx);
+                this.refit_side_surfaces_soon(window, cx);
             }),
         ];
         let app = cx.weak_entity();
@@ -1614,7 +1615,7 @@ impl Keystone {
         Some(
             ConfirmDialog::new("rename-dialog", &renaming.focus, "Rename session", "")
                 .icon(IconName::Pencil)
-                .tone(Color::Accent)
+                .tone(Color::Default)
                 .confirm_label("Rename")
                 .body(body)
                 .on_cancel(move |window, cx| cancel(&(), window, cx))
@@ -1821,6 +1822,9 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let (colors, density) = (cx.theme().colors, cx.theme().density);
+        // At Default: 12 px above the draft, 14 left of it and before the toolbar, 10 around
+        // the toolbar's right and bottom, so its 24 px controls sit evenly in the corner.
+        let edge = density.space(px(12.));
         let conversation = current.and_then(|(id, _)| self.state.read(cx).conversations().get(&id));
         let running = conversation.is_some_and(|c| c.running);
         let waiting = conversation.is_some_and(|c| !c.approvals.is_empty());
@@ -1875,7 +1879,7 @@ impl Keystone {
                     .arrangement
                     .narrows_composer(viewport.width);
                 let toolbar = h_flex()
-                    .gap(px(14.))
+                    .gap(px(4.))
                     .child(
                         h_flex()
                             .flex_shrink(1.)
@@ -1907,7 +1911,7 @@ impl Keystone {
                     .child(
                         h_flex()
                             .flex_none()
-                            .gap(px(6.))
+                            .gap(px(4.))
                             .child(self.attach_menu(cx))
                             .when(running, |d| {
                                 d.child(
@@ -1945,8 +1949,8 @@ impl Keystone {
                 let field = div()
                     .id("composer-field")
                     .automation_id("composer-field")
-                    .min_h(px(52.))
-                    .pr(px(6.));
+                    .min_h(TextSize::Body.line_height())
+                    .pr(px(4.));
                 let field = if self
                     .slash_entries(cx)
                     .is_some_and(|(.., entries)| !entries.is_empty())
@@ -1990,16 +1994,16 @@ impl Keystone {
             .rounded(radius::COMPOSER)
             .shadow(vec![BoxShadow {
                 color: colors.composer_shadow,
-                offset: point(px(0.), px(4.)),
-                blur_radius: px(16.),
-                spread_radius: px(0.),
+                offset: point(px(0.), px(8.)),
+                blur_radius: px(24.),
+                spread_radius: px(-12.),
                 inset: false,
             }])
-            .pt(density.space(px(16.)))
-            .pl(density.space(px(20.)))
-            .pr(density.space(px(12.)))
-            .pb(density.space(px(12.)))
-            .gap(density.space(px(12.)))
+            .pt(edge)
+            .pl(edge + px(2.))
+            .pr(edge - px(2.))
+            .pb(edge - px(2.))
+            .gap(edge + px(2.))
             .relative()
             .when(current.is_some(), |d| {
                 d.drag_over::<ExternalPaths>(move |style, _, _, _| {
@@ -2271,7 +2275,6 @@ impl Keystone {
         let tooltip = Tooltip::text(approval_tooltip(mode, running, narrow));
         let trigger = if narrow {
             IconButton::new("approval-mode", IconName::Shield)
-                .size(ButtonSize::Compact)
                 .selected(self.approval_menu)
                 .when_some(color, IconButton::color)
                 .aria_label(format!("Approval mode · {}", mode.label()))
@@ -2280,7 +2283,6 @@ impl Keystone {
                 .into_any_element()
         } else {
             Button::new("approval-mode", mode.label())
-                .size(ButtonSize::Compact)
                 .icon(IconName::Shield)
                 .selected(self.approval_menu)
                 .when_some(color, Button::color)
@@ -2973,7 +2975,7 @@ impl Keystone {
                     .id(arrangement::selector("turn-status", key.view))
                     .automation_id(arrangement::selector("turn-status", key.view))
                     .gap_2()
-                    .child(div().size(px(6.)).rounded_full().bg(colors.accent))
+                    .child(div().size(px(6.)).rounded_full().bg(colors.text))
                     .child(
                         Label::new("Working…")
                             .size(TextSize::Ui)
@@ -5198,7 +5200,8 @@ mod tests {
         wait_until(cx, &view, |v, cx| {
             v.state.read(cx).conversations()[&1].rows.len() == 30
         });
-        cx.simulate_resize(size(px(1000.), px(500.)));
+        // Short enough that the row below the first is clipped by the composer.
+        cx.simulate_resize(size(px(1000.), px(472.)));
         cx.simulate_keystrokes("secondary-shift-t home down");
         let top = view.read_with(cx, |v, _cx| keyboard_scroll_top(v));
         cx.simulate_keystrokes("down");
@@ -8881,7 +8884,7 @@ mod tests {
         let field = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("composer-field").unwrap();
         let send = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("send").unwrap();
         let (empty, toolbar) = (field(cx), send(cx));
-        assert_eq!(empty.size.height, px(52.));
+        assert_eq!(empty.size.height, px(28.), "one row while empty");
 
         let set = |text: String, cx: &mut gpui::VisualTestContext| {
             view.update(cx, |this, cx| {
@@ -8892,7 +8895,7 @@ mod tests {
         };
         set("word ".repeat(60), cx);
         let wrapped = field(cx);
-        assert!(wrapped.size.height > px(52.) && wrapped.size.height < px(160.));
+        assert!(wrapped.size.height > empty.size.height && wrapped.size.height < px(160.));
         // The composer grows upward; its toolbar stays docked.
         assert_eq!(wrapped.bottom(), empty.bottom());
         assert_eq!(send(cx), toolbar);
@@ -8972,9 +8975,9 @@ mod tests {
         assert_eq!(
             [compact.0, default.0, spacious.0],
             [
-                [12., 16., 8., 8., 8., 8.],
-                [16., 20., 12., 12., 12., 12.],
-                [20., 24., 16., 16., 16., 16.],
+                [8., 10., 6., 6., 10., 8.],
+                [12., 14., 10., 10., 14., 12.],
+                [16., 18., 14., 14., 18., 16.],
             ]
             .map(|row| row.map(px))
         );
@@ -11221,7 +11224,8 @@ mod tests {
         assert!(cx.debug_bounds("recovery-continue").is_none());
     }
 }
-/// The composer's round send button, which takes clicks only while `can_send`.
+/// The composer's square send button, a control's height on a side, which takes clicks
+/// only while `can_send`.
 fn send_button(
     id: &'static str,
     can_send: bool,
@@ -11233,17 +11237,17 @@ fn send_button(
         .id(id)
         .automation_id(id)
         .flex_shrink_0()
-        .size(px(32.))
+        .size(cx.theme().density.control(px(28.)))
         .flex()
         .items_center()
         .justify_center()
-        .rounded_full()
+        .rounded(radius::CONTROL)
         .bg(if can_send {
             colors.element_inverse
         } else {
             colors.element_disabled
         })
-        .child(Icon::new(IconName::Up).size(px(16.)).color(if can_send {
+        .child(Icon::new(IconName::Up).size(px(14.)).color(if can_send {
             Color::Custom(colors.text_inverse)
         } else {
             Color::Faint

@@ -11,7 +11,7 @@ use std::process::Command;
 /// Puts a stand-in `gh` first on `PATH`, once for the whole process. It runs the
 /// repository's own `.git/fake-gh`, so each test scripts its own, and otherwise acts
 /// signed out. It never reaches GitHub or the user's gh login.
-fn fake_gh() {
+pub(crate) fn fake_gh() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let dir = std::env::temp_dir().join(format!("keystone-fake-gh-pr-{}", std::process::id()));
@@ -948,5 +948,32 @@ fn a_repair_prompt_fences_the_log_past_its_backticks_and_links_a_check_without_o
     assert_eq!(
         comment_prompt(&link, &comment),
         "Address ana's review comment on README.md in https://github.com/o/r/pull/3:\n\n> Two lines\n>\n> here"
+    );
+}
+
+#[gpui::test]
+fn a_squeezed_panel_keeps_a_failed_checks_name_readable(app: &mut TestAppContext) {
+    fake_gh();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fixture(&root);
+    stage(&root, "failing");
+    let path = seeded(&root);
+    let (view, handle) = launch(&path, app);
+    let cx = visual(handle, app);
+    cx.simulate_resize(gpui::size(px(1600.), px(900.)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("secondary-alt-p");
+    until(cx, "the failed check shows", |cx| {
+        idle(&view, cx) && shown(cx, "pull-request-repair-0")
+    });
+    // Before the resize settles, the panel and sidebar shrink to their minimums.
+    cx.simulate_resize(gpui::size(px(1150.), px(720.)));
+    cx.run_until_parked();
+    let name = cx.debug_bounds("pull-request-check-0-name").unwrap();
+    assert!(
+        name.size.width >= px(72.),
+        "the check's name keeps room to read: {:?}",
+        name.size
     );
 }

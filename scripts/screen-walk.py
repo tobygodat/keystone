@@ -255,7 +255,6 @@ class Walk:
         self.key('ctrl', 'comma')
         self.click('settings-section-appearance')
         if self.theme:
-            self.click('settings-theme')
             self.click(f'settings-theme-option-{THEMES.index(self.theme)}')
         if self.density:
             self.click(f'density-{self.density}')

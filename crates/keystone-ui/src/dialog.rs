@@ -117,7 +117,8 @@ impl ConfirmDialog {
     }
 
     /// The color of the icon and of Confirm. `Danger` by default; `Warning` for a
-    /// choice that is risky but reversible.
+    /// choice that is risky but reversible. `Default` is a safe choice: an ink icon and
+    /// Confirm as the primary action.
     pub fn tone(mut self, tone: Color) -> Self {
         self.tone = tone;
         self
@@ -228,8 +229,13 @@ impl RenderOnce for ConfirmDialog {
                             SharedString::from(format!("{id}-confirm")),
                             self.confirm_label,
                         )
-                        .style(ButtonStyle::Filled)
-                        .color(self.tone)
+                        .map(|button| {
+                            if self.tone == Color::Default {
+                                button.style(ButtonStyle::Primary)
+                            } else {
+                                button.style(ButtonStyle::Filled).color(self.tone)
+                            }
+                        })
                         .track_focus(&focus.confirm)
                         .debug_selector(|| format!("{id}-confirm"))
                         .disabled(self.working)

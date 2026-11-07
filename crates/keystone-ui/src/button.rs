@@ -57,6 +57,7 @@ struct Common {
     on_click: Option<ClickHandler>,
     debug_selector: Option<String>,
     focus: Option<FocusHandle>,
+    keyboard_ring: bool,
     reveal_on_focus: bool,
     reserve_focus_ring: bool,
     aria_label: Option<SharedString>,
@@ -75,6 +76,7 @@ impl Common {
             on_click: None,
             debug_selector: None,
             focus: None,
+            keyboard_ring: false,
             reveal_on_focus: false,
             reserve_focus_ring: false,
             aria_label: None,
@@ -124,12 +126,19 @@ impl Common {
         // The ring is a border that is always there, so focus never changes the size.
         let ring = focus_ring(self.style, colors);
         let reveal = self.reveal_on_focus;
+        let keyboard_ring = self.keyboard_ring;
         el.when(self.reserve_focus_ring || self.focus.is_some(), |d| {
             d.border_2().border_color(ring.opacity(0.))
         })
         .when_some(self.focus, |d, focus| {
             d.track_focus(&focus)
-                .focus(move |s| s.border_color(ring))
+                .map(|d| {
+                    if keyboard_ring {
+                        d.focus_visible(move |s| s.border_color(ring))
+                    } else {
+                        d.focus(move |s| s.border_color(ring))
+                    }
+                })
                 .when(reveal, |d| {
                     d.relative().child(
                         gpui::canvas(
@@ -196,6 +205,12 @@ macro_rules! common_builders {
         /// Makes the button focusable with a visible ring. Enter or Space clicks it while focused.
         pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
             self.common.focus = Some(focus.clone());
+            self
+        }
+
+        /// Shows the focus ring only when focus came from the keyboard, not a click.
+        pub fn keyboard_focus_ring(mut self) -> Self {
+            self.common.keyboard_ring = true;
             self
         }
 

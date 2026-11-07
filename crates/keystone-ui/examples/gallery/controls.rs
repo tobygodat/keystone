@@ -1,5 +1,5 @@
-//! The controls page: switches, a slider, and selects, with a status line that names
-//! the last change. Tab and Shift+Tab move focus between the controls.
+//! The controls page: switches, a segmented control, a slider, and selects, with a
+//! status line that names the last change. Tab and Shift+Tab move focus between the controls.
 
 use gpui::{
     Context, FocusHandle, Focusable, IntoElement, Render, SharedString, Window, div, prelude::*, px,
@@ -24,6 +24,7 @@ const FRUITS: [&str; 12] = [
 pub struct ControlsPage {
     focus: FocusHandle,
     switch: bool,
+    segment: usize,
     slider: f32,
     action: keystone_ui::ActionColor,
     fruit: Option<usize>,
@@ -37,6 +38,7 @@ impl ControlsPage {
         Self {
             focus: cx.focus_handle(),
             switch: false,
+            segment: 1,
             slider: 40.,
             action: keystone_ui::ActionColor::Ink,
             fruit: Some(0),
@@ -111,6 +113,23 @@ impl Render for ControlsPage {
                             })),
                     )
                     .child(Switch::new("controls-switch-disabled-on", true).disabled(true)),
+            ))
+            .child(field(
+                "Segmented",
+                SegmentedControl::new("controls-segmented").segments(
+                    ["Compact", "Default", "Spacious"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(n, label)| {
+                            Button::new(("controls-segment", n), label)
+                                .selected(self.segment == n)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.segment = n;
+                                    this.status = format!("segment {label}").into();
+                                    cx.notify();
+                                }))
+                        }),
+                ),
             ))
             .child(field(
                 "Slider",

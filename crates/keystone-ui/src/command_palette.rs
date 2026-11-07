@@ -335,7 +335,7 @@ fn render_row(
     };
     let item = state.item(shown);
     let marked = HighlightStyle {
-        color: Some(Color::Accent.to_hsla(cx)),
+        color: Some(Color::Strong.to_hsla(cx)),
         font_weight: Some(FontWeight::SEMIBOLD),
         ..Default::default()
     };

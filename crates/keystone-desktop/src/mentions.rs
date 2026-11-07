@@ -557,7 +557,7 @@ impl Keystone {
 
 fn file_row(found: &Found, highlighted: bool, height: Pixels, cx: &mut App) -> AnyElement {
     let marked = HighlightStyle {
-        color: Some(Color::Accent.to_hsla(cx)),
+        color: Some(Color::Strong.to_hsla(cx)),
         font_weight: Some(FontWeight::BOLD),
         ..Default::default()
     };

@@ -929,6 +929,7 @@ impl IntoElement for TextElement {
 /// draft in a 1px layout pass took most of a second each frame.
 fn wrapped_rows(
     text: &str,
+    tokens: &[Range<usize>],
     width: Pixels,
     style: &TextStyle,
     limit: usize,
@@ -936,41 +937,82 @@ fn wrapped_rows(
 ) -> usize {
     let font_size = style.font_size.to_pixels(window.rem_size());
     let mut rows = 0;
+    let mut start = 0;
     for paragraph in text.split('\n') {
+        let end = start + paragraph.len();
         if rows >= limit {
             break;
         }
-        let runs = [TextRun {
-            len: paragraph.len(),
-            font: style.font(),
-            color: style.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }];
         rows += window
             .text_system()
             .shape_text(
                 paragraph.to_owned().into(),
                 font_size,
-                &runs,
+                &font_runs(start..end, tokens, style),
                 Some(width),
                 None,
             )
             .unwrap()
             .first()
             .map_or(1, |line| line.wrap_boundaries.len() + 1);
+        start = end + 1;
     }
     rows.min(limit)
 }
 
-/// Shapes `text`, drawing the byte ranges in `tokens` in `token_color`.
+/// Runs covering `paragraph`, a byte range of the content, with the parts inside
+/// `tokens` in SemiBold, so measuring wraps a draft where painting does.
+fn font_runs(paragraph: Range<usize>, tokens: &[Range<usize>], style: &TextStyle) -> Vec<TextRun> {
+    let mut cuts = vec![paragraph.start, paragraph.end];
+    for token in tokens {
+        cuts.extend(
+            [token.start, token.end]
+                .into_iter()
+                .filter(|&b| b > paragraph.start && b < paragraph.end),
+        );
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let runs: Vec<TextRun> = cuts
+        .windows(2)
+        .map(|pair| {
+            let token = tokens
+                .iter()
+                .any(|token| token.start <= pair[0] && pair[1] <= token.end);
+            let mut font = style.font();
+            if token {
+                font.weight = gpui::FontWeight::SEMIBOLD;
+            }
+            TextRun {
+                len: pair[1] - pair[0],
+                font,
+                color: style.color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }
+        })
+        .collect();
+    if runs.is_empty() {
+        vec![TextRun {
+            len: 0,
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }]
+    } else {
+        runs
+    }
+}
+
+/// Shapes `text`, drawing the byte ranges in `tokens` in SemiBold.
 #[allow(clippy::too_many_arguments)]
 fn shape_layout(
     input: &TextInput,
     text: &str,
     tokens: &[Range<usize>],
-    token_color: Hsla,
     width: Pixels,
     style: &TextStyle,
     line_height: Pixels,
@@ -1011,13 +1053,17 @@ fn shape_layout(
             .windows(2)
             .map(|pair| {
                 let inside = |range: &Range<usize>| range.start <= pair[0] && pair[1] <= range.end;
+                let font = if tokens.iter().any(inside) {
+                    gpui::Font {
+                        weight: gpui::FontWeight::SEMIBOLD,
+                        ..run.font.clone()
+                    }
+                } else {
+                    run.font.clone()
+                };
                 TextRun {
                     len: pair[1] - pair[0],
-                    color: if tokens.iter().any(inside) {
-                        token_color
-                    } else {
-                        color
-                    },
+                    font,
                     underline: marked
                         .filter(|range| inside(range))
                         .map(|_| UnderlineStyle {
@@ -1109,7 +1155,14 @@ impl Element for TextElement {
             let height = if let (true, Some(height)) = (input.fill, known.height) {
                 height
             } else if input.mode == InputMode::Multiline {
-                let rows = wrapped_rows(&input.content, width, &measured_style, 8, window);
+                let rows = wrapped_rows(
+                    &input.content,
+                    &input.tokens,
+                    width,
+                    &measured_style,
+                    8,
+                    window,
+                );
                 (line_height * rows).max(px(28.))
             } else {
                 line_height
@@ -1129,18 +1182,13 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> PrepaintState {
         let colors = &cx.theme().colors;
-        let (placeholder, selection_color, caret, accent) = (
-            colors.text_placeholder,
-            colors.selection,
-            colors.caret,
-            colors.accent,
-        );
+        let (placeholder, selection_color, caret) =
+            (colors.text_placeholder, colors.selection, colors.caret);
         let input = self.input.read(cx);
         let layout = shape_layout(
             input,
             &input.content,
             &input.tokens,
-            accent,
             bounds.size.width,
             &state.0,
             state.1,
@@ -1152,7 +1200,6 @@ impl Element for TextElement {
                 input,
                 &input.placeholder,
                 &[],
-                accent,
                 bounds.size.width,
                 &state.0,
                 state.1,
@@ -1447,29 +1494,42 @@ mod tests {
             let style = window.text_style();
             let line_height = window.line_height();
             for text in &texts {
-                for width in [px(1.), px(30.), px(400.), px(602.)] {
-                    let shaped = shape_layout(
-                        input.read(cx),
-                        text,
-                        &[],
-                        style.color,
-                        width,
-                        &style,
-                        line_height,
-                        style.color,
-                        window,
-                    );
-                    assert_eq!(
-                        wrapped_rows(text, width, &style, 8, window),
-                        shaped.rows.len().min(8),
-                        "{} bytes at {width:?}",
-                        text.len()
-                    );
+                let token = (0..=text.len().min(40))
+                    .rev()
+                    .find(|&end| text.is_char_boundary(end))
+                    .map(|end| 0..end)
+                    .filter(|token| !token.is_empty());
+                for tokens in [None, token] {
+                    let tokens = Vec::from_iter(tokens);
+                    for width in [px(1.), px(30.), px(400.), px(602.)] {
+                        let shaped = shape_layout(
+                            input.read(cx),
+                            text,
+                            &tokens,
+                            width,
+                            &style,
+                            line_height,
+                            style.color,
+                            window,
+                        );
+                        assert_eq!(
+                            wrapped_rows(text, &tokens, width, &style, 8, window),
+                            shaped.rows.len().min(8),
+                            "{} bytes, tokens {tokens:?}, at {width:?}",
+                            text.len()
+                        );
+                    }
                 }
             }
-            assert_eq!(wrapped_rows(&long, px(602.), &style, 8, window), 8);
-            assert_eq!(wrapped_rows("a\nb\n\nc", px(602.), &style, 8, window), 4);
-            assert_eq!(wrapped_rows("one line", px(602.), &style, 8, window), 1);
+            assert_eq!(wrapped_rows(&long, &[], px(602.), &style, 8, window), 8);
+            assert_eq!(
+                wrapped_rows("a\nb\n\nc", &[], px(602.), &style, 8, window),
+                4
+            );
+            assert_eq!(
+                wrapped_rows("one line", &[], px(602.), &style, 8, window),
+                1
+            );
         });
     }
 

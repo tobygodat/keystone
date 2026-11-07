@@ -136,7 +136,7 @@ pub(crate) struct SettingsPage {
     section: Section,
     back: FocusHandle,
     sections: [FocusHandle; SECTIONS.len()],
-    theme: FocusHandle,
+    theme: [FocusHandle; THEMES.len()],
     ui_font: FocusHandle,
     mono_font: FocusHandle,
     action_color: [FocusHandle; ACTION_COLORS.len()],
@@ -157,7 +157,7 @@ impl SettingsPage {
             section: Section::Appearance,
             back: stop(),
             sections: std::array::from_fn(|_| stop()),
-            theme: stop(),
+            theme: std::array::from_fn(|_| stop()),
             ui_font: stop(),
             mono_font: stop(),
             action_color: std::array::from_fn(|_| stop()),
@@ -541,16 +541,18 @@ impl Keystone {
         cx: &Context<Self>,
     ) -> AnyElement {
         match field {
-            Field::Theme => Select::new(
-                "settings-theme",
-                THEMES.map(|(_, label)| label),
-                THEMES.iter().position(|(mode, _)| *mode == saved.theme),
-            )
-            .track_focus(&page.theme)
-            .on_change(self.change(cx, |appearance, &at: &usize| {
-                appearance.theme = THEMES[at].0
-            }))
-            .into_any_element(),
+            Field::Theme => SegmentedControl::new("settings-theme")
+                .segments(THEMES.iter().zip(&page.theme).enumerate().map(
+                    |(n, (&(mode, label), focus))| {
+                        let id = format!("settings-theme-option-{n}");
+                        Button::new(gpui::SharedString::from(id.clone()), label)
+                            .selected(saved.theme == mode)
+                            .track_focus(focus)
+                            .debug_selector(|| id)
+                            .on_click(self.change(cx, move |appearance, _| appearance.theme = mode))
+                    },
+                ))
+                .into_any_element(),
             Field::UiFont => self.font_select(
                 "settings-ui-font",
                 &page.ui_font,
@@ -594,13 +596,10 @@ impl Keystone {
                         }),
                 )
                 .into_any_element(),
-            Field::Density => h_flex()
-                .flex_shrink_0()
-                .gap_1()
-                .children(DENSITIES.iter().zip(&page.density).map(
+            Field::Density => SegmentedControl::new("settings-density")
+                .segments(DENSITIES.iter().zip(&page.density).map(
                     |(&(density, label, id), focus)| {
                         Button::new(id, label)
-                            .style(ButtonStyle::Subtle)
                             .selected(saved.density == density)
                             .track_focus(focus)
                             .debug_selector(|| id.into())
@@ -842,7 +841,14 @@ impl Keystone {
                     .preferences()
                     .appearance()
                     .clone();
-                if let Some(at) = focused(&page.density) {
+                if let Some(at) = focused(&page.theme) {
+                    let next = step(at, THEMES.len());
+                    window.focus(&page.theme[next], cx);
+                    let mode = THEMES[next].0;
+                    if saved.theme != mode {
+                        self.update_appearance(|appearance| appearance.theme = mode, window, cx);
+                    }
+                } else if let Some(at) = focused(&page.density) {
                     let next = step(at, DENSITIES.len());
                     window.focus(&page.density[next], cx);
                     let density = DENSITIES[next].0;
@@ -992,7 +998,6 @@ mod tests {
         let (view, cx) = open_window(&path, cx);
         keys(cx, "secondary-,");
         let writer = crate::tests::lock_database(&path);
-        click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
         click(cx, "settings-action-color-2");
         let track = cx.debug_bounds("settings-transcript-size").unwrap();
@@ -1031,7 +1036,6 @@ mod tests {
         });
         assert!(shown(cx, "settings-error"), "the page shows the save error");
         drop(writer);
-        click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
         let repaired = saved(&path);
         assert_eq!(repaired.theme, ThemeMode::Light);
@@ -1390,7 +1394,6 @@ mod tests {
         assert!(shown(cx, "settings-page"), "Ctrl+Comma opens");
         assert!(!shown(cx, "session-1"), "the page replaces the workspace");
 
-        click(cx, "settings-theme");
         click(cx, "settings-theme-option-1");
         assert_eq!(saved(&path).theme, ThemeMode::Light);
         cx.update(|_, cx| assert_eq!(cx.theme().appearance, keystone_ui::Appearance::Light));
@@ -1495,8 +1498,15 @@ mod tests {
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
         // Appearance's row holds focus; next come Fonts, Notifications, Sounds, Accounts,
-        // Integrations, Prompts, Scheduled, Project, Theme, then the first action color.
-        keys(cx, "tab tab tab tab tab tab tab tab tab tab");
+        // Integrations, Prompts, Scheduled, Project, then System, the first theme. Right
+        // and Left move the choice; three more Tabs pass Light and Dark to the first action
+        // color.
+        keys(cx, "tab tab tab tab tab tab tab tab tab");
+        keys(cx, "right");
+        assert_eq!(saved(&path).theme, ThemeMode::Light);
+        keys(cx, "left");
+        assert_eq!(saved(&path).theme, ThemeMode::System);
+        keys(cx, "tab tab tab");
         keys(cx, "right right");
         assert_eq!(saved(&path).action_color, keystone_core::ActionColor::Green);
         keys(cx, "left left");
@@ -1517,9 +1527,10 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, the six action colors, Theme, Project, Scheduled,
-        // Prompts, Integrations, Accounts, Sounds, Notifications, Fonts, and Appearance to Back.
-        keys(cx, &["shift-tab"; 18].join(" "));
+        // From Default back past Compact, the six action colors, Theme's three choices,
+        // Project, Scheduled, Prompts, Integrations, Accounts, Sounds, Notifications, Fonts,
+        // and Appearance to Back.
+        keys(cx, &["shift-tab"; 20].join(" "));
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
         assert!(composer_focused(&view, cx));

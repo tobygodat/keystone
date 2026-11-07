@@ -94,7 +94,6 @@ try:
     wait('welcome-claude', 40)
     key('ctrl', 'comma')
     click('settings-section-appearance')
-    click('settings-theme')
     click(f'settings-theme-option-{["system", "light", "dark"].index(THEME)}')
     key('Escape')
     wait('welcome-claude', 5)

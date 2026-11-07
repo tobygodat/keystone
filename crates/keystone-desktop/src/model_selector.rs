@@ -627,12 +627,12 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
         .automation_id("model-selector")
         .min_w(MIN_WIDTH)
         .h(cx.theme().density.control(px(28.)))
-        .px(px(6.))
-        .gap(px(7.))
+        .px(px(7.))
+        .gap(px(5.))
         .rounded(radius::CONTROL)
         .child(
             Icon::new(provider_icon(provider))
-                .size(px(16.))
+                .size(px(14.))
                 .color(provider_icon_color(provider, cx)),
         )
         .child(
@@ -649,10 +649,14 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
                     )
                 }),
         );
-    let hover = colors.element_hover;
+    let hover = colors.element_filled_hover;
     let trigger = trigger
         .cursor_pointer()
-        .when(open, |d| d.bg(colors.selection_fill))
+        .bg(if open {
+            colors.selection_fill
+        } else {
+            colors.element_filled
+        })
         .when(!open, |d| d.hover(move |s| s.bg(hover)))
         .child(
             Icon::new(IconName::Chevron)

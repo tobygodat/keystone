@@ -1287,7 +1287,7 @@ impl ChangesPanel {
                 )
                 .on_confirm(confirm)
                 .size_full()
-                .px_1(),
+                .px(px(12.)),
             )
             .into_any_element()
     }
@@ -1327,7 +1327,7 @@ fn code_color(code: char) -> Color {
         'M' | 'T' => Color::Warning,
         'A' | '?' => Color::Success,
         'D' | '!' => Color::Danger,
-        _ => Color::Accent,
+        _ => Color::Muted,
     }
 }
 
@@ -1343,10 +1343,10 @@ fn row(
     let base = h_flex()
         .h(px(ROW_HEIGHT))
         .w_full()
-        .px_2()
+        .px_1()
         .gap_2()
         .rounded(radius::CONTROL)
-        .when(highlighted, |d| d.bg(colors.selection_fill));
+        .when(highlighted, |d| d.bg(colors.element_selected));
     let panel = panel.clone();
     match row {
         Row::Header { group, count } => {
@@ -1358,10 +1358,10 @@ fn row(
             };
             base.child(
                 div().flex_1().min_w_0().child(
-                    Label::new(format!("{} · {count}", group.label()))
-                        .size(TextSize::Sm)
+                    Label::new(format!("{} · {count}", group.label()).to_uppercase())
+                        .size(TextSize::Xs)
                         .weight(FontWeight::MEDIUM)
-                        .color(Color::Muted),
+                        .color(Color::Faint),
                 ),
             )
             .children(action.filter(|_| !busy).map(|(icon, tip)| {
@@ -1395,8 +1395,8 @@ fn row(
             base.child(
                 div().w(px(12.)).flex_shrink_0().child(
                     Label::new(file.code.to_string())
-                        .size(TextSize::Sm)
-                        .weight(FontWeight::MEDIUM)
+                        .size(TextSize::Xs)
+                        .mono()
                         .color(code_color(file.code)),
                 ),
             )

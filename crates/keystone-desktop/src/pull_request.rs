@@ -11,7 +11,8 @@ use crate::app_state::AppState;
 use crate::notifications::Alert;
 use futures::channel::oneshot;
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, IntoElement, Task, Window, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, FontWeight, IntoElement, Task, Window, div,
+    prelude::*, px,
 };
 use keystone_agent::github::{self, MergeMethod};
 use keystone_agent::worker::Worker;
@@ -26,6 +27,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 gpui::actions!(pull_request, [TogglePullRequest]);
+
+/// A check's name never narrows past this, so "CI / test" stays readable beside its
+/// summary and repair button in a narrow panel.
+const CHECK_NAME_MIN: f32 = 72.;
 
 pub(crate) const PULL_REQUEST_WIDTH: keystone_core::Size =
     keystone_core::Size::Px(NonZeroU16::new(360).unwrap());
@@ -764,7 +769,7 @@ impl Keystone {
                 format!("{} into {}", confirm.branch, confirm.base),
             )
             .icon(IconName::PullRequest)
-            .tone(Color::Accent)
+            .tone(Color::Default)
             .confirm_label(confirm.method.label())
             .when_some(methods, |dialog, methods| dialog.body(methods))
             .on_cancel(move |window, cx| cancel(&(), window, cx))
@@ -841,8 +846,8 @@ impl Keystone {
         };
         let (state_word, state_color) = match report.state {
             PullRequestState::Open => ("Open", Color::Success),
-            PullRequestState::Draft => ("Draft", Color::Muted),
-            PullRequestState::Merged => ("Merged", Color::Accent),
+            PullRequestState::Draft => ("Draft", Color::Faint),
+            PullRequestState::Merged => ("Merged", Color::Default),
             PullRequestState::Closed => ("Closed", Color::Danger),
         };
         let decision = report.review_decision.map(|decision| match decision {
@@ -875,10 +880,7 @@ impl Keystone {
                 }))
             });
         let word = |(text, color): (&'static str, Color), id: &'static str| {
-            div()
-                .flex_none()
-                .automation_id(id)
-                .child(Label::new(text).size(TextSize::Sm).color(color))
+            status(text, color, cx).automation_id(id)
         };
         let header = v_flex()
             .px(px(12.))
@@ -933,6 +935,8 @@ impl Keystone {
         let pending = Color::Warning.to_hsla(cx);
         let checks = (!report.checks.is_empty()).then(|| {
             section(
+                "Checks",
+                report.checks.len(),
                 report
                     .checks
                     .iter()
@@ -1010,21 +1014,22 @@ impl Keystone {
                                     .on_click(move |_, _, cx| cx.open_url(&url))
                             })
                             .child(mark)
+                            // The name keeps room to read before the summary truncates.
                             .child(
                                 div()
+                                    .automation_id(format!("pull-request-check-{index}-name"))
                                     .flex_1()
-                                    .min_w_0()
+                                    .min_w(px(CHECK_NAME_MIN))
                                     .child(Label::new(name).size(TextSize::Ui).truncate()),
                             )
                             .child(
-                                Label::new(summary)
-                                    .size(TextSize::Sm)
-                                    .color(if check.state == CheckState::Failed {
-                                        Color::Danger
-                                    } else {
-                                        Color::Muted
-                                    })
-                                    .tabular(),
+                                div().flex_shrink(1.).min_w_0().child(
+                                    Label::new(summary)
+                                        .size(TextSize::Sm)
+                                        .color(Color::Muted)
+                                        .tabular()
+                                        .truncate(),
+                                ),
                             )
                             .children(repair)
                             .into_any_element()
@@ -1053,9 +1058,7 @@ impl Keystone {
                         h_flex()
                             .gap(px(6.))
                             .child(Label::new(review.author.clone()).size(TextSize::Ui))
-                            .children(verdict.map(|(verdict, color)| {
-                                Label::new(verdict).size(TextSize::Sm).color(color)
-                            })),
+                            .children(verdict.map(|(verdict, color)| status(verdict, color, cx))),
                     )
                     .when(!review.body.is_empty(), |d| {
                         d.child(
@@ -1067,6 +1070,7 @@ impl Keystone {
                     .into_any_element()
             })
             .collect();
+        let review_count = reviews.len();
         reviews.extend(report.comments.iter().enumerate().map(|(index, comment)| {
             let place = comment_place(comment);
             let path = folder.clone().map(|folder| (folder, comment.path.clone()));
@@ -1118,7 +1122,7 @@ impl Keystone {
                 .child(Label::new(comment.body.clone()).size(TextSize::Ui))
                 .into_any_element()
         }));
-        let reviews = (!reviews.is_empty()).then(|| section(reviews));
+        let reviews = (!reviews.is_empty()).then(|| section("Reviews", review_count, reviews));
         v_flex()
             .pb_2()
             .child(header)
@@ -1139,8 +1143,33 @@ fn empty(text: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-fn section(rows: Vec<AnyElement>) -> AnyElement {
-    v_flex().px_1().pt_3().children(rows).into_any_element()
+/// A state word after a dot in its status color. The color marks the dot only.
+fn status(text: &'static str, color: Color, cx: &App) -> gpui::Div {
+    h_flex()
+        .flex_none()
+        .gap(px(5.))
+        .child(div().size(px(6.)).rounded_full().bg(color.to_hsla(cx)))
+        .child(Label::new(text).size(TextSize::Sm).color(Color::Muted))
+}
+
+/// Rows under a small-caps label naming the group and its count. Review comments
+/// follow the reviews without counting as one.
+fn section(label: &'static str, count: usize, rows: Vec<AnyElement>) -> AnyElement {
+    v_flex()
+        .px_1()
+        .pt_3()
+        .child(group_label(format!("{label} · {count}")))
+        .children(rows)
+        .into_any_element()
+}
+
+fn group_label(text: String) -> impl IntoElement {
+    div().h(px(24.)).px_2().flex().items_center().child(
+        Label::new(text.to_uppercase())
+            .size(TextSize::Xs)
+            .weight(FontWeight::MEDIUM)
+            .color(Color::Faint),
+    )
 }
 
 /// What to tell the user when gh can't answer: the command to run when gh is missing
@@ -1217,4 +1246,4 @@ fn notice(title: &'static str, error: &github::Error, cx: &mut Context<Keystone>
 
 #[cfg(all(test, feature = "ui-tests"))]
 #[path = "pull_request_tests.rs"]
-mod tests;
+pub(crate) mod tests;

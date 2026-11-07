@@ -27,14 +27,13 @@ fn drag(cx: &mut VisualTestContext, id: &'static str, x: f32, y: f32) {
     cx.run_until_parked();
 }
 fn open(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
+    // A Pull request panel must never reach the real gh, even from a scratch repository.
+    crate::pull_request::tests::fake_gh();
     let dir = tempfile::tempdir().unwrap();
+    let project = working_directory(dir.path());
     let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
-    store
-        .create(Provider::Codex, &working_directory(), 1)
-        .unwrap();
-    store
-        .create(Provider::Claude, &working_directory(), 2)
-        .unwrap();
+    store.create(Provider::Codex, &project, 1).unwrap();
+    store.create(Provider::Claude, &project, 2).unwrap();
     store.select(1).unwrap();
     let mut log = SessionLog::open(&dir.path().join("sessions"), 1).unwrap();
     for i in 0..50 {
@@ -261,7 +260,7 @@ fn header_only_conversation_does_not_observe_until_transcript_is_visible(cx: &mu
     let (_dir, view, cx) = open(cx);
     click(cx, "customize-apply");
     click(cx, "customize-close");
-    cx.simulate_resize(gpui::size(px(1280.), px(210.)));
+    cx.simulate_resize(gpui::size(px(1280.), px(200.)));
     cx.run_until_parked();
     unread(&view, cx);
     let transcript = cx.debug_bounds("conversation").unwrap();
@@ -282,7 +281,7 @@ fn a_click_above_a_hidden_transcript_does_not_observe_it(cx: &mut TestAppContext
     let (_dir, view, cx) = open(cx);
     click(cx, "customize-apply");
     click(cx, "customize-close");
-    cx.simulate_resize(gpui::size(px(1280.), px(210.)));
+    cx.simulate_resize(gpui::size(px(1280.), px(200.)));
     cx.run_until_parked();
     unread(&view, cx);
     let transcript = cx.debug_bounds("conversation").unwrap();
@@ -1178,8 +1177,22 @@ fn a_multiline_draft_grows_the_auto_row_instead_of_overflowing_it(cx: &mut TestA
     );
 }
 
-fn working_directory() -> WorkingDirectory {
-    WorkingDirectory::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap()
+/// A scratch git repository, so the Changes and Pull request panels these tests open never
+/// read the real checkout.
+fn working_directory(dir: &std::path::Path) -> WorkingDirectory {
+    let repo = dir.join("project");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    // A few entries, so the Files panel has rows to focus.
+    std::fs::write(repo.join("README.md"), "# project\n").unwrap();
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"project\"\n").unwrap();
+    std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let status = std::process::Command::new("git")
+        .args(["-c", "maintenance.auto=false", "init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    WorkingDirectory::new(&repo).unwrap()
 }
 
 #[gpui::test]
@@ -1201,4 +1214,448 @@ fn escape_leaves_a_resize_drag_running(cx: &mut TestAppContext) {
         cx.update(|_, cx| cx.has_active_drag()),
         "Esc cancels only tab drags"
     );
+}
+
+#[gpui::test]
+fn a_side_panel_opens_beside_the_composer_column_only_where_it_fits_at_full_width(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    // Whether `component` sits beside the composer's column, whether the window folded
+    // into tabs, and the sidebar's width.
+    let placed = |component: Component, cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            let c = this.shown_composition(cx);
+            let Node::Split { children, .. } = c.root() else {
+                panic!("a split root");
+            };
+            let beside_column = children.iter().any(|child| {
+                matches!(child.node, Node::View { id } if c.component(id) == Some(component))
+            });
+            let sidebar = this.presentation.current.arrangement.geometry[&NodePath(vec![0])]
+                .size
+                .width;
+            (
+                beside_column,
+                this.presentation.current.arrangement.fitted,
+                sidebar,
+            )
+        })
+    };
+    let close = |component: Component, cx: &mut VisualTestContext| {
+        view.update_in(cx, |this, window, cx| {
+            let c = this.shown_composition(cx);
+            let (open, _) = c.views().find(|(_, shown)| *shown == component).unwrap();
+            this.edit_surfaces(Edit::Close(open), window, cx);
+        });
+        cx.run_until_parked();
+    };
+    let panels = [
+        (Component::Files, "secondary-shift-e"),
+        (Component::Changes, "secondary-shift-g"),
+        (Component::PullRequest, "secondary-alt-p"),
+    ];
+    cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+    cx.run_until_parked();
+    let sidebar = placed(Component::Files, cx).2;
+    for (component, keys) in panels {
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        assert_eq!(
+            placed(component, cx),
+            (true, false, sidebar),
+            "1440 px wide: {component:?} beside the composer's column"
+        );
+        close(component, cx);
+    }
+    cx.simulate_resize(gpui::size(px(1100.), px(720.)));
+    cx.run_until_parked();
+    for (component, keys) in panels {
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        assert_eq!(
+            placed(component, cx),
+            (false, false, sidebar),
+            "1100 px wide: {component:?} beside the conversation, the sidebar at its width"
+        );
+        close(component, cx);
+    }
+}
+
+#[gpui::test]
+fn a_live_resize_moves_a_side_panel_under_the_composer_and_back(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    let placed = |cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            let c = this.shown_composition(cx);
+            let Node::Split { children, .. } = c.root() else {
+                panic!("a split root");
+            };
+            let beside_column = children.iter().any(|child| {
+                matches!(child.node, Node::View { id } if c.component(id) == Some(Component::PullRequest))
+            });
+            let sidebar = this.presentation.current.arrangement.geometry[&NodePath(vec![0])]
+                .size
+                .width;
+            (
+                beside_column,
+                this.presentation.current.arrangement.fitted,
+                sidebar,
+            )
+        })
+    };
+    let settle = |size: gpui::Size<Pixels>, cx: &mut VisualTestContext| {
+        cx.simulate_resize(size);
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(400));
+        cx.run_until_parked();
+    };
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    cx.simulate_keystrokes("secondary-alt-p");
+    cx.run_until_parked();
+    let (beside, fitted, sidebar) = placed(cx);
+    assert!(
+        beside && !fitted,
+        "1440 px wide: beside the composer's column"
+    );
+
+    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    assert_eq!(
+        placed(cx),
+        (false, false, sidebar),
+        "shrunk to 1100 px: beside the conversation, the sidebar at its width"
+    );
+
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    assert_eq!(
+        placed(cx),
+        (true, false, sidebar),
+        "widened again: back beside the composer's column"
+    );
+}
+
+fn resize_and_settle(size: gpui::Size<Pixels>, cx: &mut VisualTestContext) {
+    cx.simulate_resize(size);
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+}
+
+/// The side surfaces beside the composer's column, alone or tabbed, as one entry each.
+fn beside_column(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> Vec<Vec<Component>> {
+    view.update(cx, |this, cx| {
+        let c = this.shown_composition(cx);
+        let Node::Split { children, .. } = c.root() else {
+            panic!("a split root");
+        };
+        children
+            .iter()
+            .filter_map(|child| match &child.node {
+                Node::View { id } => c.component(*id).filter(|k| k.is_side()).map(|k| vec![k]),
+                Node::Tabs { views, .. } => Some(
+                    views
+                        .iter()
+                        .filter_map(|view| c.component(*view).filter(|k| k.is_side()))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn tabbed_side_panels_move_together_on_a_live_resize(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    let sidebar = |cx: &mut VisualTestContext| {
+        view.update(cx, |this, _| {
+            this.presentation.current.arrangement.geometry[&NodePath(vec![0])]
+                .size
+                .width
+        })
+    };
+    let wide_sidebar = sidebar(cx);
+    cx.simulate_keystrokes("secondary-shift-e");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("secondary-shift-g");
+    cx.run_until_parked();
+    let tabbed = vec![vec![Component::Files, Component::Changes]];
+    assert_eq!(
+        beside_column(&view, cx),
+        tabbed,
+        "1440: tabs beside the column"
+    );
+
+    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    assert_eq!(beside_column(&view, cx), Vec::<Vec<Component>>::new());
+    assert!(!view.update(cx, |this, _| this.presentation.current.arrangement.fitted));
+    assert_eq!(
+        sidebar(cx),
+        wide_sidebar,
+        "1100: the sidebar keeps its width"
+    );
+
+    assert_eq!(
+        group_size(&view, cx),
+        Some(Size::Px(NonZeroU16::new(300).unwrap())),
+        "1100: the tabs keep their 300 px under the composer"
+    );
+
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    assert_eq!(
+        beside_column(&view, cx),
+        tabbed,
+        "1440 again: the tabs come back"
+    );
+    assert_eq!(
+        group_size(&view, cx),
+        Some(Size::Px(NonZeroU16::new(300).unwrap())),
+        "1440 again: at the 300 px they opened at"
+    );
+}
+
+/// The saved size of the pane holding Files and Changes as tabs, wherever it is.
+fn group_size(view: &Entity<Keystone>, cx: &mut VisualTestContext) -> Option<Size> {
+    fn find(node: &Node) -> Option<Size> {
+        let Node::Split { children, .. } = node else {
+            return None;
+        };
+        children.iter().find_map(|child| match &child.node {
+            Node::Tabs { .. } => Some(child.size),
+            node => find(node),
+        })
+    }
+    view.update(cx, |this, cx| find(this.shown_composition(cx).root()))
+}
+
+/// Shrinks the window so Keystone moves Pull request under the composer, moves it by
+/// hand in Customize with `place(pull request, conversation)`, Applies, then widens the
+/// window. Returns what sits beside the composer's column, and the layout as applied
+/// and once widened.
+fn moved_by_hand(
+    place: impl Fn(ViewId, ViewId) -> Edit,
+    cx: &mut TestAppContext,
+) -> (Vec<Vec<Component>>, String, String) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    cx.simulate_keystrokes("secondary-alt-p");
+    cx.run_until_parked();
+    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    assert_eq!(beside_column(&view, cx), Vec::<Vec<Component>>::new());
+    view.update_in(cx, |this, window, cx| {
+        this.customize(Action::Open, window, cx);
+        let c = this.shown_composition(cx);
+        let find = |component| c.views().find(|(_, k)| *k == component).unwrap().0;
+        let edit = place(find(Component::PullRequest), find(Component::Conversation));
+        this.customize(Action::Edit(edit), window, cx);
+        this.customize(Action::Apply, window, cx);
+        this.customize(Action::Close, window, cx);
+    });
+    cx.run_until_parked();
+    let layout = |cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            format!("{:?}", this.shown_composition(cx).root())
+        })
+    };
+    let applied = layout(cx);
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    let widened = layout(cx);
+    (beside_column(&view, cx), applied, widened)
+}
+
+#[gpui::test]
+fn a_panel_tabbed_with_the_conversation_by_hand_stays_put(cx: &mut TestAppContext) {
+    let (beside, applied, widened) = moved_by_hand(
+        |view, conversation| Edit::Move {
+            view,
+            to: Place::TabWith(conversation),
+        },
+        cx,
+    );
+    assert_eq!(beside, Vec::<Vec<Component>>::new());
+    assert_eq!(
+        widened, applied,
+        "the user's arrangement is kept as applied"
+    );
+}
+
+#[gpui::test]
+fn a_panel_moved_left_of_the_conversation_by_hand_stays_put(cx: &mut TestAppContext) {
+    let (beside, applied, widened) = moved_by_hand(
+        |view, conversation| Edit::Move {
+            view,
+            to: Place::Beside {
+                target: conversation,
+                axis: Axis::Row,
+                after: false,
+            },
+        },
+        cx,
+    );
+    assert_eq!(beside, Vec::<Vec<Component>>::new());
+    assert_eq!(
+        widened, applied,
+        "the user's arrangement is kept as applied"
+    );
+}
+
+#[gpui::test]
+fn a_panel_moved_above_the_conversation_by_hand_stays_put(cx: &mut TestAppContext) {
+    let (beside, applied, widened) = moved_by_hand(
+        |view, conversation| Edit::Move {
+            view,
+            to: Place::Beside {
+                target: conversation,
+                axis: Axis::Column,
+                after: false,
+            },
+        },
+        cx,
+    );
+    assert_eq!(beside, Vec::<Vec<Component>>::new());
+    assert_eq!(
+        widened, applied,
+        "the user's arrangement is kept as applied"
+    );
+}
+
+/// The side tab group beside the composer's column: its panels, the one shown, and its
+/// saved size.
+fn side_tabs(
+    view: &Entity<Keystone>,
+    cx: &mut VisualTestContext,
+) -> Option<(Vec<Component>, Component, Size)> {
+    view.update(cx, |this, cx| {
+        let c = this.shown_composition(cx);
+        let Node::Split { children, .. } = c.root() else {
+            panic!("a split root");
+        };
+        children.iter().find_map(|child| match &child.node {
+            Node::Tabs { views, selected }
+                if views
+                    .iter()
+                    .all(|view| c.component(*view).is_some_and(Component::is_side)) =>
+            {
+                Some((
+                    views
+                        .iter()
+                        .map(|view| c.component(*view).unwrap())
+                        .collect(),
+                    c.component(views[*selected]).unwrap(),
+                    child.size,
+                ))
+            }
+            _ => None,
+        })
+    })
+}
+
+fn show_tab(view: &Entity<Keystone>, component: Component, cx: &mut VisualTestContext) {
+    view.update_in(cx, |this, window, cx| {
+        let c = this.shown_composition(cx);
+        let (tab, _) = c.views().find(|(_, k)| *k == component).unwrap();
+        this.edit_surfaces(Edit::SelectTab(tab), window, cx);
+    });
+    cx.run_until_parked();
+}
+
+fn files_then_changes(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("secondary-shift-e");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("secondary-shift-g");
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_tab_group_returns_showing_the_tab_shown_now(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    files_then_changes(cx);
+    show_tab(&view, Component::Files, cx);
+    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    show_tab(&view, Component::Changes, cx);
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    assert_eq!(
+        side_tabs(&view, cx),
+        Some((
+            vec![Component::Files, Component::Changes],
+            Component::Changes,
+            Size::Px(NonZeroU16::new(300).unwrap()),
+        )),
+        "back with the tab picked while it was moved"
+    );
+}
+
+#[gpui::test]
+fn a_tab_group_formed_at_1100_px_comes_back_when_the_window_widens(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    files_then_changes(cx);
+    assert_eq!(beside_column(&view, cx), Vec::<Vec<Component>>::new());
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    assert_eq!(
+        beside_column(&view, cx),
+        vec![vec![Component::Files, Component::Changes]]
+    );
+}
+
+#[gpui::test]
+fn a_tab_opened_into_a_moved_panel_comes_back_with_it(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    cx.simulate_keystrokes("secondary-shift-e");
+    cx.run_until_parked();
+    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    cx.simulate_keystrokes("secondary-shift-g");
+    cx.run_until_parked();
+    assert!(!view.update(cx, |this, _| this.presentation.current.arrangement.fitted));
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    assert_eq!(
+        beside_column(&view, cx),
+        vec![vec![Component::Files, Component::Changes]]
+    );
+}
+
+#[gpui::test]
+fn a_conversation_added_to_a_moved_panel_stays_where_it_was_put(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    cx.simulate_keystrokes("secondary-shift-e");
+    cx.run_until_parked();
+    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    view.update_in(cx, |this, window, cx| {
+        let c = this.shown_composition(cx);
+        let (files, _) = c.views().find(|(_, k)| *k == Component::Files).unwrap();
+        this.open_surface(
+            Component::Conversation,
+            Place::TabWith(files),
+            Size::Fill(NonZeroU16::MIN),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let narrow = view.update(cx, |this, cx| this.shown_composition(cx).root().clone());
+    resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
+    let wide = view.update(cx, |this, cx| this.shown_composition(cx).root().clone());
+    assert_eq!(wide, narrow, "the group the user added to stays put");
 }

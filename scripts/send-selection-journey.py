@@ -106,7 +106,7 @@ def send_and_receive(expected, what):
     until(lambda: draft(1) == '', 'the composer clears after Send')
 def replies(): return sorted((int(m.group(1)) for i in ids() if (m := re.fullmatch(r'reply-(\d+)-selection-surface', i))))
 def theme(index):
-    key('ctrl', 'comma'); click('settings-section-appearance'); click('settings-theme')
+    key('ctrl', 'comma'); click('settings-section-appearance')
     click(f'settings-theme-option-{index}'); key('Escape'); wait('session-1')
 
 env = {'KEYSTONE_CLAUDE_PATH': str(ROOT / 'target/debug/keystone-fake-claude'),

@@ -435,7 +435,7 @@ impl Keystone {
                     .children(status(error, "Creating…"));
                 ConfirmDialog::new("worktree-dialog", focus, "New session in worktree", "")
                     .icon(IconName::Branch)
-                    .tone(Color::Accent)
+                    .tone(Color::Default)
                     .confirm_label("Create")
                     .body(body)
             }

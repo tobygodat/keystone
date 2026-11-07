@@ -51,6 +51,12 @@ pub struct Arrangement {
     /// The fitted tab row's scroll, and the tab it last scrolled into view.
     fitted_scroll: gpui::ScrollHandle,
     fitted_revealed: Option<ViewId>,
+    /// Side surfaces put beside a conversation under the composer because the window
+    /// was too narrow for them beside the composer's column. They go back there once it
+    /// is wide enough again.
+    narrowed: Option<Narrowed>,
+    /// The check that follows a window resize, once the resize settles.
+    refit: Option<gpui::Task<()>>,
 }
 struct Resize {
     start: Point<Pixels>,
@@ -104,15 +110,13 @@ fn minimum(
     chrome: bool,
     sidebar: bool,
     composer_width: f32,
+    composer_height: f32,
 ) -> [f32; 2] {
     let header = if chrome { 30. } else { 0. };
     match node {
         Node::View { id } => match c.component(*id).unwrap() {
             Component::Conversation => [CONVERSATION_MIN, 120. + header],
-            Component::Composer => [
-                composer_width,
-                142. + f32::from(TextSize::Ui.line_height()) + header,
-            ],
+            Component::Composer => [composer_width, composer_height + header],
             Component::SessionList => {
                 if sidebar {
                     [SESSION_MIN, 160. + header]
@@ -135,7 +139,16 @@ fn minimum(
         Node::Split { axis, children } => {
             let values: Vec<_> = children
                 .iter()
-                .map(|child| minimum(&child.node, c, chrome, sidebar, composer_width))
+                .map(|child| {
+                    minimum(
+                        &child.node,
+                        c,
+                        chrome,
+                        sidebar,
+                        composer_width,
+                        composer_height,
+                    )
+                })
                 .collect();
             let along = if *axis == Axis::Row { 0 } else { 1 };
             let mut result = [0., 0.];
@@ -148,6 +161,241 @@ fn minimum(
             result[1 - along] = values.iter().map(|s| s[1 - along]).fold(0., f32::max);
             result
         }
+    }
+}
+
+/// How much wider than they need the window must be before side surfaces moved under
+/// the composer go back beside its column, so a window at the threshold doesn't flip.
+const REFIT_MARGIN: f32 = 40.;
+
+/// The path of the column that stacks a conversation over the composer, and the first
+/// conversation in it.
+fn composer_column(node: &Node, c: &Composition) -> Option<(Vec<usize>, ViewId)> {
+    let Node::Split { children, .. } = node else {
+        return None;
+    };
+    if holds_composer(node, c) {
+        return first_conversation(node, c).map(|view| (Vec::new(), view));
+    }
+    children.iter().enumerate().find_map(|(index, child)| {
+        let (mut path, view) = composer_column(&child.node, c)?;
+        path.insert(0, index);
+        Some((path, view))
+    })
+}
+
+fn first_conversation(node: &Node, c: &Composition) -> Option<ViewId> {
+    match node {
+        Node::View { id } => (c.component(*id) == Some(Component::Conversation)).then_some(*id),
+        Node::Tabs { views, .. } => views
+            .iter()
+            .copied()
+            .find(|view| c.component(*view) == Some(Component::Conversation)),
+        Node::Split { children, .. } => children
+            .iter()
+            .find_map(|child| first_conversation(&child.node, c)),
+    }
+}
+
+/// A side surface, or a tab group of side surfaces, that moves as one between the
+/// composer's column and the row beside a conversation under the composer.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SideUnit {
+    views: Vec<ViewId>,
+    selected: usize,
+    /// The unit's size beside the composer's column, which it keeps under the composer
+    /// and returns with.
+    size: Size,
+}
+
+/// The side units a resize moved under the composer, and the layout it left. They go
+/// back only while the layout is still that one, apart from which tab is shown, so a
+/// layout the user has rearranged since stays theirs.
+pub(crate) struct Narrowed {
+    units: Vec<SideUnit>,
+    layout: Node,
+}
+
+impl SideUnit {
+    fn of(node: &Node, c: &Composition, size: Size) -> Option<Self> {
+        let side = |view: &ViewId| c.component(*view).is_some_and(Component::is_side);
+        match node {
+            Node::View { id } if side(id) => Some(Self {
+                views: vec![*id],
+                selected: 0,
+                size,
+            }),
+            Node::Tabs { selected, views } if views.iter().all(side) => Some(Self {
+                views: views.clone(),
+                selected: *selected,
+                size,
+            }),
+            _ => None,
+        }
+    }
+
+    /// `c` with the unit beside `conversation` under the composer, or, with `out`, beside
+    /// the composer's column, keeping its views, their order, the shown tab and its size.
+    fn place(&self, c: Composition, conversation: ViewId, out: bool) -> Option<Composition> {
+        let at = Place::Beside {
+            target: conversation,
+            axis: Axis::Row,
+            after: true,
+        };
+        let first = self.views[0];
+        // The tab shown now, which may have changed since the unit was recorded.
+        let shown = path_of(c.root(), first)
+            .and_then(|path| match node_at(c.root(), &path) {
+                Some(Node::Tabs { selected, views }) => views.get(*selected).copied(),
+                _ => None,
+            })
+            .filter(|view| self.views.contains(view))
+            .unwrap_or(self.views[self.selected.min(self.views.len() - 1)]);
+        let mut c = if out {
+            let size = self.size;
+            let components: Vec<_> = self
+                .views
+                .iter()
+                .map(|view| c.component(*view))
+                .collect::<Option<_>>()?;
+            let closed = self
+                .views
+                .iter()
+                .try_fold(c, |c, view| c.edit(Edit::Close(*view)).ok())?;
+            self.views.iter().zip(components).enumerate().try_fold(
+                closed,
+                |c, (n, (&view, component))| {
+                    c.edit(Edit::Open {
+                        view,
+                        component,
+                        at: if n == 0 { at } else { Place::TabWith(first) },
+                        size,
+                    })
+                    .ok()
+                },
+            )?
+        } else {
+            let moved = c
+                .edit(Edit::Move {
+                    view: first,
+                    to: at,
+                })
+                .ok()?;
+            let tabbed = self.views[1..].iter().try_fold(moved, |c, view| {
+                c.edit(Edit::Move {
+                    view: *view,
+                    to: Place::TabWith(first),
+                })
+                .ok()
+            })?;
+            // A view moved out of a tab group arrives with a flexible size.
+            let path = path_of(tabbed.root(), first)?;
+            let (&index, row) = path.split_last()?;
+            let Some(Node::Split { children, .. }) = node_at(tabbed.root(), row) else {
+                return None;
+            };
+            let mut sizes: Vec<Size> = children.iter().map(|child| child.size).collect();
+            sizes[index] = self.size;
+            tabbed
+                .edit(Edit::Resize {
+                    split: NodePath(row.to_vec()),
+                    sizes,
+                })
+                .ok()?
+        };
+        if self.views.len() > 1 {
+            c = c.edit(Edit::SelectTab(shown)).ok()?;
+        }
+        Some(c)
+    }
+}
+
+fn holds_composer(node: &Node, c: &Composition) -> bool {
+    matches!(node, Node::Split { axis: Axis::Column, children } if children.iter().any(|child| {
+        matches!(child.node, Node::View { id } if c.component(id) == Some(Component::Composer))
+    }))
+}
+
+/// The path of the node that holds `view`: the view itself, or its tab group.
+fn path_of(node: &Node, view: ViewId) -> Option<Vec<usize>> {
+    match node {
+        Node::View { id } => (*id == view).then(Vec::new),
+        Node::Tabs { views, .. } => views.contains(&view).then(Vec::new),
+        Node::Split { children, .. } => children.iter().enumerate().find_map(|(index, child)| {
+            let mut path = path_of(&child.node, view)?;
+            path.insert(0, index);
+            Some(path)
+        }),
+    }
+}
+
+fn node_at<'a>(node: &'a Node, path: &[usize]) -> Option<&'a Node> {
+    path.iter().try_fold(node, |node, &index| match node {
+        Node::Split { children, .. } => children.get(index).map(|child| &child.node),
+        _ => None,
+    })
+}
+
+/// Side surfaces, alone or tabbed together, beside the composer's column at `column`,
+/// in the row that holds it.
+fn side_units_beside(root: &Node, c: &Composition, column: &[usize]) -> Vec<SideUnit> {
+    let Some((_, parent)) = column.split_last() else {
+        return Vec::new();
+    };
+    match node_at(root, parent) {
+        Some(Node::Split {
+            axis: Axis::Row,
+            children,
+        }) => children
+            .iter()
+            .filter_map(|child| SideUnit::of(&child.node, c, child.size))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `node` with every tab group showing its first tab, so layouts that differ only in
+/// the shown tab compare equal.
+fn shape(node: &Node) -> Node {
+    match node {
+        Node::Tabs { views, .. } => Node::Tabs {
+            selected: 0,
+            views: views.clone(),
+        },
+        Node::Split { axis, children } => Node::Split {
+            axis: *axis,
+            children: children
+                .iter()
+                .map(|child| keystone_core::Child {
+                    node: shape(&child.node),
+                    size: child.size,
+                })
+                .collect(),
+        },
+        view => view.clone(),
+    }
+}
+
+/// The width `node` takes at the sizes its panes open with: a pane with a saved width,
+/// such as the sidebar or a side surface, at that width, and the rest at their minimum.
+/// Unlike [`minimum`], it doesn't let those panes shrink to fit.
+fn preferred_width(node: &Node, c: &Composition, sidebar: bool, composer_width: f32) -> f32 {
+    match node {
+        Node::View { id } if c.component(*id) == Some(Component::SessionList) && !sidebar => 0.,
+        Node::Split { axis, children } => {
+            let widths = children.iter().map(|child| {
+                let width = preferred_width(&child.node, c, sidebar, composer_width);
+                match (axis, child.size) {
+                    (Axis::Row, Size::Px(saved)) if width > 0. => width.max(f32::from(saved.get())),
+                    _ => width,
+                }
+            });
+            match axis {
+                Axis::Row => widths.sum(),
+                Axis::Column => widths.fold(0., f32::max),
+            }
+        }
+        _ => minimum(node, c, false, sidebar, composer_width, 0.)[0],
     }
 }
 
@@ -202,10 +450,17 @@ fn displays(node: &Node, view: ViewId) -> bool {
 /// Files, Changes, Notes and Pull request: one-of-a-kind surfaces that get a tab strip
 /// even alone.
 fn is_side_surface(component: Option<Component>) -> bool {
-    matches!(
-        component,
-        Some(Component::Files | Component::Changes | Component::Notes | Component::PullRequest)
-    )
+    component.is_some_and(Component::is_side)
+}
+
+/// The composer pane's height with an empty draft: the one-row field and the toolbar in
+/// the composer's padding and border, the status line, and the pane's 12 px above and
+/// below.
+fn composer_minimum_height(cx: &App) -> f32 {
+    let density = cx.theme().density;
+    let edge = density.space(px(12.));
+    let composer = edge * 3. + px(28.) + density.control(px(28.)) + px(2.);
+    f32::from(composer + TextSize::Ui.line_height() + px(24.))
 }
 
 /// Whether a strip drawn for `node` has `anchor` in front, so its "+" is on screen.
@@ -515,16 +770,34 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) {
         match self.presentation.current.customization.allocate() {
-            Ok(view) => self.edit_surfaces(
-                Edit::Open {
+            Ok(view) => {
+                let open = Edit::Open {
                     view,
                     component,
                     at,
                     size,
-                },
-                window,
-                cx,
-            ),
+                };
+                match self.narrow_fallback(&open, window, cx) {
+                    Some(layout) => {
+                        let unit = SideUnit {
+                            views: vec![view],
+                            selected: 0,
+                            size,
+                        };
+                        self.narrowed(Vec::from([unit]), &layout, cx);
+                        let tabs = self.session_tabs(cx);
+                        if self.save_view(Some(layout), tabs, cx) {
+                            self.presentation.current.customization.forget_undo();
+                        }
+                        self.refresh(cx);
+                    }
+                    None => {
+                        let before = self.shown_composition(cx);
+                        self.edit_surfaces(open, window, cx);
+                        self.follow_opened_tab(view, at, &before, cx);
+                    }
+                }
+            }
             Err(error) => {
                 self.error = Some(error);
                 cx.notify();
@@ -560,12 +833,11 @@ impl Keystone {
             .child(v_flex().children(models))
             .child(div().w_0().flex_none());
         let approvals = ApprovalMode::ALL.map(|mode| {
-            Button::new(("measure-approval", mode as usize), mode.label())
-                .size(ButtonSize::Compact)
-                .icon(IconName::Shield)
+            Button::new(("measure-approval", mode as usize), mode.label()).icon(IconName::Shield)
         });
+        let control = cx.theme().density.control(px(28.));
         let mut controls = h_flex()
-            .gap(px(14.))
+            .gap(px(4.))
             .font_ui(cx)
             .text_size(TextSize::Base.px())
             .child(provider)
@@ -578,7 +850,7 @@ impl Keystone {
                     .style(ButtonStyle::Subtle)
                     .icon(IconName::Square),
             )
-            .child(div().w(px(32.)).flex_none())
+            .child(div().w(control * 2. + px(4.)).flex_none())
             .into_any_element();
         let measured = controls
             .layout_as_root(
@@ -587,10 +859,184 @@ impl Keystone {
                 cx,
             )
             .width;
-        let density = cx.theme().density;
-        let padding = density.space(px(20.)) + density.space(px(12.));
+        let padding = cx.theme().density.space(px(12.)) * 2.;
         // The composer pane's 12 px on each side and the composer's 1 px border.
         (f32::from(measured + padding) + 26.).max(COMPOSER_MIN)
+    }
+
+    /// A side surface opens beside the composer's column, where the composer keeps its
+    /// whole width. When the window is narrower than that layout at its panes' opening
+    /// widths, this is the layout with the surface beside the conversation under the
+    /// composer, as it went before, so neither the sidebar nor the surface is squeezed.
+    fn narrow_fallback(
+        &self,
+        open: &Edit,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<Composition> {
+        let Edit::Open {
+            view,
+            component,
+            at: at @ Place::Beside {
+                axis: Axis::Row, ..
+            },
+            ..
+        } = *open
+        else {
+            return None;
+        };
+        if !component.is_side() || self.presentation.current.customization.is_open() {
+            return None;
+        }
+        let opened = self.shown_composition(cx).edit(open.clone()).ok()?;
+        let width = preferred_width(
+            opened.root(),
+            &opened,
+            self.presentation.current.sidebar,
+            self.presentation.current.arrangement.composer_min_width,
+        );
+        (f32::from(window.viewport_size().width) < width)
+            .then(|| opened.edit(Edit::Move { view, to: at }).ok())
+            .flatten()
+    }
+
+    /// Checks side surfaces against the window once a resize settles, so the debounce
+    /// keeps a drag across the threshold from moving them back and forth.
+    pub(crate) fn refit_side_surfaces_soon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.presentation.current.arrangement.refit =
+            Some(cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| this.refit_side_surfaces(window, cx));
+            }));
+    }
+
+    /// Moves side surfaces beside the composer's column under the composer when the
+    /// window has become too narrow for them at their widths, and moves the ones it
+    /// moved back out once the window is [`REFIT_MARGIN`] wider than they need. Layouts
+    /// arranged by hand, and Customize, are left alone.
+    pub(crate) fn refit_side_surfaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.presentation.current.customization.is_open() {
+            return;
+        }
+        let c = self.shown_composition(cx);
+        // Units the user has rearranged, closed or resized since are theirs now.
+        if self
+            .presentation
+            .current
+            .arrangement
+            .narrowed
+            .as_ref()
+            .is_some_and(|narrowed| shape(&narrowed.layout) != shape(c.root()))
+        {
+            self.presentation.current.arrangement.narrowed = None;
+        }
+        let Some((column, conversation)) = composer_column(c.root(), &c) else {
+            return;
+        };
+        let width = f32::from(window.viewport_size().width);
+        let (sidebar, composer) = (
+            self.presentation.current.sidebar,
+            self.presentation.current.arrangement.composer_min_width,
+        );
+        let beside = side_units_beside(c.root(), &c, &column);
+        let layout = if !beside.is_empty()
+            && width < preferred_width(c.root(), &c, sidebar, composer)
+        {
+            let moved = beside
+                .iter()
+                .rev()
+                .try_fold(c.clone(), |c, unit| unit.place(c, conversation, false));
+            if let Some(moved) = &moved {
+                self.narrowed(beside, moved, cx);
+            }
+            moved
+        } else if let Some(narrowed) = self.presentation.current.arrangement.narrowed.take() {
+            let wide = narrowed
+                .units
+                .iter()
+                .try_fold(c.clone(), |c, unit| unit.place(c, conversation, true))
+                .filter(|wide| {
+                    width >= preferred_width(wide.root(), wide, sidebar, composer) + REFIT_MARGIN
+                });
+            if wide.is_none() {
+                self.presentation.current.arrangement.narrowed = Some(narrowed);
+            }
+            wide
+        } else {
+            None
+        };
+        if let Some(layout) = layout {
+            let tabs = self.session_tabs(cx);
+            if self.save_view(Some(layout), tabs, cx) {
+                self.presentation.current.customization.forget_undo();
+            }
+            self.refresh(cx);
+        }
+    }
+
+    /// A tab the shortcut opened with a side surface Keystone moved under the composer
+    /// joins that unit, so the unit still goes back once the window is wide enough.
+    fn follow_opened_tab(
+        &mut self,
+        view: ViewId,
+        at: Place,
+        before: &Composition,
+        cx: &Context<Self>,
+    ) {
+        let Place::TabWith(target) = at else {
+            return;
+        };
+        let after = self.shown_composition(cx);
+        let Some(narrowed) = self.presentation.current.arrangement.narrowed.as_mut() else {
+            return;
+        };
+        // Only another side surface joins: a conversation added from the pane's menu
+        // belongs where the user put it, so the changed layout ends the record instead.
+        if shape(&narrowed.layout) != shape(before.root())
+            || !is_side_surface(after.component(view))
+        {
+            return;
+        }
+        if let Some(unit) = narrowed
+            .units
+            .iter_mut()
+            .find(|unit| unit.views.contains(&target))
+        {
+            unit.views.push(view);
+            narrowed.layout = after.root().clone();
+        }
+    }
+
+    /// Remembers `units` as moved under the composer in `layout`, with any still moved
+    /// before it.
+    fn narrowed(&mut self, units: Vec<SideUnit>, layout: &Composition, cx: &Context<Self>) {
+        let shown = self.shown_composition(cx);
+        let arrangement = &mut self.presentation.current.arrangement;
+        let mut all = arrangement
+            .narrowed
+            .take()
+            .filter(|narrowed| shape(&narrowed.layout) == shape(shown.root()))
+            .map_or_else(Vec::new, |narrowed| narrowed.units);
+        all.extend(units);
+        arrangement.narrowed = Some(Narrowed {
+            units: all,
+            layout: layout.root().clone(),
+        });
+    }
+
+    /// The width and height `c` needs before it folds into tabs, with the composer's
+    /// width as the last frame measured it.
+    fn required_size(&self, c: &Composition, cx: &App) -> [f32; 2] {
+        minimum(
+            c.root(),
+            c,
+            self.presentation.current.customization.is_open(),
+            self.presentation.current.sidebar,
+            self.presentation.current.arrangement.composer_min_width,
+            composer_minimum_height(cx),
+        )
     }
 
     pub(crate) fn update_arrangement_fitting(
@@ -598,16 +1044,10 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let c = self.shown_composition(cx);
         self.presentation.current.arrangement.composer_min_width =
             self.composer_minimum_width(window, cx);
-        let required = minimum(
-            c.root(),
-            &c,
-            self.presentation.current.customization.is_open(),
-            self.presentation.current.sidebar,
-            self.presentation.current.arrangement.composer_min_width,
-        );
+        let c = self.shown_composition(cx);
+        let required = self.required_size(&c, cx);
         let viewport = window.viewport_size();
         let toolbar = if self.presentation.current.customization.is_open() {
             f32::from(self.presentation.current.arrangement.toolbar_height)
@@ -867,6 +1307,7 @@ impl Keystone {
                         self.presentation.current.customization.is_open(),
                         self.presentation.current.sidebar,
                         self.presentation.current.arrangement.composer_min_width,
+                        composer_minimum_height(cx),
                     );
                     let hidden_sidebar = !self.presentation.current.sidebar
                         && matches!(&child.node, Node::View { id } if c.component(*id) == Some(Component::SessionList));
@@ -905,10 +1346,14 @@ impl Keystone {
                         div()
                             .relative()
                             .map(|d| match child.size {
+                                // Content shorter than the minimum sits at the bottom, so
+                                // the composer's toolbar stays docked as its draft grows.
                                 Size::Auto => d
                                     .flex_shrink(1.)
                                     .when(axis == Axis::Row, |d| d.min_w(px(child_min[0])))
-                                    .when(axis == Axis::Column, |d| d.min_h(px(child_min[1]))),
+                                    .when(axis == Axis::Column, |d| {
+                                        d.min_h(px(child_min[1])).flex().flex_col().justify_end()
+                                    }),
                                 Size::Fill(weight) => d
                                     .when(axis == Axis::Row, |d| d.min_w(px(child_min[0])))
                                     .when(axis == Axis::Column, |d| d.min_h(px(child_min[1])))
@@ -1091,7 +1536,7 @@ impl Keystone {
                                 .iter()
                                 .any(|view| !views.contains(view))
                         {
-                            colors.accent
+                            colors.selection_edge
                         } else {
                             colors.border.opacity(0.)
                         },
@@ -1237,7 +1682,7 @@ impl Keystone {
                         .flex_none()
                         .size(px(7.))
                         .rounded_full()
-                        .bg(colors.accent)
+                        .bg(colors.text)
                         .automation_id(format!("{id}-dot")),
                 )
             })

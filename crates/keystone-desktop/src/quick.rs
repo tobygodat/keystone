@@ -562,7 +562,7 @@ impl Render for QuickComposer {
             d.on_click(cx.listener(|this, _, window, cx| this.send(&SendQuick, window, cx)))
         });
         let toolbar = h_flex()
-            .gap(px(14.))
+            .gap(px(4.))
             .child(
                 div()
                     .flex_shrink(1.)
@@ -583,10 +583,10 @@ impl Render for QuickComposer {
             .text_color(colors.text)
             .text_size(TextSize::Base.px())
             .line_height(TextSize::Base.line_height())
-            .pt(px(16.))
-            .pl(px(18.))
-            .pr(px(12.))
-            .pb(px(12.))
+            .pt(px(12.))
+            .pl(px(14.))
+            .pr(px(10.))
+            .pb(px(10.))
             .gap(px(14.))
             .child(
                 div()

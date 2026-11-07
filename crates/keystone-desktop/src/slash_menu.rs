@@ -718,7 +718,7 @@ fn command_row(entry: &Entry, highlighted: bool, height: Pixels, cx: &mut App) -
     let item = &entry.item;
     let label = item.label();
     let marked = HighlightStyle {
-        color: Some(Color::Accent.to_hsla(cx)),
+        color: Some(Color::Strong.to_hsla(cx)),
         font_weight: Some(FontWeight::BOLD),
         ..Default::default()
     };

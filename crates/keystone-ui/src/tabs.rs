@@ -231,8 +231,7 @@ impl Drops {
             let Some(landing) = over.landing((window_id, &bar_over), drag, slot, count) else {
                 return s;
             };
-            let accent = cx.theme().colors.accent;
-            let s = s.border_color(accent);
+            let s = s.border_color(cx.theme().colors.selection_edge);
             if landing.after() {
                 s.border_r(px(MARKER)).pr(pad.1 - px(MARKER))
             } else {
@@ -292,7 +291,7 @@ impl RenderOnce for TabBar {
                 .when_some(tab.dot, |d, dot| {
                     let color = match dot {
                         TabDot::Dirty => colors.text_muted,
-                        TabDot::Working | TabDot::Unseen => colors.accent,
+                        TabDot::Working | TabDot::Unseen => colors.text,
                     };
                     d.child(crate::automation::tag(
                         div()

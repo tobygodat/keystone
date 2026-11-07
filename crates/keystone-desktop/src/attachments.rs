@@ -425,9 +425,7 @@ impl Keystone {
     pub(crate) fn attach_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         PopoverMenu::new(
             "attach-menu",
-            Button::new("attach", "")
-                .style(ButtonStyle::Ghost)
-                .icon(IconName::Paperclip)
+            IconButton::new("attach", IconName::Paperclip)
                 .aria_label("Attach")
                 .selected(self.attach.menu)
                 .debug_selector(|| "attach".into())

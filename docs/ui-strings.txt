@@ -1382,6 +1382,7 @@ crates/keystone-desktop/src/pull_request.rs
 	Approved
 	Ask {provider} to repair
 	Changes requested
+	Checks
 	Closed
 	Conflicts
 	Copy command
@@ -1403,11 +1404,13 @@ crates/keystone-desktop/src/pull_request.rs
 	Open
 	Refresh
 	Review required
+	Reviews
 	Send to {provider}
 	The base branch's rules block it.
 	The branch has conflicts.
 	The branch is behind its base.
 	The repository allows no merge method.
+	{label} · {count}
 	{} into {}
 	{}h {}m
 	{}m {}s

@@ -10,6 +10,8 @@
 - The primary action (Send, Allow, `ButtonStyle::Primary`) is filled with ink, `element_inverse` with `text_inverse`. No interface element is filled with blue. Blue is for focus rings, links and text selection.
 - Status colors mark state. Put them on a mark, such as an icon or a dot, rather than on whole runs of text.
 - Sidebar rows: an unseen reply shows a dot and a bright title (`Color::Strong`) with no line under it. A session waiting on the user keeps a `text` title and an amber reason under it. A working session's wedge is ink, and so is the keystone in the wordmark's arch. Everything else has a `text_muted` title. Settle shows as an icon button on the hovered or selected row.
+- The composer's controls are 24 px at Default density (`ButtonSize::Default`): the model chip on an `element_filled` wash, ghost controls beside it, and a square Send with `radius::CONTROL`. A side surface (Files, Changes, Notes, Pull request) opens beside the column that holds the conversation and the composer, so the composer stays under its transcript.
+- Side panels: a group label is small caps, uppercase `TextSize::Xs` Medium in `text_faint`, with its count. A file's status letter is a mono mark in its status color. The highlighted row is an inset `element_selected` wash, 12 px in from the panel's edge. A pull request's state and review verdicts are a status-colored dot beside muted text.
 - Hover and press use translucent neutral washes. One state color works on the sidebar, the main column, the composer, and popovers.
 - `Elevation::Raised` is a fill with no hairline, for blocks inside content such as code and tables. A raised block that needs emphasis, such as an approval, adds its own border.
 - Components size controls and rows through `cx.theme().density`, not fixed heights. Use `Density::control` for heights and `Density::pad` for row padding. Pass the Spacious size as the base: `control` keeps it at Spacious, takes seven eighths at Default and three quarters at Compact, rounds to an even number of pixels and never goes below 20 px. `pad` rounds to whole pixels. Space between and around blocks of content, such as transcript rows and the composer's padding, goes through `Density::space`. Pass the Default size, on the 4 px grid, as the base: it takes three quarters at Compact and five quarters at Spacious, rounded to the 4 px grid.
@@ -34,7 +36,7 @@
 | `ConfirmDialog`, `DialogFocus` | A modal question with Cancel and Confirm. See below. |
 | `ListItem` | A selectable row for lists such as the session sidebar. `on_hover` reports the pointer entering and leaving, so a list can build a row action only for the row under the pointer. `track_focus` makes it a focusable row with a ring that Enter or Space clicks. |
 | `PopoverMenu`, `MenuItem`, `MenuHeader`, `MenuSeparator` | An anchored overlay menu. The caller owns the open state. `MenuItem::checked` marks one choice in a group, and `MenuItem::detail` adds a muted line that explains it. |
-| `Switch`, `Slider`, `Select` | Settings controls: an on/off toggle, a value on a stepped range, and one choice from a list. See below. |
+| `Switch`, `Slider`, `Select`, `SegmentedControl` | Settings controls: an on/off toggle, a value on a stepped range, one choice from a list, and one of a few choices on a track. See below. |
 | `VirtualList`, `VirtualListState` | A keyboard-driven list that renders only its visible rows, for pickers, palettes, and trees. See below. |
 | `CommandPalette`, `CommandPaletteState`, `PaletteItem`, `fuzzy` | A centered overlay that filters commands as the user types, and the fuzzy scorer behind it. See below. |
 | `Tree`, `TreeState`, `TreeModel` | A keyboard-driven tree of any size that loads children lazily and draws only its visible rows. See below. |
@@ -54,7 +56,7 @@ Run `cargo run -p keystone-ui --example gallery` to see every component in every
 
 ## Confirm dialog
 
-`ConfirmDialog::new(id, &focus, title, message)` asks before a risky change. `tone(Color)` colors its icon and Confirm, `Danger` by default. `on_cancel` and `on_confirm` take `Fn(&mut Window, &mut App)`. The caller owns whether it is open: create a `DialogFocus` when it opens, keep it while it shows, and drop it in both handlers.
+`ConfirmDialog::new(id, &focus, title, message)` asks before a risky change. `tone(Color)` colors its icon and Confirm, `Danger` by default. `Color::Default` is for a safe choice such as a rename: an ink icon, and Confirm as the ink primary action. `on_cancel` and `on_confirm` take `Fn(&mut Window, &mut App)`. The caller owns whether it is open: create a `DialogFocus` when it opens, keep it while it shows, and drop it in both handlers.
 
 - It draws over the whole window, menus included, on a `scrim` wash that takes every press outside the card.
 - `DialogFocus::new` focuses Cancel, so Enter alone never confirms. Tab and Shift+Tab move between the two buttons, and Enter or Space presses the focused one. `DialogFocus::with_body(handle, window, cx)` initially focuses a body input and cycles through it, Cancel and Confirm in both directions. `body`, `icon` and `confirm_label` customize the content; display operation errors inside the body so they remain visible above the scrim.
@@ -69,9 +71,9 @@ The gallery's "Open confirm dialog" button shows it.
 `TabBar::new(id)` takes `Tab::new(id, label)` children and `selected(index)`. The caller owns the order and the selection and changes them in the handlers. A tab's id keeps its hover state with it when the bar reorders.
 
 - `on_select` gets the pressed tab's index. `on_close` gets the index from the close button or a middle click, and a bar without it shows no close buttons. The selected tab shows its close button at rest. Other tabs, and a selected tab with a dot, show it on hover.
-- `Tab::dot(TabDot::Working)` draws an accent dot in the close button's slot, and `TabDot::Dirty` a muted one. When the bar has `on_close`, hovering the tab swaps the dot for the close button.
+- `Tab::dot(TabDot::Working)` draws an ink dot in the close button's slot, and `TabDot::Dirty` a muted one. When the bar has `on_close`, hovering the tab swaps the dot for the close button.
 - The bar scrolls sideways when the tabs overflow, and scrolls the selected tab into view whenever the selection changes.
-- `on_move` makes tabs draggable. A drop on another tab of the same bar calls it with `(from, to)`: removing the tab at `from` and inserting it at `to` gives the new order. A drop on the empty end moves the tab last. While a tab hovers over a slot, an accent marker shows on the side it will land. A release anywhere else changes nothing.
+- `on_move` makes tabs draggable. A drop on another tab of the same bar calls it with `(from, to)`: removing the tab at `from` and inserting it at `to` gives the new order. A drop on the empty end moves the tab last. While a tab hovers over a slot, a `selection_edge` marker shows on the side it will land. A release anywhere else changes nothing.
 - `on_insert` takes tabs dragged from another bar, as `(DraggedTab, to)`. A drop on a tab inserts before it, and a drop on the empty end appends. A bar with `on_move` or `on_insert` ends every `DraggedTab` drag released over it, because GPUI hands a drop to the first target under the pointer, so a target around the bar never sees it.
 - The drag payload is `DraggedTab { bar_id, index }`. Other drop targets, such as split pane edges, accept it with `on_drop::<DraggedTab>`.
 - Ctrl+Tab and Ctrl+Shift+Tab belong to the host, which binds them to change `selected`.
@@ -102,6 +104,7 @@ The caller owns each control's value and stores what `on_change` asks for. Each 
 - `Switch::new(id, on)` asks for `!on` on a click, or on Space or Enter while focused. `label` puts text to its right. On is a `selection_edge` track with a `background` thumb.
 - `Slider::new(id, value, range, step)` reports values snapped to `step` within `range`. A press on the track or a drag picks the value under the pointer. Left and Down step down, Right and Up step up, and Home and End jump to the ends. The fill and thumb are `selection_edge` on a `selection_fill` track.
 - `Select::new(id, options, selected)` shows the chosen label, or `placeholder` while `selected` is `None`. A press, or Enter, Space, Up, or Down on the focused trigger, opens a `PopoverMenu` whose rows are a `VirtualList` of `MenuItem`s, so a long list stays cheap. The menu opens with the choice highlighted and checked, and shows eight rows before it scrolls. Enter or a click chooses and refocuses the trigger. A letter jumps to the next option that starts with it, wrapping. Escape closes the menu and refocuses the trigger. Tab and Shift+Tab close it, refocus the trigger, and go on to the window's own Tab handling, so focus moves on. A press outside closes it.
+- `SegmentedControl::new(id)` holds the caller's `Button`s on a `element_hover` track as ghost segments of the default size. The caller marks the chosen one `selected`, which fills it with `selection_fill`, and gives each its own focus handle.
 - Debug selectors are `{id}` for each control, `{id}-thumb` for the slider thumb, and `{id}-option-{n}` for select options, counting from 0.
 
 The gallery's Controls page shows every state, including a 500-option select.
@@ -137,7 +140,7 @@ The gallery's header button "Split" opens a three-pane page with an axis toggle 
 `CommandPalette::new(id, &state)` draws a centered overlay over the whole window that filters commands as the user types. The caller holds an `Entity<CommandPaletteState>` made with `CommandPaletteState::new(items, cx)`, creates it when the palette opens, focuses it with `window.focus(&state.focus_handle(cx), cx)`, and drops it in both handlers. `PaletteItem::new(id, label)` takes an optional `detail`, `kbd` and `monogram`.
 
 - The query is a single-line `TextInput`. Every edit rescores the labels with `fuzzy::score`. An empty query shows every item in its original order. Otherwise the best score comes first, then the shorter label, then the original order. A new query highlights the first row.
-- Matched characters are bold and drawn in `Color::Accent`. `Color::Strong` is too close to body text to read, and the fallback font may lack bold.
+- Matched characters are SemiBold in `Color::Strong`. The weight carries the match, since Strong alone is too close to body text; Inter's SemiBold face is bundled. The composer's mention and slash menus mark matches the same way, and the composer draws a chosen mention or command token in SemiBold.
 - The input keeps focus throughout. A div around it catches `text_input::Up`, `Down`, and `Newline` with `capture_action`, so Up and Down move the highlight and Enter calls `on_confirm` with the highlighted item. PageUp and PageDown move a page. A click on a row also confirms it.
 - Escape and a press outside the card call `on_dismiss`. The card's key context is `CommandPalette`, and `keystone_ui::init` binds its keys.
 - Rows come from a `VirtualList`, so 10,000 items cost no more to draw than ten. At most eight rows show at once. With no match, the card says "No matching commands".

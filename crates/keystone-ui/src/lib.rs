@@ -16,6 +16,7 @@ mod list_item;
 pub mod markdown;
 mod monogram;
 mod popover;
+mod segmented;
 mod select;
 mod slider;
 mod split;
@@ -40,6 +41,7 @@ pub use list_item::ListItem;
 pub use markdown::Markdown;
 pub use monogram::Monogram;
 pub use popover::{MenuHeader, MenuItem, MenuSeparator, PopoverMenu};
+pub use segmented::SegmentedControl;
 pub use select::Select;
 pub use slider::Slider;
 pub use split::{Edge, PaneEdge, Split, SplitState};
@@ -108,7 +110,7 @@ pub mod prelude {
     pub use crate::{CommandPalette, CommandPaletteState, PaletteItem};
     pub use crate::{DraggedTab, Tab, TabBar, TabDot};
     pub use crate::{NodeId, NodeKind, Tree, TreeEntry, TreeModel, TreeState};
-    pub use crate::{Select, Slider, Switch};
+    pub use crate::{SegmentedControl, Select, Slider, Switch};
     pub use crate::{Split, SplitState};
     pub use crate::{VirtualList, VirtualListState};
 }

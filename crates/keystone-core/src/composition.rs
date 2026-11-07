@@ -57,6 +57,14 @@ impl Component {
         }
     }
 
+    /// Files, Changes, Notes and Pull request, which open beside a conversation.
+    pub fn is_side(self) -> bool {
+        matches!(
+            self,
+            Self::Files | Self::Changes | Self::Notes | Self::PullRequest
+        )
+    }
+
     /// Whether occurrences of this component can share an area as tabs.
     pub fn is_surface(self) -> bool {
         matches!(
@@ -331,7 +339,8 @@ impl Composition {
                 }
                 if !reorder(&mut root, view, to) {
                     let size = remove(&mut root, view);
-                    insert(&mut root, view, to, size.unwrap_or(Size::FILL))?;
+                    let path = slot(&root, to.target()).ok_or(Problem::UnknownView(to.target()))?;
+                    insert_at(&mut root, path, view, to, size.unwrap_or(Size::FILL));
                 }
             }
             Edit::Resize { split, sizes } => {
@@ -354,7 +363,14 @@ impl Composition {
                 if views.insert(view, component).is_some() {
                     return Err(Problem::DuplicateView(view));
                 }
-                insert(&mut root, view, at, size)?;
+                let path = slot(&root, at.target()).ok_or(Problem::UnknownView(at.target()))?;
+                let path = match at {
+                    Place::Beside {
+                        axis: Axis::Row, ..
+                    } if component.is_side() => with_composer(&root, &views, path),
+                    _ => path,
+                };
+                insert_at(&mut root, path, view, at, size);
             }
             Edit::Close(view) => {
                 views.remove(&view).ok_or(Problem::UnknownView(view))?;
@@ -544,9 +560,39 @@ fn remove(root: &mut Node, view: ViewId) -> Option<Size> {
     Some(removed.size)
 }
 
-fn insert(root: &mut Node, view: ViewId, place: Place, size: Size) -> Result<(), Problem> {
+/// The nearest column above the view at `path` that stacks it over the composer, when
+/// there is one, so a side surface opened beside a conversation, or beside one of
+/// several split above the composer, leaves the composer under the transcripts.
+fn with_composer(root: &Node, views: &BTreeMap<ViewId, Component>, path: Vec<usize>) -> Vec<usize> {
+    let holds_composer = |node: &Node| {
+        match node {
+        Node::Split {
+            axis: Axis::Column,
+            children,
+        } => children.iter().any(|child| {
+            matches!(child.node, Node::View { id } if views.get(&id) == Some(&Component::Composer))
+        }),
+        _ => false,
+    }
+    };
+    let mut ancestors = Vec::with_capacity(path.len());
+    let mut node = root;
+    for &index in &path {
+        ancestors.push(node);
+        match node {
+            Node::Split { children, .. } => node = &children[index].node,
+            _ => return path,
+        }
+    }
+    match ancestors.iter().rposition(|node| holds_composer(node)) {
+        Some(depth) => path[..depth].to_vec(),
+        None => path,
+    }
+}
+
+/// Puts `view` at `place`, whose target's slot is at `path`.
+fn insert_at(root: &mut Node, path: Vec<usize>, view: ViewId, place: Place, size: Size) {
     let target = place.target();
-    let path = slot(root, target).ok_or(Problem::UnknownView(target))?;
     match place {
         Place::TabWith(_) => {
             let node = node_mut(root, &path).expect("slot path");
@@ -575,7 +621,7 @@ fn insert(root: &mut Node, view: ViewId, place: Place, size: Size) -> Result<(),
                 && *axis == along
             {
                 children.insert(index + usize::from(after), new);
-                return Ok(());
+                return;
             }
             let node = node_mut(root, &path).expect("slot path");
             let existing = Child {
@@ -592,7 +638,6 @@ fn insert(root: &mut Node, view: ViewId, place: Place, size: Size) -> Result<(),
             };
         }
     }
-    Ok(())
 }
 
 /// What a project saved for its composition, kept as is even when this version cannot
@@ -952,8 +997,13 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            root(&beside)["children"][1]["node"]["children"][0]["node"]["children"],
-            json!([view(0, json!({"fill": 1})), view(7, json!({"px": 300}))])
+            root(&beside)["children"][2],
+            view(7, json!({"px": 300})),
+            "beside the conversation's column, so the composer stays under its transcript"
+        );
+        assert_eq!(
+            root(&beside)["children"][1]["node"]["children"],
+            json!([view(0, json!({"fill": 1})), view(2, "auto".into())])
         );
         assert_eq!(
             serde_json::to_value(&beside).unwrap()["views"][3],
@@ -998,6 +1048,88 @@ mod tests {
                 .views()
                 .all(|(_, c)| c != Component::Files)
         );
+    }
+
+    #[test]
+    fn a_side_surface_moved_beside_its_conversation_goes_under_the_composer() {
+        let at = Place::Beside {
+            target: ViewId::MAIN,
+            axis: Axis::Row,
+            after: true,
+        };
+        let moved = Composition::default()
+            .edit(Edit::Open {
+                view: ViewId(7),
+                component: Component::Files,
+                at,
+                size: px(300),
+            })
+            .unwrap()
+            .edit(Edit::Move {
+                view: ViewId(7),
+                to: at,
+            })
+            .unwrap();
+        assert_eq!(
+            root(&moved)["children"][1]["node"]["children"][0]["node"]["children"],
+            json!([view(0, json!({"fill": 1})), view(7, json!({"px": 300}))])
+        );
+    }
+
+    #[test]
+    fn a_second_conversation_still_opens_inside_the_composer_column() {
+        let split = Composition::default()
+            .edit(Edit::Open {
+                view: ViewId(7),
+                component: Component::Conversation,
+                at: Place::Beside {
+                    target: ViewId::MAIN,
+                    axis: Axis::Row,
+                    after: true,
+                },
+                size: Size::FILL,
+            })
+            .unwrap();
+        assert_eq!(
+            root(&split)["children"][1]["node"]["children"][0]["node"]["children"],
+            json!([view(0, json!({"fill": 1})), view(7, json!({"fill": 1}))])
+        );
+    }
+
+    #[test]
+    fn a_side_surface_opens_beside_conversations_split_above_the_composer() {
+        let split = Composition::default()
+            .edit(Edit::Open {
+                view: ViewId(7),
+                component: Component::Conversation,
+                at: Place::Beside {
+                    target: ViewId::MAIN,
+                    axis: Axis::Row,
+                    after: true,
+                },
+                size: Size::FILL,
+            })
+            .unwrap();
+        for target in [ViewId::MAIN, ViewId(7)] {
+            let files = split
+                .edit(Edit::Open {
+                    view: ViewId(8),
+                    component: Component::Files,
+                    at: Place::Beside {
+                        target,
+                        axis: Axis::Row,
+                        after: true,
+                    },
+                    size: px(300),
+                })
+                .unwrap();
+            assert_eq!(root(&files)["children"][2], view(8, json!({"px": 300})));
+            assert_eq!(
+                root(&files)["children"][1]["node"]["children"][1],
+                view(2, "auto".into()),
+                "the composer stays under both conversations"
+            );
+        }
     }
 
     #[test]
