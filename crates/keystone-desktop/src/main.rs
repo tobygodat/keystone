@@ -36,6 +36,7 @@ mod session_tabs;
 mod settings;
 mod settings_accounts;
 mod settings_page;
+mod settings_project;
 mod settings_prompts;
 mod settings_scheduled;
 mod slash_menu;
@@ -477,6 +478,7 @@ struct Keystone {
     /// The recovery card's Use recovered history and Retry buttons, in the view the composer
     /// sends to, so Tab reaches them.
     recovery_focus: (FocusHandle, FocusHandle),
+    setup_focus: app_state::setup::SetupFocus,
     /// Usage-limit resets a redraw is already waiting for, in unix milliseconds.
     limit_wakes: std::cell::RefCell<std::collections::HashSet<u64>>,
     new_menu: bool,
@@ -903,6 +905,7 @@ impl Keystone {
                 cx.focus_handle().tab_stop(true),
                 cx.focus_handle().tab_stop(true),
             ),
+            setup_focus: app_state::setup::SetupFocus::new(cx),
             new_menu: false,
             filter_menu: false,
             provider_filter: None,
@@ -2884,6 +2887,10 @@ impl Keystone {
         let colors = cx.theme().colors;
         let mut view = v_flex().gap_4();
         let mut empty = true;
+        if let Some(card) = self.setup_card(key, cx) {
+            empty = false;
+            view = view.child(card);
+        }
         if let Some(approval) = conversation.approvals.first() {
             empty = false;
             let (allow, deny) = (approval.request.clone(), approval.request.clone());
@@ -4198,6 +4205,7 @@ impl Render for Keystone {
             .children(self.context_menu_overlay(cx))
             .children(self.preview.as_ref().map(preview::Open::overlay));
         let root = self.settings_yields_to_workspace(root, cx);
+        let root = self.setup_actions(root, cx);
         self.on_arrangement_drag(root, cx)
     }
 }
@@ -11251,12 +11259,12 @@ fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new(
             "tab",
             NextFocus,
-            Some("Recovery && !Dialog && !CommandPalette"),
+            Some("(Recovery || Setup) && !Dialog && !CommandPalette"),
         ),
         gpui::KeyBinding::new(
             "shift-tab",
             PreviousFocus,
-            Some("Recovery && !Dialog && !CommandPalette"),
+            Some("(Recovery || Setup) && !Dialog && !CommandPalette"),
         ),
         gpui::KeyBinding::new(
             "secondary-enter",

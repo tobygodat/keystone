@@ -212,6 +212,7 @@ impl Keystone {
             } => {
                 let provider = *provider;
                 let name = self.worktree_input.read(cx).value().trim().to_owned();
+                let setup_project = self.presentation.project.clone().ok();
                 let project = match self.presentation.creation_directory() {
                     Ok(project) => project,
                     Err(e) => {
@@ -226,7 +227,7 @@ impl Keystone {
                         .spawn(async move { worktree::create(project.path(), &name, None) })
                         .await;
                     let _ = this.update_in(cx, |this, window, cx| {
-                        this.worktree_created(provider, created, window, cx)
+                        this.worktree_created(provider, setup_project, created, window, cx)
                     });
                 }));
             }
@@ -243,6 +244,10 @@ impl Keystone {
                 });
                 if running {
                     *error = Some("A turn is running here. Stop it first.".into());
+                    return self.refresh(cx);
+                }
+                if state.setup_running_in(worktree) {
+                    *error = Some("Its setup script is running. Cancel it first.".into());
                     return self.refresh(cx);
                 }
                 let worktree = worktree.clone();
@@ -278,9 +283,12 @@ impl Keystone {
         self.refresh(cx);
     }
 
+    /// Shows the new session, and runs `setup_project`'s setup script in it: the
+    /// project the window showed when Create was pressed.
     fn worktree_created(
         &mut self,
         provider: Provider,
+        setup_project: Option<ProjectId>,
         created: std::io::Result<WorktreeContext>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -306,8 +314,15 @@ impl Keystone {
             .workspace()
             .sessions()
             .iter()
-            .any(|s| s.worktree() == Some(&worktree));
-        if !created {
+            .find(|s| s.worktree() == Some(&worktree))
+            .map(Session::id);
+        if let (Some(session), Some(project)) = (created, setup_project) {
+            let worktree = worktree.clone();
+            self.state.update(cx, |state, cx| {
+                state.start_setup(session, project, worktree, cx)
+            });
+        }
+        if created.is_none() {
             let error = self.error.take().unwrap_or_default();
             self.error = Some(format!(
                 "{error} Worktree kept at {}.",
@@ -397,10 +412,26 @@ impl Keystone {
                         "worktree-codex",
                         cx,
                     )));
+                let script = self.presentation.project.as_ref().ok().and_then(|project| {
+                    let state = self.state.read(cx);
+                    let script = state.store().workspace().setup_script(project)?;
+                    Some(
+                        div().automation_id("worktree-setup-script").child(
+                            Label::new(format!(
+                                "Runs setup script: {}",
+                                crate::app_state::setup::first_line(script)
+                            ))
+                            .size(TextSize::Sm)
+                            .color(Color::Muted)
+                            .truncate(),
+                        ),
+                    )
+                });
                 let body = v_flex()
                     .gap(spacing::SM)
                     .child(field)
                     .child(providers)
+                    .children(script)
                     .children(status(error, "Creating…"));
                 ConfirmDialog::new("worktree-dialog", focus, "New session in worktree", "")
                     .icon(IconName::Branch)

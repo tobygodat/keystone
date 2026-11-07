@@ -55,13 +55,14 @@ enum Section {
     Integrations,
     Prompts,
     Scheduled,
+    Project,
 }
 
 /// A section's rows, each a label and its control.
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 8] = [
+const SECTIONS: [(Section, &str, &str, Rows); 9] = [
     (
         Section::Appearance,
         "Appearance",
@@ -126,6 +127,7 @@ const SECTIONS: [(Section, &str, &str, Rows); 8] = [
         "settings-section-scheduled",
         &[],
     ),
+    (Section::Project, "Project", "settings-section-project", &[]),
 ];
 
 /// The open settings page: the section it shows and a focus handle per tab stop. Only
@@ -145,6 +147,7 @@ pub(crate) struct SettingsPage {
     pub(crate) integrations: crate::integrations::IntegrationsPage,
     pub(crate) prompts: crate::settings_prompts::PromptsPage,
     pub(crate) scheduled: crate::settings_scheduled::ScheduledPage,
+    pub(crate) project: crate::settings_project::ProjectPage,
 }
 
 impl SettingsPage {
@@ -165,6 +168,7 @@ impl SettingsPage {
             integrations: crate::integrations::IntegrationsPage::new(cx),
             prompts: crate::settings_prompts::PromptsPage::new(cx),
             scheduled: crate::settings_scheduled::ScheduledPage::new(cx),
+            project: crate::settings_project::ProjectPage::new(cx),
         }
     }
 
@@ -209,6 +213,11 @@ impl Keystone {
         self.open_section(Section::Prompts, window, cx)
     }
 
+    /// Opens the page on Project, the window's project's own settings.
+    pub(crate) fn open_project_section(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_section(Section::Project, window, cx)
+    }
+
     fn open_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.is_none() {
             self.toggle_settings(window, cx);
@@ -216,6 +225,9 @@ impl Keystone {
         if let Some(page) = &mut self.settings {
             page.section = section;
             window.focus(&page.sections[page.section_index()], cx);
+        }
+        if section == Section::Project {
+            self.load_project_settings(cx);
         }
         self.refresh(cx);
     }
@@ -336,8 +348,12 @@ impl Keystone {
         let opened = page.section != SECTIONS[at].0;
         page.section = SECTIONS[at].0;
         window.focus(&page.sections[at], cx);
-        if opened && page.section == Section::Integrations {
+        let section = page.section;
+        if opened && section == Section::Integrations {
             self.read_integrations(cx);
+        }
+        if opened && section == Section::Project {
+            self.load_project_settings(cx);
         }
         cx.notify();
     }
@@ -384,6 +400,7 @@ impl Keystone {
             Section::Integrations => Some(self.integrations_section(page, cx).into_any_element()),
             Section::Prompts => Some(self.prompts_section(page, cx).into_any_element()),
             Section::Scheduled => Some(self.scheduled_section(page, cx).into_any_element()),
+            Section::Project => Some(self.project_section(page, cx)),
             _ => None,
         };
         let content = div()
@@ -1478,8 +1495,8 @@ mod tests {
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
         // Appearance's row holds focus; next come Fonts, Notifications, Sounds, Accounts,
-        // Integrations, Prompts, Scheduled, Theme, then the first action color.
-        keys(cx, "tab tab tab tab tab tab tab tab tab");
+        // Integrations, Prompts, Scheduled, Project, Theme, then the first action color.
+        keys(cx, "tab tab tab tab tab tab tab tab tab tab");
         keys(cx, "right right");
         assert_eq!(saved(&path).action_color, keystone_core::ActionColor::Green);
         keys(cx, "left left");
@@ -1500,9 +1517,9 @@ mod tests {
         keys(cx, "escape");
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
-        // From Default back past Compact, the six action colors, Theme, Scheduled, Prompts,
-        // Integrations, Accounts, Sounds, Notifications, Fonts, and Appearance to Back.
-        keys(cx, &["shift-tab"; 17].join(" "));
+        // From Default back past Compact, the six action colors, Theme, Project, Scheduled,
+        // Prompts, Integrations, Accounts, Sounds, Notifications, Fonts, and Appearance to Back.
+        keys(cx, &["shift-tab"; 18].join(" "));
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
         assert!(composer_focused(&view, cx));
@@ -1514,9 +1531,9 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        // Fonts' row holds focus; Notifications', Sounds', Accounts', Integrations', Prompts'
-        // and Scheduled's rows come before the first font menu.
-        keys(cx, "secondary-, down tab tab tab tab tab tab tab down");
+        // Fonts' row holds focus; Notifications', Sounds', Accounts', Integrations', Prompts',
+        // Scheduled's and Project's rows come before the first font menu.
+        keys(cx, "secondary-, down tab tab tab tab tab tab tab tab down");
         assert!(shown(cx, "settings-ui-font-option-0"));
 
         keys(cx, "tab");

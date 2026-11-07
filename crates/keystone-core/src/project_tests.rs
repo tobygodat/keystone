@@ -331,6 +331,77 @@ fn the_automatic_color_follows_the_path_alone() {
 }
 
 #[test]
+fn a_setup_script_persists_across_a_reopen_and_clearing_it_removes_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let (a, b, _) = folders(directory.path());
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .open_project(WindowId::FIRST, &a, None, None, 1)
+            .unwrap();
+        let refused = store
+            .set_project_setup_script(&b, Some("make".into()))
+            .err()
+            .unwrap();
+        assert!(
+            refused.to_string().contains("not on the project list"),
+            "{refused}"
+        );
+        store
+            .set_project_setup_script(&a, Some("  npm install\ncp ../.env .  \n".into()))
+            .unwrap();
+    }
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.workspace().setup_script(&a),
+        Some("npm install\ncp ../.env ."),
+        "trimmed and kept across a reopen"
+    );
+    assert_eq!(store.workspace().setup_script(&b), None);
+
+    store
+        .set_project_setup_script(&a, Some(" \n ".into()))
+        .unwrap();
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.workspace().setup_script(&a), None, "blank clears it");
+    let payload: String = rusqlite::Connection::open(store.path())
+        .unwrap()
+        .query_one(
+            "SELECT payload FROM projects WHERE id=?1",
+            [a.path().to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!payload.contains("setup_script"), "{payload}");
+}
+
+#[test]
+fn a_setup_script_keeps_fields_from_a_newer_release() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    drop(Store::open(&path).unwrap());
+    rusqlite::Connection::open(path.with_extension("sqlite3"))
+        .unwrap()
+        .execute_batch(r#"INSERT INTO projects VALUES ('/x', 0, '{"path":"/x","pinned":true}');"#)
+        .unwrap();
+    let x = ProjectId::from_saved("/x");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .set_project_setup_script(&x, Some("make setup".into()))
+        .unwrap();
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.workspace().setup_script(&x), Some("make setup"));
+    let payload: String = rusqlite::Connection::open(store.path())
+        .unwrap()
+        .query_one("SELECT payload FROM projects WHERE id='/x'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(payload.contains(r#""pinned":true"#), "{payload}");
+}
+
+#[test]
 fn only_a_listed_project_takes_a_color() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.json");

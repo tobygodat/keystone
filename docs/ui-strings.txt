@@ -829,6 +829,7 @@ crates/keystone-desktop/src/checkpoints.rs
 
 crates/keystone-desktop/src/commands.rs
 	Attach files…
+	Cancel setup script
 	Capture screenshot
 	Change project color…
 	Close tab
@@ -836,6 +837,7 @@ crates/keystone-desktop/src/commands.rs
 	Color
 	Copy pull request link
 	Customize layout
+	Edit worktree setup script…
 	Focus composer
 	Focus next transcript
 	Focus previous transcript
@@ -864,9 +866,11 @@ crates/keystone-desktop/src/commands.rs
 	Remove worktree…
 	Rename session
 	Retry recovery
+	Retry setup script
 	Second opinion…
 	Send selection to agent
 	Settle session
+	Skip setup script
 	Split right
 	Switch project
 	Toggle changes
@@ -1490,6 +1494,7 @@ crates/keystone-desktop/src/settings_page.rs
 	Needs paplay or pw-play
 	Notifications
 	Play sounds
+	Project
 	Prompts
 	Pull request checks and reviews
 	Scheduled
@@ -1504,6 +1509,14 @@ crates/keystone-desktop/src/settings_page.rs
 	Turn finished
 	Volume
 	{size} px
+
+crates/keystone-desktop/src/settings_project.rs
+	Open a project to set its setup script.
+	Runs in each new worktree's folder before its first message. KEYSTONE_PROJECT_ROOT and KEYSTONE_WORKTREE_PATH are set.
+	Save
+	Setup script not saved. {error}
+	Worktree setup script
+	npm install
 
 crates/keystone-desktop/src/settings_prompts.rs
 	Add
@@ -1568,6 +1581,26 @@ crates/keystone-desktop/src/settings_scheduled.rs
 	{when}, run now: {}
 	{when}{late}: {}
 	{} · {} · {} · {next}
+
+crates/keystone-desktop/src/setup.rs
+	Cancel
+	Cancelling setup script…
+	Could not open the folder.
+	Keystone is quitting.
+	Not sent. Retry or skip the setup script first.
+	Not sent. The setup script is still running.
+	Open folder
+	Retry
+	Running setup script…
+	Setup script cancelled.
+	Setup script could not start: {error}
+	Setup script failed (exit {code}).
+	Setup script failed (signal {signal}).
+	Setup script finished in {}.
+	Skip
+	its worktree folder is missing or is no longer its worktree.
+	its worktree is being removed.
+	{} s
 
 crates/keystone-desktop/src/slash_menu.rs
 	Choose a conversation folder to list commands.
@@ -1719,10 +1752,12 @@ crates/keystone-desktop/src/worktrees.rs
 	Creating…
 	Folder missing
 	In worktree
+	Its setup script is running. Cancel it first.
 	New session in worktree
 	No worktree created. {error}
 	Remove
 	Remove worktree
+	Runs setup script: {}
 	This session has no worktree.
 	Worktree folder already gone.
 	{error} Worktree kept at {}.

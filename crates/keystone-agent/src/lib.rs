@@ -24,6 +24,8 @@ pub mod mcp;
 mod profile;
 pub mod recovery;
 pub mod remote;
+#[cfg(unix)]
+pub mod setup;
 pub mod surface;
 mod version;
 pub mod worker;

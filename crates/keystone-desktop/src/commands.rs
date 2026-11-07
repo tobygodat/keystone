@@ -1,6 +1,7 @@
 //! The commands the palette lists. Their key bindings come from the same table, so a
 //! row's shortcut hint cannot drift from the binding that runs it.
 
+use crate::app_state::setup::{CancelSetup, EditSetupScript, RetrySetup, SkipSetup};
 use crate::attachments::AttachFiles;
 use crate::changes::{CopyPullRequestLink, ToggleChanges};
 use crate::customization::OpenCustomize;
@@ -209,6 +210,34 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-r"],
         context: Some(APP),
         action: || Box::new(RetryRecovery),
+    },
+    Command {
+        id: "retry-setup",
+        label: "Retry setup script",
+        keys: &["secondary-alt-r"],
+        context: Some(APP),
+        action: || Box::new(RetrySetup),
+    },
+    Command {
+        id: "skip-setup",
+        label: "Skip setup script",
+        keys: &["secondary-alt-shift-s"],
+        context: Some(APP),
+        action: || Box::new(SkipSetup),
+    },
+    Command {
+        id: "cancel-setup",
+        label: "Cancel setup script",
+        keys: &["secondary-alt-x"],
+        context: Some(APP),
+        action: || Box::new(CancelSetup),
+    },
+    Command {
+        id: "edit-setup-script",
+        label: "Edit worktree setup script…",
+        keys: &["secondary-alt-shift-e"],
+        context: Some(APP),
+        action: || Box::new(EditSetupScript),
     },
     Command {
         id: "insert-prompt",

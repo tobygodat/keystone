@@ -29,6 +29,9 @@ pub(crate) mod checkpoints;
 #[path = "scheduled.rs"]
 pub(crate) mod scheduled;
 
+#[path = "setup.rs"]
+pub(crate) mod setup;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Phase {
     Running,
@@ -110,6 +113,10 @@ pub(crate) struct AppState {
     restoring: HashMap<PathBuf, checkpoints::InFlight>,
     /// Checkpoint saves queued and not done yet, by session.
     saving: HashMap<u64, usize>,
+    /// New worktrees' setup scripts, by session, until the first message goes.
+    setups: HashMap<u64, setup::Setup>,
+    /// The shell setup scripts run with. Tests set `/bin/sh`.
+    pub(crate) setup_shell: std::ffi::OsString,
     catalogs: Catalogs,
     logs: Logs,
     log_losses: std::collections::BTreeMap<u64, String>,
@@ -460,6 +467,7 @@ impl AppState {
     pub(crate) fn teardown(&mut self, cx: &mut Context<Self>) {
         self.phase = Phase::Exiting;
         self.stop_restores();
+        self.stop_setups();
         drop(self.orchestrator.take());
         self.pull_requests.stop();
         self.codex.clear();
@@ -1530,6 +1538,8 @@ impl AppState {
             checkpoint_store: checkpoints::StoreName::new(store.database()),
             restoring: Default::default(),
             saving: HashMap::new(),
+            setup_shell: keystone_agent::setup::shell_for(std::env::var_os("SHELL")),
+            setups: HashMap::new(),
             catalogs: Catalogs::default(),
             logs,
             log_losses: Default::default(),
@@ -1905,6 +1915,7 @@ impl AppState {
             }
         }
         self.receive(reports, events, cx);
+        self.pump_setups(cx);
         self.pump_orchestrator(cx);
         let reads = std::mem::take(&mut *self.recovery_reads.lock().unwrap());
         for (session, ticket, result) in reads {
@@ -3299,6 +3310,15 @@ impl AppState {
                 return Sent::No;
             }
         }
+        // A new worktree's setup script runs before its first message.
+        if let Some(reason) = self.setup_holds_send(id) {
+            if kind != SendKind::Result {
+                self.conversation(id).error = Some(reason.into());
+                self.commit(id);
+                self.publish(cx);
+            }
+            return Sent::No;
+        }
         // A result waits for a turn that started meanwhile rather than steering it.
         if matches!(kind, SendKind::Result | SendKind::Scheduled) && self.runs_turn(id) {
             return Sent::No;
@@ -3451,6 +3471,7 @@ impl AppState {
         for attachment in &draft.attachments {
             self.attachments.touch(attachment);
         }
+        self.setup_sent(id);
         self.conversation(id)
             .push_sent(&text, draft.attachments.clone());
         self.commit(id);

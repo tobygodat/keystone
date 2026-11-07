@@ -305,7 +305,7 @@ fn keep_tail(stderr: impl Read, tail: &Mutex<VecDeque<u8>>) {
 /// macOS's waitid also returns at once for a stopped process, however often it is
 /// asked, so there kqueue reports the exit instead.
 #[cfg(target_os = "macos")]
-fn wait_without_reaping(pid: u32) {
+pub(crate) fn wait_without_reaping(pid: u32) {
     // SAFETY: kevent reads one change and writes at most one event into zeroed
     // structs that outlive the call; the queue is closed once.
     let reported = unsafe {
@@ -357,7 +357,7 @@ fn exited_unreaped(pid: u32) -> bool {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn wait_without_reaping(pid: u32) {
+pub(crate) fn wait_without_reaping(pid: u32) {
     loop {
         // SAFETY: waitid writes only into the zeroed siginfo it is given.
         let result = unsafe {
@@ -376,7 +376,7 @@ fn wait_without_reaping(pid: u32) {
 }
 
 #[cfg(not(unix))]
-fn wait_without_reaping(_pid: u32) {}
+pub(crate) fn wait_without_reaping(_pid: u32) {}
 
 /// SIGTERM to the process tree now and SIGKILL after a grace period. The `last`
 /// teardown then reaps the sentinel, releasing the group ID.
@@ -540,6 +540,15 @@ use pidfd as os;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn process_state(pid: u32) -> Option<char> {
     os::state(pid)
+}
+
+/// Whether a process other than `group`'s leader is alive in that group. The caller
+/// keeps the group ID reserved, such as by leaving the leader unreaped.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn group_has_others(group: u32) -> bool {
+    os::all()
+        .iter()
+        .any(|s| s.group == group && s.pid != group && !Targets::exited(process_state(s.pid)))
 }
 
 /// The parent of process `pid`, or `None` once nothing holds that PID.

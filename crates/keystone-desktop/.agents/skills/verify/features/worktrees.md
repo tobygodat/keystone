@@ -8,6 +8,7 @@ A session can work in its own git worktree inside the project's repository. Keys
 - The session records the worktree as its folder, plus the repository root and branch (`execution_context` version 2 in `workspace`; version 1 rows still load). Files and the provider process start there.
 - The branch shows in the top bar (`worktree-branch`) and on the session row (`session-branch-N`), also while the row needs action. A worktree folder that is gone shows `worktree-missing` (**Folder missing**, after the branch) in the top bar and **Worktree missing** on the row; the conversation stays readable and Send keeps the draft with the reason.
 - **Remove worktree…** opens `remove-worktree-dialog`. **Remove** refuses, with the reason in `worktree-error`, while the worktree has uncommitted, untracked or ignored files, hidden index flags, or commits on its branch that are neither pushed (in a remote-tracking ref) nor on another local branch, and while a turn runs in that folder or below it. It never passes `--force` and always keeps the branch. A sparse checkout marks files outside its cone as hidden, so its worktrees are always refused.
+- **Setup script.** Settings → Project (`settings-section-project`, or the palette's **Edit worktree setup script…**) saves the window's project's script (`settings-setup-script`, **Save** `settings-setup-script-save`) in the workspace database. The dialog then shows `worktree-setup-script` with its first line. Creating a worktree runs it with `$SHELL -c` in the worktree, with `KEYSTONE_PROJECT_ROOT` and `KEYSTONE_WORKTREE_PATH` set, off the UI thread. The session's status area shows `setup`: running with elapsed seconds, `setup-output` and `setup-cancel`; then **Setup script finished in N s.** until the first message; or failed, cancelled or unable to start, with `setup-retry`, `setup-skip` and `setup-open`. Send keeps the draft with the reason while it runs or after it fails. The palette's **Retry / Skip / Cancel setup script** act on the selected session. Quit stops the script's process group, and so does closing the last window when no turn is running, since that quits. A restart forgets setup state. Agent-launched worktrees run no script.
 - The orchestrator's `session_launch` accepts `cwd` naming a registered worktree of the caller's repository, and `worktree: <name>` to create one only when the caller itself works in a worktree. Any other folder is refused.
 
 ## How to get to it (user POV)
@@ -18,6 +19,9 @@ A session can work in its own git worktree inside the project's repository. Keys
 - Remove: right-click a worktree session's row and choose **Remove worktree…** (`menu-remove-worktree`), or Ctrl+Alt+Shift+G / the palette's **Remove worktree…** for the shown session.
 
 ## Driving it with keystone-verify
+
+On macOS, `python3 scripts/setup-script-journey.py` drives the setup script end to end through the automation inbox and writes screenshots and `report.json` to `.audit/setup-journey-*/`.
+
 
 Make a disposable fixture repository with one commit and a temp bare remote (`git init --bare`, `git remote add origin`, push `main`). Point `KEYSTONE_CLAUDE_PATH` at a wrapper that logs `$PWD` and sets `KEYSTONE_FAKE_ENV_RECEIPT` and a scratch `CLAUDE_CONFIG_DIR`, and start with `KEYSTONE_PROJECT_DIR` set to the fixture.
 

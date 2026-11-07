@@ -140,6 +140,9 @@ pub struct Project {
     /// The user's choice. `None` is automatic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     color: Option<SavedColor>,
+    /// A shell command run in each new worktree's folder before its first message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    setup_script: Option<String>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -151,6 +154,7 @@ impl Project {
             last_opened: Some(last_opened),
             removed: false,
             color: None,
+            setup_script: None,
             unknown: Map::new(),
         }
     }
@@ -165,6 +169,10 @@ impl Project {
 
     pub fn id(&self) -> ProjectId {
         ProjectId(self.path.clone())
+    }
+
+    pub fn setup_script(&self) -> Option<&str> {
+        self.setup_script.as_deref()
     }
 
     pub fn last_opened(&self) -> Option<u64> {
@@ -266,6 +274,14 @@ impl Workspace {
             .unwrap_or_else(|| ProjectColor::automatic(project))
     }
 
+    /// The command `project` runs in each new worktree, if it has one.
+    pub fn setup_script(&self, project: &ProjectId) -> Option<&str> {
+        self.projects
+            .iter()
+            .find(|p| p.is(project) && !p.removed)
+            .and_then(Project::setup_script)
+    }
+
     /// Lists `project` as opened at `now` unless it is listed already.
     pub(crate) fn list_project(&mut self, project: &ProjectId, now: u64) {
         match self.projects.iter_mut().find(|p| p.is(project)) {
@@ -330,6 +346,31 @@ impl Store {
             .into());
         };
         listed.color = color.map(SavedColor::Known);
+        Ok(self.commit(next, self.next_id))
+    }
+
+    /// Gives listed `project` the worktree setup script `script`. A script that is empty
+    /// once trimmed removes it.
+    pub fn set_project_setup_script(
+        &mut self,
+        project: &ProjectId,
+        script: Option<String>,
+    ) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        let Some(listed) = next
+            .projects
+            .iter_mut()
+            .find(|p| p.is(project) && !p.removed)
+        else {
+            return Err(invalid(format!(
+                "{} is not on the project list",
+                project.path().display()
+            ))
+            .into());
+        };
+        listed.setup_script = script
+            .map(|script| script.trim().to_owned())
+            .filter(|script| !script.is_empty());
         Ok(self.commit(next, self.next_id))
     }
 
