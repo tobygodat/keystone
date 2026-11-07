@@ -194,6 +194,10 @@ pub(crate) struct AppState {
     /// The `codex` and `claude` every new connection runs, in place of the ones found.
     #[cfg(test)]
     pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
+    /// Whether a test put its own Claude connection in place, which runs the program
+    /// it names. A connection started without one runs the `claude` on `PATH`.
+    #[cfg(test)]
+    test_claude_installed: bool,
     /// Whether turns take checkpoints. Off in tests unless one turns it on, so a test
     /// whose session works in this repository never writes refs into it.
     #[cfg(test)]
@@ -346,6 +350,7 @@ impl AppState {
     }
     #[cfg(test)]
     pub(crate) fn test_set_claude(&mut self, value: Option<ClaudeConnection>) {
+        self.test_claude_installed = value.is_some();
         match value {
             Some(value) => self.claude.insert(None, value),
             None => self.claude.remove(&None),
@@ -1622,6 +1627,8 @@ impl AppState {
             #[cfg(test)]
             test_programs: None,
             #[cfg(test)]
+            test_claude_installed: false,
+            #[cfg(test)]
             test_checkpoints: false,
             notifier: Default::default(),
             pull_requests: Default::default(),
@@ -1759,6 +1766,8 @@ impl AppState {
                 .conversations
                 .get(&session)
                 .and_then(|c| c.reported_model.as_deref()),
+            // What it last reported before this run, for the chip until it reports again.
+            last_model_name: saved.and_then(|s| s.last_model_name()),
             default_model,
             started: saved.is_none_or(|s| s.started()),
             choices,
@@ -1774,6 +1783,22 @@ impl AppState {
         if let Some(key) = self.catalog_key(session, provider) {
             self.request_catalog_for(key, session, cx);
         }
+    }
+
+    /// Asks Claude's catalog so the model chip can name what the session's default model
+    /// runs as before the first message. A test build asks only once a scripted Claude
+    /// is in place, so it never starts the one on `PATH`. A connection that another
+    /// request already started is not enough: without a scripted program, it runs the
+    /// `claude` on `PATH` (TOB-363).
+    pub(crate) fn name_default_model(&mut self, session: u64, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        if self.test_programs.is_none()
+            && std::env::var_os("KEYSTONE_CLAUDE_PATH").is_none()
+            && !self.test_claude_installed
+        {
+            return;
+        }
+        self.request_catalog(session, Provider::Claude, cx);
     }
 
     pub(crate) fn catalog_choices(&self, key: &CatalogKey) -> Choices<'_> {
@@ -2105,7 +2130,21 @@ impl AppState {
                         | Event::SurfaceShown { .. }
                         | Event::SurfaceStopped { .. }
                 );
+            let reported = match &event {
+                Event::ModelReported { model } => self.session(session).and_then(|saved| {
+                    let name = self
+                        .model_selection(session, saved.provider())
+                        .choices
+                        .label(model);
+                    (saved.last_model_name() != Some(name.as_str())).then_some(name)
+                }),
+                _ => None,
+            };
             let thread = self.conversation(session).apply(event);
+            if let Some(model) = reported {
+                // Saved like the conversation ID below: the writer reports a failure.
+                let _ = self.store.set_last_model_name(session, model);
+            }
             self.commit(session);
             self.turn_ended(session, cx);
             // Before the batch's later events, so the result is this turn's reply.

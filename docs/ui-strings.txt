@@ -772,7 +772,6 @@ crates/keystone-desktop/src/arrangement.rs
 	New session
 	Open a surface
 	Split right · {}
-	Stop
 	Tabs
 	What should we work on?
 
@@ -862,7 +861,6 @@ crates/keystone-desktop/src/changes.rs
 	{}\n{output}
 	{} is checked out. Check out {branch} to create this pull request.
 	{} still has conflict markers.
-	{} · {count}
 
 crates/keystone-desktop/src/checkpoints.rs
 	A turn is running here. Stop it first.
@@ -1235,7 +1233,6 @@ crates/keystone-desktop/src/main.rs
 	All sessions
 	Allow
 	Answer the approval request before closing the last window, or Quit to stop the turn.
-	Approval mode
 	Approval mode not saved. {error}
 	Approval mode · {}
 	Cannot save this project's layout. {error}
@@ -1259,7 +1256,7 @@ crates/keystone-desktop/src/main.rs
 	Maximize
 	Minimize
 	Model not saved. {error}
-	Needs action ({count})
+	Needs action
 	New session
 	No matches
 	No session open.
@@ -1280,7 +1277,6 @@ crates/keystone-desktop/src/main.rs
 	Settle
 	Settle: move out of active work
 	Settled
-	Settled ({count})
 	Show sidebar
 	Steer
 	Stop
@@ -1331,9 +1327,9 @@ crates/keystone-desktop/src/model_selector.rs
 	This model has no effort levels.
 	This model has no effort or speed choices
 	This model has no fast mode.
-	{label} · provider and account fixed after the first message
-	{label}{options} · effort and speed as asked for the next turns · provider and account fixed after the first message
-	{name} · {shown}
+	{name} · {label} · provider and account fixed after the first message
+	{name} · {label}{options}
+	{name} · {label}{options} · effort and speed as asked for the next turns · provider and account fixed after the first message
 	{} · {label}
 
 crates/keystone-desktop/src/notes.rs
@@ -1455,7 +1451,6 @@ crates/keystone-desktop/src/pull_request.rs
 	The branch has conflicts.
 	The branch is behind its base.
 	The repository allows no merge method.
-	{label} · {count}
 	{} into {}
 	{}h {}m
 	{}m {}s
@@ -1921,6 +1916,7 @@ crates/keystone-ui/src/kbd.rs
 
 crates/keystone-ui/src/label.rs
 	{kept}…
+	{name} · {count}
 
 crates/keystone-ui/src/markdown/selection.rs
 	MarkdownText selection

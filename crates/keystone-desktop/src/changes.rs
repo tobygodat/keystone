@@ -1368,12 +1368,10 @@ fn row(
                 Group::Unstaged | Group::Untracked => Some((IconName::Plus, "Stage all")),
             };
             base.child(
-                div().flex_1().min_w_0().child(
-                    Label::new(format!("{} · {count}", group.label()).to_uppercase())
-                        .size(TextSize::Xs)
-                        .weight(FontWeight::MEDIUM)
-                        .color(Color::Faint),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Label::group(group.label(), *count)),
             )
             .children(action.filter(|_| !busy).map(|(icon, tip)| {
                 IconButton::new(("changes-all", index), icon)

@@ -206,6 +206,11 @@ pub struct Session {
     /// `gpt-6-astra`. `None` leaves the choice to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// The name of the model the provider last reported running the session's turns on,
+    /// as its catalog labels it when known, else the ID it reported. Kept so the model
+    /// can be named after a restart, before the next turn reports again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_model_name: Option<String>,
     /// The effort level the user asked for, from the model's catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
@@ -361,6 +366,7 @@ impl Session {
             approval_mode: ApprovalMode::default(),
             approval_overridden: false,
             model: None,
+            last_model_name: None,
             effort: None,
             speed: None,
             model_locked: Some(false),
@@ -423,6 +429,10 @@ impl Session {
 
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    pub fn last_model_name(&self) -> Option<&str> {
+        self.last_model_name.as_deref()
     }
 
     pub fn effort(&self) -> Option<&str> {
@@ -1591,6 +1601,11 @@ impl Store {
         Ok(self.commit(next, self.next_id))
     }
 
+    /// Keeps the name of the model the provider reported running the session on.
+    pub fn set_last_model_name(&mut self, id: u64, name: String) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| session.last_model_name = Some(name))
+    }
+
     pub fn set_provider_thread(&mut self, id: u64, thread: String) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| session.provider_thread = Some(thread))
     }
@@ -1600,6 +1615,10 @@ impl Store {
     /// from the provider's next turn.
     pub fn set_choice(&mut self, id: u64, choice: ModelChoice) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| {
+            // The saved name was the model the old choice ran on.
+            if session.model != choice.model {
+                session.last_model_name = None;
+            }
             session.model = choice.model;
             session.effort = choice.effort;
             session.speed = choice.speed;
@@ -2432,6 +2451,50 @@ mod tests {
         let saved = json(&path).to_string();
         assert!(!saved.contains("_at"), "{saved}");
         assert!(saved.contains(r#""version":1"#));
+    }
+
+    #[test]
+    fn a_new_model_choice_forgets_the_last_reported_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("state.json")).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1_000)
+            .unwrap();
+        store.set_last_model_name(1, "Opus 5.5".into()).unwrap();
+        let effort = ModelChoice {
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        store.set_choice(1, effort).unwrap();
+        assert_eq!(
+            store.workspace().sessions()[0].last_model_name(),
+            Some("Opus 5.5"),
+            "the same model at another effort keeps its name"
+        );
+        let sonnet = ModelChoice {
+            model: Some("sonnet".into()),
+            ..Default::default()
+        };
+        store.set_choice(1, sonnet).unwrap();
+        assert_eq!(store.workspace().sessions()[0].last_model_name(), None);
+    }
+
+    #[test]
+    fn the_last_reported_model_name_survives_a_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create(Provider::Claude, &working_directory(), 1_000)
+            .unwrap();
+        assert_eq!(store.workspace().sessions()[0].last_model_name(), None);
+        store.set_last_model_name(1, "Opus 5.5".into()).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.workspace().sessions()[0].last_model_name(),
+            Some("Opus 5.5")
+        );
     }
 
     #[test]

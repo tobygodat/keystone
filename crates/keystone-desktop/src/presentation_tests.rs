@@ -780,8 +780,8 @@ fn fake_codex() -> std::path::PathBuf {
         .join("keystone-fake-codex")
 }
 
-fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
+/// The scripted Claude itself, run straight from the build, so the test writes no script.
+fn fake_claude() -> std::path::PathBuf {
     let exe = std::env::current_exe().unwrap();
     let fake = exe
         .parent()
@@ -793,6 +793,12 @@ fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
         fake.exists(),
         "build it with `cargo build -p keystone-agent --bins`"
     );
+    fake
+}
+
+fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = fake_claude();
     let log = dir.join("claude-cwd");
     let script = dir.join("claude-cwd-wrapper");
     std::fs::write(
@@ -1756,4 +1762,128 @@ fn choosing_a_folder_outside_the_project_for_an_old_conversation_follows_it(
         assert_eq!(this.selected(cx), Some(1), "the conversation stays shown");
         assert_eq!(this.error, None);
     });
+}
+
+#[test]
+fn a_model_is_named_by_its_catalog_label_and_an_unknown_default_stays_default() {
+    let models = [keystone_agent::ModelInfo {
+        model: "opus".into(),
+        label: "Opus 5.5".into(),
+        resolved: Some("claude-opus-5-5".into()),
+        ..Default::default()
+    }];
+    let named =
+        |model, default, choices| crate::model_selector::requested_model(model, default, choices);
+    assert_eq!(
+        named(Some("opus"), None, Choices::Ready(&models)),
+        "Opus 5.5"
+    );
+    assert_eq!(
+        named(None, Some("claude-opus-5-5"), Choices::Ready(&models)),
+        "Opus 5.5",
+        "the default, by what the provider says it resolves to"
+    );
+    assert_eq!(named(None, None, Choices::Ready(&models)), "Default");
+    assert_eq!(
+        named(None, Some("claude-opus-5-5"), Choices::Loading),
+        "Default",
+        "never a guess"
+    );
+}
+
+#[gpui::test]
+fn a_default_claude_session_names_its_model_before_the_first_message(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx, true);
+    view.update(cx, |this, cx| {
+        claude_from(this, fake_claude(), cx);
+        this.select(2, cx);
+    });
+    let named = |session, provider, cx: &mut VisualTestContext| {
+        view.read_with(cx, |this, cx| {
+            let selection = this.state.read(cx).model_selection(session, provider);
+            crate::model_selector::requested_model(
+                selection.model,
+                selection.default_model,
+                selection.choices,
+            )
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while named(2, Provider::Claude, cx) != "Fake Opus" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the chip never named the default model: {}",
+            named(2, Provider::Claude, cx)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        named(1, Provider::Codex, cx),
+        "Default",
+        "Codex does not say what its default runs as"
+    );
+}
+
+#[gpui::test]
+fn the_model_a_turn_reports_is_named_again_after_a_relaunch(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx, true);
+    view.update(cx, |this, cx| {
+        claude_from(this, fake_claude(), cx);
+        this.select(2, cx);
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let until = |cx: &mut VisualTestContext, what: &str, done: &dyn Fn(&Keystone, &App) -> bool| {
+        while !view.read_with(cx, |this, cx| done(this, cx)) {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+    };
+    until(cx, "the catalog loads", &|this, cx| {
+        let selection = this.state.read(cx).model_selection(2, Provider::Claude);
+        crate::model_selector::requested_model(
+            selection.model,
+            selection.default_model,
+            selection.choices,
+        ) == "Fake Opus"
+    });
+    view.update_in(cx, |this, window, cx| {
+        this.send_message(
+            crate::ComposerDraft {
+                session: 2,
+                text: "hello".into(),
+                attachments: Vec::new(),
+            },
+            window,
+            cx,
+        );
+    });
+    until(cx, "the turn's model is saved", &|this, cx| {
+        this.state
+            .read(cx)
+            .session(2)
+            .and_then(|s| s.last_model_name())
+            == Some("Fake Opus")
+    });
+    // A relaunch keeps the saved session but not the provider's report from this run.
+    view.update(cx, |this, cx| {
+        this.state.update(cx, |state, _| {
+            state
+                .test_conversation(2)
+                .apply(keystone_agent::Event::ModelLost)
+        });
+    });
+    let (reported, shown) = view.read_with(cx, |this, cx| {
+        let selection = this.state.read(cx).model_selection(2, Provider::Claude);
+        (
+            selection.reported_model.map(str::to_owned),
+            selection.last_model_name.map(str::to_owned),
+        )
+    });
+    assert_eq!(shown.as_deref(), Some("Fake Opus"));
+    assert_eq!(
+        reported, None,
+        "effort and speed still follow only what the provider reports in this run"
+    );
 }

@@ -11,8 +11,7 @@ use crate::app_state::AppState;
 use crate::notifications::Alert;
 use futures::channel::oneshot;
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, FontWeight, IntoElement, Task, Window, div,
-    prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, IntoElement, Task, Window, div, prelude::*, px,
 };
 use keystone_agent::github::{self, MergeMethod};
 use keystone_agent::worker::Worker;
@@ -1158,18 +1157,16 @@ fn section(label: &'static str, count: usize, rows: Vec<AnyElement>) -> AnyEleme
     v_flex()
         .px_1()
         .pt_3()
-        .child(group_label(format!("{label} · {count}")))
+        .child(
+            div()
+                .h(px(24.))
+                .px_2()
+                .flex()
+                .items_center()
+                .child(Label::group(label, count)),
+        )
         .children(rows)
         .into_any_element()
-}
-
-fn group_label(text: String) -> impl IntoElement {
-    div().h(px(24.)).px_2().flex().items_center().child(
-        Label::new(text.to_uppercase())
-            .size(TextSize::Xs)
-            .weight(FontWeight::MEDIUM)
-            .color(Color::Faint),
-    )
 }
 
 /// What to tell the user when gh can't answer: the command to run when gh is missing

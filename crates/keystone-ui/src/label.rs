@@ -32,6 +32,15 @@ impl Label {
         }
     }
 
+    /// A group's small-caps label with its count, such as "NEEDS ACTION · 3", for the
+    /// sidebar's sections and the side panels' groups.
+    pub fn group(name: &str, count: usize) -> Self {
+        Self::new(format!("{name} · {count}").to_uppercase())
+            .size(TextSize::Xs)
+            .weight(FontWeight::MEDIUM)
+            .color(Color::Faint)
+    }
+
     pub fn size(mut self, size: TextSize) -> Self {
         self.size = size;
         self

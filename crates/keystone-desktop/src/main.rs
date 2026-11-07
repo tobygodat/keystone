@@ -1868,6 +1868,16 @@ impl Keystone {
                     .child(self.worktree_pill(cx)),
             ),
             Some((session, provider)) => {
+                // Claude's catalog names what its default model runs as, so the model
+                // chip can show it before the first message. Asked once per folder.
+                if provider == Provider::Claude
+                    && self
+                        .session(session, cx)
+                        .is_some_and(|s| !s.started() && s.model().is_none())
+                {
+                    self.state
+                        .update(cx, |state, cx| state.name_default_model(session, cx));
+                }
                 let hint = (!waiting && !running)
                     .then(|| self.slash_hint(session, provider, cx))
                     .flatten();
@@ -1930,7 +1940,7 @@ impl Keystone {
                     )
                     .child(project)
                     .when_some(mode, |d, mode| {
-                        d.child(self.approval_menu(mode, running, narrow, cx))
+                        d.child(self.approval_menu(mode, running, cx))
                     })
                     .children(self.usage_meter(session, narrow, cx))
                     .child(div().flex_1())
@@ -1941,9 +1951,10 @@ impl Keystone {
                             .child(self.attach_menu(cx))
                             .when(running, |d| {
                                 d.child(
-                                    Button::new("stop", "Stop")
+                                    IconButton::new("stop", IconName::Square)
                                         .style(ButtonStyle::Subtle)
-                                        .icon(IconName::Square)
+                                        .aria_label("Stop")
+                                        .tooltip(Tooltip::text("Stop"))
                                         .debug_selector(|| "stop".into())
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.stop_turn(session, window, cx)
@@ -2290,29 +2301,16 @@ impl Keystone {
         &self,
         mode: ApprovalMode,
         running: bool,
-        narrow: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let session = self.selected(cx);
         let color = (mode == ApprovalMode::FullAccess).then_some(Color::Warning);
-        let tooltip = Tooltip::text(approval_tooltip(mode, running, narrow));
-        let trigger = if narrow {
-            IconButton::new("approval-mode", IconName::Shield)
-                .selected(self.approval_menu)
-                .when_some(color, IconButton::color)
-                .aria_label(format!("Approval mode · {}", mode.label()))
-                .debug_selector(|| "approval-mode".into())
-                .tooltip(tooltip)
-                .into_any_element()
-        } else {
-            Button::new("approval-mode", mode.label())
-                .icon(IconName::Shield)
-                .selected(self.approval_menu)
-                .when_some(color, Button::color)
-                .debug_selector(|| "approval-mode".into())
-                .tooltip(tooltip)
-                .into_any_element()
-        };
+        let trigger = IconButton::new("approval-mode", IconName::Shield)
+            .selected(self.approval_menu)
+            .when_some(color, IconButton::color)
+            .aria_label(format!("Approval mode · {}", mode.label()))
+            .debug_selector(|| "approval-mode".into())
+            .tooltip(Tooltip::text(approval_tooltip(mode, running)));
         PopoverMenu::new("approval-menu", trigger)
             .anchor(Anchor::BottomLeft)
             .open(self.approval_menu)
@@ -3323,11 +3321,11 @@ impl Section {
         }
     }
 
-    fn label(self, count: usize) -> String {
+    fn name(self) -> &'static str {
         match self {
-            Section::Attention => format!("Needs action ({count})"),
-            Section::Working => "Working".into(),
-            Section::Settled => format!("Settled ({count})"),
+            Section::Attention => "Needs action",
+            Section::Working => "Working",
+            Section::Settled => "Settled",
         }
     }
 
@@ -3355,13 +3353,10 @@ fn attention_reason(attention: Attention) -> Option<&'static str> {
     }
 }
 
-/// The approval trigger's tooltip. A `narrow` trigger shows only an icon, so it names
-/// the mode; while a turn runs, a change waits for the next one.
-fn approval_tooltip(mode: ApprovalMode, running: bool, narrow: bool) -> String {
-    let mut tooltip = String::from("Approval mode");
-    if narrow {
-        tooltip += &format!(" · {}", mode.label());
-    }
+/// The approval trigger's tooltip. The trigger is only an icon, so it names the mode;
+/// while a turn runs, a change waits for the next one.
+fn approval_tooltip(mode: ApprovalMode, running: bool) -> String {
+    let mut tooltip = format!("Approval mode · {}", mode.label());
     if running {
         tooltip += " · applies next turn";
     }
@@ -3621,11 +3616,7 @@ impl SessionSidebar {
                         .color(Color::Faint),
                 )
             })
-            .child(
-                Label::new(section.label(count))
-                    .size(TextSize::Sm)
-                    .color(Color::Faint),
-            )
+            .child(Label::group(section.name(), count))
             .child(div().flex_1())
             .when(section != Section::Working, |d| {
                 d.child(
@@ -7633,17 +7624,12 @@ mod tests {
     #[test]
     fn the_approval_tooltip_says_a_change_during_a_turn_applies_next_turn() {
         let mode = ApprovalMode::ReadOnly;
-        assert_eq!(approval_tooltip(mode, false, false), "Approval mode");
         assert_eq!(
-            approval_tooltip(mode, true, false),
-            "Approval mode · applies next turn"
-        );
-        assert_eq!(
-            approval_tooltip(mode, false, true),
+            approval_tooltip(mode, false),
             format!("Approval mode · {}", mode.label())
         );
         assert_eq!(
-            approval_tooltip(mode, true, true),
+            approval_tooltip(mode, true),
             format!("Approval mode · {} · applies next turn", mode.label())
         );
     }

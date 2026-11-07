@@ -4,8 +4,9 @@
 Drives the real debug app through the automation inbox, in the background when
 KEYSTONE_AUTOMATION_BACKGROUND is set, with the
 scripted Claude, scripts/fake-gh.py and a throwaway home, state and repository that has
-staged, unstaged and untracked files and an open pull request. At 1100×720 it checks
-that Files, Changes and Pull request open beside the conversation, under the composer.
+staged, unstaged and untracked files and an open pull request. In the default 1100×720
+window it checks that Files, Changes and Pull request each open beside the composer's
+column, and captures each with the sidebar's group labels.
 At 1440×900, in dark, then light, it captures the composer alone (and with a long draft
 in dark), the composer with Changes open, the Pull request panel and Settings →
 Appearance. It then quits and relaunches, and checks that the draft came back.
@@ -115,9 +116,12 @@ class Run(smoke.Run):
         for layout in layouts + list(preferences.get('project_layouts', {}).values()):
             views = {view['id']: view['component'] for view in layout['views']}
             if component in views.values():
-                return any(child['node'].get('kind') == 'view'
-                           and views.get(child['node'].get('id')) == component
-                           for child in layout['root'].get('children', []))
+                # Alone, or as a tab with another side panel, in the window's top row.
+                def holds(node):
+                    ids = [node.get('id')] if node.get('kind') == 'view' else node.get('views', [])
+                    return node.get('kind') in ('view', 'tabs') and any(
+                        views.get(view) == component for view in ids)
+                return any(holds(child['node']) for child in layout['root'].get('children', []))
         raise smoke.Failure(f'no saved layout holds {component}')
 
     def narrow(self):
@@ -129,12 +133,12 @@ class Run(smoke.Run):
             while not self.shown(shown) and time.monotonic() < deadline:
                 time.sleep(0.2)
             time.sleep(1)
-            self.step(f'1100 px wide: {component} opens beside the conversation, under the composer',
-                      not self.beside_column(component))
+            self.step(f'1100 px wide: {component} opens beside the composer column',
+                      self.beside_column(component))
             if component == 'pull_request':
                 self.wait_for('pull-request-check-0', 30)
                 time.sleep(2)
-                self.shot('1100-pull-request')
+            self.shot(f'1100-{component}')
             self.close(keys, shown)
 
     def pass_for(self, mode, option):

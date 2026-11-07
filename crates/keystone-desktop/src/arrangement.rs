@@ -8,7 +8,7 @@ use gpui::{
     relative, size,
 };
 use keystone_core::{
-    ApprovalMode, Axis, Component, Composition, Edit, Node, NodePath, Place, Provider, Size, ViewId,
+    Axis, Component, Composition, Edit, Node, NodePath, Place, Provider, Size, ViewId,
 };
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
@@ -808,10 +808,11 @@ impl Keystone {
     /// The composer's minimum holds the widest of each control any session shows, so a
     /// Send, a provider's report or another selection never refits the arrangement.
     fn composer_minimum_width(&self, window: &mut Window, cx: &mut Context<Self>) -> f32 {
-        let Some(session) = self.selected_session(cx) else {
+        if self.selected_session(cx).is_none() {
             return COMPOSER_MIN;
-        };
-        let folder = self.conversation_folder(session.id(), cx).unwrap();
+        }
+        // Each provider's default: a longer model name truncates in its chip, so no
+        // session's model refits the arrangement.
         let models = [Provider::Claude, Provider::Codex].map(|provider| {
             let selection = model_selector::Selection {
                 provider,
@@ -821,36 +822,21 @@ impl Keystone {
                 effort: None,
                 speed: None,
                 reported_model: None,
+                last_model_name: None,
                 default_model: None,
                 started: false,
                 choices: model_selector::Choices::Loading,
             };
             model_selector::trigger(selection, false, cx).0
         });
-        let provider = h_flex()
-            .gap(px(7.))
-            .flex_none()
-            .child(v_flex().children(models))
-            .child(div().w_0().flex_none());
-        let approvals = ApprovalMode::ALL.map(|mode| {
-            Button::new(("measure-approval", mode as usize), mode.label()).icon(IconName::Shield)
-        });
         let control = cx.theme().density.control(px(28.));
+        // The model chip, then the folder, approval, stop, attach and send icons.
         let mut controls = h_flex()
             .gap(px(4.))
             .font_ui(cx)
             .text_size(TextSize::Base.px())
-            .child(provider)
-            .child(div().w_px().flex_none())
-            .child(folder.button("measure-project"))
-            .child(v_flex().children(approvals))
-            .child(div().w_0().flex_none())
-            .child(
-                Button::new("measure-stop", "Stop")
-                    .style(ButtonStyle::Subtle)
-                    .icon(IconName::Square),
-            )
-            .child(div().w(control * 2. + px(4.)).flex_none())
+            .child(v_flex().flex_none().children(models))
+            .child(div().w(control * 5. + px(4. * 4.)).flex_none())
             .into_any_element();
         let measured = controls
             .layout_as_root(

@@ -46,6 +46,17 @@ fn open(
     provider: Provider,
     cx: &mut TestAppContext,
 ) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
+    open_with(provider, |_, _| {}, cx)
+}
+
+/// Like [`open`], with `setup` given the temporary folder and the store before the
+/// window opens. A fixture a provider reads must be written here: a shown default
+/// Claude session asks its catalog as soon as it renders.
+fn open_with(
+    provider: Provider,
+    setup: impl FnOnce(&Path, &mut Store),
+    cx: &mut TestAppContext,
+) -> (tempfile::TempDir, Entity<Keystone>, &mut VisualTestContext) {
     // Canonical, like the folders Keystone records: macOS's temporary folder sits
     // behind a symlink.
     let dir = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
@@ -75,6 +86,7 @@ fn open(
     let id = store.create(provider, &directory, 1).unwrap().value;
     store.set_account(id, Some(account)).unwrap();
     store.select(id).unwrap();
+    setup(root, &mut store);
     cx.update(|cx| {
         keystone_ui::init(cx);
         crate::bind_keys(cx);
@@ -319,10 +331,15 @@ fn a_terminal_only_command_offers_the_terminal_and_is_never_sent(cx: &mut TestAp
 /// and inserts one as Codex invokes it, `$name`.
 #[gpui::test]
 fn a_codex_session_lists_its_skills_and_inserts_one_as_a_dollar_mention(cx: &mut TestAppContext) {
-    let (dir, view, cx) = open(Provider::Codex, cx);
-    write(
-        &dir.path().join("home/skills/fixture-codex-skill/SKILL.md"),
-        "---\nname: fixture-codex-skill\ndescription: Fixture Codex skill\n---\nSkill.\n",
+    let (_dir, view, cx) = open_with(
+        Provider::Codex,
+        |root, _| {
+            write(
+                &root.join("home/skills/fixture-codex-skill/SKILL.md"),
+                "---\nname: fixture-codex-skill\ndescription: Fixture Codex skill\n---\nSkill.\n",
+            )
+        },
+        cx,
     );
     cx.simulate_input("/codex");
     wait(cx, &view, listed);
@@ -446,14 +463,30 @@ fn a_session_without_a_usable_folder_says_why_it_lists_nothing(cx: &mut TestAppC
     );
 }
 
+/// The account's own command named like the Terminal only `/status`.
+fn status_command(root: &Path) {
+    write(
+        &root.join("home/commands/status.md"),
+        "---\ndescription: Fixture status command\n---\nStatus\n",
+    );
+}
+
 /// Sent before anything listed the account's commands, a Terminal only name waits for
-/// the list, and the account's own command of that name then sends.
+/// the list, and the account's own command of that name then sends. The session has a
+/// chosen model, so nothing asks its catalog before the first Send.
 #[gpui::test]
 fn an_account_command_named_like_a_terminal_only_one_sends_once_listed(cx: &mut TestAppContext) {
-    let (dir, view, cx) = open(Provider::Claude, cx);
-    write(
-        &dir.path().join("home/commands/status.md"),
-        "---\ndescription: Fixture status command\n---\nStatus\n",
+    let (_dir, view, cx) = open_with(
+        Provider::Claude,
+        |root, store| {
+            status_command(root);
+            let choice = keystone_core::ModelChoice {
+                model: Some("fake-opus".into()),
+                ..Default::default()
+            };
+            store.set_choice(1, choice).unwrap();
+        },
+        cx,
     );
     view.update_in(cx, |view, _, cx| {
         view.composer
@@ -463,6 +496,25 @@ fn an_account_command_named_like_a_terminal_only_one_sends_once_listed(cx: &mut 
     cx.simulate_keystrokes("secondary-enter");
     wait(cx, &view, listed);
     assert_eq!(draft(&view, cx), "/status now", "the first Send waits");
+    cx.simulate_keystrokes("secondary-enter");
+    wait(cx, &view, |view, cx| {
+        view.state.read(cx).session(1).unwrap().started()
+    });
+}
+
+/// A shown default Claude session asks its catalog to name its model, which lists the
+/// account's commands too: once they are in, its own `/status` sends at once.
+#[gpui::test]
+fn a_default_claude_sessions_early_list_lets_an_account_command_send_at_once(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, view, cx) = open_with(Provider::Claude, |root, _| status_command(root), cx);
+    wait(cx, &view, listed);
+    view.update_in(cx, |view, _, cx| {
+        view.composer
+            .update(cx, |input, cx| input.set_value("/status now".into(), cx))
+    });
+    cx.run_until_parked();
     cx.simulate_keystrokes("secondary-enter");
     wait(cx, &view, |view, cx| {
         view.state.read(cx).session(1).unwrap().started()

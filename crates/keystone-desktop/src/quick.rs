@@ -469,6 +469,7 @@ impl QuickComposer {
             effort: None,
             speed: None,
             reported_model: None,
+            last_model_name: None,
             default_model: None,
             started: false,
             choices,

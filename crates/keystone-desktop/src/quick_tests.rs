@@ -344,7 +344,7 @@ fn each_project_gets_its_own_catalog_when_one_is_chosen_while_another_loads(
         cx.run_until_parked();
         let ready = cx.read(|cx| {
             keys.iter()
-                .map(|key| matches!(state.read(cx).catalog_choices(key), Choices::Ready(_)))
+                .map(|key| matches!(state.read(cx).catalog_choices(key), Choices::Ready(..)))
                 .collect::<Vec<_>>()
         });
         if ready == [true, true] {

@@ -274,7 +274,7 @@ fn global_runtime_loads_sends_answers_and_logs_both_providers_without_a_view(
                     state
                         .catalogs
                         .choices(&state.catalog_key(id, provider).unwrap()),
-                    Choices::Ready(_)
+                    Choices::Ready(..)
                 )
             })
     });
@@ -934,7 +934,7 @@ fn catalogs_are_asked_per_account_and_never_shared(cx: &mut gpui::TestAppContext
             state
                 .catalogs
                 .choices(&state.catalog_key(id, Provider::Claude).unwrap()),
-            Choices::Ready(_)
+            Choices::Ready(..)
         )
     };
     wait_until(cx, &state, |state| ready(state, 1));

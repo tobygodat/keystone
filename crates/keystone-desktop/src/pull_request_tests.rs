@@ -968,7 +968,7 @@ fn a_squeezed_panel_keeps_a_failed_checks_name_readable(app: &mut TestAppContext
         idle(&view, cx) && shown(cx, "pull-request-repair-0")
     });
     // Before the resize settles, the panel and sidebar shrink to their minimums.
-    cx.simulate_resize(gpui::size(px(1150.), px(720.)));
+    cx.simulate_resize(gpui::size(px(960.), px(720.)));
     cx.run_until_parked();
     let name = cx.debug_bounds("pull-request-check-0-name").unwrap();
     assert!(

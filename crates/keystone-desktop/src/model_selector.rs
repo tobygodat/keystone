@@ -208,6 +208,9 @@ pub struct Selection<'a> {
     pub speed: Option<&'a str>,
     /// The model the provider has reported for this session, in this run of the app.
     pub reported_model: Option<&'a str>,
+    /// The name of the model the provider last reported before this run, saved with the
+    /// session. Only the chip shows it; choices still follow `reported_model`.
+    pub last_model_name: Option<&'a str>,
     /// What the provider's default resolves to, when its catalog says.
     pub default_model: Option<&'a str>,
     /// Whether the session has sent, which fixes its provider and account.
@@ -583,6 +586,21 @@ pub fn render(
         .into_any_element()
 }
 
+/// The name of the model a session asks for: the chosen one, or what the provider's
+/// default resolves to when its catalog says. A default nobody has named yet stays
+/// "Default", never a guess.
+pub fn requested_model(
+    model: Option<&str>,
+    default_model: Option<&str>,
+    choices: Choices,
+) -> String {
+    match (model, default_model, choices) {
+        (Some(model), ..) => choices.label(model),
+        (None, Some(default), Choices::Ready(_)) => choices.label(default),
+        _ => "Default".to_owned(),
+    }
+}
+
 pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, String) {
     let Selection {
         provider,
@@ -590,6 +608,8 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
         accounts,
         model,
         reported_model,
+        last_model_name,
+        default_model,
         started,
         choices,
         ..
@@ -599,28 +619,28 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
         Some(label) => format!("{} · {label}", provider_name(provider)),
         None => provider_name(provider).to_owned(),
     };
-    let requested = model.map_or_else(
-        || "Provider default".to_owned(),
-        |model| choices.label(model),
-    );
-    // A requested model is shown as running only once the provider says so: until
-    // then the label is muted.
-    let (shown, color) = match (started, reported_model) {
-        (true, Some(reported)) => (choices.label(reported), Color::Default),
-        (true, None) => (requested, Color::Muted),
-        (false, _) => (requested, Color::Default),
+    let requested = requested_model(model, default_model, choices);
+    // A requested model is shown as running only once the provider says so, in this
+    // run or, saved, before a relaunch: until then the label is muted.
+    let (label, color) = match (started, reported_model, last_model_name) {
+        (true, Some(reported), _) => (choices.label(reported), Color::Default),
+        (true, None, Some(last)) => (last.to_owned(), Color::Default),
+        (true, None, None) => (requested, Color::Muted),
+        (false, ..) => (requested, Color::Default),
     };
-    let label = format!("{name} · {shown}");
     let options = selection.options();
     // Effort and speed are what the session asks for, never what the provider
     // reported, so once it has sent they stay muted like an unreported model.
     let options_color = if started { Color::Muted } else { color };
+    // The chip names the model; the provider is its icon, and the tooltip says both.
     let tooltip = match (started, options.is_empty()) {
-        (true, true) => format!("{label} · provider and account fixed after the first message"),
+        (true, true) => {
+            format!("{name} · {label} · provider and account fixed after the first message")
+        }
         (true, false) => format!(
-            "{label}{options} · effort and speed as asked for the next turns · provider and account fixed after the first message"
+            "{name} · {label}{options} · effort and speed as asked for the next turns · provider and account fixed after the first message"
         ),
-        (false, _) => format!("{label}{options}"),
+        (false, _) => format!("{name} · {label}{options}"),
     };
     let trigger = h_flex()
         .id("model-selector")
@@ -1099,6 +1119,7 @@ mod tests {
             effort: Some(effort),
             speed: Some(speed),
             reported_model: None,
+            last_model_name: None,
             default_model: None,
             started,
             choices: Choices::Ready(models),
@@ -1180,6 +1201,7 @@ mod tests {
                 effort: Some(effort),
                 speed: Some(speed),
                 reported_model: None,
+                last_model_name: None,
                 default_model: None,
                 started: true,
                 choices: Choices::Ready(&models),

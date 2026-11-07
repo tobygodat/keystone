@@ -1270,6 +1270,7 @@ fn a_side_panel_opens_beside_the_composer_column_only_where_it_fits_at_full_widt
         );
         close(component, cx);
     }
+    // The default window: each panel still fits beside the composer's column.
     cx.simulate_resize(gpui::size(px(1100.), px(720.)));
     cx.run_until_parked();
     for (component, keys) in panels {
@@ -1277,8 +1278,20 @@ fn a_side_panel_opens_beside_the_composer_column_only_where_it_fits_at_full_widt
         cx.run_until_parked();
         assert_eq!(
             placed(component, cx),
+            (true, false, sidebar),
+            "1100 px wide: {component:?} beside the composer's column, the sidebar at its width"
+        );
+        close(component, cx);
+    }
+    cx.simulate_resize(gpui::size(px(960.), px(720.)));
+    cx.run_until_parked();
+    for (component, keys) in panels {
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        assert_eq!(
+            placed(component, cx),
             (false, false, sidebar),
-            "1100 px wide: {component:?} beside the conversation, the sidebar at its width"
+            "960 px wide: {component:?} beside the conversation, the sidebar at its width"
         );
         close(component, cx);
     }
@@ -1324,11 +1337,11 @@ fn a_live_resize_moves_a_side_panel_under_the_composer_and_back(cx: &mut TestApp
         "1440 px wide: beside the composer's column"
     );
 
-    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    resize_and_settle(gpui::size(px(960.), px(720.)), cx);
     assert_eq!(
         placed(cx),
         (false, false, sidebar),
-        "shrunk to 1100 px: beside the conversation, the sidebar at its width"
+        "shrunk to 960 px: beside the conversation, the sidebar at its width"
     );
 
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
@@ -1395,19 +1408,19 @@ fn tabbed_side_panels_move_together_on_a_live_resize(cx: &mut TestAppContext) {
         "1440: tabs beside the column"
     );
 
-    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    resize_and_settle(gpui::size(px(960.), px(720.)), cx);
     assert_eq!(beside_column(&view, cx), Vec::<Vec<Component>>::new());
     assert!(!view.update(cx, |this, _| this.presentation.current.arrangement.fitted));
     assert_eq!(
         sidebar(cx),
         wide_sidebar,
-        "1100: the sidebar keeps its width"
+        "960: the sidebar keeps its width"
     );
 
     assert_eq!(
         group_size(&view, cx),
         Some(Size::Px(NonZeroU16::new(300).unwrap())),
-        "1100: the tabs keep their 300 px under the composer"
+        "960: the tabs keep their 300 px under the composer"
     );
 
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
@@ -1451,7 +1464,7 @@ fn moved_by_hand(
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
     cx.simulate_keystrokes("secondary-alt-p");
     cx.run_until_parked();
-    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    resize_and_settle(gpui::size(px(960.), px(720.)), cx);
     assert_eq!(beside_column(&view, cx), Vec::<Vec<Component>>::new());
     view.update_in(cx, |this, window, cx| {
         this.customize(Action::Open, window, cx);
@@ -1585,7 +1598,7 @@ fn a_tab_group_returns_showing_the_tab_shown_now(cx: &mut TestAppContext) {
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
     files_then_changes(cx);
     show_tab(&view, Component::Files, cx);
-    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    resize_and_settle(gpui::size(px(960.), px(720.)), cx);
     show_tab(&view, Component::Changes, cx);
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
     assert_eq!(
@@ -1600,11 +1613,11 @@ fn a_tab_group_returns_showing_the_tab_shown_now(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_tab_group_formed_at_1100_px_comes_back_when_the_window_widens(cx: &mut TestAppContext) {
+fn a_tab_group_formed_in_a_narrow_window_comes_back_when_it_widens(cx: &mut TestAppContext) {
     let (_dir, view, cx) = open(cx);
     click(cx, "customize-apply");
     click(cx, "customize-close");
-    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    resize_and_settle(gpui::size(px(960.), px(720.)), cx);
     files_then_changes(cx);
     assert_eq!(beside_column(&view, cx), Vec::<Vec<Component>>::new());
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
@@ -1622,7 +1635,7 @@ fn a_tab_opened_into_a_moved_panel_comes_back_with_it(cx: &mut TestAppContext) {
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
     cx.simulate_keystrokes("secondary-shift-e");
     cx.run_until_parked();
-    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    resize_and_settle(gpui::size(px(960.), px(720.)), cx);
     cx.simulate_keystrokes("secondary-shift-g");
     cx.run_until_parked();
     assert!(!view.update(cx, |this, _| this.presentation.current.arrangement.fitted));
@@ -1641,7 +1654,7 @@ fn a_conversation_added_to_a_moved_panel_stays_where_it_was_put(cx: &mut TestApp
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
     cx.simulate_keystrokes("secondary-shift-e");
     cx.run_until_parked();
-    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    resize_and_settle(gpui::size(px(960.), px(720.)), cx);
     view.update_in(cx, |this, window, cx| {
         let c = this.shown_composition(cx);
         let (files, _) = c.views().find(|(_, k)| *k == Component::Files).unwrap();
