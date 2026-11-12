@@ -34,5 +34,6 @@ case "${1:-core}" in
     cargo build -p keystone-ui --example gallery --locked
     ;;
   apple) bash scripts/apple-check.sh ;;
-  *) echo 'Usage: bash scripts/check.sh [core|core-fast|ui|build|apple]' >&2; exit 2 ;;
+  linux) bash scripts/linux-check.sh ;;
+  *) echo 'Usage: bash scripts/check.sh [core|core-fast|ui|build|apple|linux]' >&2; exit 2 ;;
 esac

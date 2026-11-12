@@ -27,7 +27,7 @@ smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 Failure = smoke.Failure
 
-BAD = {'new-claude': 'secondary-j', 'quit': 7, 'no-such-command': 'secondary-y',
+BAD = {'new-claude': 'secondary-g', 'quit': 7, 'no-such-command': 'secondary-y',
        'focus-search': 'a'}
 
 
@@ -71,9 +71,9 @@ class Run(smoke.Run):
 
         self.click('settings-shortcut-new-claude')
         self.shot('recording')
-        self.key('secondary-j')
-        self.step('Cmd+J is saved for New Claude session',
-                  self.settle(lambda: self.shortcuts() == {'new-claude': 'secondary-j'}),
+        self.key('secondary-g')
+        self.step('Cmd+G is saved for New Claude session',
+                  self.settle(lambda: self.shortcuts() == {'new-claude': 'secondary-g'}),
                   json.dumps(self.shortcuts()))
         self.wait_for('settings-shortcut-new-claude-reset')
         self.shot('rebound')
@@ -83,9 +83,9 @@ class Run(smoke.Run):
         time.sleep(1.5)
         self.step('Cmd+N no longer starts a Claude session', len(self.sessions()) == 0,
                   f'{len(self.sessions())} sessions')
-        self.key('secondary-j')
+        self.key('secondary-g')
         self.wait_for('composer-field')
-        self.step('Cmd+J starts a Claude session',
+        self.step('Cmd+G starts a Claude session',
                   self.settle(lambda: [s.get('provider') for s in self.sessions()] == ['Claude']),
                   json.dumps([s.get('provider') for s in self.sessions()]))
         self.key('secondary-k')
@@ -100,8 +100,8 @@ class Run(smoke.Run):
 
         self.quit()
         self.launch()
-        self.key('secondary-j')
-        self.step('after relaunch Cmd+J still starts a Claude session',
+        self.key('secondary-g')
+        self.step('after relaunch Cmd+G still starts a Claude session',
                   self.settle(lambda: len(self.sessions()) == 2), f'{len(self.sessions())} sessions')
         self.open_shortcuts()
         self.shot('relaunched-shortcuts')
@@ -110,7 +110,7 @@ class Run(smoke.Run):
         self.key('a')
         self.wait_for('settings-shortcut-focus-search-warning')
         self.step('a key the composer types is refused and not saved',
-                  self.shortcuts() == {'new-claude': 'secondary-j'}, json.dumps(self.shortcuts()))
+                  self.shortcuts() == {'new-claude': 'secondary-g'}, json.dumps(self.shortcuts()))
         self.shot('refused')
 
         self.click('settings-shortcut-new-claude-reset')
@@ -129,9 +129,9 @@ class BadConfig(Run):
     def journey(self):
         self.launch()
         self.step('a workspace with bad saved shortcuts starts', True)
-        self.key('secondary-j')
+        self.key('secondary-g')
         self.wait_for('composer-field')
-        self.step('its good entry binds Cmd+J', self.settle(lambda: len(self.sessions()) == 1))
+        self.step('its good entry binds Cmd+G', self.settle(lambda: len(self.sessions()) == 1))
         self.open_shortcuts()
         self.wait_for('settings-shortcuts-skipped')
         self.step('the skipped entries are listed on the page', True)

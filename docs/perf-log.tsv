@@ -1,4 +1,4 @@
-date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_refresh_ms	note	transcript_draw_ms	transcript_stream_ms
+date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_refresh_ms	note	transcript_draw_ms	transcript_stream_ms	terminal_draw_ms	terminal_idle_ms
 2026-10-15T19:40:33Z	7bf19af	1.56	1.47	334	101.46		baseline: debug=1, deps unoptimized		
 2026-10-15T19:46:26Z	7bf19af+dirty	1.04	1.13	264	8.22		deps opt-level=2 in dev profile		
 2026-10-15T20:19:09Z	6e1c99b	0.56	0.64	262	4.78		baseline on this machine before sidebar caching		
@@ -43,3 +43,7 @@ date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_
 2026-11-07T18:51:52Z	5b28ecf	1.65	1.92	474	1.21	1.31	TOB-302 browser preview merged with main 45c3656; Browser surface, browser_* tools, pop-up and download containment; 3 runs, 8 build jobs, no sccache, shared host load	1.37	1.39
 2026-11-07T18:54:50Z	0edf8bd	1.57	1.95	474	1.11	1.24	TOB-302 browser preview merged with main efd95d7 (#149 panel fitting); Browser surface, browser_* tools, pop-up and download containment; 3 runs, 8 build jobs, no sccache, shared host load	1.48	1.31
 2026-11-07T19:04:21Z	5c60b30	1.78	2.39	483	1.07	1.26	TOB-304 Files editor merged with main efd95d7: CodeEditor, tree-sitter highlighting, Save file command; 8 build jobs, no sccache, shared host load; diagnostic only, no speed comparison	1.44	1.33
+2026-11-03T04:12:14Z	afb6180	3.06	10.63	79	1.13	1.55	TOB-301 integrated terminal; first macOS row (M-series laptop, debug build), compare only with later rows from this Mac; load average 34 to 54 on 18 cores	1.37	1.38	2.87	0.70
+2026-11-03T05:24:55Z	f21c253	1.14	1.55	80	0.93	0.99	TOB-301 review fixes; same Mac as afb6180, load average 4 to 6 on 18 cores, so lower across the board; terminal benchmark window now 1500 px tall for the same 1000 px drawer	0.82	0.79	2.51	0.58
+2026-11-03T06:09:16Z	78fb6af	1.15	1.57	80	1.47	2.03	TOB-301 review round 2 fixes; same Mac as f21c253; sidebar and transcript rose about as much as the terminal, with load average 13 to 32 on 18 cores against 4 to 6 then, so the rise is load	1.04	1.22	2.98	0.63
+2026-11-12T02:36:33Z	f5720e8d4	2.89	4.02	502	1.29	3.66	TOB-301 terminal merged with main 0dab479 (rebindable shortcuts, quiet ink, compact composer); Linux, 8 build jobs, shared host load average 50 to 94 during the run; first Linux row with terminal columns, diagnostic only, no speed comparison	2.84	2.81	4.77	1.94

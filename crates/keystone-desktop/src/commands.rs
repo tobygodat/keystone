@@ -24,6 +24,9 @@ use crate::restore::RestoreToHere;
 use crate::screenshot::CaptureScreenshot;
 use crate::second_opinion::AskSecondOpinion;
 use crate::session_tabs::{CloseTab, NewTab, NextTab, PreviousTab, SplitRight};
+use crate::terminal::{
+    CloseTerminal, FocusNextPane, FocusPreviousPane, SplitTerminal, ToggleTerminal,
+};
 use crate::transcript_keyboard::*;
 use crate::windows::{self, CloseWindow, Destination, MoveTabToWindow, NewWindow, OpenInNewWindow};
 use crate::worktrees::{NewWorktreeSession, RemoveWorktree};
@@ -46,6 +49,10 @@ pub(crate) struct Command {
     pub keys: &'static [&'static str],
     pub context: Option<&'static str>,
     pub action: fn() -> Box<dyn Action>,
+    /// Runs from inside the terminal too. On Linux, where the app's shortcuts are Ctrl,
+    /// the shell gets every other Ctrl+letter; this command's key, as the keymap has
+    /// it, still reaches the app.
+    pub in_terminal: bool,
 }
 
 /// While the palette is open its shortcuts stay inert, so focus cannot leave it
@@ -62,6 +69,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-n"],
         context: Some(APP),
         action: || Box::new(NewCodex),
+        in_terminal: false,
     },
     Command {
         id: "new-claude",
@@ -69,6 +77,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-n"],
         context: Some(APP),
         action: || Box::new(NewClaude),
+        in_terminal: false,
     },
     Command {
         id: "toggle-sidebar",
@@ -76,6 +85,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-b"],
         context: Some(APP),
         action: || Box::new(ToggleSidebar),
+        in_terminal: false,
     },
     Command {
         id: "toggle-files",
@@ -83,6 +93,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-e"],
         context: Some(APP),
         action: || Box::new(ToggleFiles),
+        in_terminal: false,
     },
     Command {
         id: "toggle-notes",
@@ -90,6 +101,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-j"],
         context: Some(APP),
         action: || Box::new(ToggleNotes),
+        in_terminal: false,
     },
     Command {
         id: "view-uncommitted",
@@ -97,6 +109,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-u"],
         context: Some(APP),
         action: || Box::new(ViewUncommitted),
+        in_terminal: false,
     },
     Command {
         id: "toggle-changes",
@@ -104,6 +117,47 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-g"],
         context: Some(APP),
         action: || Box::new(ToggleChanges),
+        in_terminal: false,
+    },
+    Command {
+        id: "toggle-terminal",
+        label: "Toggle terminal",
+        keys: &["secondary-j"],
+        context: Some(APP),
+        action: || Box::new(ToggleTerminal),
+        in_terminal: true,
+    },
+    Command {
+        id: "split-terminal",
+        label: "Split terminal",
+        keys: &["secondary-shift-d"],
+        context: Some(APP),
+        action: || Box::new(SplitTerminal),
+        in_terminal: true,
+    },
+    Command {
+        id: "close-terminal",
+        label: "Close terminal",
+        keys: &["secondary-alt-w"],
+        context: Some(APP),
+        action: || Box::new(CloseTerminal),
+        in_terminal: true,
+    },
+    Command {
+        id: "focus-next-terminal-pane",
+        label: "Focus next terminal pane",
+        keys: &["secondary-alt-right"],
+        context: Some(crate::terminal::CONTEXT),
+        action: || Box::new(FocusNextPane),
+        in_terminal: true,
+    },
+    Command {
+        id: "focus-previous-terminal-pane",
+        label: "Focus previous terminal pane",
+        keys: &["secondary-alt-left"],
+        context: Some(crate::terminal::CONTEXT),
+        action: || Box::new(FocusPreviousPane),
+        in_terminal: true,
     },
     Command {
         id: "toggle-pull-request",
@@ -111,6 +165,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-p"],
         context: Some(APP),
         action: || Box::new(TogglePullRequest),
+        in_terminal: false,
     },
     Command {
         id: "toggle-browser",
@@ -118,6 +173,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-b"],
         context: Some(APP),
         action: || Box::new(ToggleBrowser),
+        in_terminal: false,
     },
     Command {
         id: "copy-pull-request-link",
@@ -125,6 +181,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-c"],
         context: Some(APP),
         action: || Box::new(CopyPullRequestLink),
+        in_terminal: false,
     },
     Command {
         id: "focus-search",
@@ -132,6 +189,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-f"],
         context: Some(APP),
         action: || Box::new(FocusSearch),
+        in_terminal: false,
     },
     Command {
         id: SEND_SELECTION,
@@ -139,6 +197,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-a"],
         context: Some(APP),
         action: || Box::new(SendSelection),
+        in_terminal: false,
     },
     Command {
         id: SAVE_FILE,
@@ -146,6 +205,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-s"],
         context: Some(FILE_EDITOR),
         action: || Box::new(Save),
+        in_terminal: false,
     },
     Command {
         id: "focus-composer",
@@ -153,6 +213,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-l"],
         context: Some(APP),
         action: || Box::new(FocusComposer),
+        in_terminal: false,
     },
     Command {
         id: "attach-files",
@@ -160,6 +221,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-u"],
         context: Some(APP),
         action: || Box::new(AttachFiles),
+        in_terminal: false,
     },
     Command {
         id: "import-sessions",
@@ -167,6 +229,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-i"],
         context: Some(APP),
         action: || Box::new(ImportSessions),
+        in_terminal: false,
     },
     Command {
         id: "capture-screenshot",
@@ -174,6 +237,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-s"],
         context: Some(APP),
         action: || Box::new(CaptureScreenshot),
+        in_terminal: false,
     },
     Command {
         id: "next-effort",
@@ -181,6 +245,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-e"],
         context: Some(APP),
         action: || Box::new(NextEffort),
+        in_terminal: false,
     },
     Command {
         id: "toggle-fast-mode",
@@ -188,6 +253,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-f"],
         context: Some(APP),
         action: || Box::new(ToggleFastMode),
+        in_terminal: false,
     },
     Command {
         id: "next-model",
@@ -195,6 +261,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &[],
         context: Some(APP),
         action: || Box::new(NextModel),
+        in_terminal: false,
     },
     Command {
         id: "rename-session",
@@ -202,6 +269,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["f2"],
         context: Some(APP),
         action: || Box::new(RenameSession),
+        in_terminal: false,
     },
     Command {
         id: "hand-off",
@@ -209,6 +277,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-h"],
         context: Some(APP),
         action: || Box::new(HandOff),
+        in_terminal: false,
     },
     Command {
         id: "second-opinion",
@@ -216,6 +285,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-o"],
         context: Some(APP),
         action: || Box::new(AskSecondOpinion),
+        in_terminal: false,
     },
     Command {
         id: "settle-session",
@@ -223,6 +293,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-s"],
         context: Some(APP),
         action: || Box::new(ToggleSettle),
+        in_terminal: false,
     },
     Command {
         id: "continue-recovery",
@@ -230,6 +301,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-enter"],
         context: Some(APP),
         action: || Box::new(ContinueRecovery),
+        in_terminal: false,
     },
     Command {
         id: "retry-recovery",
@@ -237,6 +309,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-r"],
         context: Some(APP),
         action: || Box::new(RetryRecovery),
+        in_terminal: false,
     },
     Command {
         id: "retry-setup",
@@ -244,6 +317,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-r"],
         context: Some(APP),
         action: || Box::new(RetrySetup),
+        in_terminal: false,
     },
     Command {
         id: "skip-setup",
@@ -251,6 +325,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-shift-s"],
         context: Some(APP),
         action: || Box::new(SkipSetup),
+        in_terminal: false,
     },
     Command {
         id: "cancel-setup",
@@ -258,6 +333,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-x"],
         context: Some(APP),
         action: || Box::new(CancelSetup),
+        in_terminal: false,
     },
     Command {
         id: "edit-setup-script",
@@ -265,6 +341,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-shift-e"],
         context: Some(APP),
         action: || Box::new(EditSetupScript),
+        in_terminal: false,
     },
     Command {
         id: "insert-prompt",
@@ -272,6 +349,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-i"],
         context: Some(APP),
         action: || Box::new(InsertPrompt),
+        in_terminal: false,
     },
     Command {
         id: "open-settings",
@@ -279,6 +357,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-,"],
         context: Some(APP),
         action: || Box::new(OpenSettings),
+        in_terminal: false,
     },
     Command {
         id: "customize-layout",
@@ -286,6 +365,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-l"],
         context: Some("Keystone && !Dialog && !CommandPalette"),
         action: || Box::new(OpenCustomize),
+        in_terminal: false,
     },
     Command {
         id: "quit",
@@ -293,6 +373,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-q"],
         context: None,
         action: || Box::new(Quit),
+        in_terminal: true,
     },
     Command {
         id: "focus-transcript",
@@ -300,6 +381,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-t"],
         context: Some(APP),
         action: || Box::new(FocusTranscript),
+        in_terminal: false,
     },
     Command {
         id: "next-transcript",
@@ -307,6 +389,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["f6"],
         context: Some(APP),
         action: || Box::new(NextTranscript),
+        in_terminal: false,
     },
     Command {
         id: "previous-transcript",
@@ -314,6 +397,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["shift-f6"],
         context: Some(APP),
         action: || Box::new(PreviousTranscript),
+        in_terminal: false,
     },
     Command {
         id: "new-tab",
@@ -321,6 +405,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-t"],
         context: Some(APP),
         action: || Box::new(NewTab),
+        in_terminal: false,
     },
     Command {
         id: "close-tab",
@@ -328,6 +413,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-w"],
         context: Some(APP),
         action: || Box::new(CloseTab),
+        in_terminal: false,
     },
     Command {
         id: "next-tab",
@@ -335,6 +421,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-tab"],
         context: Some(APP),
         action: || Box::new(NextTab),
+        in_terminal: false,
     },
     Command {
         id: "previous-tab",
@@ -342,6 +429,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["ctrl-shift-tab"],
         context: Some(APP),
         action: || Box::new(PreviousTab),
+        in_terminal: false,
     },
     Command {
         id: "split-right",
@@ -349,6 +437,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-\\"],
         context: Some(APP),
         action: || Box::new(SplitRight),
+        in_terminal: false,
     },
     Command {
         id: "switch-project",
@@ -356,6 +445,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-o"],
         context: Some(APP),
         action: || Box::new(SwitchProject),
+        in_terminal: false,
     },
     Command {
         id: "open-project",
@@ -363,6 +453,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-o"],
         context: Some(APP),
         action: || Box::new(OpenProject),
+        in_terminal: false,
     },
     Command {
         id: "change-project-color",
@@ -370,6 +461,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-k"],
         context: Some(APP),
         action: || Box::new(ChangeProjectColor),
+        in_terminal: false,
     },
     Command {
         id: "new-worktree-session",
@@ -377,6 +469,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-g"],
         context: Some(APP),
         action: || Box::new(NewWorktreeSession),
+        in_terminal: false,
     },
     Command {
         id: "remove-worktree",
@@ -384,6 +477,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-shift-g"],
         context: Some(APP),
         action: || Box::new(RemoveWorktree),
+        in_terminal: false,
     },
     Command {
         id: "new-window",
@@ -391,6 +485,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-n"],
         context: Some(APP),
         action: || Box::new(NewWindow),
+        in_terminal: false,
     },
     Command {
         id: "quick-composer",
@@ -398,6 +493,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-space"],
         context: Some(APP),
         action: || Box::new(OpenQuickComposer),
+        in_terminal: false,
     },
     Command {
         id: "close-window",
@@ -405,6 +501,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-w"],
         context: Some(APP),
         action: || Box::new(CloseWindow),
+        in_terminal: false,
     },
     Command {
         id: "open-in-new-window",
@@ -412,6 +509,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-shift-n"],
         context: Some(APP),
         action: || Box::new(OpenInNewWindow),
+        in_terminal: false,
     },
     Command {
         id: "move-tab-to-window",
@@ -419,6 +517,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-m"],
         context: Some(APP),
         action: || Box::new(MoveTabToWindow),
+        in_terminal: false,
     },
     Command {
         id: "transcript-previous-row",
@@ -426,6 +525,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["up"],
         context: Some(TRANSCRIPT),
         action: || Box::new(PreviousRow),
+        in_terminal: false,
     },
     Command {
         id: "transcript-next-row",
@@ -433,6 +533,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["down"],
         context: Some(TRANSCRIPT),
         action: || Box::new(NextRow),
+        in_terminal: false,
     },
     Command {
         id: "transcript-first-row",
@@ -440,6 +541,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["home"],
         context: Some(TRANSCRIPT),
         action: || Box::new(FirstRow),
+        in_terminal: false,
     },
     Command {
         id: "transcript-last-row",
@@ -447,6 +549,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["end"],
         context: Some(TRANSCRIPT),
         action: || Box::new(LastRow),
+        in_terminal: false,
     },
     Command {
         id: "transcript-next-action",
@@ -454,6 +557,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["tab"],
         context: Some(TRANSCRIPT),
         action: || Box::new(NextAction),
+        in_terminal: false,
     },
     Command {
         id: "transcript-previous-action",
@@ -461,6 +565,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["shift-tab"],
         context: Some(TRANSCRIPT),
         action: || Box::new(PreviousAction),
+        in_terminal: false,
     },
     Command {
         id: "transcript-copy",
@@ -468,6 +573,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-c"],
         context: Some(TRANSCRIPT),
         action: || Box::new(CopyTranscript),
+        in_terminal: false,
     },
     Command {
         id: "fork-from-here",
@@ -475,6 +581,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-f"],
         context: Some(TRANSCRIPT),
         action: || Box::new(ForkFromHere),
+        in_terminal: false,
     },
     Command {
         id: "restore-to-here",
@@ -482,6 +589,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-z"],
         context: Some(TRANSCRIPT),
         action: || Box::new(RestoreToHere),
+        in_terminal: false,
     },
     Command {
         id: "view-changes",
@@ -489,6 +597,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-shift-d"],
         context: Some(TRANSCRIPT),
         action: || Box::new(ViewChanges),
+        in_terminal: false,
     },
     Command {
         id: "transcript-focus-latest",
@@ -496,6 +605,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["alt-end"],
         context: Some(TRANSCRIPT),
         action: || Box::new(FocusLatest),
+        in_terminal: false,
     },
     Command {
         id: "transcript-leave",
@@ -503,6 +613,7 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["escape"],
         context: Some(TRANSCRIPT),
         action: || Box::new(LeaveTranscript),
+        in_terminal: false,
     },
 ];
 

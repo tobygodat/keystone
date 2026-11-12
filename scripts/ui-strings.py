@@ -227,7 +227,8 @@ def inventory():
     for base in SOURCES:
         for path in sorted((ROOT / base).rglob('*.rs')):
             rel = path.relative_to(ROOT).as_posix()
-            if rel in SKIP_FILES or rel.startswith(SKIP_DIRS) or path.name.endswith('_tests.rs'):
+            tests = path.name.endswith('_tests.rs') or any(part.endswith('_tests') for part in path.relative_to(ROOT).parts)
+            if rel in SKIP_FILES or rel.startswith(SKIP_DIRS) or tests:
                 continue
             found = sorted(set(strings(path.read_text(encoding='utf-8'))))
             if found:

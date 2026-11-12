@@ -17,7 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOG = ROOT / 'docs/perf-log.tsv'
 COLUMNS = ['date', 'commit', 'touch_desktop_s', 'touch_ui_s', 'desktop_debug_mb',
            'sidebar_draw_ms', 'sidebar_refresh_ms', 'note', 'transcript_draw_ms',
-           'transcript_stream_ms']
+           'transcript_stream_ms', 'terminal_draw_ms', 'terminal_idle_ms']
 BUILD = ['cargo', 'build', '-p', 'keystone-desktop', '--locked', '-q']
 
 
@@ -86,6 +86,9 @@ def main():
         'transcript_draw_ms': render['transcript_draw_ms'],
         # Added with the virtualized transcript; earlier code has no streaming benchmark.
         'transcript_stream_ms': render.get('transcript_stream_ms', ''),
+        # Added with the integrated terminal (TOB-301).
+        'terminal_draw_ms': render.get('terminal_draw_ms', ''),
+        'terminal_idle_ms': render.get('terminal_idle_ms', ''),
     }
     print('\t'.join(f'{k}={row[k]}' for k in COLUMNS))
     if not args.no_log:

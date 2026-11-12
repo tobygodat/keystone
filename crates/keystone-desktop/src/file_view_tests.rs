@@ -397,7 +397,7 @@ fn a_rebound_save_follows_the_keymap_and_no_command_takes_the_editors_keys(
     cx.update(|_, cx| {
         crate::keymap::apply(
             &serde_json::json!({
-                "save-file": "secondary-alt-w",
+                "save-file": "secondary-alt-h",
                 "new-claude": "tab",
                 "focus-composer": "secondary-a",
             }),
@@ -410,7 +410,7 @@ fn a_rebound_save_follows_the_keymap_and_no_command_takes_the_editors_keys(
     assert!(skipped.contains("Focus composer"), "{skipped}");
     assert_eq!(
         cx.update(|_, cx| crate::commands::hint(SAVE_FILE, cx)),
-        keystone_ui::shortcut_text("secondary-alt-w"),
+        keystone_ui::shortcut_text("secondary-alt-h"),
         "Save's hint follows its binding"
     );
 
@@ -444,7 +444,7 @@ fn a_rebound_save_follows_the_keymap_and_no_command_takes_the_editors_keys(
     cx.simulate_keystrokes("right secondary-s");
     cx.run_until_parked();
     assert_eq!(on_disk(&run), LIB, "the old key no longer saves");
-    cx.simulate_keystrokes("secondary-alt-w");
+    cx.simulate_keystrokes("secondary-alt-h");
     cx.run_until_parked();
     assert_eq!(on_disk(&run), text, "the new key saves");
     assert!(!shown(cx, "file-editor-edited"));

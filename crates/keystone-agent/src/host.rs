@@ -201,6 +201,96 @@ impl Drop for Process {
     }
 }
 
+/// A process Keystone started some other way than [`Process`], such as a terminal's
+/// shell, pinned so that ending its tree later never signals a reused PID.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub struct Root(os::Pin);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Root {
+    /// Pins `pid`. Call it while `pid` is the caller's own unreaped child.
+    pub fn pin(pid: u32) -> Option<Self> {
+        os::stat(pid).and_then(|seen| os::pin(&seen)).map(Self)
+    }
+
+    /// The live processes to end with this one: itself, the members of `groups`, and
+    /// everything descended from them, each pinned. Nothing is found once it exited,
+    /// because its descendants may then have been adopted by strangers' PIDs.
+    pub fn tree(&self, groups: &[u32]) -> Tree {
+        let seeds = self
+            .0
+            .duplicate()
+            .filter(os::Pin::is_alive)
+            .map(|pin| tree::Node {
+                pid: self.0.pid,
+                pin: Some(pin),
+            });
+        Tree::found(seeds.into_iter().collect(), groups, self.0.pid)
+    }
+}
+
+/// Processes found in a tree, each pinned, so signals reach only the processes found
+/// even after their PIDs are reused.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub struct Tree {
+    pins: Vec<os::Pin>,
+    root: u32,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Tree {
+    fn found(mut seeds: Vec<tree::Node<os::Pin>>, groups: &[u32], root: u32) -> Self {
+        let all = os::all();
+        if !seeds.is_empty() {
+            let members: Vec<_> = all
+                .iter()
+                .filter(|s| groups.contains(&s.group) && seeds.iter().all(|n| n.pid != s.pid))
+                .filter_map(|s| {
+                    Some(tree::Node {
+                        pid: s.pid,
+                        pin: Some(os::pin(s)?),
+                    })
+                })
+                .collect();
+            seeds.extend(members);
+        }
+        tree::adopt(&mut seeds, root, &all, os::pin, os::Pin::is_alive);
+        let pins = seeds.into_iter().filter_map(|n| n.pin).collect();
+        Self { pins, root }
+    }
+
+    pub fn signal(&self, signal: libc::c_int) {
+        for pin in &self.pins {
+            pin.signal(signal);
+        }
+    }
+
+    /// Whether any process found has not exited yet.
+    pub fn is_alive(&self) -> bool {
+        self.pins.iter().any(|pin| !pin.is(Targets::exited))
+    }
+
+    /// Adds the processes the ones still alive have started since they were found.
+    pub fn refresh(&mut self) {
+        let seeds = self
+            .pins
+            .iter()
+            .filter(|pin| pin.is_alive())
+            .filter_map(|pin| {
+                Some(tree::Node {
+                    pid: pin.pid,
+                    pin: Some(pin.duplicate()?),
+                })
+            })
+            .collect();
+        for pin in Self::found(seeds, &[], self.root).pins {
+            if self.pins.iter().all(|known| known.pid != pin.pid) {
+                self.pins.push(pin);
+            }
+        }
+    }
+}
+
 /// Forks a child of Keystone into `group` that waits for a signal and holds nothing
 /// open, and that dies with Keystone.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -953,6 +1043,13 @@ mod pidfd {
             refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
         }
 
+        pub fn duplicate(&self) -> Option<Self> {
+            Some(Self {
+                fd: self.fd.try_clone().ok()?,
+                pid: self.pid,
+            })
+        }
+
         pub fn signal(&self, signal: libc::c_int) {
             // SAFETY: the descriptor is valid for the lifetime of `self`.
             unsafe {
@@ -1131,6 +1228,13 @@ mod libproc {
             refused
                 && self.is_alive()
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+
+        pub fn duplicate(&self) -> Option<Self> {
+            Some(Self {
+                pid: self.pid,
+                seen: self.seen,
+            })
         }
 
         pub fn signal(&self, signal: libc::c_int) {

@@ -154,7 +154,8 @@ class InventoryTest(unittest.TestCase):
         self.addCleanup(patch.stop)
         for name, text in {'b.rs': 'Label::new("Beta\\tline");', 'a.rs': 'Label::new("Alpha");',
                            'skipped.rs': 'Label::new("Skipped file");', 'bin/tool.rs': 'Label::new("Bin");',
-                           'a_tests.rs': 'Label::new("Test file");'}.items():
+                           'a_tests.rs': 'Label::new("Test file");',
+                           'a_tests/split.rs': 'Label::new("Split test file");'}.items():
             (self.root / 'src' / name).parent.mkdir(parents=True, exist_ok=True)
             (self.root / 'src' / name).write_text(text)
 

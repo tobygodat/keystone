@@ -53,7 +53,8 @@ pub use switch::Switch;
 pub use tabs::{DraggedTab, Tab, TabBar, TabDot};
 pub use text_input::{InputMode, TextInput};
 pub use theme::{
-    ActionColor, ActiveTheme, Appearance, Colors, Density, Fonts, SyntaxColors, Theme, Tint,
+    ActionColor, ActiveTheme, Appearance, Colors, Density, Fonts, SyntaxColors, TerminalColors,
+    Theme, Tint,
 };
 pub use tokens::{Elevation, TextSize, radius, spacing};
 pub use tooltip::Tooltip;

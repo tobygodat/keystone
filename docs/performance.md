@@ -15,6 +15,8 @@ Run `python scripts/perf.py --note "what changed"` after a change that could aff
 | `sidebar_refresh_ms` | Mean window draw with 200 sessions after the sidebar is also notified, as a session, section, or search change does. Rows before this column existed leave it empty. |
 | `transcript_draw_ms` | Mean window draw with a 1,000-turn (3,000-row) transcript open after the root view is notified, as a composer keystroke does. From the ignored `perf_transcript_draw` test. Added after `note`, so older rows end before it. |
 | `transcript_stream_ms` | Mean window draw for the same transcript while a reply streams at its end, one delta per frame. Added with the virtualized list; the baseline row leaves it empty. |
+| `terminal_draw_ms` | Mean window frame with the terminal drawer showing a full grid of at least 200×50 cells whose color changes at every cell (the eight ANSI colors in turn), after only the terminal is notified, as shell output does. From the ignored `perf_terminal_draw` test. Added with the terminal (TOB-301); earlier rows end before it. |
+| `terminal_idle_ms` | Mean window frame with that drawer open after only the root view is notified, as a composer keystroke does. The cached drawer is not drawn again; its painted frame is replayed. |
 
 The draw benchmark runs in the GPUI test platform, so it measures layout and scene building, not GPU presentation. Compare rows from the same machine. Treat differences under about 20% as noise on a loaded desktop.
 

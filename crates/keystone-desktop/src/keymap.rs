@@ -235,7 +235,7 @@ fn holds(predicate: Option<&KeyBindingContextPredicate>, stack: &[KeyContext]) -
 }
 
 /// What else `keystroke` runs on a surface where it would also run `command`: the
-/// labels of every other binding, sorted.
+/// labels of every other binding that runs an action, sorted.
 pub(crate) fn conflicts(
     command: &Command,
     keystroke: &Keystroke,
@@ -258,6 +258,11 @@ pub(crate) fn conflicts(
     let mut labels: Vec<String> = bindings
         .bindings()
         .filter(|binding| binding.action().name() != own)
+        // A binding that runs nothing, such as a key the terminal hands to its shell,
+        // takes no key from a command.
+        .filter(|binding| {
+            !gpui::is_no_action(binding.action()) && !gpui::is_unbind(binding.action())
+        })
         .filter(|binding| match binding.keystrokes() {
             [only] => {
                 only.inner().modifiers == keystroke.modifiers && only.inner().key == keystroke.key

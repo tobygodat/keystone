@@ -15,6 +15,7 @@ Before a PR, run the merge checks in `AGENTS.md`. The lanes of `scripts/check.sh
 - `bash scripts/check.sh ui`: GPUI simulated-input tests of the app and its components (`ui-tests` feature).
 - `bash scripts/check.sh build`: compiles the app and the component gallery.
 - `bash scripts/check.sh apple`: type-checks every crate for Apple Silicon macOS from Linux. On a Mac, `python3 scripts/macos-smoke.py` runs the native smoke journey. See [macOS](macos.md).
+- `bash scripts/check.sh linux`: type-checks every crate for x86_64 Linux from a Mac, the mirror of `apple`. Run it after changing code under a `cfg(target_os)`. See [macOS](macos.md).
 
 Every lane first checks that `docs/ui-strings.txt`, the inventory of interface text, matches the sources. After changing interface text, run `python3 scripts/ui-strings.py` and review the diff. `check.sh` records its wall time through `scripts/dev-timing.py`.
 

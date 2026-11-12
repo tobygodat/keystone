@@ -77,6 +77,24 @@ fn shown(cx: &mut VisualTestContext, selector: &'static str) -> bool {
     cx.debug_bounds(selector).is_some()
 }
 
+/// Scrolls the Shortcuts page with the wheel, as a user does, until `selector` shows.
+fn scroll_to(cx: &mut VisualTestContext, selector: &'static str) {
+    let height = cx.update(|window, _| window.viewport_size().height);
+    for _ in 0..20 {
+        let row = cx.debug_bounds(selector).unwrap();
+        if row.bottom() < height {
+            break;
+        }
+        let page = cx.debug_bounds("settings-shortcuts").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(page.center().x, height / 2.),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-300.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+    }
+}
+
 fn click(cx: &mut VisualTestContext, selector: &'static str) {
     let bounds = cx
         .debug_bounds(selector)
@@ -127,9 +145,9 @@ fn a_recorded_shortcut_saves_and_runs_at_once(cx: &mut TestAppContext) {
     assert!(!shown(cx, "settings-shortcut-new-claude-reset"));
     click(cx, "settings-shortcut-new-claude");
     assert!(recording(&view, cx));
-    keys(cx, "secondary-j");
+    keys(cx, "secondary-g");
     assert!(!recording(&view, cx));
-    assert_eq!(saved(&path), json!({"new-claude": "secondary-j"}));
+    assert_eq!(saved(&path), json!({"new-claude": "secondary-g"}));
     assert_eq!(sessions(&path), 1, "the recorded keys ran nothing");
     assert!(shown(cx, "settings-shortcut-new-claude-reset"));
 
@@ -137,7 +155,7 @@ fn a_recorded_shortcut_saves_and_runs_at_once(cx: &mut TestAppContext) {
     assert!(!shown(cx, "settings-page"));
     keys(cx, "secondary-n");
     assert_eq!(sessions(&path), 1, "the old keys no longer run it");
-    keys(cx, "secondary-j");
+    keys(cx, "secondary-g");
     assert_eq!(sessions(&path), 2, "the new keys run it");
 
     keys(cx, "secondary-k");
@@ -148,7 +166,7 @@ fn a_recorded_shortcut_saves_and_runs_at_once(cx: &mut TestAppContext) {
     });
     assert_eq!(
         hint.as_deref(),
-        Some(keystone_ui::shortcut_text("secondary-j").as_str())
+        Some(keystone_ui::shortcut_text("secondary-g").as_str())
     );
 }
 
@@ -162,11 +180,11 @@ fn a_bad_saved_shortcut_is_skipped_and_the_rest_bind(cx: &mut TestAppContext) {
             "no-such-command": "secondary-y",
             "rename-session": 7,
             "new-claude": "a",
-            "new-codex": "secondary-j",
+            "new-codex": "secondary-g",
         }),
     );
     let (_, cx) = open_window(&path, cx);
-    keys(cx, "secondary-j");
+    keys(cx, "secondary-g");
     assert_eq!(sessions(&path), 2, "the good entry binds");
     keys(cx, "secondary-n");
     assert_eq!(sessions(&path), 3, "a skipped entry keeps the default");
@@ -246,7 +264,7 @@ fn reset_and_reset_all_restore_the_defaults_live(cx: &mut TestAppContext) {
     let path = dir.path().join("workspace.json");
     seeded(
         &path,
-        json!({"new-claude": "secondary-j", "new-codex": "secondary-alt-j"}),
+        json!({"new-claude": "secondary-g", "new-codex": "secondary-alt-j"}),
     );
     let (_, cx) = open_window(&path, cx);
     open_shortcuts(cx);
@@ -266,7 +284,7 @@ fn reset_and_reset_all_restore_the_defaults_live(cx: &mut TestAppContext) {
     assert_eq!(sessions(&path), 2);
     keys(cx, "secondary-shift-n");
     assert_eq!(sessions(&path), 3);
-    keys(cx, "secondary-j secondary-alt-j");
+    keys(cx, "secondary-g secondary-alt-j");
     assert_eq!(sessions(&path), 3, "the overrides are gone");
 }
 
@@ -274,7 +292,7 @@ fn reset_and_reset_all_restore_the_defaults_live(cx: &mut TestAppContext) {
 fn the_components_keep_their_keys_after_shortcuts_apply(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");
-    seeded(&path, json!({"new-claude": "secondary-j"}));
+    seeded(&path, json!({"new-claude": "secondary-g"}));
     let (_, cx) = open_window(&path, cx);
     keys(cx, "secondary-k");
     assert!(shown(cx, "palette"));
@@ -293,14 +311,14 @@ fn leaving_the_section_or_the_shortcut_ends_recording(cx: &mut TestAppContext) {
     assert!(recording(&view, cx));
     click(cx, "settings-section-fonts");
     assert!(!recording(&view, cx));
-    keys(cx, "secondary-j");
+    keys(cx, "secondary-g");
     assert_eq!(saved(&path), Value::Null);
 
     click(cx, "settings-section-shortcuts");
     click(cx, "settings-shortcut-new-claude");
     assert!(recording(&view, cx));
     view.update_in(cx, |view, window, cx| view.focus.focus(window, cx));
-    keys(cx, "secondary-j");
+    keys(cx, "secondary-g");
     assert!(!recording(&view, cx));
     assert_eq!(saved(&path), Value::Null, "the key went where focus went");
 }
@@ -392,6 +410,8 @@ fn a_palette_only_command_can_be_given_keys(cx: &mut TestAppContext) {
     let (view, cx) = open_window(&path, cx);
     open_shortcuts(cx);
     assert!(!shown(cx, "settings-shortcut-next-model-reset"));
+    // The terminal's and the browser's rows push it below the fold.
+    scroll_to(cx, "settings-shortcut-next-model");
     click(cx, "settings-shortcut-next-model");
     keys(cx, "secondary-alt-shift-m");
     assert_eq!(saved(&path), json!({"next-model": "secondary-alt-shift-m"}));
@@ -638,7 +658,7 @@ fn a_shortcut_whose_save_fails_says_not_saved(cx: &mut TestAppContext) {
     open_shortcuts(cx);
     let writer = crate::tests::lock_database(&path);
     click(cx, "settings-shortcut-new-claude");
-    keys(cx, "secondary-j");
+    keys(cx, "secondary-g");
     let state = view.read_with(cx, |view, _| view.state.clone());
     crate::tests::settle(&state, cx);
     cx.run_until_parked();
@@ -666,7 +686,7 @@ fn a_shortcut_whose_save_fails_says_not_saved(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         saved(&path),
-        json!({"new-claude": "secondary-j", "new-codex": "secondary-alt-j"}),
+        json!({"new-claude": "secondary-g", "new-codex": "secondary-alt-j"}),
         "the next save writes both"
     );
     assert!(!shown(cx, "settings-error"), "a good save clears the error");
@@ -777,23 +797,8 @@ fn recording_a_letter_on_a_transcript_command_is_refused(cx: &mut TestAppContext
     seeded(&path, Value::Null);
     let (view, cx) = open_window(&path, cx);
     open_shortcuts(cx);
-    // The transcript's rows are far down the page: scroll to them as a user does.
-    let height = cx.update(|window, _| window.viewport_size().height);
-    for _ in 0..20 {
-        let row = cx
-            .debug_bounds("settings-shortcut-transcript-next-row")
-            .unwrap();
-        if row.bottom() < height {
-            break;
-        }
-        let page = cx.debug_bounds("settings-shortcuts").unwrap();
-        cx.simulate_event(gpui::ScrollWheelEvent {
-            position: gpui::point(page.center().x, height / 2.),
-            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-300.))),
-            ..Default::default()
-        });
-        cx.run_until_parked();
-    }
+    // The transcript's rows are far down the page.
+    scroll_to(cx, "settings-shortcut-transcript-next-row");
     for keystroke in ["j", "shift-j", "1", "space"] {
         click(cx, "settings-shortcut-transcript-next-row");
         assert!(recording(&view, cx), "recording before {keystroke}");

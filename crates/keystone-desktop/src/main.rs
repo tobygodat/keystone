@@ -47,6 +47,7 @@ mod settings_scheduled;
 mod settings_shortcuts;
 mod slash_menu;
 mod sounds;
+mod terminal;
 mod transcript;
 mod transcript_keyboard;
 mod usage;
@@ -208,6 +209,7 @@ fn install_app_state(store: Store, cx: &mut App) -> Entity<AppState> {
     let state = cx.new(|cx| AppState::new(store, cx));
     cx.set_quit_mode(gpui::QuitMode::Explicit);
     notifications::install(cx);
+    terminal::install(cx);
     cx.set_global(DesktopApp {
         state: state.clone(),
         windows: Vec::new(),
@@ -467,6 +469,7 @@ fn save_and_teardown(state: &Entity<AppState>, can_cancel: bool, cx: &mut App) -
         eprintln!("Commit message not saved. {error}");
     }
     state.update(cx, |state, cx| state.teardown(cx));
+    terminal::shutdown_all(cx);
     for view in windows {
         view.update(cx, |view, _| view.customize_agent = None);
     }
@@ -499,6 +502,8 @@ struct Keystone {
     composer: Entity<TextInput>,
     search: Entity<TextInput>,
     session_sidebar: Entity<SessionSidebar>,
+    /// The terminal whose drawer this window showed when it last rendered.
+    drawer_shown: Option<gpui::EntityId>,
     _subscriptions: Vec<Subscription>,
     draft_save_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
@@ -833,6 +838,7 @@ impl Keystone {
                 this.save_placement_soon(window, cx);
                 this.refit_side_surfaces_soon(window, cx);
             }),
+            cx.observe_window_visibility(window, |this, _, _, cx| this.terminal_presented(cx)),
         ];
         let app = cx.weak_entity();
         let session_sidebar = cx.new(|_| SessionSidebar {
@@ -926,6 +932,9 @@ impl Keystone {
                 this.runtime_changed(changed, cx);
             }),
         );
+        // A notify from a session's terminal reaches only windows whose last frame read
+        // it, so a window showing the session without a terminal yet learns of one here.
+        subscriptions.push(cx.observe_global::<terminal::Terminals>(|_, cx| cx.notify()));
         // An open right-click menu closes on any key but a lone modifier, and takes Escape
         // before any binding of the focused element, such as a reply's Clear or Files' Back.
         let (menu_owner, menu_window) = (cx.weak_entity(), window.window_handle());
@@ -956,6 +965,7 @@ impl Keystone {
             composer,
             search,
             session_sidebar,
+            drawer_shown: None,
             _subscriptions: subscriptions,
             draft_save_task: None,
             focus: cx.focus_handle(),
@@ -1552,7 +1562,8 @@ impl Keystone {
                     .child(self.own_press(second_opinion::button(cx), cx))
             })
             .when(self.settings.is_none(), |d| {
-                d.children(self.split_toggle(cx))
+                d.children(self.terminal_toggle(cx))
+                    .children(self.split_toggle(cx))
                     .child(self.customize_toggle(cx))
             })
             .when(!cfg!(target_os = "macos"), |d| {
@@ -3810,6 +3821,7 @@ impl Render for SessionSidebar {
 impl Render for Keystone {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.focus_project_transition(window, cx);
+        self.follow_terminals(window, cx);
         self.sync_title(window);
         #[cfg(target_os = "macos")]
         {
@@ -3969,6 +3981,32 @@ impl Render for Keystone {
                     this.toggle_changes(window, cx)
                 }),
             )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &terminal::ToggleTerminal, window, cx| {
+                    this.toggle_terminal(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &terminal::SplitTerminal, window, cx| {
+                    this.split_terminal(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &terminal::CloseTerminal, window, cx| {
+                    this.close_terminal(window, cx)
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &terminal::FocusNextPane, window, cx| {
+                    this.focus_terminal_pane(1, window, cx)
+                }),
+            )
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &terminal::FocusPreviousPane, window, cx| {
+                    this.focus_terminal_pane(-1, window, cx)
+                },
+            ))
             .on_action(self.scoped_listener(
                 cx,
                 |this, _: &diff_view::ViewUncommitted, window, cx| {
@@ -4292,6 +4330,7 @@ impl Render for Keystone {
                 d.child(self.customize_panel(window.viewport_size(), cx))
             })
             .child(main)
+            .children(self.terminal_drawer(window, cx))
             .children(self.borrow_dialog(cx))
             .children(self.full_access_dialog(cx))
             .children(self.rename_dialog(cx))
@@ -11400,6 +11439,7 @@ fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new("enter", quick::SendQuick, Some("QuickComposer > TextInput")),
         gpui::KeyBinding::new("escape", quick::DismissQuick, Some("QuickComposer")),
     ]);
+    terminal::bind_keys(cx);
     platform::bind_menus(cx);
 }
 

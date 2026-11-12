@@ -33,6 +33,8 @@ pub struct Arrangement {
     geometry: HashMap<NodePath, Bounds<Pixels>>,
     toolbar_height: Pixels,
     composer_min_width: f32,
+    /// The height the shown composition needs, the composer's full height among it.
+    min_height: f32,
     resize: Option<Resize>,
     /// The conversation view the user last worked in. See `session_tabs`.
     pub active: Option<ViewId>,
@@ -421,6 +423,12 @@ impl Arrangement {
     /// Shows `view` as the fitted tab while the window is fitted.
     pub(crate) fn reveal(&mut self, view: ViewId) {
         self.tab = Some(view);
+    }
+
+    /// The height the main area needs below the top bar to show the composition
+    /// without clipping, so the terminal drawer leaves it that much.
+    pub(crate) fn min_height(&self) -> Pixels {
+        px(self.min_height)
     }
 
     /// Whether a window this wide is too narrow for the composer's full controls.
@@ -1044,6 +1052,7 @@ impl Keystone {
         } else {
             0.
         };
+        self.presentation.current.arrangement.min_height = required[1] + toolbar;
         let fitted = f32::from(viewport.width) < required[0]
             || f32::from(viewport.height) - 44. - toolbar < required[1];
         if fitted != self.presentation.current.arrangement.fitted

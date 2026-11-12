@@ -49,6 +49,7 @@ icons! {
     Diff => "icons/diff.svg", "<path d='M11.25 3v7.5 M7.5 6.75h7.5 M7.5 17.25h7.5'/>";
     Copy => "icons/copy.svg", "<rect x='8.25' y='8.25' width='12' height='12' rx='2'/><path d='M15.75 8.25v-4.5h-12v12h4.5'/>";
     Close => "icons/close.svg", "<path d='m6 6 12 12 M18 6 6 18'/>";
+    Terminal => "icons/terminal.svg", "<rect x='2.25' y='3.75' width='19.5' height='16.5' rx='3'/><path d='m6.75 9 3 3-3 3 M12.75 15.75h4.5'/>";
     Minus => "icons/minus.svg", "<path d='M5.25 11.25h13.5'/>";
     Square => "icons/square.svg", "<rect x='5.25' y='5.25' width='13.5' height='13.5' rx='2'/>";
     Check => "icons/check.svg", "<path d='m5 12 5 5 9-10'/>";

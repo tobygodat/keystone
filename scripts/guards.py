@@ -2,7 +2,8 @@
 """Source rules that scripts/check.sh enforces, one per argument.
 
 `python3 scripts/guards.py colors` fails on GPUI colors outside crates/keystone-ui/src/theme.rs.
-`python3 scripts/guards.py shortcuts` fails on ctrl- key bindings other than ctrl-tab and ctrl-shift-tab.
+`python3 scripts/guards.py shortcuts` fails on ctrl- key bindings other than ctrl-tab and ctrl-shift-tab,
+outside the terminal's key encoding.
 `python3 scripts/guards.py hints` fails on Ctrl+… hints written out in docs/ui-strings.txt.
 
 It exits 0 when nothing matches, 1 after printing each match, and 2 when a file or folder cannot be read.
@@ -21,6 +22,8 @@ COLOR = re.compile(r'\b(rgba?|hsla|black|white|transparent_black|transparent_whi
                    r'|opaque_grey)\(|(?<!-> )(?<!for )\b(Hsla|Rgba)\s*\{')
 SHORTCUT = re.compile(r'"(?:[^"\n]*[ -])?ctrl-(?!(?:shift-)?tab\b)')
 HINT = re.compile(rb'Ctrl[+ ]')
+# The terminal's key encoding and its tests mean the Control key itself on every platform.
+SHORTCUT_EXEMPT = {'crates/keystone-desktop/src/terminal/input.rs', 'crates/keystone-desktop/src/terminal_tests/input.rs'}
 HINT_EXEMPT = {b'crates/keystone-agent/src/lib.rs', b'crates/keystone-ui/src/kbd.rs'}
 
 
@@ -59,7 +62,7 @@ def colors():
 
 def shortcuts():
     for path, number, text in rust_lines():
-        if SHORTCUT.search(pcre_text(text)):
+        if path not in SHORTCUT_EXEMPT and SHORTCUT.search(pcre_text(text)):
             yield b'%s:%d:%s' % (os.fsencode(path), number, text)
 
 

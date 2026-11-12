@@ -204,6 +204,57 @@ pub struct Colors {
 
     /// Project tiles, in the order of `keystone_core::ProjectColor::ALL`.
     pub tiles: [Tint; 7],
+
+    pub terminal: TerminalColors,
+}
+
+/// The integrated terminal's palette.
+#[derive(Clone, Copy)]
+pub struct TerminalColors {
+    /// Black, red, green, yellow, blue, magenta, cyan and white, then their bright forms.
+    pub ansi: [Hsla; 16],
+    pub foreground: Hsla,
+    pub background: Hsla,
+    pub cursor: Hsla,
+    pub selection: Hsla,
+}
+
+impl TerminalColors {
+    /// xterm's 256 colors: the 16 ANSI colors, a 6×6×6 cube, then 24 grays.
+    pub fn indexed(&self, index: u8) -> Hsla {
+        match index {
+            0..16 => self.ansi[index as usize],
+            16..232 => {
+                let level = |step: u8| if step == 0 { 0 } else { step * 40 + 55 };
+                let cube = index - 16;
+                Self::true_color(level(cube / 36), level(cube / 6 % 6), level(cube % 6))
+            }
+            232.. => {
+                let gray = (index - 232) * 10 + 8;
+                Self::true_color(gray, gray, gray)
+            }
+        }
+    }
+
+    /// A color a program chose as 24-bit RGB.
+    pub fn true_color(r: u8, g: u8, b: u8) -> Hsla {
+        rgb(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)).into()
+    }
+
+    /// Faint (SGR 2) text.
+    pub fn dim(color: Hsla) -> Hsla {
+        color.opacity(0.66)
+    }
+
+    fn new(ansi: [u32; 16], foreground: u32, background: u32, selection: u32) -> Self {
+        Self {
+            ansi: ansi.map(|color| rgb(color).into()),
+            foreground: rgb(foreground).into(),
+            background: rgb(background).into(),
+            cursor: rgb(foreground).into(),
+            selection: rgba(selection).into(),
+        }
+    }
 }
 
 /// The color of each [`Syntax`]: muted hues, none of them the interface blue, each at
@@ -426,6 +477,16 @@ impl Colors {
             tiles: tiles([
                 0xaa5a54, 0x946749, 0x3e7d53, 0x3c7b78, 0x5072a3, 0x7f62b2, 0xaa5386,
             ]),
+
+            terminal: TerminalColors::new(
+                [
+                    0x3a3a3a, 0xe5867a, 0x8fc79a, 0xe2ba6e, 0x6f98de, 0xb994e0, 0x6cbfc0, 0xd4d4d4,
+                    0x767676, 0xf0a196, 0xaad9b3, 0xefd08f, 0x93b5ec, 0xcdb1ec, 0x8fd3d4, 0xf2f2f2,
+                ],
+                0xe0e0e0,
+                0x171717,
+                0x5b87d670,
+            ),
         }
     }
 
@@ -495,6 +556,16 @@ impl Colors {
             tiles: tiles([
                 0xae4e47, 0x94603d, 0x32794a, 0x307674, 0x446da7, 0x7d58bb, 0xad4682,
             ]),
+
+            terminal: TerminalColors::new(
+                [
+                    0x262626, 0xb53b2f, 0x2e7d43, 0x8a5d0c, 0x2f6db3, 0x7d4bb3, 0x1f7a7a, 0x6e6e6e,
+                    0x5a5a5a, 0xc8473a, 0x37904f, 0x9a6a12, 0x3f7fc6, 0x9060c4, 0x278c8c, 0x8f8f8f,
+                ],
+                0x262626,
+                0xffffff,
+                0x3a6ea540,
+            ),
         }
     }
 }
@@ -686,6 +757,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn terminal_text_reads_on_its_background_in_both_themes() {
+        for colors in [Colors::light(), Colors::dark()] {
+            let terminal = colors.terminal;
+            assert!(contrast(terminal.foreground, terminal.background) >= 7.);
+            for color in &terminal.ansi[1..7] {
+                assert!(contrast(*color, terminal.background) >= 3., "{color:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_256_color_palette_follows_xterm() {
+        let terminal = Colors::dark().terminal;
+        assert_eq!(terminal.indexed(1), terminal.ansi[1]);
+        assert_eq!(terminal.indexed(16), TerminalColors::true_color(0, 0, 0));
+        assert_eq!(terminal.indexed(196), TerminalColors::true_color(255, 0, 0));
+        assert_eq!(
+            terminal.indexed(244),
+            TerminalColors::true_color(128, 128, 128)
+        );
+        assert_eq!(
+            terminal.indexed(255),
+            TerminalColors::true_color(238, 238, 238)
+        );
     }
 
     #[test]

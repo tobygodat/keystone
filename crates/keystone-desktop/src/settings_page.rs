@@ -278,6 +278,8 @@ impl Keystone {
             .capture_action(self.leave_settings::<crate::session_tabs::PreviousTab>(cx))
             .capture_action(self.leave_settings::<crate::session_tabs::SplitRight>(cx))
             .capture_action(self.leave_settings::<crate::prompts::InsertPrompt>(cx))
+            .capture_action(self.leave_settings::<crate::terminal::ToggleTerminal>(cx))
+            .capture_action(self.leave_settings::<crate::terminal::SplitTerminal>(cx))
             .capture_action(self.scoped_listener(cx, |this, _: &SendMessage, _, cx| {
                 if this.settings.is_some() {
                     cx.stop_propagation();

@@ -1,6 +1,6 @@
 # Shortcuts
 
-Settings → Shortcuts rebinds any command-palette command. A rebinding is saved in the workspace preferences as `shortcuts` (`{"new-claude": "secondary-j"}`), binds at once, and comes back after a relaunch. Every hint for the command, in the palette, menus and tooltips, shows the new keys.
+Settings → Shortcuts rebinds any command-palette command. A rebinding is saved in the workspace preferences as `shortcuts` (`{"new-claude": "secondary-g"}`), binds at once, and comes back after a relaunch. Every hint for the command, in the palette, menus and tooltips, shows the new keys.
 
 ## Sub-features
 
@@ -20,7 +20,7 @@ Settings → Shortcuts rebinds any command-palette command. A rebinding is saved
 ## Driving it
 
 - On macOS, `python3 scripts/macos-shortcuts.py` drives the whole journey: rebinding with the mouse, the new and old keys, the palette and menu hints, quit and relaunch, a refused key, reset, and a workspace seeded with bad entries.
-- With keystone-verify: open Settings, `click` `settings-section-shortcuts` and then `settings-shortcut-new-claude`, and press Ctrl+J. Read `workspace` until `preferences.shortcuts` is `{"new-claude":"secondary-j"}`. Press Escape, require Ctrl+N to add no session and Ctrl+J to add a Claude one. Quit with Ctrl+Q, `launch`, and press Ctrl+J again.
+- With keystone-verify: open Settings, `click` `settings-section-shortcuts` and then `settings-shortcut-new-claude`, and press Ctrl+G. Read `workspace` until `preferences.shortcuts` is `{"new-claude":"secondary-g"}`. Press Escape, require Ctrl+N to add no session and Ctrl+G to add a Claude one. Quit with Ctrl+Q, `launch`, and press Ctrl+G again.
 
 ## Gotchas
 
@@ -29,3 +29,5 @@ Settings → Shortcuts rebinds any command-palette command. A rebinding is saved
 - Each command keeps the context it runs in. There is no `when` editor.
 - Keys that belong to one panel and aren't palette commands stay fixed: the diff viewer's N, P, C, Enter and arrows, the Files tree's and the Changes list's Space and copy keys. Their tooltips show the fixed key. The Files editor's Save is a palette command, **Save file**, and its tooltip follows its binding.
 - An app-wide command outranks Save file in the editor, because GPUI ranks a `!Dialog` context at the focused element's depth. Moving Save file onto such a command's key, such as Capture screenshot's Ctrl+Alt+S, names the clash, and that command wins.
+
+On Linux, `python3 scripts/shortcuts-audit-linux.py` screenshots every screenful of Settings → Shortcuts in dark and light, in the default state, after rebinding New Claude to Ctrl+G, Split terminal to Ctrl+K and Quit to Ctrl+P, and after resetting each, and checks that only Split terminal names a clash (Open palette). It also screenshots the palette's hints outside the terminal and inside a pane. Read the screenshots for the hints.

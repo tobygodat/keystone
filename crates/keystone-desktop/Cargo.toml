@@ -21,6 +21,7 @@ sha2 = "0.10"
 shlex = "2.0.1"
 tempfile = "3"
 unicode-segmentation = "1"
+alacritty_terminal = { version = "0.26", default-features = false }
 
 # Without font-kit GPUI's macOS text system draws no text. With runtime shaders Metal
 # compiles the shaders when the app starts, so a Mac with only the Command Line Tools,

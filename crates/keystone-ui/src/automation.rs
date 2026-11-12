@@ -274,13 +274,16 @@ fn push_string(out: &mut String, s: &str) {
 /// - `key secondary-n escape`: keystrokes, as GPUI parses them;
 /// - `type Some text`: everything after `type `, one key per character;
 /// - `click 120 48`: a left click at window coordinates, in logical pixels;
+/// - `wheel 120 48 -3`: the mouse wheel over a point, positive lines scrolling up;
+/// - `resize 900 480`: the window's content size, in logical pixels;
 /// - `capture /path/shot.png`: the window's latest frame, rendered by GPUI's own
 ///   renderer, in a build with the `capture` feature.
 ///
 /// Input enters through [`gpui::Window::dispatch_event`] and
 /// [`gpui::Window::dispatch_keystroke`], the calls the platform makes for real input,
 /// so key bindings, focus and hit-testing run as they do for a person. What it skips
-/// is the OS: its event translation, input methods and window focus.
+/// is the OS: its event translation, input methods and window focus. In a background
+/// launch it also draws every window each tick, covered or not.
 pub fn serve_inbox(cx: &mut gpui::App) {
     let Some(dir) = inbox() else { return };
     cx.spawn(async move |cx| {
@@ -288,6 +291,9 @@ pub fn serve_inbox(cx: &mut gpui::App) {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(50))
                 .await;
+            if background() {
+                cx.update(draw_every_window);
+            }
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -313,10 +319,19 @@ pub fn serve_inbox(cx: &mut gpui::App) {
     .detach();
 }
 
+/// macOS stops drawing a window that other apps cover, and a background launch's
+/// windows usually are, so the driver would wait for frames that never come. Drawing
+/// here keeps the frame file and captures current; the platform still presents.
+fn draw_every_window(cx: &mut gpui::App) {
+    for window in cx.windows() {
+        let _ = window.update(cx, |_, window, cx| window.draw(cx).clear(cx));
+    }
+}
+
 fn run(command: &str, cx: &mut gpui::App) -> Result<(), String> {
     use gpui::{
         Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        PlatformInput, point, px,
+        PlatformInput, ScrollDelta, ScrollWheelEvent, point, px,
     };
     let (verb, rest) = command.split_once(' ').unwrap_or((command, ""));
     let window = cx
@@ -397,6 +412,40 @@ fn run(command: &str, cx: &mut gpui::App) -> Result<(), String> {
                     }),
                     cx,
                 );
+                Ok(())
+            }
+            "wheel" => {
+                let mut numbers = rest.split_whitespace().map(str::parse::<f32>);
+                let (Some(Ok(x)), Some(Ok(y)), Some(Ok(lines))) =
+                    (numbers.next(), numbers.next(), numbers.next())
+                else {
+                    return Err(format!("wheel needs x, y and lines, not {rest:?}"));
+                };
+                let position = point(px(x), px(y));
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        position,
+                        delta: ScrollDelta::Lines(point(0., lines)),
+                        ..ScrollWheelEvent::default()
+                    }),
+                    cx,
+                );
+                Ok(())
+            }
+            "resize" => {
+                let mut numbers = rest.split_whitespace().map(str::parse::<f32>);
+                let (Some(Ok(width)), Some(Ok(height))) = (numbers.next(), numbers.next()) else {
+                    return Err(format!("resize needs a width and a height, not {rest:?}"));
+                };
+                window.resize(gpui::size(px(width), px(height)));
                 Ok(())
             }
             "capture" => capture(window, rest.trim()),

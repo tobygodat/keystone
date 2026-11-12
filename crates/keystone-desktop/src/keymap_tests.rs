@@ -588,3 +588,56 @@ mod surfaces {
         assert_eq!(EDITOR, TEXT_FIELDS[3]);
     }
 }
+
+/// The terminal hands keys to the shell with `NoAction` bindings. Those run nothing, so
+/// they are no clash. With Linux's key rules, where every Ctrl+letter goes to the shell
+/// inside a pane, a command rebound to a free Ctrl+letter names none. With macOS's, F2
+/// goes to the shell too, and a command rebound to it names only Rename session.
+#[test]
+fn the_terminals_keys_for_the_shell_are_no_clash() {
+    for (control_keys, keys, clashes) in [
+        (true, "secondary-g", vec![]),
+        (false, "f2", vec!["Rename session"]),
+    ] {
+        let keymap = Keymap::parse(&json!({"new-claude": keys}));
+        let mut bindings = commands::bindings(&keymap);
+        bindings.extend(crate::terminal::shell_keys(&keymap, control_keys));
+        let bindings = gpui::Keymap::new(bindings);
+        assert_eq!(
+            keymap.clashes(command_with("new-claude"), &bindings),
+            clashes,
+            "{keys}"
+        );
+    }
+}
+
+/// A real clash with a terminal command is still named, on both rows, and with an app
+/// binding that is no palette command.
+#[test]
+fn a_clash_with_a_terminal_command_is_named_on_both_rows() {
+    let keymap = Keymap::parse(&json!({"split-terminal": "secondary-n"}));
+    let mut bindings = commands::bindings(&keymap);
+    bindings.extend(crate::terminal::shell_keys(&keymap, true));
+    let bindings = gpui::Keymap::new(bindings);
+    assert_eq!(
+        keymap.clashes(command_with("split-terminal"), &bindings),
+        ["New Claude session"]
+    );
+    assert_eq!(
+        keymap.clashes(command_with("new-claude"), &bindings),
+        ["Split terminal"]
+    );
+
+    let keymap = Keymap::parse(&json!({"split-terminal": "secondary-k"}));
+    let mut bindings = commands::bindings(&keymap);
+    bindings.extend(crate::terminal::shell_keys(&keymap, true));
+    bindings.push(KeyBinding::new(
+        "secondary-k",
+        crate::OpenPalette,
+        Some("!Dialog"),
+    ));
+    assert_eq!(
+        keymap.clashes(command_with("split-terminal"), &gpui::Keymap::new(bindings)),
+        ["Open palette"]
+    );
+}

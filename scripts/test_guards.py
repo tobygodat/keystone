@@ -121,6 +121,12 @@ class CheckScriptGuardsTest(unittest.TestCase):
         self.write('crates/keystone-desktop/src/keys.rs', 'KeyBinding::new("ctrl-k", Palette, None);\n')
         self.assert_fails('crates/keystone-desktop/src/keys.rs:1:')
 
+    def test_terminal_key_encoding_may_name_ctrl(self):
+        for path in ('crates/keystone-desktop/src/terminal/input.rs', 'crates/keystone-desktop/src/terminal_tests/input.rs'):
+            with self.subTest(path=path):
+                self.write(path, 'encode("ctrl-c");\n')
+                self.assert_passes()
+
     def test_prefixed_ctrl_shift_binding_fails(self):
         self.write('crates/keystone-desktop/src/keys.rs', '\nKeyBinding::new("alt-ctrl-shift-k", Palette, None);\n')
         self.assert_fails('crates/keystone-desktop/src/keys.rs:2:')

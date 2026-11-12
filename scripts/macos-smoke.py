@@ -80,6 +80,7 @@ class Run:
             'KEYSTONE_FAKE_CLAUDE_DELAY_MS': '5', 'KEYSTONE_FAKE_CODEX_DELAY_MS': '5',
             'KEYSTONE_FAKE_CLAUDE_REPLY': REPLY,
             'CLAUDE_CONFIG_DIR': str(self.home / 'claude'), 'CODEX_HOME': str(self.home / 'codex'),
+            **background(),
         }
 
     def step(self, name, ok, detail=''):
@@ -232,6 +233,11 @@ class Run:
         if self.database.exists():
             shutil.copy(self.database, self.evidence / 'workspace.sqlite3')
         shutil.rmtree(self.scratch, ignore_errors=True)
+
+
+def background():
+    key = 'KEYSTONE_AUTOMATION_BACKGROUND'
+    return {key: os.environ[key]} if key in os.environ else {}
 
 
 def main():
