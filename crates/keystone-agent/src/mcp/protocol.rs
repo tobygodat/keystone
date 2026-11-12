@@ -119,13 +119,29 @@ pub(super) fn dispatch(
             let outcome = if name == "session_wait" {
                 wait(caller, arguments, handler, state, clock)
             } else if auth::is_live(state, caller) {
-                handler(caller, name, arguments, Duration::from_secs(5))
+                let budget = if super::browser::TOOLS.contains(&name) {
+                    super::browser::BUDGET_SECS
+                } else {
+                    5
+                };
+                handler(caller, name, arguments, Duration::from_secs(budget))
             } else {
                 Err("Caller revoked".into())
             };
             let output = match outcome {
-                Ok(value) => {
-                    json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":false})
+                Ok(mut value) => {
+                    let image = (name == "browser_screenshot")
+                        .then(|| {
+                            value
+                                .as_object_mut()
+                                .and_then(|object| object.remove("image"))
+                        })
+                        .flatten();
+                    let mut content = vec![json!({"type":"text","text":value.to_string()})];
+                    if let Some(image) = image {
+                        content.push(json!({"type":"image","data":image["data"],"mimeType":image["mime_type"]}));
+                    }
+                    json!({"content":content,"structuredContent":value,"isError":false})
                 }
                 Err(message) => {
                     let value = json!({"error":message.to_string()});
@@ -234,7 +250,10 @@ fn valid_arguments(arguments: &Value, schema: &Value) -> bool {
             return false;
         };
         let valid_type = match property["type"].as_str() {
-            Some("string") => value.as_str().is_some_and(|value| !value.trim().is_empty()),
+            Some("string") => value.as_str().is_some_and(|value| {
+                property.get("minLength").is_none() || !value.trim().is_empty()
+            }),
+            Some("boolean") => value.is_boolean(),
             Some("integer") => value.as_u64().is_some(),
             Some("number") => value.as_f64().is_some(),
             _ => false,
@@ -256,7 +275,7 @@ fn valid_arguments(arguments: &Value, schema: &Value) -> bool {
     true
 }
 
-fn tool(name: &str, description: &str, properties: Value, required: Value) -> Value {
+pub(super) fn tool(name: &str, description: &str, properties: Value, required: Value) -> Value {
     json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})
 }
 
@@ -264,7 +283,7 @@ pub(super) fn tools() -> Vec<Value> {
     let session = json!({"type":"integer","minimum":1,"description":"Keystone session ID in the caller's project."});
     let message = json!({"type":"string","minLength":1});
     let request_id = json!({"type":"string","minLength":1,"description":"Stable unique ID for this write. Reuse only to retry the same request."});
-    vec![
+    [
         tool(
             "capabilities",
             "List available providers, accounts, models and orchestration permissions.",
@@ -311,4 +330,7 @@ pub(super) fn tools() -> Vec<Value> {
             json!(["session"]),
         ),
     ]
+    .into_iter()
+    .chain(super::browser::tools())
+    .collect()
 }

@@ -1123,3 +1123,27 @@ fn only_one_repositorys_root_and_worktrees_reach_each_other() {
     assert!(!reachable(&subfolder, None, &a.directory, Some(&a)));
     assert!(!reachable(&a.directory, Some(&a), &nested, None));
 }
+
+#[gpui::test]
+fn a_read_only_agent_reads_the_browser_status_but_may_not_act(cx: &mut gpui::TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let state = setup(directory.path(), Provider::Claude, cx);
+    state.update(cx, |state, cx| {
+        state
+            .set_approval_mode(1, ApprovalMode::ReadOnly, cx)
+            .unwrap();
+    });
+    let reply = orchestrate_turn(&state, "orchestrator test: browser".into(), cx);
+    assert!(
+        reply.contains("browser status open=false servers=0, act refused"),
+        "{reply}"
+    );
+    assert!(
+        state
+            .read_with(cx, |state, _| state.browsers.existing(
+                WorkingDirectory::new(directory.path()).unwrap().as_str()
+            ))
+            .is_none(),
+        "neither call started a browser page"
+    );
+}

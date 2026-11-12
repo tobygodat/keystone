@@ -6,6 +6,7 @@
 //! own git and gh, and [`remote`] runs sessions on other machines through
 //! `keystone-host`. See `docs/design/providers.md`.
 
+pub mod browser;
 pub mod checkpoint;
 pub mod claude;
 pub mod codex;

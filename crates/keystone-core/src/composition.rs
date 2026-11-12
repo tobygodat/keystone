@@ -34,10 +34,12 @@ pub enum Component {
     Notes,
     /// The session's pull request, its checks and its reviews.
     PullRequest,
+    /// The project's browser page, which agents can drive.
+    Browser,
 }
 
 impl Component {
-    pub const ALL: [Component; 7] = [
+    pub const ALL: [Component; 8] = [
         Component::SessionList,
         Component::Conversation,
         Component::Composer,
@@ -45,23 +47,27 @@ impl Component {
         Component::Changes,
         Component::Notes,
         Component::PullRequest,
+        Component::Browser,
     ];
 
     pub fn allows(self, count: usize) -> bool {
         match self {
-            Self::SessionList | Self::Files | Self::Changes | Self::Notes | Self::PullRequest => {
-                count <= 1
-            }
+            Self::SessionList
+            | Self::Files
+            | Self::Changes
+            | Self::Notes
+            | Self::PullRequest
+            | Self::Browser => count <= 1,
             Self::Conversation => count >= 1,
             Self::Composer => count == 1,
         }
     }
 
-    /// Files, Changes, Notes and Pull request, which open beside a conversation.
+    /// Files, Changes, Notes, Pull request and Browser, which open beside a conversation.
     pub fn is_side(self) -> bool {
         matches!(
             self,
-            Self::Files | Self::Changes | Self::Notes | Self::PullRequest
+            Self::Files | Self::Changes | Self::Notes | Self::PullRequest | Self::Browser
         )
     }
 
@@ -69,7 +75,12 @@ impl Component {
     pub fn is_surface(self) -> bool {
         matches!(
             self,
-            Self::Conversation | Self::Files | Self::Changes | Self::Notes | Self::PullRequest
+            Self::Conversation
+                | Self::Files
+                | Self::Changes
+                | Self::Notes
+                | Self::PullRequest
+                | Self::Browser
         )
     }
 }

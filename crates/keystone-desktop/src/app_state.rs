@@ -71,6 +71,9 @@ pub(crate) struct RuntimeChanged {
     pub files: Vec<u64>,
     /// Folders whose saved commit message changed, with the new message.
     pub commit_drafts: Vec<(String, String)>,
+    /// Sessions whose agent opened the browser page, so windows showing them open the
+    /// Browser surface.
+    pub browser: Vec<u64>,
 }
 pub(crate) struct RowChange {
     pub session: u64,
@@ -206,9 +209,33 @@ pub(crate) struct AppState {
     pub(crate) pull_requests: crate::pull_request::Monitor,
     /// Where attached images are copied, beside the workspace database.
     pub(crate) attachments: keystone_core::attachment::Attachments,
+    /// The browser preview's pages, one per project folder.
+    pub(crate) browsers: Arc<keystone_agent::browser::Browsers>,
     scheduler: scheduled::Scheduler,
 }
 impl EventEmitter<RuntimeChanged> for AppState {}
+impl EventEmitter<crate::browser::BrowserChanged> for AppState {}
+
+/// A wake for the browser's pages: each burst of frames and addresses emits one
+/// [`crate::browser::BrowserChanged`].
+fn browser_signal(cx: &mut Context<AppState>) -> Wake {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+    cx.spawn(async move |this, cx| {
+        while rx.next().await.is_some() {
+            while rx.try_recv().is_ok() {}
+            if this
+                .update(cx, |_, cx| cx.emit(crate::browser::BrowserChanged))
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+    .detach();
+    Arc::new(move || {
+        let _ = tx.unbounded_send(());
+    })
+}
 
 /// Deletes, off the UI thread, attached-image copies past their retention that no
 /// draft holds. See [`keystone_core::attachment::keep_for`].
@@ -476,6 +503,7 @@ impl AppState {
         self.stop_setups();
         drop(self.orchestrator.take());
         self.pull_requests.stop();
+        self.browsers.shut_down();
         self.codex.clear();
         self.claude.clear();
         self.publish(cx);
@@ -1558,7 +1586,12 @@ impl AppState {
             Some(bytes) => logs.with_budget(bytes),
             None => logs,
         };
+        let browsers = Arc::new(keystone_agent::browser::Browsers::new(
+            data_dir.join("browser"),
+            browser_signal(cx),
+        ));
         let mut state = Self {
+            browsers,
             removing_worktrees: Arc::default(),
             error: None,
             shutdown_error: None,
@@ -1666,6 +1699,11 @@ impl AppState {
     }
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.changes.sidebar = true;
+        self.publish(cx);
+    }
+    /// Asks the windows that show `session` to open the Browser surface.
+    pub(crate) fn reveal_browser_for(&mut self, session: u64, cx: &mut Context<Self>) {
+        self.changes.browser.push(session);
         self.publish(cx);
     }
 

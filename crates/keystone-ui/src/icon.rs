@@ -43,6 +43,7 @@ icons! {
     Down => "icons/down.svg", "<path d='m5.25 13.5 6 6 6-6 M11.25 19.5v-15'/>";
     PullRequest => "icons/pull-request.svg", "<circle cx='6.75' cy='4.5' r='2.25'/><circle cx='6.75' cy='19.5' r='2.25'/><circle cx='17.25' cy='19.5' r='2.25'/><path d='M6.75 6.75v10.5 M17.25 17.25v-7.5a3 3 0 0 0-3-3h-3.75 M12.75 4.5 10.5 6.75 12.75 9'/>";
     Folder => "icons/folder.svg", "<path d='M2.25 6.75h6l1.5 3h12v10.5H2.25Z M2.25 6.75v-3h6l1.5 1.5h9v4.5'/>";
+    Globe => "icons/globe.svg", "<circle cx='12' cy='12' r='8.25'/><path d='M3.75 12h16.5 M12 3.75c-2.25 2.25-3.37 5-3.37 8.25s1.12 6 3.37 8.25 M12 3.75c2.25 2.25 3.37 5 3.37 8.25s-1.12 6-3.37 8.25'/>";
     Refresh => "icons/refresh.svg", "<path d='M20.25 12a8.25 8.25 0 1 1-2.42-5.83 M20.25 3.75v6h-6'/>";
     Restore => "icons/restore.svg", "<path d='M3.75 12a8.25 8.25 0 1 0 2.42-5.83 M3.75 3.75v6h6'/>";
     Diff => "icons/diff.svg", "<path d='M11.25 3v7.5 M7.5 6.75h7.5 M7.5 17.25h7.5'/>";

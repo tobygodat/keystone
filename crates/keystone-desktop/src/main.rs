@@ -3,6 +3,7 @@ use app_state::{AppState, RuntimeChanged};
 mod arrangement;
 mod arrangement_editor;
 mod attachments;
+mod browser;
 mod changes;
 mod commands;
 mod conversation;
@@ -562,6 +563,7 @@ struct Keystone {
     files: files::Files,
     changes: changes::Changes,
     notes: notes::Notes,
+    browser: Entity<browser::BrowserView>,
     pull_request_focus: FocusHandle,
     /// The session the Pull request surface showed in the frame being built.
     pull_request_drawn: Option<u64>,
@@ -608,6 +610,18 @@ impl Keystone {
             cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, window, cx| {
                     let _ = this.update(cx, |this, cx| this.poll_import(window, cx));
+                });
+            });
+        }
+        if changed
+            .browser
+            .iter()
+            .any(|session| !self.showing(*session, cx).is_empty())
+        {
+            let (handle, this) = (self.handle, cx.weak_entity());
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = this.update(cx, |this, cx| this.reveal_browser(window, cx));
                 });
             });
         }
@@ -778,6 +792,7 @@ impl Keystone {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let browser = cx.new(|cx| browser::BrowserView::new(state.clone(), cx));
         let composer = cx.new(|cx| {
             TextInput::new("Write a draft…", InputMode::Multiline, cx)
                 .text_style(TextSize::Body, Color::Strong)
@@ -989,6 +1004,7 @@ impl Keystone {
             files: files::Files::default(),
             changes: changes::Changes::default(),
             notes: notes::Notes::default(),
+            browser,
             pull_request_focus: cx.focus_handle(),
             pull_request_drawn: None,
             merge_confirm: None,
@@ -3941,6 +3957,11 @@ impl Render for Keystone {
                         window,
                         cx,
                     )
+                }),
+            )
+            .on_action(
+                self.scoped_listener(cx, |this, _: &browser::ToggleBrowser, window, cx| {
+                    this.toggle_browser(window, cx)
                 }),
             )
             .on_action(
@@ -11327,6 +11348,7 @@ fn bind_keys(cx: &mut App) {
     files::bind_keys(cx);
     diff_view::bind_keys(cx);
     changes::bind_keys(cx);
+    browser::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new(
             "tab",

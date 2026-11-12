@@ -3,6 +3,7 @@
 
 use crate::app_state::setup::{CancelSetup, EditSetupScript, RetrySetup, SkipSetup};
 use crate::attachments::AttachFiles;
+use crate::browser::ToggleBrowser;
 use crate::changes::{CopyPullRequestLink, ToggleChanges};
 use crate::customization::OpenCustomize;
 use crate::diff_view::{ViewChanges, ViewUncommitted};
@@ -110,6 +111,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-p"],
         context: Some(APP),
         action: || Box::new(TogglePullRequest),
+    },
+    Command {
+        id: "toggle-browser",
+        label: "Toggle browser",
+        keys: &["secondary-alt-b"],
+        context: Some(APP),
+        action: || Box::new(ToggleBrowser),
     },
     Command {
         id: "copy-pull-request-link",

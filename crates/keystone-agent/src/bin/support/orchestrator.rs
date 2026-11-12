@@ -126,6 +126,8 @@ impl Server {
                 "ceiling refused"
             } else if error.contains("busy") {
                 "busy"
+            } else if error.contains("not act on it") {
+                "act refused"
             } else {
                 "tool failed"
             });
@@ -224,8 +226,75 @@ fn delegate(text: &str, server: Option<&Server>, request: &str) -> Option<String
     })
 }
 
+/// `orchestrator test: browser` reads the browser page's status, which starts no
+/// browser, and tries to click, which a read-only caller is refused.
+fn browser(text: &str, server: Option<&Server>) -> Option<String> {
+    if text != "orchestrator test: browser" {
+        return None;
+    }
+    let server = server?;
+    let status = match server.call("browser_status", json!({})) {
+        Ok(status) => format!(
+            "open={} servers={}",
+            status["open"],
+            status["dev_servers"].as_array().map_or(0, Vec::len)
+        ),
+        Err(error) => error.to_owned(),
+    };
+    let act = match server.call("browser_act", json!({"action":"click","ref":"e1"})) {
+        Ok(_) => "act ran",
+        Err(error) => error,
+    };
+    Some(format!(
+        "Scripted orchestrator success: browser status {status}, {act} (test data, no model call)."
+    ))
+}
+
+/// `orchestrator test: drive browser URL` opens URL in the browser page, clicks its
+/// first button and reads the page back, as an agent driving the Browser surface would.
+fn drive(text: &str, server: Option<&Server>) -> Option<String> {
+    let url = text
+        .strip_prefix("orchestrator test: drive browser ")?
+        .trim();
+    let server = server?;
+    let steps = || -> Result<String, &'static str> {
+        server.call("browser_open", json!({"url": url}))?;
+        let before = server.call("browser_snapshot", json!({}))?;
+        let outline = before["outline"].as_str().unwrap_or_default();
+        let button = outline
+            .lines()
+            .find(|line| line.trim_start().starts_with("- button \""))
+            .ok_or("no button")?;
+        let start = button.find("[ref=").ok_or("no ref")? + 5;
+        let reference = &button[start..start + button[start..].find(']').ok_or("no ref")?];
+        server.call("browser_act", json!({"action": "click", "ref": reference}))?;
+        let after = server.call("browser_snapshot", json!({}))?;
+        let read: Vec<&str> = after["outline"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.contains("[ref="))
+            .collect();
+        Ok(format!(
+            "clicked {} and read: {}",
+            button.trim().trim_start_matches("- "),
+            read.join(" | ")
+        ))
+    };
+    Some(match steps() {
+        Ok(done) => {
+            format!("Scripted orchestrator success: browser {done} (test data, no model call).")
+        }
+        Err(error) => format!("Scripted orchestrator failure: browser {error} (test data)."),
+    })
+}
+
 pub fn reply(text: &str, server: Option<&Server>, request: &str) -> Option<String> {
-    if let Some(reply) = delegate(text, server, request) {
+    if let Some(reply) = delegate(text, server, request)
+        .or_else(|| browser(text, server))
+        .or_else(|| drive(text, server))
+    {
         return Some(reply);
     }
     let target = match (

@@ -1352,6 +1352,61 @@ fn a_live_resize_moves_a_side_panel_under_the_composer_and_back(cx: &mut TestApp
     );
 }
 
+#[gpui::test]
+fn the_browser_opens_like_the_other_side_panels_at_each_window_width(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    // Whether Browser sits beside the composer's column, whether it shows, and whether
+    // the window folded into tabs.
+    let placed = |cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            let c = this.shown_composition(cx);
+            let Node::Split { children, .. } = c.root() else {
+                panic!("a split root");
+            };
+            let beside_column = children.iter().any(|child| {
+                matches!(child.node, Node::View { id } if c.component(id) == Some(Component::Browser))
+            });
+            let open = c.views().any(|(_, shown)| shown == Component::Browser);
+            (beside_column, open, this.presentation.current.arrangement.fitted)
+        })
+    };
+    resize_and_settle(gpui::size(px(1920.), px(1080.)), cx);
+    cx.simulate_keystrokes("secondary-alt-b");
+    cx.run_until_parked();
+    assert_eq!(
+        placed(cx),
+        (true, true, false),
+        "1920 px wide: beside the composer's column"
+    );
+    assert!(
+        cx.debug_bounds("browser-servers").is_some(),
+        "the Browser surface draws its toolbar"
+    );
+
+    resize_and_settle(gpui::size(px(1100.), px(720.)), cx);
+    assert_eq!(
+        placed(cx),
+        (false, true, false),
+        "shrunk to 1100 px: beside the conversation, under the composer"
+    );
+
+    resize_and_settle(gpui::size(px(720.), px(900.)), cx);
+    assert!(placed(cx).1, "720 px wide: still open");
+    assert!(
+        placed(cx).2,
+        "720 px wide: the window shows its surfaces as tabs"
+    );
+
+    resize_and_settle(gpui::size(px(1920.), px(1080.)), cx);
+    assert_eq!(
+        placed(cx),
+        (true, true, false),
+        "widened again: back beside the composer's column"
+    );
+}
+
 fn resize_and_settle(size: gpui::Size<Pixels>, cx: &mut VisualTestContext) {
     cx.simulate_resize(size);
     cx.run_until_parked();

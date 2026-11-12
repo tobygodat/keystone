@@ -127,6 +127,7 @@ fn minimum(
             Component::Files | Component::Notes | Component::PullRequest => {
                 [FILES_MIN, 160. + header]
             }
+            Component::Browser => [CONVERSATION_MIN, 200. + header],
             // The message box and Commit button sit above the list.
             Component::Changes => [FILES_MIN, 260. + header],
         },
@@ -447,8 +448,8 @@ fn displays(node: &Node, view: ViewId) -> bool {
     }
 }
 
-/// Files, Changes, Notes and Pull request: one-of-a-kind surfaces that get a tab strip
-/// even alone.
+/// Files, Changes, Notes, Pull request and Browser: one-of-a-kind surfaces that get a
+/// tab strip even alone.
 fn is_side_surface(component: Option<Component>) -> bool {
     component.is_some_and(Component::is_side)
 }
@@ -481,9 +482,10 @@ impl Keystone {
     /// occurrence id.
     fn tab_label(&self, id: ViewId, c: &Composition, cx: &App) -> String {
         match c.component(id).unwrap() {
-            component @ (Component::Files | Component::Notes | Component::PullRequest) => {
-                label(component).to_owned()
-            }
+            component @ (Component::Files
+            | Component::Notes
+            | Component::PullRequest
+            | Component::Browser) => label(component).to_owned(),
             Component::Changes => self.changes.label(self.files_root(cx).ok().as_deref(), cx),
             Component::Conversation if !self.presentation.current.customization.is_open() => self
                 .view_session(id, cx)
@@ -608,6 +610,7 @@ impl Keystone {
             (Some(Component::Notes), _, _) => self.focus_notes(window, cx),
             (Some(Component::Changes), _, _) => self.focus_changes(window, cx),
             (Some(Component::PullRequest), _, _) => self.focus_pull_request(window, cx),
+            (Some(Component::Browser), _, _) => self.focus_browser(window, cx),
             (Some(Component::Conversation), Some(view), Some(session)) => self
                 .presentation
                 .current
@@ -666,6 +669,7 @@ impl Keystone {
                 });
             }
             Some(Component::Notes) => return self.notes_contain_focus(window, cx),
+            Some(Component::Browser) => return self.browser_contains_focus(window, cx),
             Some(Component::Files) => self
                 .files_root(cx)
                 .ok()
@@ -1588,6 +1592,7 @@ impl Keystone {
                 IconName::PullRequest,
                 "surface-add-pull-request",
             ),
+            (Component::Browser, IconName::Globe, "surface-add-browser"),
             (
                 Component::Conversation,
                 IconName::Chat,
@@ -1615,6 +1620,7 @@ impl Keystone {
                             Component::Notes => this.focus_notes(window, cx),
                             Component::Changes => this.focus_changes(window, cx),
                             Component::PullRequest => this.focus_pull_request(window, cx),
+                            Component::Browser => this.focus_browser(window, cx),
                             _ => {}
                         }
                     })),
@@ -1820,6 +1826,9 @@ impl Keystone {
             }
             Component::PullRequest => {
                 pane = pane.child(self.pull_request_pane(cx));
+            }
+            Component::Browser => {
+                pane = pane.child(self.browser_pane(cx));
             }
             Component::Conversation => {
                 self.presentation.current.arrangement.visible.push(id);

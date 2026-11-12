@@ -238,6 +238,10 @@ impl AppState {
         orchestrator.draining = true;
         let requests: Vec<_> = orchestrator.requests.try_iter().take(32).collect();
         for request in requests {
+            if keystone_agent::mcp::browser::TOOLS.contains(&request.tool.as_str()) {
+                self.answer_browser(request, cx);
+                continue;
+            }
             match self.launch_job(&request) {
                 Some(Err(busy)) => {
                     let _ = request.reply.send(Err(HandlerError::from(busy)));
@@ -273,8 +277,34 @@ impl AppState {
         }
     }
 
+    /// Checks a browser tool call here and runs it off the UI thread, since starting
+    /// the browser and loading a page take seconds.
+    fn answer_browser(&mut self, request: Request, cx: &mut Context<Self>) {
+        if Instant::now() >= request.deadline {
+            let _ = request.reply.send(Err(HandlerError::Deadline));
+            return;
+        }
+        match self.browser_job(
+            request.caller,
+            &request.tool,
+            request.arguments,
+            request.deadline,
+            cx,
+        ) {
+            Ok(job) => {
+                let reply = request.reply;
+                drop(crate::browser::off_thread(move || {
+                    let _ = reply.send(job().map_err(HandlerError::from));
+                }));
+            }
+            Err(error) => {
+                let _ = request.reply.send(Err(HandlerError::from(error)));
+            }
+        }
+    }
+
     /// Whether `id` is a second opinion, or a handoff or fork that carries one on.
-    fn reviews(&self, id: u64) -> bool {
+    pub(crate) fn reviews(&self, id: u64) -> bool {
         let mut current = self.session(id);
         while let Some(session) = current {
             if session.second_opinion_on().is_some() {
@@ -416,7 +446,10 @@ impl AppState {
         Ok((launch, provider, account, selected_mode))
     }
 
-    fn caller(&self, caller: Caller) -> Result<(WorkingDirectory, ApprovalMode), String> {
+    pub(crate) fn caller(
+        &self,
+        caller: Caller,
+    ) -> Result<(WorkingDirectory, ApprovalMode), String> {
         if self.phase != Phase::Running
             || !self
                 .orchestrator

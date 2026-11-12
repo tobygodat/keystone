@@ -10,6 +10,7 @@ use keystone_core::ApprovalMode;
 use serde_json::Value;
 
 mod auth;
+pub mod browser;
 mod http;
 mod protocol;
 

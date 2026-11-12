@@ -268,6 +268,7 @@ impl Keystone {
             .capture_action(self.leave_settings::<ToggleSidebar>(cx))
             .capture_action(self.leave_settings::<crate::files::ToggleFiles>(cx))
             .capture_action(self.leave_settings::<crate::notes::ToggleNotes>(cx))
+            .capture_action(self.leave_settings::<crate::browser::ToggleBrowser>(cx))
             .capture_action(self.leave_settings::<crate::pull_request::TogglePullRequest>(cx))
             .capture_action(self.leave_settings::<crate::changes::ToggleChanges>(cx))
             .capture_action(self.leave_settings::<OpenCustomize>(cx))

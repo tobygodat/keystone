@@ -209,6 +209,43 @@ fn claude_mcp_autoallow_is_limited_to_the_six_published_tools() {
 }
 
 #[test]
+fn claude_asks_before_a_browser_tool_loads_another_machines_page() {
+    let mut out = Outputs::default();
+    let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
+    driver.set_mcp("http://127.0.0.1/mcp".into(), "synthetic-token".into());
+    claude_init(&mut driver, &mut out);
+    claude_mcp_ready(&mut driver, &mut out);
+    for (tool, input, allowed) in [
+        ("browser_open", json!({}), true),
+        ("browser_navigate", json!({"url": "localhost:5173"}), true),
+        ("browser_act", json!({"action": "click", "ref": "e1"}), true),
+        (
+            "browser_navigate",
+            json!({"url": "https://example.com/?q=1"}),
+            false,
+        ),
+        ("browser_open", json!({"url": "example.com"}), false),
+        ("browser_evaluate", json!({"expression": "1"}), false),
+    ] {
+        out = Outputs::default();
+        driver.on_line(json!({"type":"control_request","request_id":tool,"request":{"subtype":"can_use_tool","tool_name":format!("mcp__keystone__{tool}"),"input":input}}).to_string().as_bytes(), &mut out);
+        let asked = out
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, Event::ApprovalRequested(_)));
+        assert_eq!(asked, !allowed, "{tool} {input}");
+        if allowed {
+            assert_eq!(
+                wire(&out.writes[0])["response"]["response"]["behavior"],
+                "allow"
+            );
+        } else {
+            assert!(out.writes.is_empty(), "{tool} {input}");
+        }
+    }
+}
+
+#[test]
 fn codex_interrupt_does_not_acknowledge_a_queued_launch_as_idle() {
     let server = server();
     let issuer = server.issuer();

@@ -22,6 +22,7 @@ access is provided.
 | `session_read {session, after?, limit?}` | Reads transcript rows, with zero-based positions. `after` is exclusive; `limit` defaults to 50 and is bounded to 1–200. `next` does not advance past a streaming row, so polling does not miss its completion. `handed_off_from` is `{session, second_opinion}`: the session a handoff or second opinion continued, so a session started from either can read the rows its handoff text left out. A second opinion, and a handoff or fork of one, only reads: its `session_launch`, `session_send` and `session_interrupt` calls are refused in every approval mode. |
 | `session_wait {session, timeout?}` | Waits for the target's current work to end. The timeout defaults to 50 seconds and is capped at 50 seconds; `timed_out` distinguishes the cutoff from completion. Call again to keep waiting. A wait that sees a launched session's turn end marks its result observed, so it starts no turn. |
 | `session_interrupt {session}` | Stops the current target turn through the same runtime path as the Stop button. Codex also cancels an initial message waiting for its thread to open. Work still queued on a connection worker returns busy rather than acknowledging a stop it cannot apply immediately. |
+| `browser_*` | Open, read and drive the caller's project page in the Browser surface. See [browser preview](browser-preview.md). |
 
 Every call requires a live Keystone caller process with a running turn. Every
 target must have the caller's recorded project directory. `cwd`, when supplied,
@@ -156,8 +157,9 @@ Tokens identify their own caller session,
 not a target selected by request arguments.
 
 Claude receives `mcp_set_servers` after initialization and before its first user
-message. Only the six published `mcp__keystone__<tool>` names are auto-allowed;
-native tools and other names retain normal approval handling. Codex receives the server in its per-thread configuration. Catalog and
+message. Only the six published `mcp__keystone__<tool>` session tools and the
+`browser_*` tools other than `browser_evaluate` are auto-allowed; native tools and other names retain normal
+approval handling. Codex receives the server in its per-thread configuration. Catalog and
 permission-mode probes, and the restricted layout helper, receive no orchestrator
 credentials.
 

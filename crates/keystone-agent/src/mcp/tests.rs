@@ -442,3 +442,108 @@ fn bounded_connections_and_shutdown_close_partial_requests() {
     }
     assert!(!issuer.is_live(credentials.caller()));
 }
+
+#[test]
+fn browser_tools_get_a_longer_budget_and_an_image_becomes_an_image_block() {
+    let server = Server::start(Arc::new(|_, name, arguments, budget| {
+        Ok(match name {
+            "browser_screenshot" => json!({"url":"http://localhost:5173/","image":{"mime_type":"image/jpeg","data":"/9j/AA=="}}),
+            _ => json!({"tool":name,"arguments":arguments,"budget":budget.as_secs()}),
+        })
+    }))
+    .unwrap();
+    let caller = server.issuer().issue(1).unwrap();
+    let listed = {
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string();
+        let (_, body) = exchange(&caller, &request(&caller, &body, ""));
+        serde_json::from_slice::<Value>(&body).unwrap()
+    };
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(
+        browser::TOOLS.iter().all(|tool| names.contains(tool)),
+        "{names:?}"
+    );
+
+    let shot = &call(&caller, "browser_screenshot", json!({}))["result"];
+    assert_eq!(
+        shot["structuredContent"],
+        json!({"url":"http://localhost:5173/"})
+    );
+    assert_eq!(
+        shot["content"][1],
+        json!({"type":"image","data":"/9j/AA==","mimeType":"image/jpeg"})
+    );
+    let act = &call(
+        &caller,
+        "browser_act",
+        json!({"action":"type","ref":"e2","text":"","clear":true}),
+    )["result"]["structuredContent"];
+    assert_eq!(act["budget"], browser::BUDGET_SECS);
+    assert_eq!(act["arguments"]["clear"], true);
+    assert_eq!(
+        call(&caller, "session_read", json!({"session":2}))["result"]["structuredContent"]["budget"],
+        5
+    );
+    for refused in [
+        json!({"action":"type","clear":"yes"}),
+        json!({"action":"drag"}),
+        json!({"action":"click","ref":""}),
+    ] {
+        assert_eq!(
+            call(&caller, "browser_act", refused)["error"]["message"],
+            "Invalid tool arguments"
+        );
+    }
+}
+
+#[test]
+fn only_this_machines_addresses_load_without_asking() {
+    for local in [
+        "localhost:5173",
+        ":3000",
+        "http://127.0.0.1:8080/app?x=1",
+        "http://127.8.0.2/",
+        "http://[::1]:4000/",
+        "http://app.localhost/",
+        "HTTP://LOCALHOST/",
+        "0.0.0.0:8000",
+    ] {
+        assert!(browser::is_local(local), "{local}");
+    }
+    for remote in [
+        "example.com",
+        "https://example.com/?leak=1",
+        "http://localhost@example.com/",
+        "http://example.com\\@localhost/",
+        "http://localhost.example.com/",
+        "http://[::ffff:7f00:1]/",
+        "http://192.168.1.4:3000/",
+        "file:///etc/hosts",
+        "",
+    ] {
+        assert!(!browser::is_local(remote), "{remote}");
+    }
+    assert!(browser::auto_allowed("browser_snapshot", &json!({})));
+    assert!(browser::auto_allowed("browser_open", &json!({})));
+    assert!(browser::auto_allowed(
+        "browser_navigate",
+        &json!({"url": "localhost:5173"})
+    ));
+    assert!(!browser::auto_allowed(
+        "browser_navigate",
+        &json!({"url": "https://example.com"})
+    ));
+    assert!(!browser::auto_allowed(
+        "browser_open",
+        &json!({"url": "https://example.com"})
+    ));
+    assert!(!browser::auto_allowed(
+        "browser_evaluate",
+        &json!({"expression": "1"})
+    ));
+}
