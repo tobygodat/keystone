@@ -551,15 +551,13 @@ fn store_wrapper(dir: &Path, name: &str) -> PathBuf {
         "KEYSTONE_FAKE_CLAUDE_LOG_DIR": dir.to_str().unwrap(),
     });
     let script = dir.join(format!("{name}-store-wrapper"));
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/usr/bin/python3\nimport os, sys\nos.environ.update({environment})\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
             serde_json::to_string(&binary).unwrap()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 

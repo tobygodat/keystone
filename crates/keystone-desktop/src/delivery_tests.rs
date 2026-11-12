@@ -733,20 +733,26 @@ fn a_parent_that_refuses_the_result_is_not_sent_it_in_a_loop(cx: &mut gpui::Test
         );
         state.pump(cx);
     });
-    for _ in 0..5 {
-        std::thread::sleep(Duration::from_millis(50));
-        cx.run_until_parked();
+    let refused = |state: &AppState| {
+        state.conversations[&parent]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("Not sent."))
+    };
+    wait_until(cx, &state, refused);
+    // A loop sends again once each save lands. Let every save land, pump, three times.
+    for _ in 0..3 {
+        let saved = state.read_with(cx, |state, _| state.store.revision());
+        wait_until(cx, &state, |state| state.store.is_durable(saved));
+        state.update(cx, |state, cx| state.pump(cx));
     }
+    cx.run_until_parked();
     state.read_with(cx, |state, _| {
         assert!(matches!(
             state.store.workspace().delivery(child).unwrap().state(),
             DeliveryState::Ready { .. }
         ));
-        let error = state.conversations[&parent]
-            .error
-            .clone()
-            .unwrap_or_default();
-        assert!(error.starts_with("Not sent."), "{error}");
+        assert!(refused(state));
     });
     let database = state.read_with(cx, |state, _| {
         keystone_core::database_path(state.store().path())

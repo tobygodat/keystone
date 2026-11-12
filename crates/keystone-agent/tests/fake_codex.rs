@@ -17,19 +17,6 @@ const NO_MODE: ApprovalState = ApprovalState {
     overridden: false,
 };
 
-/// Writes through a child, so this process never holds a write fd a sibling test's fork can inherit.
-fn write_script(path: &std::path::Path, body: impl AsRef<[u8]>) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", "cat > \"$0\""])
-        .arg(path)
-        .stdin(std::process::Stdio::piped())
-        .spawn()?;
-    child.stdin.take().unwrap().write_all(body.as_ref())?;
-    assert!(child.wait()?.success());
-    Ok(())
-}
-
 fn connect() -> (CodexConnection, Receiver<()>) {
     // SAFETY: tests in this file set the same value and run no other code that reads it.
     unsafe { std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "20") };
@@ -296,19 +283,16 @@ fn dropping_gives_up_on_a_stuck_start() {
 /// A scripted Codex that keeps thread overrides in `dir`, so a restarted process
 /// resumes a thread with its override, as real Codex does.
 fn connect_keeping_overrides(dir: &std::path::Path) -> (CodexConnection, Receiver<()>) {
-    use std::os::unix::fs::PermissionsExt;
     unsafe { std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "20") };
     let script = dir.join("codex");
-    write_script(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\nKEYSTONE_FAKE_CODEX_STATE={} exec {} \"$@\"\n",
             dir.join("state.json").display(),
             env!("CARGO_BIN_EXE_keystone-fake-codex")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let (tx, rx) = channel();
     let wake = Arc::new(move || {
         let _ = tx.send(());
@@ -424,18 +408,15 @@ fn a_chosen_model_reaches_codex_on_start_and_resume_and_the_catalog_is_listed() 
 /// and ask again.
 #[test]
 fn a_catalog_codex_cannot_list_fails_with_its_reason() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("codex");
-    write_script(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\nKEYSTONE_FAKE_CODEX_NO_CATALOG=1 exec {} \"$@\"\n",
             env!("CARGO_BIN_EXE_keystone-fake-codex")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let (tx, rx) = channel();
     let wake = Arc::new(move || {
         let _ = tx.send(());
@@ -547,20 +528,17 @@ fn provider_settings_after_a_restart_restore_the_users_own() {
 #[test]
 fn a_rejected_steer_retried_as_a_turn_uses_the_mode_chosen_since() {
     use keystone_core::ApprovalMode::{FullAccess, ReadOnly};
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let gate = dir.path().join("steer-gate");
     let script = dir.path().join("codex");
-    write_script(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\nKEYSTONE_FAKE_CODEX_DELAY_MS=1 KEYSTONE_FAKE_CODEX_STEER_GATE='{}' exec '{}' \"$@\"\n",
             gate.display(),
             env!("CARGO_BIN_EXE_keystone-fake-codex")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let (tx, wake) = channel();
     let conn = CodexConnection::new(
         Some(script),
@@ -664,7 +642,6 @@ fn connect_with_rate_limits(
     dir: &std::path::Path,
     setting: &str,
 ) -> (CodexConnection, Receiver<()>) {
-    use std::os::unix::fs::PermissionsExt;
     unsafe { std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "20") };
     let script = dir.join("codex");
     let export = if setting.is_empty() {
@@ -676,15 +653,13 @@ fn connect_with_rate_limits(
             dir.join("rate-limits").display()
         )
     };
-    write_script(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\n{export}exec '{}' \"$@\"\n",
             env!("CARGO_BIN_EXE_keystone-fake-codex")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let (tx, rx) = channel();
     let wake = Arc::new(move || {
         let _ = tx.send(());
@@ -755,18 +730,15 @@ fn an_app_server_reports_its_rate_limits_read_as_the_first_turn_runs() {
 /// report is lost first, and `thread/settings/updated` reports the new one.
 #[test]
 fn a_choice_changed_between_turns_runs_the_next_turn_on_it() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("codex");
-    write_script(
+    keystone_core::test_support::write_executable(
         &program,
         format!(
             "#!/bin/sh\nexport KEYSTONE_FAKE_CODEX_DELAY_MS=1 KEYSTONE_FAKE_CODEX_VERSION=0.166.0\nexec '{}' \"$@\"\n",
             env!("CARGO_BIN_EXE_keystone-fake-codex")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let (tx, wake) = channel();
     let conn = CodexConnection::new(
         Some(program),

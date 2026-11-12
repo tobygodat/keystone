@@ -6,7 +6,6 @@ use crate::{AppState, Keystone, Row};
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use keystone_agent::ItemKind;
 use keystone_core::{Provider, Store, WorkingDirectory};
-use std::os::unix::fs::PermissionsExt;
 
 const REPLY: &str =
     "Here it is.\n\n![](./shot.png)\n\n![](../outside.png)\n\n![](http://127.0.0.1:9/remote.png)";
@@ -25,15 +24,13 @@ fn claude(dir: &Path) -> PathBuf {
         "KEYSTONE_FAKE_CLAUDE_WRITE": "out/demo.mp4",
     });
     let script = dir.join("claude-preview-wrapper");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/usr/bin/python3\nimport os, sys\nos.environ.update({environment})\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
             serde_json::to_string(&binary).unwrap()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 

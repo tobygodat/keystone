@@ -281,8 +281,7 @@ mod tests {
     fn a_save_keeps_permissions_and_symlinks() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("run.sh");
-        std::fs::write(&target, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        keystone_core::test_support::write_executable(&target, "#!/bin/sh\n");
         let link = dir.path().join("link.sh");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let known = version(&link);

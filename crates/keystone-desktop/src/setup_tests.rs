@@ -33,7 +33,7 @@ fn fake_claude(dir: &Path) -> PathBuf {
         "build keystone-fake-claude first: cargo build -p keystone-agent --bins"
     );
     let script = dir.join("claude-setup-wrapper");
-    write_script(
+    keystone_core::test_support::write_executable(
         &script,
         &format!(
             "#!/usr/bin/python3\nimport os, sys\nos.environ['KEYSTONE_FAKE_CLAUDE_DELAY_MS'] = '2'\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
@@ -41,25 +41,6 @@ fn fake_claude(dir: &Path) -> PathBuf {
         ),
     );
     script
-}
-
-/// Writes an executable script through a child, so this process never holds a write fd
-/// that a sibling test's fork can inherit and keep busy when the script is run.
-fn write_script(path: &Path, body: &str) {
-    use std::io::Write;
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
-        .arg(path)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(body.as_bytes())
-        .unwrap();
-    assert!(child.wait().unwrap().success());
 }
 
 /// A repository with one commit, opened as the first window's project with `script`

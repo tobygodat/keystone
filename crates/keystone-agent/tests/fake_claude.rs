@@ -990,18 +990,15 @@ fn a_chosen_model_is_passed_on_start_and_resume_and_the_catalog_is_listed() {
 #[test]
 fn replacing_claude_loses_its_reported_model_before_the_replacement_can_fail() {
     use keystone_core::ApprovalMode::*;
-    use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
     let script = tmp.path().join("claude");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\nKEYSTONE_FAKE_CLAUDE_DELAY_MS=20 exec '{}' \"$@\"\n",
             env!("CARGO_BIN_EXE_keystone-fake-claude")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let (tx, wake) = channel();
     let conn = ClaudeConnection::new(
         Some(script.clone()),
@@ -1062,7 +1059,6 @@ fn a_catalog_from_a_claude_that_cannot_start_fails_with_the_path() {
 /// with why it stopped, so the two are told apart.
 #[test]
 fn a_catalog_probe_says_whether_claude_hung_or_stopped() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = project("catalog-timeout", &[("ignore-initialize", "all")]);
     let (conn, wake) = connect();
     conn.set_probe_timeout(Duration::from_millis(300));
@@ -1077,8 +1073,7 @@ fn a_catalog_probe_says_whether_claude_hung_or_stopped() {
 
     let tmp = tempfile::tempdir().unwrap();
     let script = tmp.path().join("claude");
-    std::fs::write(&script, "#!/bin/sh\nexit 3\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keystone_core::test_support::write_executable(&script, "#!/bin/sh\nexit 3\n");
     let (tx, rx) = channel();
     let wake = Arc::new(move || {
         let _ = tx.send(());

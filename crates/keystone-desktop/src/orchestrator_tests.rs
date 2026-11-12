@@ -640,21 +640,15 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
     use keystone_agent::idle::{IdlePolicy, ManualClock};
     let directory = tempfile::tempdir().unwrap();
     let wrapper = directory.path().join("claude-idle");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &wrapper,
         format!(
             "#!/bin/sh\nKEYSTONE_FAKE_CLAUDE_IDLE=1 KEYSTONE_FAKE_CLAUDE_DELAY_MS=1 KEYSTONE_FAKE_CLAUDE_ARGV_LOG={} exec {} \"$@\"\n",
             directory.path().join("argv").display(),
             scripted(Provider::Claude).display()
         ),
-    )
-    .unwrap();
+    );
     std::fs::write(directory.path().join("argv"), "").unwrap();
-    std::fs::set_permissions(
-        &wrapper,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-    )
-    .unwrap();
     let state = setup(directory.path(), Provider::Codex, cx);
     let clock = Arc::new(ManualClock::default());
     state.update(cx, |state, _| {

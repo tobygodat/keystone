@@ -19,4 +19,5 @@ rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"
 libc = "0.2"
 
 [dev-dependencies]
+keystone-core = { path = "../keystone-core", features = ["test-support"] }
 tempfile = "3"

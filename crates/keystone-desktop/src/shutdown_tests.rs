@@ -2,7 +2,6 @@ use super::*;
 use crate::tests::lock_database;
 use app_state::Phase;
 use gpui::{TestAppContext, VisualTestContext};
-use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 struct RestoredRow(Row);
@@ -89,8 +88,7 @@ fn tracked_provider(dir: &Path, provider: Provider, starting: bool) -> PathBuf {
         serde_json::to_string(&binary).unwrap(),
         starting = if starting { "True" } else { "False" }
     );
-    std::fs::write(&path, code).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keystone_core::test_support::write_executable(&path, code);
     path
 }
 

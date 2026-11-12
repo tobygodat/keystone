@@ -226,6 +226,19 @@ pub(crate) enum Until<'a> {
     Cancelled(&'a Cancel),
 }
 
+/// The sleeps between checks of a command that is still running: short at first
+/// under a cancel, so each quick command of a restore is not held up by the polling,
+/// and never longer than 50 ms.
+fn pauses(until: Until) -> impl Iterator<Item = Duration> {
+    let first = match until {
+        Until::Cancelled(_) => Duration::from_millis(1),
+        _ => Duration::from_millis(50),
+    };
+    std::iter::successors(Some(first), |pause| {
+        Some((*pause * 2).min(Duration::from_millis(50)))
+    })
+}
+
 /// Runs `command` with `input` on stdin.
 pub(crate) fn run(command: Command, input: Option<Vec<u8>>, output: Output) -> Result<Vec<u8>> {
     run_until(command, input, output, Until::Exit)
@@ -276,12 +289,7 @@ pub(crate) fn run_until(
         Until::Exit => child.wait().map_err(spawn)?,
         _ => {
             let started = Instant::now();
-            // Short at first under a cancel, so each quick command of a restore is not
-            // held up by the polling.
-            let mut pause = match until {
-                Until::Cancelled(_) => Duration::from_millis(1),
-                _ => Duration::from_millis(50),
-            };
+            let mut pauses = pauses(until);
             loop {
                 if let Some(status) = child.try_wait().map_err(spawn)? {
                     break status;
@@ -295,8 +303,7 @@ pub(crate) fn run_until(
                     let _ = child.wait();
                     return Err(error);
                 }
-                std::thread::sleep(pause);
-                pause = (pause * 2).min(Duration::from_millis(50));
+                std::thread::sleep(pauses.next().expect("pauses never end"));
             }
         }
     };
@@ -947,8 +954,7 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
     fn hook(root: &Path, script: &str) {
         let hook = root.join(".git/hooks/pre-commit");
         fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        fs::write(&hook, format!("#!/bin/sh\n{script}")).unwrap();
-        fs::set_permissions(&hook, PermissionsExt::from_mode(0o755)).unwrap();
+        keystone_core::test_support::write_executable(&hook, format!("#!/bin/sh\n{script}"));
     }
 
     #[test]
@@ -1427,21 +1433,23 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
 
     #[test]
     fn a_quick_command_under_a_cancel_is_not_slowed_by_polling() {
-        let dir = tempfile::tempdir().unwrap();
         let cancel = Cancel::default();
-        let timed = |until: Until| {
-            let start = Instant::now();
-            for _ in 0..20 {
-                let mut command = program(Path::new("sleep"), dir.path());
-                command.arg("0.01");
-                run_until(command, None, Output::Separate, until).unwrap();
+        for exited in (1..=200).map(Duration::from_millis) {
+            let mut slept = Duration::ZERO;
+            for pause in pauses(Until::Cancelled(&cancel)) {
+                assert!(
+                    pause <= Duration::from_millis(50),
+                    "a cancel waits {pause:?}"
+                );
+                slept += pause;
+                if slept >= exited {
+                    break;
+                }
             }
-            start.elapsed()
-        };
-        let (cancellable, deadline) = (
-            timed(Until::Cancelled(&cancel)),
-            timed(Until::Deadline(Duration::from_secs(60))),
-        );
-        assert!(cancellable < deadline, "{cancellable:?} vs {deadline:?}");
+            assert!(
+                slept <= (exited * 2).max(exited + Duration::from_millis(1)),
+                "a command that ends after {exited:?} is seen after {slept:?}"
+            );
+        }
     }
 }

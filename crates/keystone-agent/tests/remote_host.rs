@@ -1280,14 +1280,20 @@ fn a_watcher_that_cant_take_over_stops_its_provider_before_any_input() {
 fn a_daemon_whose_binary_was_replaced_still_watches_its_providers() {
     let bin = tempfile::tempdir().unwrap();
     let host = bin.path().join("keystone-host");
-    std::fs::copy(env!("CARGO_BIN_EXE_keystone-host"), &host).unwrap();
+    keystone_core::test_support::write_executable(
+        &host,
+        std::fs::read(env!("CARGO_BIN_EXE_keystone-host")).unwrap(),
+    );
     let mut machine = Machine::new();
     machine.host = host.clone().into();
     let mut client = machine.client("app-1");
     client.connected();
     // As `cargo install` replaces it: a new copy renamed over the old.
     let new = bin.path().join("keystone-host.new");
-    std::fs::copy(env!("CARGO_BIN_EXE_keystone-host"), &new).unwrap();
+    keystone_core::test_support::write_executable(
+        &new,
+        std::fs::read(env!("CARGO_BIN_EXE_keystone-host")).unwrap(),
+    );
     std::fs::rename(&new, &host).unwrap();
     let dir = folder(&[("delay-ms", "1")]);
     client.send(dir.path(), "hello").unwrap();

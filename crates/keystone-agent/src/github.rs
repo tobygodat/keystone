@@ -692,17 +692,14 @@ mod tests {
 
     /// A stand-in `gh` that records its arguments, one per line, and runs `script`.
     fn fake(dir: &Path, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("gh");
-        std::fs::write(
+        keystone_core::test_support::write_executable(
             &path,
             format!(
                 "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"{0}/argv\"\n[ \"$1\" = pr ] && cat >> \"{0}/argv\"\necho --- >> \"{0}/argv\"\n{script}",
                 dir.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, PermissionsExt::from_mode(0o755)).unwrap();
+        );
         path
     }
 

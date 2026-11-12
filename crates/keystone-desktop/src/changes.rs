@@ -2079,12 +2079,10 @@ mod ui_tests {
         fixture(repo);
         let hook = repo.join(".git/hooks/pre-commit");
         fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        fs::write(
+        keystone_core::test_support::write_executable(
             &hook,
             "#!/bin/sh\necho 'pre-commit: lint failed in edited.txt' >&2\nexit 1\n",
-        )
-        .unwrap();
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let (view, cx) = open_keystone(repo, state.path(), cx);
 
         cx.simulate_keystrokes("secondary-shift-g");
@@ -2328,8 +2326,7 @@ mod ui_tests {
         fixture(repo);
         let hook = repo.join(".git/hooks/pre-commit");
         fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        fs::write(&hook, "#!/bin/sh\nsleep 0.5\n").unwrap();
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        keystone_core::test_support::write_executable(&hook, "#!/bin/sh\nsleep 0.5\n");
         let (view, cx) = open_keystone(repo, state.path(), cx);
         cx.simulate_keystrokes("secondary-shift-g");
         until(cx, "first status", |cx| settled(&view, cx));
@@ -2506,15 +2503,13 @@ mod ui_tests {
             let dir = std::env::temp_dir().join(format!("keystone-fake-gh-{}", std::process::id()));
             fs::create_dir_all(&dir).unwrap();
             let gh = dir.join("gh");
-            fs::write(
+            keystone_core::test_support::write_executable(
                 &gh,
                 "#!/bin/sh\n\
                  [ -x \"$PWD/.git/fake-gh\" ] && exec \"$PWD/.git/fake-gh\" \"$@\"\n\
                  echo 'To get started with GitHub CLI, please run:  gh auth login' >&2\n\
                  exit 4\n",
-            )
-            .unwrap();
-            fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+            );
             let path = std::env::var_os("PATH").unwrap_or_default();
             let path =
                 std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)))
@@ -2529,14 +2524,12 @@ mod ui_tests {
     /// still running it would make writing to it fail.
     fn script_gh(repo: &Path, script: &str) {
         let path = repo.join(".git/fake-gh.new");
-        fs::write(
+        keystone_core::test_support::write_executable(
             &path,
             format!(
                 "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> .git/fake-gh-argv\n[ \"$1\" = pr ] && {{ cat; echo; }} >> .git/fake-gh-argv\necho --- >> .git/fake-gh-argv\n{script}"
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         fs::rename(&path, repo.join(".git/fake-gh")).unwrap();
     }
 

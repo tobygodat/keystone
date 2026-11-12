@@ -2,7 +2,6 @@ use super::*;
 use gpui::{TestAppContext, VisualTestContext};
 use std::io::Write;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -63,15 +62,13 @@ fn open<'a>(
         "build scripted providers with the UI lane"
     );
     let script = dir.join("codex-wrapper");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\nexec /usr/bin/env -i PATH=/usr/bin:/bin KEYSTONE_FAKE_CODEX_DELAY_MS=1 {} \"$@\"\n",
             shlex::try_quote(binary.to_str().unwrap()).unwrap()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let state = cx.update(|cx| {
         keystone_ui::init(cx);
         bind_keys(cx);

@@ -5,6 +5,8 @@
 `python3 scripts/guards.py shortcuts` fails on ctrl- key bindings other than ctrl-tab and ctrl-shift-tab,
 outside the terminal's key encoding.
 `python3 scripts/guards.py hints` fails on Ctrl+… hints written out in docs/ui-strings.txt.
+`python3 scripts/guards.py executables` fails on a script (`#!` text) written with fs::write, which a sibling
+test's fork can hold open so that running it fails with "Text file busy".
 
 It exits 0 when nothing matches, 1 after printing each match, and 2 when a file or folder cannot be read.
 """
@@ -22,6 +24,8 @@ COLOR = re.compile(r'\b(rgba?|hsla|black|white|transparent_black|transparent_whi
                    r'|opaque_grey)\(|(?<!-> )(?<!for )\b(Hsla|Rgba)\s*\{')
 SHORTCUT = re.compile(r'"(?:[^"\n]*[ -])?ctrl-(?!(?:shift-)?tab\b)')
 HINT = re.compile(rb'Ctrl[+ ]')
+WRITE = re.compile(rb'\bfs::write\(')
+STRING = re.compile(rb'r(#*)".*?"\1|b?"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'', re.S)
 # The terminal's key encoding and its tests mean the Control key itself on every platform.
 SHORTCUT_EXEMPT = {'crates/keystone-desktop/src/terminal/input.rs', 'crates/keystone-desktop/src/terminal_tests/input.rs'}
 HINT_EXEMPT = {b'crates/keystone-agent/src/lib.rs', b'crates/keystone-ui/src/kbd.rs'}
@@ -75,12 +79,36 @@ def hints():
             yield source + b': ' + text
 
 
+def call_text(text, start):
+    """The text of the call whose `(` ends at `start`, through its matching `)`."""
+    depth, at = 1, start
+    while depth and at < len(text):
+        string = STRING.match(text, at)
+        if string:
+            at = string.end()
+            continue
+        depth += {ord('('): 1, ord(')'): -1}.get(text[at], 0)
+        at += 1
+    return text[start:at]
+
+
+def executables():
+    for path in sorted({path for path, _, _ in rust_lines()}):
+        text = (ROOT / path).read_bytes()
+        for call in WRITE.finditer(text):
+            if b'#!' in call_text(text, call.end()):
+                number = text.count(b'\n', 0, call.start()) + 1
+                yield b'%s:%d:%s' % (os.fsencode(path), number, text.split(b'\n')[number - 1])
+
+
 RULES = {
     'colors': (colors, 'Colors belong in crates/keystone-ui/src/theme.rs. Use a theme token or Color.'),
     'shortcuts': (shortcuts, 'Spell shortcuts secondary-… (Cmd on macOS, Ctrl elsewhere). '
                              'Only ctrl-tab and ctrl-shift-tab stay ctrl-.'),
     'hints': (hints, 'Write shortcut hints with keystone_ui::shortcut_text("secondary-…"), '
                      'which shows Ctrl+… on Linux and ⌘ on macOS.'),
+    'executables': (executables, 'Write a script a test runs with keystone_core::test_support::write_executable, '
+                                 'so no fork from another test can keep it busy.'),
 }
 
 

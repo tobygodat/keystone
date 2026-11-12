@@ -492,18 +492,14 @@ struct Engine {
 }
 
 impl Engine {
+    /// Starts QuickJS with the bundled Mermaid. Only a layout has a time budget: the
+    /// bundle is ours and its start is fixed work, and a deadline here only failed
+    /// diagrams on a busy machine.
     fn new() -> Result<Self, DiagramError> {
-        Self::start(|| Deadline::after(RENDER_TIME))
-    }
-
-    fn start(init: impl FnOnce() -> Deadline) -> Result<Self, DiagramError> {
         let runtime = Runtime::new().map_err(js_error)?;
         runtime.set_memory_limit(64 * 1_048_576);
         runtime.set_max_stack_size(512 * 1024);
-        let budget: Arc<Mutex<Option<Budget>>> = Arc::new(Mutex::new(Some(Budget {
-            deadline: init(),
-            cancel: Arc::new(AtomicBool::new(false)),
-        })));
+        let budget: Arc<Mutex<Option<Budget>>> = Arc::new(Mutex::new(None));
         let interrupt = budget.clone();
         let interrupted = Arc::new(AtomicBool::new(false));
         let interrupt_flag = interrupted.clone();
@@ -521,23 +517,12 @@ impl Engine {
             abort
         })));
         let context = Context::full(&runtime).map_err(js_error)?;
-        let initialized = context.with(|ctx| {
-            ctx.eval::<(), _>(BUNDLE)?;
-            ctx.eval::<(), _>(WRAPPER)
-        });
-        if let Err(error) = initialized {
-            return Err(if interrupted.load(Ordering::Relaxed) {
-                DiagramError {
-                    kind: ErrorKind::RenderTimeout,
-                    ..DiagramError::new(
-                        "Diagram runtime initialization exceeded 750 ms; retry when the application is less busy",
-                    )
-                }
-            } else {
-                js_error(error)
-            });
-        }
-        *budget.lock().unwrap() = None;
+        context
+            .with(|ctx| {
+                ctx.eval::<(), _>(BUNDLE)?;
+                ctx.eval::<(), _>(WRAPPER)
+            })
+            .map_err(js_error)?;
         Ok(Self {
             context,
             runtime,
@@ -1733,19 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn initialization_and_request_waits_fail_when_their_budgets_expire() {
-        let init = Deadline::default();
-        init.expire();
-        let error = Engine::start(|| init)
-            .err()
-            .expect("an expired initialization budget interrupts the bundle");
-        assert!(
-            error.message.contains("initialization exceeded 750 ms")
-                && error.is_transient()
-                && error.resets_runtime(),
-            "{error}"
-        );
-        assert!(Engine::start(Deadline::default).is_ok());
+    fn a_request_wait_fails_when_its_budget_expires() {
         let (reply, response) = oneshot::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let waited = Deadline::default();

@@ -4,7 +4,6 @@ use keystone_agent::{ApprovalState, ClaudeConnection, CodexConnection, Connectio
 use keystone_core::ModelChoice;
 use serde::Deserialize;
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
@@ -19,8 +18,7 @@ struct Fixture {
 }
 
 fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    keystone_core::test_support::write_executable(path, format!("#!/bin/sh\n{body}\n"));
 }
 
 fn collect(

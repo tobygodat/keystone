@@ -57,7 +57,7 @@ The budgets are deliberately smaller than upstream defaults:
 | Source | 32,768 UTF-8 bytes; source remains copyable above the limit. |
 | Work queue | Eight waiting jobs; full queue fails immediately. |
 | Runtime heap / stack | 64 MiB / 512 KiB. |
-| JavaScript work | 750 ms per initialization or layout, checked by QuickJS's interrupt handler. |
+| JavaScript work | 750 ms per layout, checked by QuickJS's interrupt handler. Starting the engine runs only bundled code and has no limit of its own: the caller's four-second deadline covers it. |
 | Caller/queue deadline | Four seconds; expired jobs are skipped and cancelled work is interrupted. |
 | Edges / output | 512 flowchart edges / 1 MiB SVG. |
 | Measurement | 4,096 host calls and 256 KiB cumulative label text per layout; invalid metrics fail. |

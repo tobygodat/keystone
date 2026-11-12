@@ -127,8 +127,9 @@ impl Saves {
         Revision(self.issued)
     }
 
-    /// Queues another try when the last one failed, none is queued, and another try
-    /// could save it.
+    /// Queues another try when the last one failed and another try could save it. A
+    /// try may be running: one that will fail too leaves the new try to run after it.
+    /// Nothing is queued when a try already waits behind the running one.
     pub(crate) fn retry(&self) {
         let failing = {
             let progress = lock(&self.shared.progress);
@@ -136,7 +137,7 @@ impl Saves {
                 .error
                 .as_ref()
                 .is_some_and(|error| !matches!(error, SaveError::Stale(_)))
-                && progress.draining == 0
+                && progress.draining <= 1
         };
         if failing {
             self.drain(None);

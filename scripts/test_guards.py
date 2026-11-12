@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the color, shortcut and hint guards in scripts/check.sh: python3 scripts/test_guards.py."""
+"""Tests for the color, shortcut, hint and executable guards in scripts/check.sh: python3 scripts/test_guards.py."""
 import os
 from pathlib import Path
 import shutil
@@ -136,6 +136,20 @@ class CheckScriptGuardsTest(unittest.TestCase):
             with self.subTest(hint=hint):
                 self.write('docs/ui-strings.txt', INVENTORY + f'\ncrates/keystone-desktop/src/palette.rs\n\t{hint}\n')
                 self.assert_fails(f'crates/keystone-desktop/src/palette.rs: \t{hint}')
+
+    def test_a_script_written_with_fs_write_fails(self):
+        self.write('crates/keystone-desktop/src/wrapper_tests.rs',
+                   'fn wrapper(path: &Path) {\n    let _ = std::fs::write(path, ")");\n'
+                   '    std::fs::write(\n        path,\n        format!("#!/bin/sh\\nexec {}", fake()),\n    )\n    .unwrap();\n}\n')
+        run = self.assert_fails('crates/keystone-desktop/src/wrapper_tests.rs:3:', 'write_executable')
+        self.assertNotIn('wrapper_tests.rs:2:', run.stdout)
+
+    def test_a_script_written_with_write_executable_passes(self):
+        self.write('crates/keystone-desktop/src/wrapper_tests.rs',
+                   'fn wrapper(path: &Path) {\n    std::fs::write(path, "(#").unwrap();\n'
+                   '    keystone_core::test_support::write_executable(path, "#!/bin/sh\\nexit 0\\n");\n'
+                   '    std::fs::write(path.with_extension("log"), "").unwrap();\n}\n')
+        self.assert_passes()
 
     def without_grep_p_or_awk(self):
         self.shim('grep', f'''for a; do case $a in -*P*) echo "grep: invalid option -- 'P'" >&2; exit 2;; esac; done

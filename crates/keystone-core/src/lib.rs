@@ -29,6 +29,9 @@ mod save;
 mod schedule;
 mod session_context;
 mod tabs;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;
 mod usage;
 mod windows;
 pub mod worktree;
@@ -2356,6 +2359,46 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(reopened.workspace().sessions()[0].draft(), "look");
+    }
+
+    /// A retry asked for while a try that will fail is still running is not dropped: it
+    /// runs once that try ends, so a cause fixed meanwhile saves without another change.
+    #[test]
+    fn a_retry_asked_for_while_a_doomed_try_runs_goes_once_that_try_ends() {
+        static GATE: (std::sync::Mutex<(bool, bool)>, std::sync::Condvar) = (
+            std::sync::Mutex::new((false, false)),
+            std::sync::Condvar::new(),
+        );
+        fn held_then_failed(_: &std::fs::File) -> io::Result<()> {
+            let mut state = GATE.0.lock().unwrap();
+            state.0 = true;
+            GATE.1.notify_all();
+            while !state.1 {
+                state = GATE.1.wait(state).unwrap();
+            }
+            Err(io::Error::other("directory sync unavailable"))
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path().join("state.json")).unwrap();
+        store.set_sync_directory(|_| Err(io::Error::other("directory sync unavailable")));
+        let created = store
+            .create(Provider::Claude, &working_directory(), 1)
+            .unwrap();
+        assert!(store.flush().is_err());
+        store.set_sync_directory(held_then_failed);
+        store.retry();
+        let mut state = GATE.0.lock().unwrap();
+        while !state.0 {
+            state = GATE.1.wait(state).unwrap();
+        }
+        drop(state);
+        store.set_sync_directory(std::fs::File::sync_all);
+        store.retry();
+        GATE.0.lock().unwrap().1 = true;
+        GATE.1.notify_all();
+        store.writes();
+        assert_eq!(store.save_error(), None);
+        assert!(store.is_durable(created.revision));
     }
 
     #[test]

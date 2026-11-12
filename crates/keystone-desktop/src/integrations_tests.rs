@@ -7,7 +7,6 @@ use crate::*;
 use keystone_agent::{ConfigEnv, ItemStatus};
 use keystone_core::integrations::Health;
 use keystone_core::integrations::copy;
-use std::os::unix::fs::PermissionsExt;
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -35,12 +34,10 @@ fn fake(dir: &Path, name: &str, env: &str) -> PathBuf {
         "build it with `cargo build -p keystone-agent --bins`"
     );
     let script = dir.join(format!("{name}-wrapper"));
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!("#!/bin/sh\n{env} exec '{}' \"$@\"\n", binary.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 

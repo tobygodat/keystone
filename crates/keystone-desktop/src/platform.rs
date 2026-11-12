@@ -242,17 +242,14 @@ pub(crate) fn bind_menus(cx: &mut gpui::App) {
 mod tests {
     #[test]
     fn a_shell_that_never_stops_printing_is_given_up_at_the_deadline() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let shell = dir.path().join("shell");
-        std::fs::write(
+        keystone_core::test_support::write_executable(
             &shell,
             "#!/bin/sh
 while :; do echo noise; done
 ",
-        )
-        .unwrap();
-        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let started = std::time::Instant::now();
         assert!(super::login_environment(shell.as_os_str()).is_none());
         assert!(started.elapsed() < std::time::Duration::from_secs(7));

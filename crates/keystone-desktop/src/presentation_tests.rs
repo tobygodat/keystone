@@ -797,20 +797,17 @@ fn fake_claude() -> std::path::PathBuf {
 }
 
 fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let fake = fake_claude();
     let log = dir.join("claude-cwd");
     let script = dir.join("claude-cwd-wrapper");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\nif [ \"$1\" != --version ]; then pwd >> '{}'; fi\nexec '{}' \"$@\"\n",
             log.display(),
             fake.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     (script, log)
 }
 
@@ -867,7 +864,7 @@ fn changing_provider_clears_a_completed_catalog_notice(cx: &mut TestAppContext) 
         "#!/bin/sh",
         "#!/bin/sh\nexport KEYSTONE_FAKE_CLAUDE_VERSION=development-build",
     );
-    std::fs::write(&claude, body).unwrap();
+    keystone_core::test_support::write_executable(&claude, body);
     view.update(cx, |this, cx| {
         claude_from(this, claude, cx);
         this.request_catalog(2, Provider::Claude, cx);
@@ -901,7 +898,7 @@ fn a_late_catalog_notice_cannot_cross_provider_selection(cx: &mut TestAppContext
         "#!/bin/sh",
         "#!/bin/sh\nexport KEYSTONE_FAKE_CLAUDE_VERSION=development-build",
     );
-    std::fs::write(&claude, body).unwrap();
+    keystone_core::test_support::write_executable(&claude, body);
     // The scripted Codex, since a Codex installed on the machine may earn a notice of its own.
     view.update_in(cx, |this, window, cx| {
         claude_from(this, claude, cx);

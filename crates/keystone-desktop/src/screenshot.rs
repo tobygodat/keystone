@@ -173,33 +173,17 @@ fn shot(output: &Output, out: &Path) -> Shot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     use std::path::PathBuf;
 
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        keystone_core::test_support::write_executable(&path, format!("#!/bin/sh\n{body}\n"));
         path
     }
 
-    /// Run through `sh`, so a script just written is never executed while another test
-    /// thread's fork still holds it open for writing.
     fn program(dir: &Path, body: &str) -> Tool {
-        let script = script(dir, "capture", body);
-        Tool::Program(vec!["/bin/sh".into(), script.to_str().unwrap().into()])
-    }
-
-    /// Captures with `tool`, again while a script it runs is still busy being written.
-    fn capture(tool: &Tool, out: &Path) -> Shot {
-        for _ in 0..50 {
-            match tool.capture(out) {
-                Shot::Failed(reason) if reason.contains("Text file busy") => {}
-                shot => return shot,
-            }
-        }
-        panic!("a capture script stayed busy");
+        Tool::Program(vec![script(dir, "capture", body).to_str().unwrap().into()])
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -258,7 +242,7 @@ mod tests {
         for (body, expected) in cases {
             let _ = std::fs::remove_file(&out);
             assert_eq!(
-                capture(&program(dir.path(), body), &out),
+                (program(dir.path(), body)).capture(&out),
                 expected,
                 "{body}"
             );
@@ -285,7 +269,7 @@ mod tests {
             slurp: script(dir.path(), "slurp", "echo '10,20 300x200'"),
             grim: grim.clone(),
         };
-        assert_eq!(capture(&picked, &out), Shot::Taken);
+        assert_eq!(picked.capture(&out), Shot::Taken);
         assert_eq!(
             std::fs::read_to_string(&log).unwrap().trim(),
             format!("-g 10,20 300x200 {}", out.display())
@@ -300,7 +284,7 @@ mod tests {
             ),
             grim,
         };
-        assert_eq!(capture(&cancelled, &out), Shot::Cancelled);
+        assert_eq!(cancelled.capture(&out), Shot::Cancelled);
         assert!(!log.exists(), "grim ran after a cancelled pick");
     }
 
@@ -318,7 +302,7 @@ mod tests {
             ),
         };
         assert_eq!(
-            capture(&unsupported, &dir.path().join(NAME)),
+            unsupported.capture(&dir.path().join(NAME)),
             Shot::Failed(
                 "Screenshot failed. compositor doesn't support wlr-screencopy-unstable-v1".into()
             )

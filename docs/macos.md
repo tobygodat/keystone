@@ -46,7 +46,7 @@ macOS lets a process inject input or read the screen only with Accessibility and
 
 Drive Keystone on a Mac through these hooks, never with screenshot-and-click computer use such as Codex Computer Use, a computer-use MCP server, `cliclick` or `osascript` keystrokes. Those move the pointer and type into whatever window is in front, so they take over the Mac from the person using it. Accessibility-tree tools such as [agent-desktop](https://github.com/vercel-labs/agent-desktop) cannot drive Keystone yet, even in their headless mode, which neither moves the pointer nor takes focus. GPUI puts only elements with an explicit `.role()` into the macOS accessibility tree, and Keystone sets a role on almost none. agent-desktop sees the title bar's three buttons and an empty view. TOB-325 tracks exposing the controls.
 
-Some tests hold timing budgets that a busy Mac can miss, such as the workspace's 100 ms wait for its writer and the 500 ms budget of `many_large_additions_are_trimmed_quickly`. When the lanes fail only there, rerun them with `RUST_TEST_THREADS=4`.
+Some tests hold timing budgets that a busy Mac can miss, such as the workspace's 100 ms wait for its writer. When the lanes fail only there, rerun them with `RUST_TEST_THREADS=4`.
 
 ## The Linux guard
 

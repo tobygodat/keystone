@@ -661,13 +661,10 @@ pub(crate) mod tests_support {
             "build it with `cargo build -p keystone-agent --bins`"
         );
         let script = dir.join(format!("{name}-wrapper"));
-        std::fs::write(
+        keystone_core::test_support::write_executable(
             &script,
             format!("#!/bin/sh\n{env} exec '{}' \"$@\"\n", fake.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        );
         script
     }
 }

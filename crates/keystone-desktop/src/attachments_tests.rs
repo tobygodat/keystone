@@ -6,7 +6,6 @@ use crate::{AppState, Row};
 use gpui::{ClipboardItem, ImageFormat, TestAppContext, VisualTestContext};
 use keystone_agent::ItemKind;
 use keystone_core::{Provider, Store, WorkingDirectory};
-use std::os::unix::fs::PermissionsExt;
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nkeystone attachment fixture";
 const JPEG: &[u8] = b"\xff\xd8\xff\xe0keystone jpeg fixture";
@@ -34,15 +33,13 @@ fn wrapper(dir: &Path, name: &str) -> PathBuf {
         "KEYSTONE_FAKE_IMAGE_RECEIPT": dir.join("receipt.jsonl"),
     });
     let script = dir.join(format!("{name}-attach-wrapper"));
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/usr/bin/python3\nimport os, sys\nos.environ.update({environment})\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
             serde_json::to_string(&binary).unwrap()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 

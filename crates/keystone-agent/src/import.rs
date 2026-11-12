@@ -270,14 +270,23 @@ mod tests {
     #[test]
     fn claude_sessions_are_those_that_ran_in_the_folder_newest_first_and_untouched() {
         let root = tempfile::tempdir().unwrap();
+        // Each file is a second newer than the last, so the order never rests on how
+        // finely the filesystem stamps two quick writes.
+        let written = std::cell::Cell::new(std::time::UNIX_EPOCH);
         let write = |folder: &str, name: &str, text: String| {
             let folder = root.path().join("projects").join(folder);
             std::fs::create_dir_all(&folder).unwrap();
             std::fs::write(folder.join(name), text).unwrap();
+            written.set(written.get() + std::time::Duration::from_secs(1));
+            std::fs::File::options()
+                .write(true)
+                .open(folder.join(name))
+                .unwrap()
+                .set_modified(written.get())
+                .unwrap();
         };
         let older = record("u1", None, "/w", "Older one");
         write("-w", "older.jsonl", older);
-        std::thread::sleep(std::time::Duration::from_millis(20));
         let newer =
             record("v1", None, "/w", "Newer one") + &record("v2", Some("v1"), "/w", "again");
         write("-w", "newer.jsonl", newer);

@@ -5,7 +5,6 @@ use super::*;
 use crate::AppState;
 use gpui::{TestAppContext, VisualTestContext};
 use keystone_core::{Store, WorkingDirectory};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 fn write(path: &Path, text: &str) {
@@ -28,15 +27,13 @@ fn wrapper(dir: &Path, name: &str) -> PathBuf {
         "KEYSTONE_FAKE_CLAUDE_LOG_DIR": dir.to_str().unwrap(),
     });
     let script = dir.join(format!("{name}-slash-wrapper"));
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/usr/bin/python3\nimport os, sys\nos.environ.update({environment})\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
             serde_json::to_string(&binary).unwrap()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 
@@ -665,8 +662,7 @@ fn enter_waits_for_the_command_list_before_inserting_a_shortcut_prompt(cx: &mut 
     let folder = dir.path().join("project");
     std::fs::create_dir_all(&folder).unwrap();
     let silent = dir.path().join("silent");
-    std::fs::write(&silent, "#!/bin/sh\nexec sleep 30\n").unwrap();
-    std::fs::set_permissions(&silent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keystone_core::test_support::write_executable(&silent, "#!/bin/sh\nexec sleep 30\n");
     let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
     let id = store
         .create(

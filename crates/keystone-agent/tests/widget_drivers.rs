@@ -710,7 +710,6 @@ mod scripted {
     use keystone_agent::{
         ApprovalState, ClaudeConnection, CodexConnection, Command, Connection, Event, TurnStatus,
     };
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::sync::mpsc::{Receiver, channel};
     use std::time::{Duration, Instant};
@@ -812,8 +811,10 @@ mod scripted {
 
     fn program(dir: &std::path::Path, binary: &str, env: &str) -> std::path::PathBuf {
         let path = dir.join("provider");
-        std::fs::write(&path, format!("#!/bin/sh\n{env}\nexec '{binary}' \"$@\"\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        keystone_core::test_support::write_executable(
+            &path,
+            format!("#!/bin/sh\n{env}\nexec '{binary}' \"$@\"\n"),
+        );
         path
     }
 

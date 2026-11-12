@@ -67,18 +67,15 @@ fn thread(events: &[(u64, Event)], session: u64) -> Option<String> {
 }
 
 fn wrapper(dir: &Path, program: &str, env: &[(&str, String)]) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let script = dir.join("wrapper");
     let exports: String = env
         .iter()
         .map(|(name, value)| format!("export {name}='{value}'\n"))
         .collect();
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!("#!/bin/sh\n{exports}exec '{program}' \"$@\"\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 

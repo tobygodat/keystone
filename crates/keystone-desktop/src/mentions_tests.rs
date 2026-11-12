@@ -5,7 +5,6 @@ use super::*;
 use crate::AppState;
 use gpui::{TestAppContext, VisualTestContext};
 use keystone_core::{Provider, Store, WorkingDirectory};
-use std::os::unix::fs::PermissionsExt;
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -26,15 +25,13 @@ fn wrapper(dir: &Path) -> PathBuf {
         "build keystone-fake-claude first: cargo build -p keystone-agent --bins"
     );
     let script = dir.join("claude-mention-wrapper");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/usr/bin/python3\nimport os, sys\nos.environ['KEYSTONE_FAKE_CLAUDE_DELAY_MS'] = '2'\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
             serde_json::to_string(&binary).unwrap()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 

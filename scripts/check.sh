@@ -13,6 +13,7 @@ python3 scripts/test_guards.py
 python3 scripts/test_ui_strings.py
 python3 scripts/ui-strings.py --check
 python3 scripts/guards.py hints
+python3 scripts/guards.py executables
 case "${1:-core}" in
   core)
     cargo test -p keystone-core -p keystone-agent --locked

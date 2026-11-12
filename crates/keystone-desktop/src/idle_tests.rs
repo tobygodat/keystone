@@ -28,15 +28,13 @@ fn idle_claude(dir: &Path) -> PathBuf {
         "KEYSTONE_FAKE_ENV_RECEIPT": dir.join("env").to_str().unwrap(),
     });
     let script = dir.join("claude-idle-wrapper");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/usr/bin/python3\nimport os, sys\nos.environ.update({environment})\nbinary = {}\nos.execv(binary, [binary, *sys.argv[1:]])\n",
             serde_json::to_string(&binary).unwrap()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     std::fs::write(dir.join("argv"), "").unwrap();
     std::fs::write(dir.join(".fake-claude-messages"), "").unwrap();
     script

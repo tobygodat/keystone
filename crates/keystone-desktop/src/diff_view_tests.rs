@@ -12,21 +12,12 @@ fn wait_for_element(cx: &mut gpui::VisualTestContext, selector: &'static str) {
     panic!("{selector} was never drawn");
 }
 
-/// A wrapper script for the fake `name`, written by a child process. A file this
-/// process writes and then runs can be held open by a fork from a sibling test's thread,
-/// and exec then fails with "Text file busy".
 fn script_wrapper(dir: &Path, name: &str, env: &str) -> PathBuf {
-    use std::io::Write;
     let script = dir.join(format!("{name}-wrapper"));
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
-        .arg(&script)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let body = format!("#!/bin/sh\n{env} exec '{}' \"$@\"\n", fake(name).display());
-    child.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
-    assert!(child.wait().unwrap().success());
+    keystone_core::test_support::write_executable(
+        &script,
+        format!("#!/bin/sh\n{env} exec '{}' \"$@\"\n", fake(name).display()),
+    );
     script
 }
 

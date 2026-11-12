@@ -4,7 +4,6 @@ use crate::{AppState, install_app_state, open_windows, request_quit};
 use gpui::{AnyWindowHandle, Entity, TestAppContext, VisualTestContext};
 use keystone_core::{Provider, Store, WorkingDirectory};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -17,15 +16,13 @@ pub(crate) fn fake_gh() {
         let dir = std::env::temp_dir().join(format!("keystone-fake-gh-pr-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let gh = dir.join("gh");
-        fs::write(
+        keystone_core::test_support::write_executable(
             &gh,
             "#!/bin/sh\n\
              [ -x \"$PWD/.git/fake-gh\" ] && exec \"$PWD/.git/fake-gh\" \"$@\"\n\
              echo 'To get started with GitHub CLI, please run:  gh auth login' >&2\n\
              exit 4\n",
-        )
-        .unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let path = std::env::var_os("PATH").unwrap_or_default();
         let path =
             std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path))).unwrap();
@@ -48,7 +45,7 @@ fn git(repo: &Path, args: &[&str]) {
 /// `comments-<stage>.json`. A merge records itself and moves the stage to `merged`.
 fn script_gh(repo: &Path) {
     let path = repo.join(".git/fake-gh");
-    fs::write(
+    keystone_core::test_support::write_executable(
         &path,
         r#"#!/bin/sh
 for a in "$@"; do printf '%s\n' "$a"; done >> .git/fake-gh-argv
@@ -75,9 +72,7 @@ case "$1 $2" in
     esac ;;
 esac
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 }
 
 fn view_json(state: &str, merge_state: &str, decision: &str, checks: &str) -> String {
@@ -424,12 +419,10 @@ fn the_pull_request_tab_follows_checks_and_reviews_and_merges_only_once_confirme
     assert!(shown(cx, "pull-request-title"), "and the tab with it");
     let editor = root.join("editor-log");
     let script = root.join("editor");
-    fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!("#!/bin/sh\necho \"$1\" > '{}'\n", editor.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     // SAFETY: as for PATH; no other test reads VISUAL.
     unsafe { std::env::set_var("VISUAL", &script) };
     click(cx, "pull-request-comment-0");

@@ -9,7 +9,6 @@ use crate::app_state::CONTINUE_TEXT;
 use crate::limit::{CONTINUE_GRACE_MS, CONTINUE_MISSED_MS};
 use crate::*;
 use keystone_agent::ItemStatus;
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 /// The scripted providers, each run with this test's own default config home and
@@ -30,7 +29,7 @@ fn fake_programs(dir: &Path) -> (PathBuf, PathBuf) {
         );
         let script = dir.join(format!("{name}-limit-wrapper"));
         let root = dir.display();
-        std::fs::write(
+        keystone_core::test_support::write_executable(
             &script,
             format!(
                 "#!/bin/sh\ncase \"${var}\" in '{root}'/*) ;; *) export {var}='{root}/default-{name}' ;; esac\n\
@@ -38,9 +37,7 @@ fn fake_programs(dir: &Path) -> (PathBuf, PathBuf) {
                  KEYSTONE_FAKE_CLAUDE_ECHO=1 KEYSTONE_FAKE_CODEX_DELAY_MS=1 exec '{}' \"$@\"\n",
                 binary.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         script
     };
     (

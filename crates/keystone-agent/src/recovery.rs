@@ -163,6 +163,12 @@ pub const LOCAL_PREFIX: &str = "local:";
 /// Most bytes one batch may serialize to, below the log's retry budget.
 pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    /// How many operations this thread's reconciles have serialized to fit the budget.
+    static SERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn incomplete(item: &Item) -> bool {
     matches!(
         item.status,
@@ -387,6 +393,8 @@ pub fn reconcile(neutral: &[Item], open_turn: bool, snapshot: &Snapshot) -> Opti
     let kept = operations
         .iter()
         .position(|operation| {
+            #[cfg(test)]
+            SERIALIZED.set(SERIALIZED.get() + 1);
             total = serde_json::to_vec(operation)
                 .map_or(usize::MAX, |bytes| total.saturating_add(bytes.len() + 1));
             total > MAX_BATCH_BYTES - 64 * 1024
@@ -851,22 +859,21 @@ mod tests {
     }
 
     #[test]
-    fn many_large_additions_are_trimmed_quickly() {
+    fn many_large_additions_are_trimmed_without_serializing_the_rest() {
         let neutral = [user("u1", "a")];
         let text = "y".repeat(8 * 1024);
         let items: Vec<Item> = std::iter::once(user("u1", "a"))
             .chain((0..1500).map(|n| reply(&format!("m{n}"), &text, ItemStatus::Completed)))
             .collect();
         let snap = snapshot(vec![(items, None)]);
-        let started = std::time::Instant::now();
+        super::SERIALIZED.set(0);
         let batch = reconcile(&neutral, false, &snap).unwrap();
-        let elapsed = started.elapsed();
         assert!(batch.report.limits.contains(&Limit::Truncated));
         assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_BATCH_BYTES);
-        assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "{:?}",
-            elapsed
+        assert_eq!(
+            super::SERIALIZED.get(),
+            batch.operations.len() + 1,
+            "operations serialized: only those kept and the first that didn't fit"
         );
     }
 

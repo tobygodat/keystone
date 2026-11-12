@@ -2381,18 +2381,12 @@ mod tests {
 
     #[test]
     fn a_ref_hook_that_hangs_does_not_hold_a_restore() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = repository();
         let root = dir.path();
         save_turn(root, 1, 1, None, KEEP);
         write(root, "edited.txt", "later\n");
         let hook = root.join(".git/hooks/reference-transaction");
-        write(
-            root,
-            ".git/hooks/reference-transaction",
-            "#!/bin/sh\nsleep 30\n",
-        );
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        keystone_core::test_support::write_executable(&hook, "#!/bin/sh\nsleep 30\n");
         let start = std::time::Instant::now();
 
         restore_kept(root, &session(1), 1).unwrap();

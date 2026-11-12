@@ -244,21 +244,18 @@ fn until(
 
 /// The scripted app-server run with extra environment, through a wrapper script.
 fn wrapper(dir: &Path, env: &[(&str, String)]) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let script = dir.join("codex-wrapper");
     let exports: String = env
         .iter()
         .map(|(name, value)| format!("export {name}='{value}'\n"))
         .collect();
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\n{exports}exec '{}' \"$@\"\n",
             env!("CARGO_BIN_EXE_keystone-fake-codex")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 
@@ -413,18 +410,13 @@ fn a_provider_that_exits_mid_turn_asks_for_recovery_and_its_store_is_ahead() {
     std::fs::create_dir_all(&cwd).unwrap();
     let claude = PathBuf::from(env!("CARGO_BIN_EXE_keystone-fake-claude"));
     let program = dir.path().join("claude-wrapper");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &program,
         format!(
             "#!/bin/sh\nexport KEYSTONE_FAKE_CLAUDE_STORE=1 KEYSTONE_FAKE_CLAUDE_DELAY_MS=5\nexec '{}' \"$@\"\n",
             claude.display()
         ),
-    )
-    .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    );
     let (wake, rx) = wake();
     let connection = ClaudeConnection::with_profile(
         Some(program),

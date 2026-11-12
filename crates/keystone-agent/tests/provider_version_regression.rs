@@ -2,7 +2,6 @@
 
 use keystone_agent::{ApprovalState, CodexConnection, Event};
 use keystone_core::ModelChoice;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -10,8 +9,13 @@ use std::time::{Duration, Instant};
 fn incompatible_codex_is_refused_before_a_thread_or_turn_starts() {
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("codex");
-    std::fs::write(&program, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.20.0'; exit 0; fi\nexec '{}' \"$@\"\n", env!("CARGO_BIN_EXE_keystone-fake-codex"))).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    keystone_core::test_support::write_executable(
+        &program,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.20.0'; exit 0; fi\nexec '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_keystone-fake-codex")
+        ),
+    );
     let (tx, rx) = mpsc::channel();
     let connection = CodexConnection::new(
         Some(program),

@@ -5189,15 +5189,16 @@ mod tests {
     fn transcript_keyboard_diagrams_toggle_copy_and_preserve_code_ordinals(
         cx: &mut gpui::TestAppContext,
     ) {
-        fn image(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        fn image(cx: &mut gpui::VisualTestContext, image: &'static str, error: &'static str) {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
             loop {
                 cx.run_until_parked();
                 cx.update(|window, cx| window.draw(cx).clear(cx));
-                if cx.debug_bounds(selector).is_some() {
+                if cx.debug_bounds(image).is_some() {
                     return;
                 }
-                assert!(std::time::Instant::now() < deadline, "{selector}");
+                assert!(cx.debug_bounds(error).is_none(), "{error} is shown");
+                assert!(std::time::Instant::now() < deadline, "{image}");
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
@@ -5235,7 +5236,7 @@ mod tests {
         assert_eq!(clipboard(cx).as_deref(), Some(reply));
         keys(cx, "tab space");
         assert_eq!(clipboard(cx).as_deref(), Some("before"));
-        image(cx, "reply-0-diagram-2-image");
+        image(cx, "reply-0-diagram-2-image", "reply-0-diagram-2-error");
         keys(cx, "tab space");
         assert!(cx.debug_bounds("reply-0-diagram-2-source").is_some());
         keys(cx, "secondary-shift-c");
@@ -5246,7 +5247,7 @@ mod tests {
         assert_eq!(clipboard(cx).as_deref(), Some("flowchart TD\nA-->B\n"));
         keys(cx, "tab space");
         assert_eq!(clipboard(cx).as_deref(), Some("after"));
-        image(cx, "reply-0-diagram-4-image");
+        image(cx, "reply-0-diagram-4-image", "reply-0-diagram-4-error");
         keys(cx, "tab enter");
         assert!(cx.debug_bounds("reply-0-diagram-4-source").is_some());
         keys(cx, "tab space");
@@ -7056,13 +7057,10 @@ mod tests {
     /// this process see no change.
     fn wrapper(dir: &Path, name: &str, env: &str) -> PathBuf {
         let script = dir.join(format!("{name}-wrapper"));
-        std::fs::write(
+        keystone_core::test_support::write_executable(
             &script,
             format!("#!/bin/sh\n{env} exec '{}' \"$@\"\n", fake(name).display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        );
         script
     }
 
@@ -8642,17 +8640,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("workspace.json")).unwrap();
         // The setting goes in a wrapper, so tests sharing this process see no change.
+        // The reply holds after its first word until `release` exists, so the turn is
+        // still running when the steer is tried, however slow the machine.
         let script = dir.path().join("old-claude");
-        std::fs::write(
+        let release = dir.path().join("release");
+        keystone_core::test_support::write_executable(
             &script,
             format!(
-                "#!/bin/sh\nKEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE=1 KEYSTONE_FAKE_CLAUDE_DELAY_MS=5 exec '{}' \"$@\"\n",
+                "#!/bin/sh\nKEYSTONE_FAKE_CLAUDE_NO_LIFECYCLE=1 KEYSTONE_FAKE_CLAUDE_DELAY_MS=5 KEYSTONE_FAKE_CLAUDE_RELEASE_FILE='{}' exec '{}' \"$@\"\n",
+                release.display(),
                 fake("keystone-fake-claude").display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        );
         cx.update(|cx| {
             keystone_ui::init(cx);
             bind_keys(cx);
@@ -8685,7 +8684,7 @@ mod tests {
                 .iter()
                 .any(|row| {
                     matches!(row, Row::Item(item)
-                if item.status == ItemStatus::InProgress && item.text.contains("word1"))
+                if item.status == ItemStatus::InProgress && item.kind == ItemKind::AgentMessage)
                 })
         });
         cx.simulate_input("change course");
@@ -8710,6 +8709,7 @@ mod tests {
                 if item.text == "change course"))
             );
         });
+        std::fs::write(&release, "").unwrap();
         wait_until(cx, &view, |view, cx| {
             !view.state.read(cx).conversations()[&1].running
         });
@@ -9841,16 +9841,13 @@ mod tests {
     /// process see no change.
     fn claude_script(dir: &std::path::Path, env: &str) -> PathBuf {
         let script = dir.join("claude");
-        std::fs::write(
+        keystone_core::test_support::write_executable(
             &script,
             format!(
                 "#!/bin/sh\n{env} KEYSTONE_FAKE_CLAUDE_DELAY_MS=5 exec '{}' \"$@\"\n",
                 fake("keystone-fake-claude").display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        );
         script
     }
 

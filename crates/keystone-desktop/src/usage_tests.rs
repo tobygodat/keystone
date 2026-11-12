@@ -5,7 +5,6 @@
 
 use crate::*;
 use keystone_agent::ItemStatus;
-use std::os::unix::fs::PermissionsExt;
 
 fn fake_claude(dir: &Path) -> PathBuf {
     let binary = std::env::current_exe()
@@ -20,15 +19,13 @@ fn fake_claude(dir: &Path) -> PathBuf {
         "build it with `cargo build -p keystone-agent --bins`"
     );
     let script = dir.join("claude-usage-wrapper");
-    std::fs::write(
+    keystone_core::test_support::write_executable(
         &script,
         format!(
             "#!/bin/sh\nKEYSTONE_FAKE_CLAUDE_DELAY_MS=1 exec '{}' \"$@\"\n",
             binary.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 
