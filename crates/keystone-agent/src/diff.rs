@@ -1,8 +1,13 @@
 //! What changed between two trees of a repository, read from `git diff-tree` as plain
-//! data. Reading stops after [`MAX_LINES`] lines of the patch, so a huge change costs
-//! no more memory or time than that. Every call blocks.
+//! data, and what one agent edit changed, built from what its provider sent. Reading
+//! stops after [`MAX_LINES`] lines of the patch, so a huge change costs no more memory
+//! or time than that. Every git call blocks.
+//!
+//! A patch serializes compactly: each hunk as its header and its lines in unified diff
+//! form (` a`, `-b`, `+c`), with line numbers worked out again when it is read.
 
 use crate::git::{self, git};
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::Stdio;
@@ -11,15 +16,163 @@ use std::process::Stdio;
 pub const MAX_LINES: usize = 200_000;
 /// Bytes of one line kept; the rest of a longer line is left out.
 const MAX_LINE_BYTES: usize = 4096;
+/// Bytes of an edit's lines kept: the log's cap on a tool's output, both ends together.
+pub const EDIT_BYTES: usize = crate::item::OUTPUT_CAP * 2;
+/// Lines of an edit kept in the log. A transcript row draws only the first few of them;
+/// the diff view, which lays out only the lines in view, shows the rest.
+pub const EDIT_LINES: usize = 1000;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Patch {
+    #[serde(default)]
     pub files: Vec<FileDiff>,
-    /// The patch was longer than [`MAX_LINES`], and the files after that are missing.
+    /// The patch was cut at a limit ([`MAX_LINES`], or [`EDIT_LINES`] and
+    /// [`EDIT_BYTES`] for an edit), and the lines after that are missing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+impl Patch {
+    /// An agent edit's files, kept to [`EDIT_LINES`] lines and [`EDIT_BYTES`] bytes of
+    /// line text. Hunks and files after the limit are dropped, and `truncated` says so.
+    pub fn edit(mut files: Vec<FileDiff>) -> Patch {
+        let (mut lines, mut bytes) = (0, 0);
+        let mut cut = None;
+        'files: for (f, file) in files.iter().enumerate() {
+            for (h, hunk) in file.hunks.iter().enumerate() {
+                for (l, line) in hunk.lines.iter().enumerate() {
+                    lines += 1;
+                    bytes += line.text.len() + 1;
+                    if lines > EDIT_LINES || bytes > EDIT_BYTES {
+                        cut = Some((f, h, l));
+                        break 'files;
+                    }
+                }
+            }
+        }
+        if let Some((f, h, l)) = cut {
+            files.truncate(f + 1);
+            let file = &mut files[f];
+            file.hunks.truncate(h + 1);
+            file.hunks[h].lines.truncate(l);
+            if l == 0 {
+                file.hunks.pop();
+            } else {
+                file.hunks[h].recount();
+            }
+            if file.hunks.is_empty() && f > 0 {
+                files.pop();
+            }
+        }
+        Patch {
+            files,
+            truncated: cut.is_some(),
+        }
+    }
+
+    /// The same patch with each path as a user should see it from `folder`: relative to
+    /// it when inside it ([`shown_path`]).
+    pub fn shown_from(&self, folder: &str) -> Patch {
+        let mut patch = self.clone();
+        for file in &mut patch.files {
+            file.path = shown_path(&file.path, folder).into_owned();
+            if let Some(old) = &mut file.old_path {
+                *old = shown_path(old, folder).into_owned();
+            }
+        }
+        patch
+    }
+
+    /// The patch as unified diff text: each file's `---` and `+++` lines, then its hunks.
+    /// A relative path takes git's `a/` and `b/` prefixes; an absolute one is written as
+    /// it is. A cut patch starts with a line saying so, which patch tools skip as text
+    /// before the first file.
+    pub fn text(&self) -> String {
+        let mut text = String::new();
+        let partial = "so this diff is partial and will not apply as it is.";
+        if self.truncated {
+            let kept: usize = self
+                .files
+                .iter()
+                .flat_map(|f| &f.hunks)
+                .map(|h| h.lines.len())
+                .sum();
+            text.push_str(&format!(
+                "Keystone kept only the first {kept} lines of this edit, {partial}\n"
+            ));
+        }
+        if self
+            .files
+            .iter()
+            .flat_map(|f| &f.hunks)
+            .any(|h| h.shortened)
+        {
+            text.push_str(&format!(
+                "Keystone shortened lines longer than {} KiB, {partial}\n",
+                MAX_LINE_BYTES / 1024
+            ));
+        }
+        let side = |prefix: &str, path: &str| match path.starts_with('/') {
+            true => path.to_owned(),
+            false => format!("{prefix}{path}"),
+        };
+        for file in &self.files {
+            let old = file.old_path.as_deref().unwrap_or(&file.path);
+            let (from, to) = match file.change {
+                Change::Added => ("/dev/null".to_owned(), side("b/", &file.path)),
+                Change::Deleted => (side("a/", old), "/dev/null".to_owned()),
+                Change::Modified | Change::Renamed => (side("a/", old), side("b/", &file.path)),
+            };
+            text.push_str(&format!("--- {from}\n+++ {to}\n"));
+            for hunk in &file.hunks {
+                let wire = WireHunk::from(hunk.clone());
+                text.push_str(&wire.header);
+                text.push('\n');
+                for line in wire.lines {
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+            }
+        }
+        text
+    }
+}
+
+/// `path` as a user should see it from `folder`, the session's folder here or on
+/// another machine: relative to it when it lies inside it, else as given. Paths are
+/// compared as text, a whole component at a time, since a remote folder names nothing
+/// on this machine; repeated separators count as one.
+pub fn shown_path<'a>(path: &'a str, folder: &str) -> std::borrow::Cow<'a, str> {
+    let path = single_slashes(path);
+    let folder = single_slashes(folder);
+    let folder = folder.trim_end_matches('/');
+    let inside = path
+        .strip_prefix(folder)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|inside| !inside.is_empty())
+        .map(str::to_owned);
+    match inside {
+        Some(inside) => inside.into(),
+        None => path,
+    }
+}
+
+/// `text` with each run of `/` made one.
+fn single_slashes(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("//") {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if !(c == '/' && out.ends_with('/')) {
+            out.push(c);
+        }
+    }
+    out.into()
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Change {
     Added,
     Deleted,
@@ -28,18 +181,53 @@ pub enum Change {
     Renamed,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileDiff {
     /// The path after the change, or before it for a deleted file.
     pub path: String,
     /// The path before a rename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
+    #[serde(default)]
     pub change: Change,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub binary: bool,
+    #[serde(default)]
     pub hunks: Vec<Hunk>,
 }
 
 impl FileDiff {
+    /// A new file holding `text`: every line added.
+    pub fn created(path: String, text: &str) -> FileDiff {
+        Self::whole(path, Change::Added, text, '+')
+    }
+
+    /// A deleted file that held `text`: every line removed.
+    pub fn deleted(path: String, text: &str) -> FileDiff {
+        Self::whole(path, Change::Deleted, text, '-')
+    }
+
+    fn whole(path: String, change: Change, text: &str, mark: char) -> FileDiff {
+        let mut lines: Vec<String> = text.lines().map(|line| format!("{mark}{line}")).collect();
+        if !lines.is_empty() && !text.ends_with('\n') {
+            lines.push(NO_NEWLINE.to_owned());
+        }
+        let hunks = if lines.is_empty() {
+            Vec::new()
+        } else {
+            let start = |side| u32::from(mark == side);
+            Hunk::new(start('-'), start('+'), lines)
+                .into_iter()
+                .collect()
+        };
+        FileDiff {
+            path,
+            change,
+            hunks,
+            ..FileDiff::default()
+        }
+    }
+
     /// Lines added and removed.
     pub fn counts(&self) -> (usize, usize) {
         let lines = self.hunks.iter().flat_map(|hunk| &hunk.lines);
@@ -51,11 +239,171 @@ impl FileDiff {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "WireHunk", into = "WireHunk")]
 pub struct Hunk {
     /// The `@@ -a,b +c,d @@` line, with any function name after it.
     pub header: String,
     pub lines: Vec<Line>,
+    /// A line was longer than [`MAX_LINE_BYTES`] and its end was left out.
+    pub shortened: bool,
+}
+
+impl Hunk {
+    /// A hunk whose sides start at `old` and `new`, from lines marked as in a unified
+    /// diff: ` ` for context, `-` removed and `+` added. A line with no mark is empty
+    /// context, and [`NO_NEWLINE`] marks the line before it ([`Line::no_newline`]).
+    /// Lines are numbered from the starts and cut to [`MAX_LINE_BYTES`]. `None` when a
+    /// line number would pass `u32::MAX`, as only a malformed patch numbers its lines.
+    pub fn new<S: AsRef<str>>(
+        old: u32,
+        new: u32,
+        marked: impl IntoIterator<Item = S>,
+    ) -> Option<Hunk> {
+        let (mut old_at, mut new_at) = (old, new);
+        let mut lines: Vec<Line> = Vec::new();
+        let mut shortened = false;
+        for marked in marked {
+            let marked = marked.as_ref();
+            let (kind, text) = match marked.split_at_checked(1) {
+                Some(("+", text)) => (Kind::Added, text),
+                Some(("-", text)) => (Kind::Removed, text),
+                Some(("\\", _)) => {
+                    if let Some(line) = lines.last_mut() {
+                        line.no_newline = true;
+                    }
+                    continue;
+                }
+                Some((_, text)) => (Kind::Context, text),
+                None => (Kind::Context, ""),
+            };
+            let (old, new) = match kind {
+                Kind::Context => (Some(old_at), Some(new_at)),
+                Kind::Added => (None, Some(new_at)),
+                Kind::Removed => (Some(old_at), None),
+            };
+            old_at = old_at.checked_add(u32::from(old.is_some()))?;
+            new_at = new_at.checked_add(u32::from(new.is_some()))?;
+            let kept = &text[..floor_char_boundary(text, MAX_LINE_BYTES - 1)];
+            shortened |= kept.len() < text.len();
+            lines.push(Line {
+                kind,
+                old,
+                new,
+                text: kept.to_owned(),
+                no_newline: false,
+            });
+        }
+        let count = |side: fn(&Line) -> Option<u32>| lines.iter().filter_map(side).count();
+        let header = format!(
+            "@@ -{old},{} +{new},{} @@",
+            count(|line| line.old),
+            count(|line| line.new)
+        );
+        Some(Hunk {
+            header,
+            lines,
+            shortened,
+        })
+    }
+}
+
+impl Hunk {
+    /// Makes the header's line counts match the lines the hunk holds, as after a cut.
+    fn recount(&mut self) {
+        let (old, _, new, _) = hunk_range(&self.header).unwrap_or_default();
+        let old = self.lines.iter().find_map(|line| line.old).unwrap_or(old);
+        let new = self.lines.iter().find_map(|line| line.new).unwrap_or(new);
+        let count = |side: fn(&Line) -> Option<u32>| self.lines.iter().filter_map(side).count();
+        self.header = format!(
+            "@@ -{old},{} +{new},{} @@",
+            count(|line| line.old),
+            count(|line| line.new)
+        );
+    }
+}
+
+/// A hunk as it is stored: its header and its marked lines.
+#[derive(Serialize, Deserialize)]
+struct WireHunk {
+    header: String,
+    lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    shortened: bool,
+}
+
+impl From<Hunk> for WireHunk {
+    fn from(hunk: Hunk) -> WireHunk {
+        let mut lines = Vec::with_capacity(hunk.lines.len());
+        for line in hunk.lines {
+            let mark = match line.kind {
+                Kind::Context => ' ',
+                Kind::Added => '+',
+                Kind::Removed => '-',
+            };
+            lines.push(format!("{mark}{}", line.text));
+            if line.no_newline {
+                lines.push(NO_NEWLINE.to_owned());
+            }
+        }
+        WireHunk {
+            header: hunk.header,
+            lines,
+            shortened: hunk.shortened,
+        }
+    }
+}
+
+impl TryFrom<WireHunk> for Hunk {
+    type Error = String;
+
+    fn try_from(wire: WireHunk) -> Result<Hunk, String> {
+        let (old, _, new, _) = hunk_range(&wire.header).unwrap_or_default();
+        let hunk = Hunk::new(old, new, wire.lines)
+            .ok_or_else(|| format!("line numbers past the end in {}", wire.header))?;
+        Ok(Hunk {
+            header: wire.header,
+            shortened: hunk.shortened || wire.shortened,
+            ..hunk
+        })
+    }
+}
+
+/// The hunks of a unified diff that has no file headers, as Codex sends an update:
+/// each `@@` line starts a hunk, and lines before the first are skipped.
+pub fn hunks(text: &str) -> Vec<Hunk> {
+    let mut hunks = Vec::new();
+    let mut open: Option<(String, Vec<&str>)> = None;
+    let mut close = |open: Option<(String, Vec<&str>)>| {
+        let Some((header, lines)) = open else {
+            return;
+        };
+        let wire = WireHunk {
+            header,
+            lines: lines.into_iter().map(str::to_owned).collect(),
+            shortened: false,
+        };
+        hunks.extend(Hunk::try_from(wire).ok());
+    };
+    for line in text.lines() {
+        if line.starts_with("@@ ") && hunk_range(line).is_some() {
+            close(open.replace((line.to_owned(), Vec::new())));
+        } else if let Some((_, lines)) = &mut open {
+            lines.push(line);
+        }
+    }
+    close(open);
+    hunks
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +420,13 @@ pub struct Line {
     pub old: Option<u32>,
     pub new: Option<u32>,
     pub text: String,
+    /// The file ends after this line with no newline: `\ No newline at end of file`
+    /// followed it. A context line can carry it for both sides.
+    pub no_newline: bool,
 }
+
+/// The marker a unified diff puts after a file's last line when it has no newline.
+pub const NO_NEWLINE: &str = "\\ No newline at end of file";
 
 /// What changed from tree `from` to tree `to` in the repository at `root`, renames
 /// found.
@@ -176,6 +530,7 @@ pub fn parse(mut reader: impl BufRead, max_lines: usize) -> Patch {
                 old,
                 new,
                 text: text.to_owned(),
+                no_newline: false,
             });
             continue;
         }
@@ -195,6 +550,7 @@ pub fn parse(mut reader: impl BufRead, max_lines: usize) -> Patch {
                 file.hunks.push(Hunk {
                     header: line.into_owned(),
                     lines: Vec::new(),
+                    shortened: false,
                 });
             }
         } else if line.starts_with("new file mode") {
@@ -329,6 +685,7 @@ mod tests {
 
     fn line(kind: Kind, old: Option<u32>, new: Option<u32>, text: &str) -> Line {
         Line {
+            no_newline: false,
             kind,
             old,
             new,
@@ -437,6 +794,190 @@ mod tests {
         assert!(patch.truncated);
         assert_eq!(patch.files[0].hunks[0].lines.len(), 16);
         assert!(!parse(text.as_bytes(), 200).truncated);
+    }
+
+    /// A small seeded generator, so a failing case can be replayed from its seed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+
+        fn text(&mut self) -> String {
+            const CHARS: &[char] = &[
+                'a', 'Z', ' ', '\t', '@', '+', '-', '\\', 'é', '漢', '🦀', '"',
+            ];
+            if self.below(40) == 0 {
+                return "é".repeat(MAX_LINE_BYTES);
+            }
+            (0..self.below(12))
+                .map(|_| CHARS[self.below(CHARS.len())])
+                .collect()
+        }
+    }
+
+    /// What a generated line should read as once parsed: its text, cut as the parser
+    /// cuts a long line.
+    fn kept(text: &str) -> String {
+        text[..floor_char_boundary(text, MAX_LINE_BYTES - 1)].to_owned()
+    }
+
+    #[test]
+    fn generated_hunks_parse_number_and_round_trip() {
+        let mut cut = [0, 0];
+        for seed in 1..=500u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            let mut text = String::new();
+            for _ in 0..rng.below(3) {
+                text.push_str("diff header the parser skips\n");
+            }
+            let mut expected = Vec::new();
+            let count = if rng.below(8) == 0 {
+                20 + rng.below(40)
+            } else {
+                1 + rng.below(4)
+            };
+            for _ in 0..count {
+                let (old, new) = (rng.below(500) as u32, rng.below(500) as u32);
+                let lines: Vec<(Kind, String, bool)> = (0..rng.below(30))
+                    .map(|_| {
+                        let kind = [Kind::Context, Kind::Added, Kind::Removed][rng.below(3)];
+                        (kind, rng.text(), rng.below(10) == 0)
+                    })
+                    .collect();
+                let count = |side: Kind| lines.iter().filter(|(k, _, _)| *k != side).count();
+                text.push_str(&format!(
+                    "@@ -{old},{} +{new},{} @@ fn f()\n",
+                    count(Kind::Added),
+                    count(Kind::Removed)
+                ));
+                for (kind, line, no_newline) in &lines {
+                    let mark = match kind {
+                        Kind::Context => ' ',
+                        Kind::Added => '+',
+                        Kind::Removed => '-',
+                    };
+                    text.push_str(&format!("{mark}{line}\n"));
+                    if *no_newline {
+                        text.push_str(&format!("{NO_NEWLINE}\n"));
+                    }
+                }
+                expected.push((old, new, lines));
+            }
+
+            let parsed = hunks(&text);
+            assert_eq!(parsed.len(), expected.len(), "seed {seed}");
+            for (hunk, (old, new, lines)) in parsed.iter().zip(&expected) {
+                let read: Vec<_> = hunk
+                    .lines
+                    .iter()
+                    .map(|l| (l.kind, l.text.clone(), l.no_newline))
+                    .collect();
+                let want: Vec<_> = lines.iter().map(|(k, t, n)| (*k, kept(t), *n)).collect();
+                assert_eq!(read, want, "seed {seed}");
+                let olds: Vec<u32> = hunk.lines.iter().filter_map(|l| l.old).collect();
+                let news: Vec<u32> = hunk.lines.iter().filter_map(|l| l.new).collect();
+                assert!(
+                    olds.iter().copied().eq(*old..*old + olds.len() as u32),
+                    "seed {seed}"
+                );
+                assert!(
+                    news.iter().copied().eq(*new..*new + news.len() as u32),
+                    "seed {seed}"
+                );
+                assert!(hunk.header.ends_with(" @@ fn f()"), "seed {seed}");
+            }
+
+            let file = FileDiff {
+                path: format!("file {seed}.rs"),
+                hunks: parsed,
+                ..FileDiff::default()
+            };
+            let all: Vec<Line> = file.hunks.iter().flat_map(|h| h.lines.clone()).collect();
+            let patch = Patch::edit(vec![file.clone(), file]);
+            let json = serde_json::to_string(&patch).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Patch>(&json).unwrap(),
+                patch,
+                "seed {seed}"
+            );
+
+            let kept: Vec<&Line> = patch
+                .files
+                .iter()
+                .flat_map(|f| &f.hunks)
+                .flat_map(|h| &h.lines)
+                .collect();
+            let bytes: usize = kept.iter().map(|l| l.text.len() + 1).sum();
+            assert!(
+                kept.len() <= EDIT_LINES && bytes <= EDIT_BYTES,
+                "seed {seed}"
+            );
+            let whole: Vec<&Line> = all.iter().chain(&all).collect();
+            assert_eq!(
+                kept[..],
+                whole[..kept.len()],
+                "seed {seed}: kept lines are a prefix"
+            );
+            let whole_bytes: usize = whole.iter().map(|l| l.text.len() + 1).sum();
+            let over = whole.len() > EDIT_LINES || whole_bytes > EDIT_BYTES;
+            assert_eq!(patch.truncated, over, "seed {seed}");
+            cut[usize::from(over)] += 1;
+        }
+        assert!(
+            cut[0] > 0 && cut[1] > 0,
+            "both whole and cut edits generated: {cut:?}"
+        );
+    }
+
+    #[test]
+    fn any_text_reads_as_hunks_without_panicking() {
+        for seed in 1..=500u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1);
+            let text: String = (0..rng.below(20))
+                .map(|_| match rng.below(4) {
+                    0 => format!("@@ -{} +{} @@\n", rng.text(), rng.text()),
+                    1 => "@@ -1,2 +3 @@\n".to_owned(),
+                    _ => format!("{}\n", rng.text()),
+                })
+                .collect();
+            for hunk in hunks(&text) {
+                let round = Hunk::try_from(WireHunk::from(hunk.clone())).unwrap();
+                assert_eq!(round, hunk, "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_edit_over_the_cap_keeps_its_start_and_says_it_was_cut() {
+        let long: String = (0..EDIT_LINES + 50)
+            .map(|n| format!("line {n}\n"))
+            .collect();
+        let patch = Patch::edit(vec![
+            FileDiff::created("big.txt".into(), &long),
+            FileDiff::created("after.txt".into(), "x\n"),
+        ]);
+        assert!(patch.truncated);
+        assert_eq!(patch.files.len(), 1, "after.txt comes after the cut");
+        let lines = &patch.files[0].hunks[0].lines;
+        assert_eq!(lines.len(), EDIT_LINES);
+        assert_eq!(lines[0].text, "line 0");
+        assert_eq!(lines[EDIT_LINES - 1].new, Some(EDIT_LINES as u32));
+
+        let wide = "w".repeat(1000);
+        let wide: String = (0..100).map(|_| format!("{wide}\n")).collect();
+        let patch = Patch::edit(vec![FileDiff::deleted("wide.txt".into(), &wide)]);
+        assert!(patch.truncated);
+        assert_eq!(patch.files[0].hunks[0].lines.len(), EDIT_BYTES / 1001);
+        assert!(!Patch::edit(vec![FileDiff::created("small".into(), "a\nb\n")]).truncated);
     }
 
     fn repo() -> tempfile::TempDir {

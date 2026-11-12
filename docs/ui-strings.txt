@@ -191,6 +191,7 @@ crates/keystone-agent/src/claude.rs
 	a hook is running
 	a tool
 	a tool call is running
+	a tool result
 	a turn is running
 	a widget waits for the user
 	an approval is waiting
@@ -332,15 +333,22 @@ crates/keystone-agent/src/connection.rs
 	{name} stopped: {}
 
 crates/keystone-agent/src/diff.rs
+	--- {from}\n+++ {to}\n
+	@@ -{old},{} +{new},{} @@
 	Binary files 
 	GIT binary patch
+	Keystone kept only the first {kept} lines of this edit, {partial}\n
+	Keystone shortened lines longer than {} KiB, {partial}\n
+	\\ No newline at end of file
 	core.quotePath=false
 	deleted file mode
 	diff --git 
 	git diff-tree
+	line numbers past the end in {}
 	new file mode
 	rename from 
 	rename to 
+	so this diff is partial and will not apply as it is.
 
 crates/keystone-agent/src/git.rs
 	Cancelled.
@@ -1107,7 +1115,7 @@ crates/keystone-desktop/src/commands.rs
 	Transcript: previous action
 	Transcript: previous row
 	Transcript: restore to the focused turn
-	Transcript: view the focused turn's changes
+	Transcript: view the focused turn's or edit's changes
 	Use recovered history
 	View uncommitted changes
 
@@ -1204,6 +1212,7 @@ crates/keystone-desktop/src/diff_view.rs
 	Back to the conversation
 	Binary file. Its contents aren't shown.
 	C
+	Changes in this edit
 	Changes in turn {turn}
 	Choose a turn's last reply.
 	Comment
@@ -1230,6 +1239,7 @@ crates/keystone-desktop/src/diff_view.rs
 	Send to {}
 	Sent {count} {noun}.
 	This diff is too long. The rest isn't shown.
+	This edit is too long to keep whole. The rest isn't shown.
 	This folder isn't in a git repository.
 	This turn's starting point wasn't saved, so its changes can't be shown.
 	Uncommitted changes
@@ -1991,11 +2001,14 @@ crates/keystone-desktop/src/terminal.rs
 	Up to 4 terminals side by side
 
 crates/keystone-desktop/src/transcript.rs
+	 · added
+	 · deleted
 	 · failed
 	 · no recorded result
 	 · not run
 	$ {command}
 	1 file
+	1 more line
 	1 saved message differs from
 	1 tool call has
 	1 {one}
@@ -2023,12 +2036,15 @@ crates/keystone-desktop/src/transcript.rs
 	It finished.
 	It was stopped.
 	Matching items appear in a different order, so nothing was matched.
+	No lines changed.
 	No part of the provider's record matches this transcript, so nothing was added.
 	Not run
 	Nothing more was recovered.
 	Older messages weren't imported.
 	Only part of a long history was checked.
 	Only the newest part of the provider's history was read; it does not reach what is shown here.
+	Open full edit
+	Open the whole edit
 	Partial
 	Recovered {}
 	Restore to here
@@ -2036,6 +2052,7 @@ crates/keystone-desktop/src/transcript.rs
 	Running
 	Second opinion…
 	Stopped
+	The file is empty.
 	The last saved record was cut off and left out.
 	The provider compacted this conversation, so older parts are summaries.
 	The provider returned summaries instead of some items.
@@ -2043,12 +2060,14 @@ crates/keystone-desktop/src/transcript.rs
 	The provider's record has more than one branch, so nothing was matched.
 	The provider's record names a different folder, so it was not used.
 	The provider's saved conversation changed while it was read.
+	This edit is too long to keep whole. The rest isn't shown.
 	Usage limit reached
 	View this turn's changes
 	Your last message is not in the provider's record, so it may not have been delivered.
 	activity {name}
 	command output
 	completed {}
+	edit
 	item
 	items
 	message
@@ -2067,6 +2086,7 @@ crates/keystone-desktop/src/transcript.rs
 	{count} tool calls have
 	{count} {many}
 	{files} files
+	{more} more lines
 	{text}: {error}
 	{} could not be read.
 	{} earlier in the provider's record {} not match this transcript and {} left out.
@@ -2074,6 +2094,7 @@ crates/keystone-desktop/src/transcript.rs
 	{} of unsupported kinds were skipped.
 	{} the provider's copy; Keystone's copy was kept.
 	{} {name}
+	−{removed}
 
 crates/keystone-desktop/src/usage.rs
 	Context

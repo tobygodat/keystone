@@ -56,7 +56,7 @@ fn entry(row: &Row, position: usize, provider: Provider) -> Option<(bool, String
                 };
                 line(format!("Ran `{}` · {outcome}", one_line(command)))
             }
-            ItemKind::FileChange { paths } => {
+            ItemKind::FileChange { paths, .. } => {
                 let mut shown = paths.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
                 if paths.len() > 5 {
                     shown.push_str(&format!(" and {} more", paths.len() - 5));
@@ -653,6 +653,7 @@ mod tests {
             item(
                 ItemKind::FileChange {
                     paths: vec!["src/auth.rs".into()],
+                    patch: None,
                 },
                 "",
             ),

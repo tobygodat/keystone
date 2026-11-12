@@ -57,6 +57,9 @@ pub(crate) fn bind_keys(cx: &mut App) {
 pub(crate) enum Source {
     Turn(u64),
     WorkingTree,
+    /// One agent edit, from the transcript row at this place. Read only: an edit takes no
+    /// line comments, since the turn's diff already does.
+    Edit(usize),
 }
 
 impl Source {
@@ -64,6 +67,7 @@ impl Source {
         match self {
             Self::Turn(turn) => format!("Changes in turn {turn}"),
             Self::WorkingTree => "Uncommitted changes".into(),
+            Self::Edit(_) => "Changes in this edit".into(),
         }
     }
 }
@@ -181,7 +185,7 @@ fn lines_label(lines: &[&Line]) -> String {
 /// and what was said.
 fn review_prompt(source: Source, patch: &Patch, comments: &[LineComment]) -> String {
     let mut prompt = String::from(match source {
-        Source::Turn(_) => "Comments on your changes:",
+        Source::Turn(_) | Source::Edit(_) => "Comments on your changes:",
         Source::WorkingTree => "Comments on the uncommitted changes:",
     });
     for comment in comments {
@@ -231,6 +235,78 @@ fn shown(text: &str) -> String {
         shown.push('…');
     }
     shown.replace('\t', "    ")
+}
+
+/// The width of a line number column for numbers up to `biggest`, in the mono font at
+/// [`TextSize::Sm`].
+pub(crate) fn gutter(biggest: u32, cx: &App) -> Pixels {
+    let text = cx.text_system();
+    let font = text.resolve_font(&gpui::font(cx.theme().fonts.mono.clone()));
+    let digit = text
+        .advance(font, TextSize::Sm.px(), '0')
+        .map_or(TextSize::Sm.px(), |size| size.width);
+    (digit * biggest.to_string().len() as f32).ceil() + px(16.)
+}
+
+/// A hunk's `@@` line. Like [`line_row`], it goes under the mono font at
+/// [`TextSize::Sm`].
+pub(crate) fn hunk_row(header: &str, cx: &App) -> gpui::Div {
+    div()
+        .px(px(8.))
+        .py(px(2.))
+        .text_color(cx.theme().colors.text_faint)
+        .child(shown(header))
+}
+
+/// One line of a diff: its old and new numbers in a `gutter` wide column each, its mark,
+/// and its text, on the added or removed wash. A line the file ends on without a newline
+/// is followed by a muted `\ No newline at end of file`.
+pub(crate) fn line_row(line: &Line, gutter: Pixels, selected: bool, cx: &App) -> gpui::Div {
+    let colors = cx.theme().colors;
+    let (sign, mark, wash) = match line.kind {
+        Kind::Added => ("+", colors.success, Some(colors.diff_added)),
+        Kind::Removed => ("-", colors.danger, Some(colors.diff_removed)),
+        Kind::Context => (" ", colors.text_muted, None),
+    };
+    let number = |n: Option<u32>| {
+        div()
+            .flex_none()
+            .w(gutter)
+            .pr(px(8.))
+            .text_right()
+            .text_color(colors.text_faint)
+            .child(n.map(|n| n.to_string()).unwrap_or_default())
+    };
+    let line_row = h_flex()
+        .items_start()
+        .w_full()
+        .pl(px(4.))
+        .min_h(TextSize::Sm.line_height())
+        .when_some(wash, |d, wash| d.bg(wash))
+        .when(selected, |d| d.bg(colors.selection))
+        .child(number(line.old))
+        .child(number(line.new))
+        .child(div().flex_none().w(px(16.)).text_color(mark).child(sign))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .pr(px(8.))
+                .text_color(colors.code_text)
+                .child(shown(&line.text)),
+        );
+    v_flex()
+        .w_full()
+        .child(line_row)
+        .when(line.no_newline, |d| {
+            d.child(
+                div()
+                    .pl(gutter * 2. + px(20.))
+                    .min_h(TextSize::Sm.line_height())
+                    .text_color(colors.text_faint)
+                    .child(keystone_agent::diff::NO_NEWLINE),
+            )
+        })
 }
 
 pub(crate) struct DiffView {
@@ -483,7 +559,15 @@ impl DiffView {
     }
 
     /// Opens the comment box for the selected lines.
+    /// One edit's diff takes no comments.
+    fn read_only(&self) -> bool {
+        matches!(self.source, Source::Edit(_))
+    }
+
     fn comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only() {
+            return;
+        }
         if let Some((_, _, input)) = &self.draft {
             return window.focus(&input.focus_handle(cx), cx);
         }
@@ -662,14 +746,17 @@ impl DiffView {
         let body = match row {
             Row::File(file) => self.file_row(&patch.files[file], cx),
             Row::Binary => note("Binary file. Its contents aren't shown."),
-            Row::Truncated => note("This diff is too long. The rest isn't shown."),
-            Row::Empty => note("No files changed."),
-            Row::Hunk(file, hunk) => div()
-                .px(px(8.))
-                .py(px(2.))
-                .text_color(colors.text_faint)
-                .child(shown(&patch.files[file].hunks[hunk].header))
+            Row::Truncated => div()
+                .automation_id("diff-truncated")
+                .child(note(match self.source {
+                    Source::Edit(_) => "This edit is too long to keep whole. The rest isn't shown.",
+                    _ => "This diff is too long. The rest isn't shown.",
+                }))
                 .into_any_element(),
+            Row::Empty => note("No files changed."),
+            Row::Hunk(file, hunk) => {
+                hunk_row(&patch.files[file].hunks[hunk].header, cx).into_any_element()
+            }
             Row::Comment(comment) => {
                 let text = self.comments[comment].text.clone();
                 h_flex()
@@ -702,41 +789,8 @@ impl DiffView {
                     .into_any_element()
             }
             Row::Line(at) => {
-                let line = line(patch, at);
                 let selected = self.selection.is_some_and(|s| s.range().contains(&index));
-                let (sign, mark, wash) = match line.kind {
-                    Kind::Added => ("+", colors.success, Some(colors.diff_added)),
-                    Kind::Removed => ("-", colors.danger, Some(colors.diff_removed)),
-                    Kind::Context => (" ", colors.text_muted, None),
-                };
-                let number = |n: Option<u32>| {
-                    div()
-                        .flex_none()
-                        .w(self.gutter)
-                        .pr(px(8.))
-                        .text_right()
-                        .text_color(colors.text_faint)
-                        .child(n.map(|n| n.to_string()).unwrap_or_default())
-                };
-                h_flex()
-                    .items_start()
-                    .w_full()
-                    .pl(px(4.))
-                    .min_h(TextSize::Sm.line_height())
-                    .when_some(wash, |d, wash| d.bg(wash))
-                    .when(selected, |d| d.bg(colors.selection))
-                    .child(number(line.old))
-                    .child(number(line.new))
-                    .child(div().flex_none().w(px(16.)).text_color(mark).child(sign))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .pr(px(8.))
-                            .text_color(colors.code_text)
-                            .child(shown(&line.text)),
-                    )
-                    .into_any_element()
+                line_row(line(patch, at), self.gutter, selected, cx).into_any_element()
             }
         };
         div()
@@ -923,16 +977,9 @@ impl DiffView {
 }
 
 impl Render for DiffView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let mono = theme.fonts.mono.clone();
-        let biggest = self.biggest;
-        let font = window.text_system().resolve_font(&gpui::font(mono.clone()));
-        let digit = window
-            .text_system()
-            .advance(font, TextSize::Sm.px(), '0')
-            .map_or(TextSize::Sm.px(), |size| size.width);
-        self.gutter = (digit * biggest.to_string().len() as f32).ceil() + px(16.);
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mono = cx.theme().fonts.mono.clone();
+        self.gutter = gutter(self.biggest, cx);
         let body = match &self.content {
             Content::Loading => div()
                 .flex_1()
@@ -1029,7 +1076,7 @@ impl Render for DiffView {
             .on_action(
                 cx.listener(|this, _: &crate::SendMessage, window, cx| this.send(window, cx)),
             )
-            .child(self.footer(cx))
+            .when(!self.read_only(), |d| d.child(self.footer(cx)))
     }
 }
 
@@ -1037,6 +1084,8 @@ impl Render for DiffView {
 struct OpenDiff {
     key: ViewKey,
     view: Entity<DiffView>,
+    /// The transcript row and control that opened it, which take focus back on close.
+    opener: Option<(usize, crate::view_state::CopyTarget)>,
 }
 
 /// A window's diffs: the one open, and closed ones whose comments weren't sent, which
@@ -1106,7 +1155,11 @@ impl Keystone {
         // From Changes in a narrow window, the conversation is a tab behind it.
         self.reveal_view(key.view, window, cx);
         window.focus(&view.focus_handle(cx), cx);
-        self.diff.open = Some(OpenDiff { key, view });
+        self.diff.open = Some(OpenDiff {
+            key,
+            view,
+            opener: None,
+        });
         self.refresh(cx);
     }
 
@@ -1124,11 +1177,18 @@ impl Keystone {
         let Some(open) = self.take_open_diff(keep) else {
             return;
         };
-        self.presentation
-            .current
-            .views
-            .focus(open.key, cx)
-            .focus(window, cx);
+        let views = &mut self.presentation.current.views;
+        match open.opener {
+            Some((row, control)) => {
+                let keyboard = views.keyboard(open.key, cx);
+                keyboard.row = Some(row);
+                keyboard.action = Some(control);
+                keyboard.selection_from_pointer = false;
+                keyboard.action_focus.clone().focus(window, cx);
+                views.activate(open.key);
+            }
+            None => views.focus(open.key, cx).focus(window, cx),
+        }
         self.refresh(cx);
     }
 
@@ -1162,7 +1222,42 @@ impl Keystone {
         }
     }
 
-    /// View changes from the transcript row the keyboard is on.
+    /// Shows the whole of the edit at transcript row `index`, read only, with its paths
+    /// as [`crate::transcript::EditFolder`] shows them. `opener`, the row's control that
+    /// asked for it, takes focus back when it closes.
+    pub(crate) fn open_edit_diff(
+        &mut self,
+        key: ViewKey,
+        index: usize,
+        opener: Option<crate::view_state::CopyTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(patch) = self.edit_patch(key, index, cx) else {
+            return;
+        };
+        let patch = self.edit_folder(key.session, cx).patch(&patch);
+        let load: Load = Box::new(move || Ok(Some(patch)));
+        self.open_diff(key, Source::Edit(index), load, None, window, cx);
+        if let Some(open) = &mut self.diff.open {
+            open.opener = opener.map(|control| (index, control));
+        }
+    }
+
+    /// The patch of the edit at transcript row `index`, when it has one.
+    fn edit_patch(&self, key: ViewKey, index: usize, cx: &App) -> Option<Patch> {
+        let conversation = self.state.read(cx).conversations().get(&key.session)?;
+        match conversation.rows.get(index)? {
+            crate::conversation::Row::Item(keystone_agent::Item {
+                kind: keystone_agent::ItemKind::FileChange { patch, .. },
+                ..
+            }) => patch.clone(),
+            _ => None,
+        }
+    }
+
+    /// View changes from the transcript row the keyboard is on: the whole edit on an
+    /// edit's row, else the turn's changes.
     pub(crate) fn view_changes_focused_row(
         &mut self,
         key: ViewKey,
@@ -1176,6 +1271,9 @@ impl Keystone {
             .keyboard_state(key)
             .and_then(|keyboard| keyboard.row);
         match row {
+            Some(index) if self.edit_patch(key, index, cx).is_some() => {
+                self.open_edit_diff(key, index, None, window, cx)
+            }
             Some(index) => self.open_turn_diff(key, index, window, cx),
             None => {
                 self.error = Some("Choose a turn's last reply.".into());

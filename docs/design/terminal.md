@@ -188,8 +188,8 @@ the app's shortcuts are ⌘ and keep working inside the terminal, and Ctrl+lette
 the shell. F2 (Rename session) is off inside the terminal on both platforms, so
 programs such as `mc` get it.
 
-In the transcript, Ctrl+Shift+D (⌘⇧D) shows the focused turn's changes (see
-`features/diff.md` in the verify skill), so there Split terminal runs from the palette, the drawer's
+In the transcript, Ctrl+Shift+D (⌘⇧D) shows the focused turn's changes, or on an
+edit's row that edit (see `features/diff.md` in the verify skill), so there Split terminal runs from the palette, the drawer's
 Split button, or a pane.
 
 F6 (Focus next transcript) still moves focus out of the terminal on both platforms,

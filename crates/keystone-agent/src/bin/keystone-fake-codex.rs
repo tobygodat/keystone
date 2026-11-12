@@ -17,6 +17,10 @@
 //! exist: its end, or with "end on steer", the steer's rejection after that end.
 //! `KEYSTONE_FAKE_CODEX_REPLY` replaces the reply text exactly.
 //!
+//! A prompt containing "replay edits" reports the `fileChange` codex-cli 0.167.1 made
+//! in `tests/fixtures/edits/`, under the thread's folder, and one with "long edit N" one
+//! update of N scripted lines (see `support/edits.rs`).
+//!
 //! A prompt containing "ask me" first asks two questions through
 //! `item/tool/requestUserInput`, and one containing "fill a form" asks for an MCP form
 //! through `mcpServer/elicitation/request`, in codex-cli 0.166's shapes. The form has
@@ -104,6 +108,8 @@ use std::time::Duration;
 
 #[path = "support/codex_config.rs"]
 mod config_cli;
+#[path = "support/edits.rs"]
+mod edits;
 #[path = "support/images.rs"]
 mod images;
 #[path = "support/orchestrator.rs"]
@@ -413,6 +419,8 @@ fn main() {
         .unwrap_or_default();
     let defaults = || (json!("on-request"), json!({"type": "workspaceWrite"}));
     let mut models: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Each thread's folder, from its start or resume, where its scripted edits land.
+    let mut folders: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut efforts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut tiers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut servers: std::collections::HashMap<String, orchestrator::Server> =
@@ -550,6 +558,9 @@ fn main() {
                     widget_threads.insert(thread.clone());
                 }
                 let (approval, sandbox) = defaults();
+                if let Some(cwd) = params["cwd"].as_str() {
+                    folders.insert(thread.clone(), cwd.to_owned());
+                }
                 let model = thread_model(&mut models, &thread, &params);
                 thread_server(&mut servers, &thread, &params);
                 reply(json!({"thread": {"id": thread},
@@ -606,6 +617,9 @@ fn main() {
             "thread/resume" => {
                 let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
                 let (approval, sandbox) = policies.get(&thread).cloned().unwrap_or_else(defaults);
+                if let Some(cwd) = params["cwd"].as_str() {
+                    folders.insert(thread.clone(), cwd.to_owned());
+                }
                 let model = thread_model(&mut models, &thread, &params);
                 thread_server(&mut servers, &thread, &params);
                 reply(json!({"thread": {"id": thread},
@@ -763,11 +777,13 @@ fn main() {
                 });
                 turns.lock().unwrap().insert(turn_id.clone(), turn.clone());
                 let (out, next, turns) = (out.clone(), next.clone(), turns.clone());
+                let folder = folders.get(&thread).cloned().unwrap_or_default();
                 thread::spawn(move || {
                     run_turn(
                         &out,
                         &next,
                         &thread,
+                        &folder,
                         &turn_id,
                         &text,
                         &images,
@@ -913,6 +929,7 @@ fn run_turn(
     out: &Out,
     next: &AtomicU64,
     thread: &str,
+    folder: &str,
     turn_id: &str,
     text: &str,
     images: &str,
@@ -1160,6 +1177,10 @@ fn run_turn(
         while !turn.interrupt.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(5));
         }
+    }
+    for item in edits::codex(text, turn_id, folder) {
+        notify(out, "item/started", with(json!({"item": item})));
+        notify(out, "item/completed", with(json!({"item": item})));
     }
     while turn.until_released && !released() && !turn.interrupt.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(5));

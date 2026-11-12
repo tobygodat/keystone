@@ -610,7 +610,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         id: "view-changes",
-        label: "Transcript: view the focused turn's changes",
+        label: "Transcript: view the focused turn's or edit's changes",
         keys: &["secondary-shift-d"],
         context: Some(TRANSCRIPT),
         action: || Box::new(ViewChanges),

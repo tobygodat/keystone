@@ -7,6 +7,7 @@
 //! the 0.163.0 app-server schema.
 
 use crate::commands::{self, Commands};
+use crate::diff::{self, FileDiff, Patch};
 use crate::driver::{ApprovalState, Command, Image, Outputs};
 use crate::item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, Speed, TurnStatus,
@@ -2349,9 +2350,36 @@ pub(crate) struct WireItem {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Change {
-    #[serde(default)]
     path: String,
+    /// `{"type": "add" | "delete" | "update", ..}`, read loosely so another shape
+    /// costs only the diff, not the item.
+    kind: Value,
+    /// Unified hunks for an update, the file's whole text for an add or a delete. Read
+    /// loosely too: a value that is not text costs only the diff.
+    diff: Value,
+}
+
+/// What a `fileChange` did, from each change's `diff`. `None` when no change has one.
+fn edit_patch(changes: &[Change]) -> Option<Patch> {
+    let files: Vec<FileDiff> = changes
+        .iter()
+        .filter_map(|change| {
+            let text = change.diff.as_str()?;
+            let path = change.path.clone();
+            Some(match change.kind.get("type").and_then(Value::as_str) {
+                Some("add") => FileDiff::created(path, text),
+                Some("delete") => FileDiff::deleted(path, text),
+                _ => FileDiff {
+                    path,
+                    hunks: diff::hunks(text),
+                    ..FileDiff::default()
+                },
+            })
+        })
+        .collect();
+    (!files.is_empty()).then(|| Patch::edit(files))
 }
 
 impl WireItem {
@@ -2378,6 +2406,7 @@ impl WireItem {
             ),
             "fileChange" => (
                 ItemKind::FileChange {
+                    patch: edit_patch(&self.changes),
                     paths: self.changes.into_iter().map(|c| c.path).collect(),
                 },
                 String::new(),

@@ -9,7 +9,7 @@ Settings → Shortcuts rebinds any command-palette command. A rebinding is saved
 - `shortcuts-conflict`: a key the user bound that another binding also runs on the composer, transcript, sidebar or a dialog, or in a panel that binds the same command, shows "Also bound to …" under the row. Saving is not blocked.
 - `shortcuts-unbound`: a palette-only command, such as Next model, shows "Not set" and can be given keys. Its reset removes them again.
 - `shortcuts-reset`: `settings-shortcut-<id>-reset` restores one command's default, and `settings-shortcuts-reset-all` restores every default. Focus moves to a shortcut button.
-- `shortcuts-hints`: the palette, the new-session menu, the welcome pills and tooltips read the current binding. View diff in the Changes list takes the keys of "Transcript: view the focused turn's changes", so its tooltip and the transcript's agree.
+- `shortcuts-hints`: the palette, the new-session menu, the welcome pills and tooltips read the current binding. View diff in the Changes list takes the keys of "Transcript: view the focused turn's or edit's changes", so its tooltip and the transcript's agree.
 - `shortcuts-bad-config`: a saved entry naming no command, holding something other than text, holding keys that don't parse or name no key (such as `"secondary-"` or `""`), or holding a key the previous rule refuses is skipped, and the command keeps its default. Each one is printed to stderr as `Skipped a saved shortcut. …` and listed in `settings-shortcuts-skipped`. The app still starts and the other entries bind.
 
 ## How to get to it (user POV)

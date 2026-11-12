@@ -22,7 +22,8 @@ struct Transcript {
     visible_rows: Option<Range<usize>>,
     fully_visible_rows: Option<Range<usize>>,
     visible_anchor: Option<ListOffset>,
-    collapsed_activity: HashSet<usize>,
+    /// Rows whose disclosure the user turned from its default ([`crate::transcript::opens_expanded`]).
+    toggled_activity: HashSet<usize>,
     /// Each widget's controls, by the tool call that showed it.
     widgets: RefCell<HashMap<String, WidgetFocus>>,
 }
@@ -44,6 +45,8 @@ pub enum CopyTarget {
     TextSelection,
     /// The message row's Fork from here control.
     Fork,
+    /// An open edit row's Open full edit control.
+    OpenEdit,
 }
 
 #[derive(Default)]
@@ -79,7 +82,7 @@ impl ViewStates {
                 visible_rows: None,
                 fully_visible_rows: None,
                 visible_anchor: None,
-                collapsed_activity: HashSet::new(),
+                toggled_activity: HashSet::new(),
                 widgets: RefCell::default(),
             })
             .list
@@ -204,20 +207,23 @@ impl ViewStates {
         }
     }
 
-    pub fn activity_expanded(&self, key: ViewKey, row: usize) -> bool {
-        self.transcripts
+    /// Whether a row's disclosure is open, where `opens` is how it starts.
+    pub fn activity_expanded(&self, key: ViewKey, row: usize, opens: bool) -> bool {
+        let toggled = self
+            .transcripts
             .get(&key)
-            .is_none_or(|t| !t.collapsed_activity.contains(&row))
+            .is_some_and(|t| t.toggled_activity.contains(&row));
+        opens != toggled
     }
 
-    pub fn toggle_activity(&mut self, key: ViewKey, row: usize) {
+    pub fn toggle_activity(&mut self, key: ViewKey, row: usize, opens: bool) {
         let Some(t) = self.transcripts.get_mut(&key) else {
             return;
         };
-        let collapsed = t.collapsed_activity.insert(row);
-        if !collapsed {
-            t.collapsed_activity.remove(&row);
+        if !t.toggled_activity.insert(row) {
+            t.toggled_activity.remove(&row);
         }
+        let collapsed = opens == t.toggled_activity.contains(&row);
         let mut top = t.list.logical_scroll_top();
         if top.item_ix == t.list.item_count() {
             top = t.visible_anchor.unwrap_or(ListOffset {

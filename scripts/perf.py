@@ -17,7 +17,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOG = ROOT / 'docs/perf-log.tsv'
 COLUMNS = ['date', 'commit', 'touch_desktop_s', 'touch_ui_s', 'desktop_debug_mb',
            'sidebar_draw_ms', 'sidebar_refresh_ms', 'note', 'transcript_draw_ms',
-           'transcript_stream_ms', 'terminal_draw_ms', 'terminal_idle_ms']
+           'transcript_stream_ms', 'terminal_draw_ms', 'terminal_idle_ms',
+           'edit_row_closed_ms', 'edit_row_open_ms']
 BUILD = ['cargo', 'build', '-p', 'keystone-desktop', '--locked', '-q']
 
 
@@ -89,6 +90,9 @@ def main():
         # Added with the integrated terminal (TOB-301).
         'terminal_draw_ms': render.get('terminal_draw_ms', ''),
         'terminal_idle_ms': render.get('terminal_idle_ms', ''),
+        # Added with edit diffs (TOB-310): a transcript with a 1,000-line edit, closed and open.
+        'edit_row_closed_ms': render.get('edit_row_closed_ms', ''),
+        'edit_row_open_ms': render.get('edit_row_open_ms', ''),
     }
     print('\t'.join(f'{k}={row[k]}' for k in COLUMNS))
     if not args.no_log:

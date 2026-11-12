@@ -82,6 +82,11 @@
 //! An account whose config home holds a `.fake-usage-limit` file is at its usage limit
 //! (see `support/limit.rs`): each turn fails on it, in Claude Code 2.1.301's frames.
 //!
+//! A prompt containing "replay edits" reports the Edit and Write calls Claude Code
+//! 2.1.322 made in `tests/fixtures/edits/`, under the working directory, and one with
+//! "long edit N" one Edit of N scripted lines, and one with "edit without newline" an
+//! Edit of `a.txt` whose file has no final newline (see `support/edits.rs`).
+//!
 //! Each line or `;`-separated part of a prompt reading `write <path>: <text>` writes that file in the
 //! working directory, folders included, and `delete <path>` deletes it, as an agent's
 //! edits would, before the reply.
@@ -156,6 +161,8 @@ use std::time::{Duration, Instant};
 
 #[path = "support/claude_config.rs"]
 mod config_cli;
+#[path = "support/edits.rs"]
+mod edits;
 #[path = "support/images.rs"]
 mod images;
 #[path = "support/orchestrator.rs"]
@@ -1664,6 +1671,10 @@ fn answer(
             json!({"type": "user", "message": {"role": "user", "content": result},
                    "parent_tool_use_id": null, "uuid": uuid}),
         );
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    for frame in edits::claude(text, &cwd.to_string_lossy()) {
+        emit(out, frame);
     }
     let calls = widgets::calls(text);
     if !calls.is_empty() {

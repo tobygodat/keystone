@@ -563,6 +563,7 @@ struct Keystone {
     /// Each reply row's Markdown and how much of it is shown. The open session's
     /// streaming replies catch up with each burst over a few frames.
     replies: RefCell<reveal::Replies>,
+    edit_previews: RefCell<transcript::EditPreviews>,
     reveal_task: Option<gpui::Task<()>>,
     clock: BackgroundExecutor,
     /// The sample transcript, parsed once.
@@ -1023,6 +1024,7 @@ impl Keystone {
             customize_wake: wake,
             transcript_scroll: ScrollHandle::new(),
             replies: RefCell::default(),
+            edit_previews: RefCell::default(),
             reveal_task: None,
             clock: cx.background_executor().clone(),
             fixture_document: Arc::new(Document::parse(if fixture {
@@ -2801,11 +2803,11 @@ impl Keystone {
                 };
                 let activity = match row {
                     Row::Item(item) if transcript::activity_name(item).is_some() => {
-                        let expanded = self
-                            .presentation
-                            .current
-                            .views
-                            .activity_expanded(key, index);
+                        let expanded = self.presentation.current.views.activity_expanded(
+                            key,
+                            index,
+                            transcript::opens_expanded(item),
+                        );
                         Some(transcript::ActivityControl {
                             expanded,
                             selector: arrangement::selector(
@@ -2827,6 +2829,19 @@ impl Keystone {
                                     this.toggle_activity(key, index, window, cx)
                                 },
                             )),
+                            on_open_edit: Box::new(self.scoped_listener(
+                                cx,
+                                move |this, _, window, cx| {
+                                    this.open_edit_diff(
+                                        key,
+                                        index,
+                                        Some(view_state::CopyTarget::OpenEdit),
+                                        window,
+                                        cx,
+                                    )
+                                },
+                            )),
+                            preview: self.edit_preview(session, index, item),
                         })
                     }
                     _ => None,
@@ -2922,6 +2937,14 @@ impl Keystone {
                         fork,
                         restore,
                         second_opinion,
+                        edit_folder: matches!(
+                            row,
+                            Row::Item(keystone_agent::Item {
+                                kind: ItemKind::FileChange { .. },
+                                ..
+                            })
+                        )
+                        .then(|| self.edit_folder(session, cx)),
                     },
                     cx,
                 ))
@@ -4885,10 +4908,10 @@ mod tests {
                 item_ix: 1,
                 offset_in_item: px(30.),
             });
-            views.toggle_activity(MAIN_1, 0);
+            views.toggle_activity(MAIN_1, 0, true);
             assert_eq!(activity_top(&list), (2, px(70.)));
-            assert!(views.activity_expanded(other, 0));
-            assert!(!views.activity_expanded(MAIN_1, 0));
+            assert!(views.activity_expanded(other, 0, true));
+            assert!(!views.activity_expanded(MAIN_1, 0, true));
             v.state.update(cx, |state, _| {
                 state.test_conversation(1).apply(Event::ItemCompleted(Item {
                     id: "activity-0".into(),
@@ -4905,13 +4928,13 @@ mod tests {
             let views = &mut v.presentation.current.views;
             assert_eq!(activity_top(views.get(MAIN_1).unwrap()), (2, px(70.)));
             assert_eq!(activity_top(views.get(other).unwrap()), (1, px(30.)));
-            assert!(!views.activity_expanded(MAIN_1, 0));
+            assert!(!views.activity_expanded(MAIN_1, 0, true));
             let list = views.get(MAIN_1).unwrap().clone();
             list.scroll_to(ListOffset {
                 item_ix: 1,
                 offset_in_item: px(400.),
             });
-            views.toggle_activity(MAIN_1, 1);
+            views.toggle_activity(MAIN_1, 1, true);
             assert_eq!(activity_top(&list), (1, px(0.)));
             cx.notify();
         });
@@ -10827,6 +10850,11 @@ mod tests {
     mod diff_view {
         use super::*;
         include!("diff_view_tests.rs");
+    }
+
+    mod edit_rows {
+        use super::*;
+        include!("edit_rows_tests.rs");
     }
 
     mod second_opinion {

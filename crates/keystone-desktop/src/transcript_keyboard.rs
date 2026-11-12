@@ -50,7 +50,13 @@ fn code_actions<'a>(block: &'a Block, actions: &mut Vec<(CopyTarget, &'a str)>, 
     }
 }
 
-fn copy_actions<'a>(row: &'a Row, document: Option<&'a Document>) -> Vec<(CopyTarget, &'a str)> {
+/// What each keyboard action on `row` copies. An edit's controls copy nothing here: its
+/// diff text is built only when it is copied ([`Keystone::copy_transcript`]).
+fn copy_actions<'a>(
+    row: &'a Row,
+    document: Option<&'a Document>,
+    open_edit: bool,
+) -> Vec<(CopyTarget, &'a str)> {
     let Row::Item(item) = row else {
         return Vec::new();
     };
@@ -85,16 +91,18 @@ fn copy_actions<'a>(row: &'a Row, document: Option<&'a Document>) -> Vec<(CopyTa
         _ => {}
     }
     if crate::transcript::activity_name(item).is_some() {
-        let text = if let ItemKind::Command { command, .. } = &item.kind {
-            if item.text.trim_end().is_empty() {
+        let text = match &item.kind {
+            ItemKind::Command { command, .. } if item.text.trim_end().is_empty() => {
                 command.as_str()
-            } else {
-                item.text.trim_end()
             }
-        } else {
-            item.text.as_str()
+            ItemKind::Command { .. } => item.text.trim_end(),
+            ItemKind::FileChange { .. } => "",
+            _ => item.text.as_str(),
         };
         actions.push((CopyTarget::ActivityToggle, text));
+        if open_edit {
+            actions.push((CopyTarget::OpenEdit, text));
+        }
     }
     if crate::fork::forkable(row) {
         actions.push((CopyTarget::Fork, item.text.as_str()));
@@ -150,16 +158,42 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) {
         if self.selected(cx) != Some(key.session)
-            || !self.presentation.current.arrangement.visible.contains(&key.view)
-            || !self.state.read(cx).conversations().get(&key.session).and_then(|c| c.rows.get(index)).is_some_and(|row| matches!(row, Row::Item(item) if crate::transcript::activity_name(item).is_some())) {
+            || !self
+                .presentation
+                .current
+                .arrangement
+                .visible
+                .contains(&key.view)
+        {
             return;
         }
+        let opens = match self
+            .state
+            .read(cx)
+            .conversations()
+            .get(&key.session)
+            .and_then(|c| c.rows.get(index))
+        {
+            Some(Row::Item(item)) if crate::transcript::activity_name(item).is_some() => {
+                crate::transcript::opens_expanded(item)
+            }
+            _ => return,
+        };
         let keyboard = self.presentation.current.views.keyboard(key, cx);
         keyboard.row = Some(index);
         keyboard.action = Some(CopyTarget::ActivityToggle);
         keyboard.selection_from_pointer = false;
         keyboard.action_focus.focus(window, cx);
-        self.presentation.current.views.toggle_activity(key, index);
+        self.presentation
+            .current
+            .views
+            .toggle_activity(key, index, opens);
+        let open = self
+            .presentation
+            .current
+            .views
+            .activity_expanded(key, index, opens);
+        self.edit_row_toggled(key.session, index, open, cx);
         self.presentation.current.views.activate(key);
         cx.notify();
     }
@@ -298,6 +332,27 @@ impl Keystone {
         cx.notify();
     }
 
+    /// The edit on the transcript's row as diff text, built when it is copied.
+    fn edit_text(&self, key: ViewKey, cx: &App) -> Option<String> {
+        let index = self
+            .presentation
+            .current
+            .views
+            .keyboard_state(key)
+            .and_then(|k| k.row)?;
+        let conversation = self.state.read(cx).conversations().get(&key.session)?;
+        match conversation.rows.get(index)? {
+            Row::Item(keystone_agent::Item {
+                kind:
+                    ItemKind::FileChange {
+                        patch: Some(patch), ..
+                    },
+                ..
+            }) => Some(self.edit_folder(key.session, cx).patch(patch).text()),
+            _ => None,
+        }
+    }
+
     fn with_row_actions<R>(
         &self,
         key: ViewKey,
@@ -330,7 +385,34 @@ impl Keystone {
             ),
             _ => None,
         };
-        read(&copy_actions(row, document.as_deref()))
+        // Open full edit is a stop only while it is drawn: on an open edit longer than
+        // its preview.
+        let open_edit = match row {
+            Row::Item(
+                item @ keystone_agent::Item {
+                    kind:
+                        ItemKind::FileChange {
+                            patch: Some(patch), ..
+                        },
+                    ..
+                },
+            ) => {
+                let lines: usize = patch
+                    .files
+                    .iter()
+                    .flat_map(|f| &f.hunks)
+                    .map(|h| h.lines.len())
+                    .sum();
+                lines > crate::transcript::PREVIEW_LINES
+                    && self.presentation.current.views.activity_expanded(
+                        key,
+                        index,
+                        crate::transcript::opens_expanded(item),
+                    )
+            }
+            _ => false,
+        };
+        read(&copy_actions(row, document.as_deref(), open_edit))
     }
 
     /// The row of the widget whose control has focus.
@@ -510,16 +592,22 @@ impl Keystone {
             .views
             .keyboard_state(key)
             .and_then(|k| k.action);
-        let text = self.with_row_actions(
+        let chosen = self.with_row_actions(
             key,
             |actions| {
                 target
                     .and_then(|target| actions.iter().find(|(t, _)| *t == target))
                     .or_else(|| actions.first())
-                    .map(|(_, text)| (*text).to_owned())
+                    .map(|(target, text)| (*target, (*text).to_owned()))
             },
             cx,
         );
+        let text = match chosen {
+            Some((CopyTarget::ActivityToggle | CopyTarget::OpenEdit, text)) => {
+                self.edit_text(key, cx).or(Some(text))
+            }
+            chosen => chosen.map(|(_, text)| text),
+        };
         if let Some(text) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }

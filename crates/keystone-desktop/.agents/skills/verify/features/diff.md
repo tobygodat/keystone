@@ -1,11 +1,12 @@
 # Diff viewer (TOB-305)
 
-A read-only diff shown in place of a conversation view: what one turn changed, or the uncommitted changes of the session's repository. Lines are selected as in a Files view, comments are left on them, and the comments go to the session as one message. The composer and its draft stay as they were.
+A read-only diff shown in place of a conversation view: what one turn changed, one agent edit (TOB-310), or the uncommitted changes of the session's repository. Lines are selected as in a Files view, comments are left on them, and the comments go to the session as one message. The composer and its draft stay as they were.
 
 ## Entry points
 
 - The "N files" button under a turn's last reply (`view-changes-<row>`, inside `checkpoint-files-<row>`), shown when the turn changed files.
-- Ctrl+Shift+D with the transcript on that reply, or the palette's "Transcript: view the focused turn's changes".
+- Ctrl+Shift+D with the transcript on that reply, or the palette's "Transcript: view the focused turn's or edit's changes".
+- On an edit's row, Ctrl+Shift+D, or an open edit's Open full edit (`edit-open-<row>`, also reached by Tab from the row's toggle), shows that edit alone: "Changes in this edit", read only, with no Comment button, and "This edit is too long to keep whole. The rest isn't shown." at the end of a cut edit.
 - The Changes header's View uncommitted changes button (`changes-diff`), the highlighted row's View diff button (`changes-diff-file`) and Ctrl+Shift+D in the Changes list, which open at that file.
 - Ctrl+Alt+U, or the palette's "View uncommitted changes", for the selected session's folder.
 

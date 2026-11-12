@@ -308,6 +308,7 @@ fn cross_provider_scenario(provider: Provider, cx: &mut gpui::TestAppContext) {
                 id: "synthetic-paths".into(),
                 kind: keystone_agent::ItemKind::FileChange {
                     paths: vec!["p".repeat(1024); 1024],
+                    patch: None,
                 },
                 text: String::new(),
                 status: keystone_agent::ItemStatus::Completed,

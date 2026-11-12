@@ -23,6 +23,11 @@ pub enum ItemKind {
     },
     FileChange {
         paths: Vec<String>,
+        /// What the edit did, when the provider sent it: kept to
+        /// [`crate::diff::EDIT_LINES`] lines, and `truncated` when cut. Logs from before
+        /// Keystone kept it have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        patch: Option<crate::diff::Patch>,
     },
     Tool {
         name: String,

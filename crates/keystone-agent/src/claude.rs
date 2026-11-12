@@ -10,6 +10,7 @@
 //! completes, or cancels it. A steer can fold into the running turn (one `result`) or
 //! abort it and run next (two), so counting results alone is not enough.
 
+use crate::diff::{FileDiff, Hunk, Patch};
 use crate::driver::{ApprovalState, Command, Image, Outputs};
 use crate::item::{
     Approval, Catalog, Event, Item, ItemKind, ItemStatus, ModelInfo, RequestId, Speed, TurnStatus,
@@ -1946,6 +1947,12 @@ impl ClaudeDriver {
         }
         // Parts without a replay flag are tool results, or notes such as
         // "[Request interrupted by user]" that are not the user's words.
+        let results = parts
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool_result"))
+            .count();
+        // `tool_use_result` describes the message's one tool result.
+        let mut edit = (results == 1).then_some(user.tool_use_result);
         for part in parts {
             if part.get("type").and_then(Value::as_str) != Some("tool_result") {
                 continue;
@@ -1974,6 +1981,12 @@ impl ClaudeDriver {
                     (false, false) => Some(0),
                     (false, true) => exit_code_in(&text),
                 };
+            }
+            if let ItemKind::FileChange { paths, patch } = &mut kind
+                && let (Some(path), Some(edit), false) =
+                    (paths.first(), edit.take(), is_error || declined)
+            {
+                *patch = edit.patch(path);
             }
             let status = match (declined, is_error) {
                 (true, _) => ItemStatus::Declined,
@@ -2786,6 +2799,7 @@ pub(crate) fn tool_kind(name: &str, input: &Value) -> ItemKind {
                 .or_else(|| text("notebook_path"))
                 .into_iter()
                 .collect(),
+            patch: None,
         },
         _ => ItemKind::Tool {
             name: name.to_owned(),
@@ -3180,6 +3194,108 @@ struct User {
     uuid: Option<String>,
     #[serde(rename = "isReplay", default)]
     is_replay: bool,
+    #[serde(default)]
+    tool_use_result: EditResult,
+}
+
+/// What an Edit or Write result says it did: `structuredPatch` hunks, and for a created
+/// file (`type: "create"`) its `content`. Any other `tool_use_result`, even one that is
+/// not an object, reads as empty, and fields other than these are skipped unbuilt, so a
+/// large `originalFile` costs nothing.
+#[derive(Default)]
+struct EditResult {
+    kind: Option<String>,
+    hunks: Option<Vec<WireHunk>>,
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireHunk {
+    old_start: u32,
+    new_start: u32,
+    lines: Vec<String>,
+}
+
+impl EditResult {
+    /// The edit to the file at `path`, when the result carried one.
+    fn patch(self, path: &str) -> Option<Patch> {
+        let hunks = self.hunks?;
+        let file = match (self.kind.as_deref(), self.content) {
+            (Some("create"), Some(content)) => FileDiff::created(path.to_owned(), &content),
+            _ => FileDiff {
+                path: path.to_owned(),
+                hunks: hunks
+                    .into_iter()
+                    .map(|hunk| Hunk::new(hunk.old_start, hunk.new_start, hunk.lines))
+                    .collect::<Option<_>>()?,
+                ..FileDiff::default()
+            },
+        };
+        Some(Patch::edit(vec![file]))
+    }
+}
+
+impl<'de> Deserialize<'de> for EditResult {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = EditResult;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a tool result")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<EditResult, A::Error> {
+                let mut result = EditResult::default();
+                while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                    // Each kept field is read raw, then parsed alone, so one that does not
+                    // parse, such as text with a lone surrogate, costs only the patch.
+                    let raw = |map: &mut A| map.next_value::<Box<serde_json::value::RawValue>>();
+                    match key.as_ref() {
+                        "type" => result.kind = serde_json::from_str(raw(&mut map)?.get()).ok(),
+                        "structuredPatch" => {
+                            result.hunks = serde_json::from_str(raw(&mut map)?.get()).ok()
+                        }
+                        "content" => {
+                            result.content = serde_json::from_str(raw(&mut map)?.get()).ok()
+                        }
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<EditResult, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(EditResult::default())
+            }
+            fn visit_str<E>(self, _: &str) -> Result<EditResult, E> {
+                Ok(EditResult::default())
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<EditResult, E> {
+                Ok(EditResult::default())
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<EditResult, E> {
+                Ok(EditResult::default())
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<EditResult, E> {
+                Ok(EditResult::default())
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<EditResult, E> {
+                Ok(EditResult::default())
+            }
+            fn visit_unit<E>(self) -> Result<EditResult, E> {
+                Ok(EditResult::default())
+            }
+        }
+        deserializer.deserialize_any(Visit)
+    }
 }
 
 #[derive(Deserialize)]

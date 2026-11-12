@@ -7,6 +7,7 @@ use gpui::{
     AnyElement, App, ClipboardItem, ElementId, FocusHandle, SharedString, Window, div, prelude::*,
     px,
 };
+use keystone_agent::diff::{Change, FileDiff, Hunk, Line, Patch};
 use keystone_agent::recovery::{Limit, Outcome, RecoveryReport, TurnEvidence};
 use keystone_agent::{Item, ItemKind, ItemStatus, TurnStatus};
 use keystone_ui::markdown::Document;
@@ -14,11 +15,22 @@ use keystone_ui::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// What a click on a row's control does.
+pub type ClickHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
+
+/// Each open edit row's cached preview, by session and row, with its item's ID.
+pub type EditPreviews =
+    std::collections::HashMap<(u64, usize), (String, gpui::Entity<EditPreview>)>;
+
 pub struct ActivityControl {
     pub expanded: bool,
     pub selector: String,
     pub body_selector: String,
     pub on_toggle: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+    /// An edit row's Open full edit: the whole edit in the diff view.
+    pub on_open_edit: ClickHandler,
+    /// An open edit row's preview.
+    pub preview: Option<gpui::Entity<EditPreview>>,
 }
 
 #[derive(Default)]
@@ -44,6 +56,8 @@ pub struct RowControls {
     )>,
     /// How the row's images and videos show and open.
     pub previews: Option<crate::preview::Previews>,
+    /// For an edit's row, the folder its paths are shown from.
+    pub edit_folder: Option<EditFolder>,
 }
 
 pub enum RestoreControl {
@@ -142,6 +156,7 @@ pub fn activity_name(item: &Item) -> Option<String> {
     match &item.kind {
         ItemKind::Reasoning => Some("reasoning".into()),
         ItemKind::Command { .. } => Some("command output".into()),
+        ItemKind::FileChange { patch: Some(_), .. } => Some("edit".into()),
         ItemKind::Tool { name } => Some(format!("tool {name}")),
         ItemKind::Other { name }
             if !item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX) =>
@@ -149,6 +164,344 @@ pub fn activity_name(item: &Item) -> Option<String> {
             Some(format!("activity {name}"))
         }
         _ => None,
+    }
+}
+
+/// Whether a row's disclosure starts open. An edit's diff starts closed, so a turn of
+/// edits reads as one line each.
+pub fn opens_expanded(item: &Item) -> bool {
+    !matches!(item.kind, ItemKind::FileChange { .. })
+}
+
+/// Diff lines an open edit row draws. The rest of a longer edit opens in the diff view,
+/// which lays out only the lines in view, so a row costs the same whatever the edit's size.
+pub const PREVIEW_LINES: usize = 40;
+
+/// One row of an edit's preview.
+enum PreviewRow<'a> {
+    Name(&'a FileDiff),
+    Hunk(&'a Hunk),
+    Line(&'a Line),
+}
+
+/// The rows an edit's preview draws: each file's name when the edit changed more than
+/// one, then its hunks, up to [`PREVIEW_LINES`] lines.
+fn preview_rows(patch: &Patch) -> Vec<PreviewRow<'_>> {
+    let named = patch.files.len() > 1;
+    let mut rows = Vec::new();
+    let mut room = PREVIEW_LINES;
+    for file in &patch.files {
+        if room == 0 {
+            break;
+        }
+        if named {
+            rows.push(PreviewRow::Name(file));
+        }
+        for hunk in &file.hunks {
+            if room == 0 {
+                break;
+            }
+            rows.push(PreviewRow::Hunk(hunk));
+            let lines = &hunk.lines[..hunk.lines.len().min(room)];
+            room -= lines.len();
+            rows.extend(lines.iter().map(PreviewRow::Line));
+        }
+    }
+    rows
+}
+
+/// A preview row's height. Rows never wrap, so the preview's height is known before it
+/// is drawn, which a cached view needs.
+fn preview_row_height(row: &PreviewRow) -> gpui::Pixels {
+    let line = TextSize::Sm.line_height();
+    match row {
+        PreviewRow::Hunk(_) => line + px(4.),
+        PreviewRow::Line(drawn) if drawn.no_newline => line * 2.,
+        PreviewRow::Name(_) | PreviewRow::Line(_) => line,
+    }
+}
+
+/// The start of one edit's diff, drawn with the diff view's own rows. It is its own
+/// view, so outside verification it is cached: a keystroke elsewhere, which redraws the
+/// transcript, does not lay it out again.
+pub struct EditPreview {
+    index: usize,
+    patch: Patch,
+    folder: EditFolder,
+}
+
+impl EditPreview {
+    pub fn new(index: usize, patch: Patch, folder: EditFolder) -> Self {
+        Self {
+            index,
+            patch,
+            folder,
+        }
+    }
+
+    pub fn height(patch: &Patch) -> gpui::Pixels {
+        preview_rows(patch).iter().map(preview_row_height).sum()
+    }
+}
+
+impl Render for EditPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        preview_element(self.index, &self.patch, &self.folder, cx)
+    }
+}
+
+/// The preview's rows as one element of [`EditPreview::height`].
+fn preview_element(index: usize, patch: &Patch, folder: &EditFolder, cx: &App) -> gpui::Div {
+    {
+        let colors = cx.theme().colors;
+        let rows = preview_rows(patch);
+        let biggest = rows
+            .iter()
+            .filter_map(|row| match row {
+                PreviewRow::Line(line) => line.old.max(line.new),
+                _ => None,
+            })
+            .max();
+        let gutter = crate::diff_view::gutter(biggest.unwrap_or(1), cx);
+        let mut drawn = 0;
+        let mut children = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let content = match row {
+                PreviewRow::Name(file) => {
+                    let change = match file.change {
+                        Change::Added => " · added",
+                        Change::Deleted => " · deleted",
+                        Change::Renamed | Change::Modified => "",
+                    };
+                    let path = folder.shown(&file.path);
+                    div()
+                        .px(px(8.))
+                        .text_color(colors.text_muted)
+                        .child(format!("{path}{change}"))
+                }
+                PreviewRow::Hunk(hunk) => crate::diff_view::hunk_row(&hunk.header, cx),
+                PreviewRow::Line(line) => {
+                    drawn += 1;
+                    crate::diff_view::line_row(line, gutter, false, cx)
+                        .automation_id(format!("edit-{index}-line-{}", drawn - 1))
+                }
+            };
+            children.push(
+                div()
+                    .h(preview_row_height(row))
+                    .overflow_hidden()
+                    .child(content),
+            );
+        }
+        v_flex()
+            .w_full()
+            .font_family(cx.theme().fonts.mono.clone())
+            .text_size(TextSize::Sm.px())
+            .line_height(TextSize::Sm.line_height())
+            .whitespace_nowrap()
+            .children(children)
+    }
+}
+
+/// An open edit: its preview, then how many lines are left and a way to open all of it,
+/// or where a cut edit's kept lines end, or that it has no lines.
+struct EditBody<'a> {
+    index: usize,
+    patch: &'a Patch,
+    preview: Option<gpui::Entity<EditPreview>>,
+    folder: &'a EditFolder,
+    selector: String,
+    open_edit: ClickHandler,
+    action: &'a Option<(CopyTarget, FocusHandle)>,
+}
+
+fn edit_body(body: EditBody, cx: &App) -> AnyElement {
+    let EditBody {
+        index,
+        patch,
+        preview,
+        folder,
+        selector,
+        open_edit,
+        action,
+    } = body;
+    let colors = cx.theme().colors;
+    let total: usize = patch
+        .files
+        .iter()
+        .flat_map(|file| &file.hunks)
+        .map(|hunk| hunk.lines.len())
+        .sum();
+    let more = total.saturating_sub(PREVIEW_LINES);
+    let height = EditPreview::height(patch);
+    // A reused cached view reports no element geometry, so verification draws it
+    // uncached, as the sidebar and the terminal do.
+    let preview = match preview {
+        Some(preview) if !keystone_ui::automation::enabled() => gpui::AnyView::from(preview)
+            .cached(gpui::StyleRefinement::default().w_full().h(height))
+            .into_any_element(),
+        Some(preview) => div().w_full().h(height).child(preview).into_any_element(),
+        None => preview_element(index, patch, folder, cx).into_any_element(),
+    };
+    let note = |id: String, text: String| {
+        div()
+            .automation_id(id)
+            .px(px(8.))
+            .child(Label::new(text).size(TextSize::Sm).color(Color::Muted))
+    };
+    let empty = match patch.files.iter().all(|file| file.change == Change::Added) {
+        true => "The file is empty.",
+        false => "No lines changed.",
+    };
+    v_flex()
+        .automation_id(selector)
+        .py_1()
+        .rounded(radius::PANEL)
+        .overflow_hidden()
+        .bg(colors.surface_raised)
+        .child(preview)
+        .when(total == 0, |d| {
+            d.child(note(format!("edit-empty-{index}"), empty.into()))
+        })
+        .when(patch.truncated && more == 0, |d| {
+            d.child(
+                note(
+                    format!("edit-cut-{index}"),
+                    "This edit is too long to keep whole. The rest isn't shown.".into(),
+                )
+                .pt_1(),
+            )
+        })
+        .when(more > 0, |d| {
+            let label = match more {
+                1 => "1 more line".to_owned(),
+                more => format!("{more} more lines"),
+            };
+            d.child(
+                h_flex()
+                    .pt_1()
+                    .pr_1()
+                    .gap_2()
+                    .child(note(format!("edit-more-{index}"), label))
+                    .child(
+                        Button::new(("edit-open", index), "Open full edit")
+                            .style(ButtonStyle::Ghost)
+                            .size(ButtonSize::Compact)
+                            .icon(IconName::Diff)
+                            .tooltip(Tooltip::with_key(
+                                "Open the whole edit",
+                                crate::commands::hint("view-changes", cx),
+                            ))
+                            .debug_selector(move || format!("edit-open-{index}"))
+                            .when_some(
+                                action
+                                    .as_ref()
+                                    .filter(|(target, _)| *target == CopyTarget::OpenEdit),
+                                |button, (_, focus)| button.track_focus(focus).reveal_on_focus(),
+                            )
+                            .on_click(move |event, window, cx| open_edit(event, window, cx)),
+                    ),
+            )
+        })
+        .into_any_element()
+}
+
+impl crate::Keystone {
+    /// The preview of the edit at row `index` of `session`, when it was made for this
+    /// item as the row opened.
+    pub(crate) fn edit_preview(
+        &self,
+        session: u64,
+        index: usize,
+        item: &Item,
+    ) -> Option<gpui::Entity<EditPreview>> {
+        let previews = self.edit_previews.borrow();
+        let (id, preview) = previews.get(&(session, index))?;
+        (*id == item.id).then(|| preview.clone())
+    }
+
+    /// Makes the preview of the edit at row `index` as it opens, or forgets it as it
+    /// closes.
+    pub(crate) fn edit_row_toggled(
+        &mut self,
+        session: u64,
+        index: usize,
+        open: bool,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if !open {
+            self.edit_previews.borrow_mut().remove(&(session, index));
+            return;
+        }
+        let edit = match self.state.read(cx).conversations().get(&session) {
+            Some(conversation) => match conversation.rows.get(index) {
+                Some(crate::conversation::Row::Item(Item {
+                    id,
+                    kind:
+                        ItemKind::FileChange {
+                            patch: Some(patch), ..
+                        },
+                    ..
+                })) => Some((id.clone(), patch.clone())),
+                _ => None,
+            },
+            None => None,
+        };
+        let Some((id, patch)) = edit else {
+            return;
+        };
+        let folder = self.edit_folder(session, cx);
+        let preview = cx.new(|_| EditPreview::new(index, patch, folder));
+        self.edit_previews
+            .borrow_mut()
+            .insert((session, index), (id, preview));
+    }
+}
+
+/// The folder a session's edits are shown from, here or on another machine, as text.
+/// It only shortens paths for display and copying: nothing reads a file through it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EditFolder(Option<String>);
+
+impl EditFolder {
+    pub fn of(context: keystone_core::SessionContext<'_>) -> Self {
+        use keystone_core::SessionContext;
+        Self(match context {
+            SessionContext::Recorded { directory, .. } => {
+                Some(directory.path().to_string_lossy().into_owned())
+            }
+            SessionContext::Remote { folder, .. } => Some(folder.wire().to_owned()),
+            SessionContext::LegacyMissing | SessionContext::Unsupported => None,
+        })
+    }
+
+    /// An edit's path as the user should see it: relative to the session's folder when
+    /// inside it. Every surface that shows or copies an edit's paths goes through here.
+    pub fn shown<'a>(&self, path: &'a str) -> std::borrow::Cow<'a, str> {
+        match &self.0 {
+            Some(folder) => keystone_agent::diff::shown_path(path, folder),
+            None => path.into(),
+        }
+    }
+
+    /// `patch` with each path as [`EditFolder::shown`] gives it.
+    pub fn patch(&self, patch: &Patch) -> Patch {
+        match &self.0 {
+            Some(folder) => patch.shown_from(folder),
+            None => patch.clone(),
+        }
+    }
+}
+
+impl crate::Keystone {
+    /// The folder `session`'s edits are shown from.
+    pub(crate) fn edit_folder(&self, session: u64, cx: &App) -> EditFolder {
+        self.state
+            .read(cx)
+            .session(session)
+            .map_or_else(EditFolder::default, |session| {
+                EditFolder::of(session.context())
+            })
     }
 }
 
@@ -168,8 +521,14 @@ fn activity_toggle(
         }
     );
     if compact {
+        // A new id per state, so a tooltip opened before a click closes with it.
+        let id = if control.expanded {
+            "activity-toggle-open"
+        } else {
+            "activity-toggle"
+        };
         return IconButton::new(
-            ("activity-toggle", index),
+            (id, index),
             if control.expanded {
                 IconName::Chevron
             } else {
@@ -232,6 +591,7 @@ pub fn row(
         restore,
         second_opinion,
         previews,
+        edit_folder,
     } = controls;
     let colors = cx.theme().colors;
     let (code_size, code_line) = cx.theme().transcript_code_text();
@@ -459,21 +819,81 @@ pub fn row(
                     })
                     .into_any_element()
             }
-            ItemKind::FileChange { paths } => v_flex()
-                .gap_2()
-                .text_size(TextSize::Ui.px())
-                .text_color(colors.text_muted)
-                .child(format!(
-                    "Changed {}{}",
-                    paths.join(", "),
-                    outcome_note(item.status)
-                ))
-                .children(
-                    previews
-                        .as_ref()
-                        .and_then(|previews| previews.changed(index, item.status, paths)),
-                )
-                .into_any_element(),
+            ItemKind::FileChange { paths, patch } => {
+                let folder = edit_folder.unwrap_or_default();
+                let shown: Vec<_> = paths.iter().map(|path| folder.shown(path)).collect();
+                let label = format!("Changed {}{}", shown.join(", "), outcome_note(item.status));
+                let previews = previews
+                    .as_ref()
+                    .and_then(|previews| previews.changed(index, item.status, paths));
+                let Some((patch, control)) = patch.as_ref().zip(activity) else {
+                    return v_flex()
+                        .gap_2()
+                        .text_size(TextSize::Ui.px())
+                        .text_color(colors.text_muted)
+                        .child(label)
+                        .children(previews)
+                        .into_any_element();
+                };
+                let (added, removed) = patch
+                    .files
+                    .iter()
+                    .map(FileDiff::counts)
+                    .fold((0, 0), |(a, r), (added, removed)| (a + added, r + removed));
+                let expanded = control.expanded;
+                let body_selector = control.body_selector.clone();
+                let mut control = control;
+                let open_edit =
+                    std::mem::replace(&mut control.on_open_edit, Box::new(|_, _, _| {}));
+                let preview = control.preview.take();
+                v_flex()
+                    .gap_2()
+                    .text_size(TextSize::Ui.px())
+                    .text_color(colors.text_muted)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .pl_1p5()
+                            .child(div().min_w_0().child(label))
+                            .when(added > 0, |d| {
+                                d.child(
+                                    Label::new(format!("+{added}"))
+                                        .size(TextSize::Sm)
+                                        .color(Color::Success),
+                                )
+                            })
+                            .when(removed > 0, |d| {
+                                d.child(
+                                    Label::new(format!("−{removed}"))
+                                        .size(TextSize::Sm)
+                                        .color(Color::Danger),
+                                )
+                            })
+                            .child(activity_toggle(
+                                index,
+                                "edit".into(),
+                                &action,
+                                control,
+                                true,
+                            )),
+                    )
+                    .when(expanded, |d| {
+                        d.child(edit_body(
+                            EditBody {
+                                index,
+                                patch,
+                                preview,
+                                folder: &folder,
+                                selector: body_selector,
+                                open_edit,
+                                action: &action,
+                            },
+                            cx,
+                        ))
+                    })
+                    .children(previews)
+                    .into_any_element()
+            }
             ItemKind::Other { .. }
                 if item.id.starts_with(keystone_agent::log::LOSS_MARKER_PREFIX) =>
             {

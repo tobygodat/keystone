@@ -45,7 +45,8 @@ local dispatch, not provider completion; later provider failures are exposed by 
 Read pages have a 256 KiB encoded-byte budget as well as a row limit, and every
 row, the first included, fits within it. Item text, command lines, approval actions
 and turn errors keep their first and last 32 KiB with an omitted-byte marker, and the
-row says `truncated: true`. A row still over the budget, such as a file change that
+row says `truncated: true`. A file change item carries its edit's diff, already kept to
+1,000 lines when it was logged (see [Edit diffs](providers.md#edit-diffs)). A row still over the budget, such as a file change that
 lists thousands of paths, is replaced by `{position, omitted_bytes, truncated: true}`,
 so `next` still moves past it. The session-level `error`, `load_error` and
 `save_error` in read and wait responses are capped the same way. This bounds the

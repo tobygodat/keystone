@@ -19,6 +19,8 @@ impl Render for RestoredRow {
                     selector: "activity-expanded-0".into(),
                     body_selector: "activity-body-0".into(),
                     on_toggle: Box::new(|_, _, _| {}),
+                    on_open_edit: Box::new(|_, _, _| {}),
+                    preview: None,
                 }),
                 ..Default::default()
             },

@@ -168,7 +168,28 @@ fn rows_naming_files(folder: &Path) -> Vec<keystone_agent::Event> {
     let change = |id: &str, path: String| {
         item(
             id,
-            ItemKind::FileChange { paths: vec![path] },
+            ItemKind::FileChange {
+                paths: vec![path],
+                patch: None,
+            },
+            String::new(),
+        )
+    };
+    // An edit with its diff, which comes from the agent, not from a file here.
+    let edit = |id: &str, path: String| {
+        use keystone_agent::diff::{FileDiff, Hunk, Patch};
+        let hunk = Hunk::new(1, 1, ["-on the other machine", "+edited there"]).unwrap();
+        let patch = Patch::edit(vec![FileDiff {
+            path: path.clone(),
+            hunks: vec![hunk],
+            ..FileDiff::default()
+        }]);
+        item(
+            id,
+            ItemKind::FileChange {
+                paths: vec![path],
+                patch: Some(patch),
+            },
             String::new(),
         )
     };
@@ -190,7 +211,7 @@ fn rows_naming_files(folder: &Path) -> Vec<keystone_agent::Event> {
         change("f1", format!("{at}/shot.png")),
         change("f2", "shot.png".into()),
         change("f3", format!("{at}/clip.mp4")),
-        change("f4", format!("{at}/notes.txt")),
+        edit("f4", format!("{at}/notes.txt")),
         item(
             "a",
             ItemKind::AgentMessage,
@@ -305,6 +326,18 @@ fn no_row_of_a_remote_session_reads_this_machines_files(cx: &mut TestAppContext)
         !shown(cx, "preview-overlay"),
         "clicking a row opens nothing"
     );
+    assert_eq!(media(cx), Vec::<String>::new());
+    // The edit row opens to its own diff, its path shown from the remote folder.
+    if shown(cx, "activity-collapsed-5") {
+        let toggle = cx.debug_bounds("activity-collapsed-5").unwrap();
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        settle(cx);
+    }
+    assert!(shown(cx, "edit-5-line-1"), "the remote edit draws its diff");
+    view.read_with(cx, |view, cx| {
+        let path = format!("{}/notes.txt", folder.display());
+        assert_eq!(view.edit_folder(remote, cx).shown(&path), "notes.txt");
+    });
     assert_eq!(media(cx), Vec::<String>::new());
 
     view.update_in(cx, |view, window, cx| {

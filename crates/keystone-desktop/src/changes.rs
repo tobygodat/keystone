@@ -2188,6 +2188,7 @@ mod ui_tests {
                 id: "edit-1".into(),
                 kind: ItemKind::FileChange {
                     paths: vec!["agent.txt".into()],
+                    patch: None,
                 },
                 text: String::new(),
                 status: ItemStatus::Completed,
