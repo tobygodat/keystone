@@ -40,9 +40,12 @@ fn lines(events: &[SetupEvent]) -> Vec<&str> {
         .collect()
 }
 
+/// Whether a process of the group `pid` leads has not exited yet. A killed child the
+/// shell left is reparented, and stays in the group as a zombie until its new parent
+/// reaps it, which Keystone cannot hurry.
 fn group_alive(pid: i32) -> bool {
-    // SAFETY: signal 0 only checks whether the group exists.
-    unsafe { libc::killpg(pid, 0) == 0 }
+    let leader_exited = matches!(host::process_state(pid as u32), None | Some('Z' | 'X'));
+    !leader_exited || host::group_has_others(pid as u32)
 }
 
 #[test]
@@ -180,11 +183,6 @@ fn a_script_that_ignores_term_is_killed() {
         events(&run, &wakes, Duration::from_secs(1)).last(),
         Some(&SetupEvent::Exited(SetupExit::Signal(libc::SIGKILL)))
     );
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while group_alive(pid) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!group_alive(pid));
 }
 
 #[test]

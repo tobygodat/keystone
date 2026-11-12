@@ -635,7 +635,7 @@ pub fn process_state(pid: u32) -> Option<char> {
 /// Whether a process other than `group`'s leader is alive in that group. The caller
 /// keeps the group ID reserved, such as by leaving the leader unreaped.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn group_has_others(group: u32) -> bool {
+pub fn group_has_others(group: u32) -> bool {
     os::all()
         .iter()
         .any(|s| s.group == group && s.pid != group && !Targets::exited(process_state(s.pid)))

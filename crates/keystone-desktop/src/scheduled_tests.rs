@@ -303,6 +303,9 @@ fn a_run_whose_first_save_fails_starts_nothing_and_goes_once_saving_works(
     wait_until(cx, &state, |state| state.scheduler_error().is_some());
     let refused = state.read_with(cx, |state, _| state.scheduler_error().map(str::to_owned));
     mode(0o644);
+    // A try the writer started while the files were read-only can still be running and
+    // fail, so the clock moves on only once the writer is past it.
+    state.read_with(cx, |state, _| state.store.writes());
     assert!(
         refused.is_some_and(|error| error.contains("did not run")),
         "the failed save is shown"

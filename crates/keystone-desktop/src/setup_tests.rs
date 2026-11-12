@@ -5,6 +5,7 @@ use super::*;
 use crate::windows::open;
 use crate::{install_app_state, open_windows};
 use gpui::{Entity, TestAppContext, VisualTestContext};
+use keystone_agent::host;
 use keystone_core::{Provider, Store, WindowId, WorkingDirectory};
 use std::path::{Path, PathBuf};
 
@@ -244,9 +245,12 @@ fn retry(view: &Entity<Keystone>, session: u64, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Whether a process of the group `pid` leads has not exited yet. A killed child the
+/// shell left is reparented, and stays in the group as a zombie until its new parent
+/// reaps it, which Keystone cannot hurry.
 fn group_alive(pid: i32) -> bool {
-    // SAFETY: signal 0 only checks whether the group exists.
-    unsafe { libc::killpg(pid, 0) == 0 }
+    let leader_exited = matches!(host::process_state(pid as u32), None | Some('Z' | 'X'));
+    !leader_exited || host::group_has_others(pid as u32)
 }
 
 #[gpui::test]
