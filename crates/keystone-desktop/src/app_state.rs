@@ -24,7 +24,7 @@ mod tests;
 mod remote_tests;
 
 #[path = "orchestrator.rs"]
-mod orchestrator;
+pub(crate) mod orchestrator;
 
 #[path = "delivery.rs"]
 pub(crate) mod delivery;
@@ -260,6 +260,7 @@ pub(crate) struct AppState {
     pub(crate) test_checkpoints: bool,
     pub(crate) notifier: crate::notifications::Notifier,
     pub(crate) pull_requests: crate::pull_request::Monitor,
+    pub(crate) devices: crate::device::Devices,
     /// Where attached images are copied, beside the workspace database.
     pub(crate) attachments: keystone_core::attachment::Attachments,
     /// The browser preview's pages, one per project folder.
@@ -577,6 +578,7 @@ impl AppState {
         self.stop_setups();
         drop(self.orchestrator.take());
         self.pull_requests.stop();
+        self.devices.stop();
         self.browsers.shut_down();
         self.codex.clear();
         self.claude.clear();
@@ -1582,6 +1584,7 @@ impl AppState {
         }
         let result = self.store.close_window(window);
         self.pull_requests.window_closed(window);
+        self.devices.window_closed(window);
         self.changes.sidebar = true;
         self.publish(cx);
         result
@@ -1773,6 +1776,9 @@ impl AppState {
             test_checkpoints: false,
             notifier: Default::default(),
             pull_requests: Default::default(),
+            devices: crate::device::Devices::new(Arc::new(
+                keystone_agent::device::LocalHost::default(),
+            )),
             attachments,
             scheduler: Default::default(),
             store,

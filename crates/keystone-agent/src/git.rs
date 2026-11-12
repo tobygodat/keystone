@@ -216,12 +216,83 @@ impl Cancel {
     }
 }
 
+/// The commands running under it, by process group, so they can all be ended at once
+/// from any thread. Clones share them.
+#[derive(Clone, Debug, Default)]
+pub struct Children(Arc<std::sync::Mutex<Groups>>);
+
+#[derive(Debug, Default)]
+struct Groups {
+    stopped: bool,
+    running: std::collections::HashSet<libc::pid_t>,
+}
+
+impl Children {
+    /// Kills every command running under it, with whatever each started, before it
+    /// returns. Commands after it fail with [`Error::Cancelled`] before they start.
+    pub fn stop(&self) {
+        let mut groups = self.0.lock().unwrap();
+        groups.stopped = true;
+        for group in groups.running.drain() {
+            // SAFETY: kill has no memory effects; a group that has gone fails.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+    }
+
+    /// Keeps `child` until the guard drops, or kills it at once after a stop.
+    fn hold(&self, child: &mut std::process::Child) -> Result<Held<'_>> {
+        let group = child.id() as libc::pid_t;
+        let mut groups = self.0.lock().unwrap();
+        if groups.stopped {
+            drop(groups);
+            // SAFETY: as in `stop`.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Cancelled);
+        }
+        groups.running.insert(group);
+        Ok(Held(self, group))
+    }
+}
+
+struct Held<'a>(&'a Children, libc::pid_t);
+
+impl Held<'_> {
+    /// `try_wait`, and on exit the group leaves the set in the same hold of its lock,
+    /// so `stop` never signals a pid that was reaped and may be another process's.
+    fn try_wait(
+        &self,
+        child: &mut std::process::Child,
+    ) -> io::Result<Option<std::process::ExitStatus>> {
+        let mut groups = self.0.0.lock().unwrap();
+        let status = child.try_wait()?;
+        if status.is_some() {
+            groups.running.remove(&self.1);
+        }
+        Ok(status)
+    }
+
+    /// Leaves the set while the child is still unreaped, so its pid can't be reused.
+    fn release(&self) {
+        self.0.0.lock().unwrap().running.remove(&self.1);
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// When a running command is given up.
 #[derive(Clone, Copy)]
 pub(crate) enum Until<'a> {
     Exit,
     /// Fails as having had no answer.
     Deadline(Duration),
+    /// As [`Until::Deadline`], and ended by [`Children::stop`].
+    Held(Duration, &'a Children),
     /// Fails with [`Error::Cancelled`].
     Cancelled(&'a Cancel),
 }
@@ -272,6 +343,10 @@ pub(crate) fn run_until(
     let mut child = command.spawn().map_err(spawn)?;
     // The pipe ends only once every writer is closed, so the command's copies go first.
     drop(command);
+    let held = match until {
+        Until::Held(_, children) => Some(children.hold(&mut child)?),
+        _ => None,
+    };
     let feeder = child.stdin.take().zip(input).map(|(mut stdin, input)| {
         std::thread::spawn(move || {
             let _ = stdin.write_all(&input);
@@ -281,7 +356,7 @@ pub(crate) fn run_until(
     let written = drain(reader);
     let given_up = |started: Instant| match until {
         Until::Exit => None,
-        Until::Deadline(limit) => (started.elapsed() >= limit)
+        Until::Deadline(limit) | Until::Held(limit, _) => (started.elapsed() >= limit)
             .then(|| Error::Spawn(format!("no answer after {} seconds", limit.as_secs()))),
         Until::Cancelled(cancel) => cancel.is_cancelled().then_some(Error::Cancelled),
     };
@@ -291,7 +366,11 @@ pub(crate) fn run_until(
             let started = Instant::now();
             let mut pauses = pauses(until);
             loop {
-                if let Some(status) = child.try_wait().map_err(spawn)? {
+                let reaped = match &held {
+                    Some(held) => held.try_wait(&mut child),
+                    None => child.try_wait(),
+                };
+                if let Some(status) = reaped.map_err(spawn)? {
                     break status;
                 }
                 if let Some(error) = given_up(started) {
@@ -299,6 +378,9 @@ pub(crate) fn run_until(
                     // started goes with it and lets go of the output pipes.
                     // SAFETY: kill has no memory effects; a pid that leads no group fails.
                     unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+                    if let Some(held) = &held {
+                        held.release();
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(error);
@@ -307,6 +389,7 @@ pub(crate) fn run_until(
             }
         }
     };
+    drop(held);
     if let Some(feeder) = feeder {
         let _ = feeder.join();
     }
@@ -1451,5 +1534,36 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc both.rs\0\
                 "a command that ends after {exited:?} is seen after {slept:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_command_that_ends_or_is_given_up_leaves_the_children_it_ran_under() {
+        let children = Children::default();
+        let held = |program_name: &str, args: &[&str], limit: Duration| {
+            let mut command = program(Path::new(program_name), &std::env::temp_dir());
+            command.args(args);
+            run_until(
+                command,
+                None,
+                Output::Separate,
+                Until::Held(limit, &children),
+            )
+        };
+        held("true", &[], Duration::from_secs(10)).unwrap();
+        assert!(children.0.lock().unwrap().running.is_empty(), "it ended");
+        assert!(held("sleep", &["30"], Duration::from_millis(100)).is_err());
+        assert!(
+            children.0.lock().unwrap().running.is_empty(),
+            "it was given up"
+        );
+        children.stop();
+        assert!(
+            matches!(
+                held("true", &[], Duration::from_secs(10)),
+                Err(Error::Cancelled)
+            ),
+            "nothing runs after a stop"
+        );
+        assert!(children.0.lock().unwrap().running.is_empty());
     }
 }

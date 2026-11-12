@@ -6,6 +6,7 @@ use crate::attachments::AttachFiles;
 use crate::browser::ToggleBrowser;
 use crate::changes::{CopyPullRequestLink, ToggleChanges};
 use crate::customization::OpenCustomize;
+use crate::device::ToggleDevice;
 use crate::diff_view::{ViewChanges, ViewUncommitted};
 use crate::excerpt::{SEND_SELECTION, SendSelection, Taken};
 use crate::file_view::{SAVE_FILE, Save};
@@ -174,6 +175,14 @@ pub(crate) const COMMANDS: &[Command] = &[
         keys: &["secondary-alt-b"],
         context: Some(APP),
         action: || Box::new(ToggleBrowser),
+        in_terminal: false,
+    },
+    Command {
+        id: "toggle-device",
+        label: "Toggle device",
+        keys: &["secondary-alt-v"],
+        context: Some(APP),
+        action: || Box::new(ToggleDevice),
         in_terminal: false,
     },
     Command {

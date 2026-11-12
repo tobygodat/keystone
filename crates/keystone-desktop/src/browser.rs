@@ -15,6 +15,7 @@ use gpui::{
 use keystone_agent::browser::{
     self, Act, Browsers, DevServer, History, Mouse, Page, Viewport, modifiers,
 };
+use keystone_agent::mcp::{Image, Reply};
 use keystone_core::{ApprovalMode, Axis, Component, Place, Size};
 use keystone_ui::prelude::*;
 use serde_json::{Value, json};
@@ -688,7 +689,7 @@ impl AppState {
         arguments: Value,
         deadline: std::time::Instant,
         cx: &mut Context<Self>,
-    ) -> Result<Box<dyn FnOnce() -> Result<Value, String> + Send>, String> {
+    ) -> Result<Box<dyn FnOnce() -> Result<Reply, String> + Send>, String> {
         let (project, ceiling) = self.caller(caller)?;
         let acts = matches!(tool, "browser_act" | "browser_evaluate");
         if acts && (ceiling == ApprovalMode::ReadOnly || self.reviews(caller.session)) {
@@ -723,7 +724,7 @@ fn run_tool(
     tool: &str,
     arguments: &Value,
     deadline: std::time::Instant,
-) -> Result<Value, String> {
+) -> Result<Reply, String> {
     let servers = || {
         json!(browser::servers::find(Path::new(folder))
             .into_iter()
@@ -737,7 +738,7 @@ fn run_tool(
             None => json!({"url": null, "open": false}),
         };
         status["dev_servers"] = servers();
-        return Ok(status);
+        return Ok(status.into());
     }
     let page = browsers.page(folder)?;
     let _operation = page.operation();
@@ -755,7 +756,7 @@ fn run_tool(
             }
             let mut status = page.status()?;
             status["dev_servers"] = servers();
-            Ok(status)
+            Ok(status.into())
         }
         "browser_navigate" => {
             match (arguments["url"].as_str(), arguments["history"].as_str()) {
@@ -768,27 +769,33 @@ fn run_tool(
                 _ => return Err("Give either url or history".into()),
             }
             note(&page, format!("went to {}", page.url()));
-            page.status()
+            page.status().map(Reply::from)
         }
         "browser_snapshot" => {
             note(&page, "read the page".into());
-            page.snapshot()
+            page.snapshot().map(Reply::from)
         }
         "browser_act" => {
             let act = Act::parse(arguments)?;
             let result = page.act(&act)?;
             note(&page, describe(&act));
-            Ok(result)
+            Ok(result.into())
         }
         "browser_screenshot" => {
             let data = page.screenshot()?;
             note(&page, "took a screenshot".into());
-            Ok(json!({"url": page.url(), "image": {"mime_type": "image/jpeg", "data": data}}))
+            Ok(Reply {
+                value: json!({"url": page.url()}),
+                images: vec![Image {
+                    mime: "image/jpeg",
+                    data,
+                }],
+            })
         }
         "browser_evaluate" => {
             let value = page.evaluate(arguments["expression"].as_str().unwrap_or_default())?;
             note(&page, "ran a script".into());
-            Ok(json!({"value": value}))
+            Ok(json!({"value": value}).into())
         }
         _ => Err("Unknown tool".into()),
     }

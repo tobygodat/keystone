@@ -11,12 +11,12 @@ use std::time::Instant;
 
 type Reply = Result<Value, String>;
 
-struct Request {
-    caller: Caller,
-    tool: String,
-    arguments: Value,
-    deadline: Instant,
-    reply: Sender<Result<Value, HandlerError>>,
+pub(crate) struct Request {
+    pub(crate) caller: Caller,
+    pub(crate) tool: String,
+    pub(crate) arguments: Value,
+    pub(crate) deadline: Instant,
+    pub(crate) reply: Sender<Result<keystone_agent::mcp::Reply, HandlerError>>,
     /// For a launch that names a worktree, its git work's result, found off the UI thread.
     prepared: Option<Prepared>,
 }
@@ -239,6 +239,10 @@ impl AppState {
         orchestrator.draining = true;
         let requests: Vec<_> = orchestrator.requests.try_iter().take(32).collect();
         for request in requests {
+            if request.tool.starts_with("device_") {
+                self.device_request(request, cx);
+                continue;
+            }
             if keystone_agent::mcp::browser::TOOLS.contains(&request.tool.as_str()) {
                 self.answer_browser(request, cx);
                 continue;
@@ -411,7 +415,7 @@ impl AppState {
             }
             reply
         };
-        let _ = request.reply.send(reply);
+        let _ = request.reply.send(reply.map(Into::into));
     }
 
     /// A launch's arguments, checked before anything is created.

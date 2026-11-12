@@ -1354,11 +1354,28 @@ fn a_live_resize_moves_a_side_panel_under_the_composer_and_back(cx: &mut TestApp
 
 #[gpui::test]
 fn the_browser_opens_like_the_other_side_panels_at_each_window_width(cx: &mut TestAppContext) {
+    opens_like_the_other_side_panels(Component::Browser, "secondary-alt-b", "browser-servers", cx);
+}
+
+#[gpui::test]
+fn the_device_panel_opens_like_the_other_side_panels_at_each_window_width(cx: &mut TestAppContext) {
+    opens_like_the_other_side_panels(Component::Device, "secondary-alt-v", "device-refresh", cx);
+}
+
+/// `component`, opened by `keys`, sits beside the composer's column at full width,
+/// beside the conversation at 1100 px, folds into tabs at 720 px, and comes back.
+/// `drawn` is an element its surface always draws.
+fn opens_like_the_other_side_panels(
+    component: Component,
+    keys: &str,
+    drawn: &'static str,
+    cx: &mut TestAppContext,
+) {
     let (_dir, view, cx) = open(cx);
     click(cx, "customize-apply");
     click(cx, "customize-close");
-    // Whether Browser sits beside the composer's column, whether it shows, and whether
-    // the window folded into tabs.
+    // Whether it sits beside the composer's column, whether it shows, and whether the
+    // window folded into tabs.
     let placed = |cx: &mut VisualTestContext| {
         view.update(cx, |this, cx| {
             let c = this.shown_composition(cx);
@@ -1366,14 +1383,18 @@ fn the_browser_opens_like_the_other_side_panels_at_each_window_width(cx: &mut Te
                 panic!("a split root");
             };
             let beside_column = children.iter().any(|child| {
-                matches!(child.node, Node::View { id } if c.component(id) == Some(Component::Browser))
+                matches!(child.node, Node::View { id } if c.component(id) == Some(component))
             });
-            let open = c.views().any(|(_, shown)| shown == Component::Browser);
-            (beside_column, open, this.presentation.current.arrangement.fitted)
+            let open = c.views().any(|(_, shown)| shown == component);
+            (
+                beside_column,
+                open,
+                this.presentation.current.arrangement.fitted,
+            )
         })
     };
     resize_and_settle(gpui::size(px(1920.), px(1080.)), cx);
-    cx.simulate_keystrokes("secondary-alt-b");
+    cx.simulate_keystrokes(keys);
     cx.run_until_parked();
     assert_eq!(
         placed(cx),
@@ -1381,8 +1402,8 @@ fn the_browser_opens_like_the_other_side_panels_at_each_window_width(cx: &mut Te
         "1920 px wide: beside the composer's column"
     );
     assert!(
-        cx.debug_bounds("browser-servers").is_some(),
-        "the Browser surface draws its toolbar"
+        cx.debug_bounds(drawn).is_some(),
+        "the surface draws {drawn}"
     );
 
     resize_and_settle(gpui::size(px(1100.), px(720.)), cx);

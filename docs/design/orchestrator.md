@@ -23,6 +23,7 @@ access is provided.
 | `session_wait {session, timeout?}` | Waits for the target's current work to end. The timeout defaults to 50 seconds and is capped at 50 seconds; `timed_out` distinguishes the cutoff from completion. Call again to keep waiting. A wait that sees a launched session's turn end marks its result observed, so it starts no turn. |
 | `session_interrupt {session}` | Stops the current target turn through the same runtime path as the Stop button. Codex also cancels an initial message waiting for its thread to open. Work still queued on a connection worker returns busy rather than acknowledging a stop it cannot apply immediately. |
 | `browser_*` | Open, read and drive the caller's project page in the Browser surface. See [browser preview](browser-preview.md). |
+| `device_list`, `device_open`, `device_screenshot`, `device_launch`, `device_tap`, `device_swipe`, `device_type`, `device_close` | A simulator or emulator beside the caller's session, with screenshots as image content. `device_open` may take 50 seconds and the others 20. See [devices](devices.md). |
 
 Every call requires a live Keystone caller process with a running turn. Every
 target must have the caller's recorded project directory. `cwd`, when supplied,
@@ -158,9 +159,11 @@ Tokens identify their own caller session,
 not a target selected by request arguments.
 
 Claude receives `mcp_set_servers` after initialization and before its first user
-message. Only the six published `mcp__keystone__<tool>` session tools and the
-`browser_*` tools other than `browser_evaluate` are auto-allowed; native tools and other names retain normal
-approval handling. Codex receives the server in its per-thread configuration. Catalog and
+message. Only the six published `mcp__keystone__<tool>` session tools, the eight
+`device_*` tools and the `browser_*` tools other than `browser_evaluate` are
+auto-allowed (`mcp::auto_allowed`), and a browser tool only while the address it
+loads is this machine's; native tools and other names retain normal approval
+handling. Codex receives the server in its per-thread configuration. Catalog and
 permission-mode probes, and the restricted layout helper, receive no orchestrator
 credentials.
 

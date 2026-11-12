@@ -2046,18 +2046,7 @@ impl ClaudeDriver {
                 .as_deref()
                 .and_then(|name| name.strip_prefix("mcp__keystone__"))
                 .is_some_and(|name| {
-                    matches!(
-                        name,
-                        "capabilities"
-                            | "session_launch"
-                            | "session_send"
-                            | "session_read"
-                            | "session_wait"
-                            | "session_interrupt"
-                    ) || crate::mcp::browser::auto_allowed(
-                        name,
-                        request.input.as_ref().unwrap_or(&Value::Null),
-                    )
+                    crate::mcp::auto_allowed(name, request.input.as_ref().unwrap_or(&Value::Null))
                 })
         {
             out.writes

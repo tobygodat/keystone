@@ -2,7 +2,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::{Caller, Handler, HandlerError, State, auth};
+use base64::Engine;
+
+use super::{Caller, Handler, HandlerError, Reply, State, auth};
 
 pub(super) trait Clock {
     fn now(&self) -> Duration;
@@ -117,31 +119,15 @@ pub(super) fn dispatch(
                 return error(id, -32602, "Invalid tool arguments");
             }
             let outcome = if name == "session_wait" {
-                wait(caller, arguments, handler, state, clock)
+                wait(caller, arguments, handler, state, clock).map(Reply::from)
             } else if auth::is_live(state, caller) {
-                let budget = if super::browser::TOOLS.contains(&name) {
-                    super::browser::BUDGET_SECS
-                } else {
-                    5
-                };
-                handler(caller, name, arguments, Duration::from_secs(budget))
+                handler(caller, name, arguments, budget(name))
             } else {
                 Err("Caller revoked".into())
             };
             let output = match outcome {
-                Ok(mut value) => {
-                    let image = (name == "browser_screenshot")
-                        .then(|| {
-                            value
-                                .as_object_mut()
-                                .and_then(|object| object.remove("image"))
-                        })
-                        .flatten();
-                    let mut content = vec![json!({"type":"text","text":value.to_string()})];
-                    if let Some(image) = image {
-                        content.push(json!({"type":"image","data":image["data"],"mimeType":image["mime_type"]}));
-                    }
-                    json!({"content":content,"structuredContent":value,"isError":false})
+                Ok(reply) => {
+                    json!({"content":content(&reply),"structuredContent":reply.value,"isError":false})
                 }
                 Err(message) => {
                     let value = json!({"error":message.to_string()});
@@ -152,6 +138,27 @@ pub(super) fn dispatch(
         }
         _ => error(id, -32601, "Method not found"),
     }
+}
+
+/// How long a tool's handler may take.
+pub(super) fn budget(tool: &str) -> Duration {
+    if super::device::TOOLS.contains(&tool) {
+        super::device::budget(tool)
+    } else if super::browser::TOOLS.contains(&tool) {
+        Duration::from_secs(super::browser::BUDGET_SECS)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
+/// The reply as text, then each image, base64-encoded.
+fn content(reply: &Reply) -> Vec<Value> {
+    std::iter::once(json!({"type":"text","text":reply.value.to_string()}))
+        .chain(reply.images.iter().map(|image| {
+            json!({"type":"image","mimeType":image.mime,
+                "data":base64::engine::general_purpose::STANDARD.encode(&image.data)})
+        }))
+        .collect()
 }
 
 fn wait(
@@ -192,7 +199,8 @@ fn wait(
         } else {
             remaining.min(Duration::from_secs(5))
         };
-        let outcome = handler(caller, "session_wait", arguments.clone(), budget);
+        let outcome =
+            handler(caller, "session_wait", arguments.clone(), budget).map(|reply| reply.value);
         if !auth::is_live(state, caller) {
             return Err("Caller revoked".into());
         }
@@ -332,5 +340,6 @@ pub(super) fn tools() -> Vec<Value> {
     ]
     .into_iter()
     .chain(super::browser::tools())
+    .chain(super::device::tools())
     .collect()
 }

@@ -9,6 +9,7 @@ mod commands;
 mod conversation;
 mod customization;
 mod customization_agent;
+mod device;
 mod diff_view;
 mod excerpt;
 mod file_disk;
@@ -582,6 +583,7 @@ struct Keystone {
     /// The session the Pull request surface showed in the frame being built.
     pull_request_drawn: Option<u64>,
     merge_confirm: Option<pull_request::MergeConfirm>,
+    device: device::Pane,
     /// Reading a failed check's log for "Ask … to repair".
     repair: Option<gpui::Task<()>>,
     slash: slash_menu::SlashMenu,
@@ -1044,6 +1046,7 @@ impl Keystone {
             pull_request_focus: cx.focus_handle(),
             pull_request_drawn: None,
             merge_confirm: None,
+            device: device::Pane::new(cx),
             repair: None,
             slash,
             mentions,
@@ -3965,6 +3968,7 @@ impl Render for Keystone {
         self.activate_focused_view(window, cx);
         self.note_seen(window, cx);
         self.note_pull_request(window, cx);
+        self.note_device(window, cx);
         let customizing = self.presentation.current.customization.is_open();
         let root = v_flex()
             .id("keystone-root")
@@ -4134,6 +4138,16 @@ impl Render for Keystone {
                     )
                 },
             ))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &device::ToggleDevice, window, cx| {
+                    this.toggle_surface(
+                        keystone_core::Component::Device,
+                        device::DEVICE_WIDTH,
+                        window,
+                        cx,
+                    )
+                }),
+            )
             .on_action(
                 self.scoped_listener(cx, |this, _: &changes::CopyPullRequestLink, _, cx| {
                     this.copy_pull_request_link(cx)

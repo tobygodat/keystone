@@ -6,7 +6,7 @@ const SESSION: u64 = 7;
 const PARENT: u64 = 99;
 
 fn caller() -> (Server, Issuer, Credentials) {
-    let server = Server::start(Arc::new(|_, _, _, _| Ok(json!({})))).unwrap();
+    let server = Server::start(Arc::new(|_, _, _, _| Ok(json!({}).into()))).unwrap();
     let issuer = server.issuer();
     let credentials = issuer.issue(PARENT).unwrap();
     issuer.set_mode(PARENT, ApprovalMode::FullAccess);

@@ -158,7 +158,7 @@ fn an_agent_drives_a_local_page() {
     );
 
     let shot = page.screenshot().unwrap();
-    assert!(shot.starts_with("/9j/"), "a JPEG");
+    assert!(shot.starts_with(&[0xff, 0xd8, 0xff]), "a JPEG");
     let thrown = page
         .evaluate("(() => { throw new Error('boom') })()")
         .unwrap_err();

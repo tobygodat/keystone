@@ -5,7 +5,7 @@ use keystone_core::integrations::Health;
 use serde_json::{Value, json};
 
 fn server() -> Server {
-    Server::start(Arc::new(|_, _, _, _| Ok(json!({})))).unwrap()
+    Server::start(Arc::new(|_, _, _, _| Ok(json!({}).into()))).unwrap()
 }
 
 fn caller(issuer: &Issuer) -> Credentials {
@@ -173,7 +173,7 @@ fn claude_mcp_tools_are_allowed_without_restricting_native_tools() {
 }
 
 #[test]
-fn claude_mcp_autoallow_is_limited_to_the_six_published_tools() {
+fn claude_mcp_autoallow_is_limited_to_the_published_tools() {
     let mut out = Outputs::default();
     let mut driver = ClaudeDriver::new(7, false, 1, ApprovalMode::Provider, &mut out);
     driver.set_mcp("http://127.0.0.1/mcp".into(), "synthetic-token".into());
@@ -186,6 +186,14 @@ fn claude_mcp_autoallow_is_limited_to_the_six_published_tools() {
         "session_read",
         "session_wait",
         "session_interrupt",
+        "device_list",
+        "device_open",
+        "device_screenshot",
+        "device_launch",
+        "device_tap",
+        "device_swipe",
+        "device_type",
+        "device_close",
         "unknown",
         "x__native",
     ] {

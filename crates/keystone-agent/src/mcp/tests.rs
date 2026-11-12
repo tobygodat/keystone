@@ -4,7 +4,10 @@ use std::io::{Read, Write};
 
 fn handler() -> Handler {
     Arc::new(|caller, name, arguments, _| {
-        Ok(json!({"caller":caller.session,"tool":name,"arguments":arguments,"running":false}))
+        Ok(
+            json!({"caller":caller.session,"tool":name,"arguments":arguments,"running":false})
+                .into(),
+        )
     })
 }
 
@@ -266,7 +269,7 @@ fn wait_returns_authorized_snapshot_despite_short_deadline() {
             if budget < latency {
                 return Err("dispatch deadline".into());
             }
-            Ok(json!({"running":true,"session":2,"status":"running"}))
+            Ok(json!({"running":true,"session":2,"status":"running"}).into())
         });
         let response = protocol::dispatch(
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_wait","arguments":{"session":2,"timeout":timeout}}}),
@@ -295,7 +298,7 @@ fn wait_only_recovers_dispatch_expiry_after_an_authorized_snapshot() {
         let delayed: Handler = Arc::new(move |_, _, _, budget| {
             if time.load(Ordering::Relaxed) == 0 && error != "no first snapshot" {
                 time.fetch_add(20, Ordering::Relaxed);
-                return Ok(json!({"running":true,"session":2,"status":"running"}));
+                return Ok(json!({"running":true,"session":2,"status":"running"}).into());
             }
             time.fetch_add(budget.as_millis() as u64, Ordering::Relaxed);
             if error == "unknown target" {
@@ -345,7 +348,7 @@ fn wait_caps_at_fifty_seconds_including_dispatch_budget_and_zero_polls_once() {
             budget.min(Duration::from_millis(30)).as_millis() as u64,
             Ordering::Relaxed,
         );
-        Ok(json!({"running":true}))
+        Ok(json!({"running":true}).into())
     });
     let request = |timeout| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_wait","arguments":{"session":2,"timeout":timeout}}});
     let response = protocol::dispatch(
@@ -395,7 +398,7 @@ fn wait_returns_completed_or_revoked_instead_of_starting_any_work() {
     let held = Arc::new(Mutex::new(Some(credentials)));
     let handler: Handler = Arc::new(move |_, _, _, _| {
         held.lock().unwrap().take();
-        Ok(json!({"running":true}))
+        Ok(json!({"running":true}).into())
     });
     let revoked = protocol::dispatch(request, caller, &handler, &server.issuer.state, &clock);
     assert_eq!(revoked["result"]["isError"], true);
@@ -444,11 +447,108 @@ fn bounded_connections_and_shutdown_close_partial_requests() {
 }
 
 #[test]
+fn an_image_reply_carries_text_then_the_image_and_keeps_bytes_out_of_structured_content() {
+    let server = Server::start(handler()).unwrap();
+    let credentials = server.issuer().issue(1).unwrap();
+    let clock = Clock(Arc::new(AtomicU64::new(0)));
+    let budgets = Arc::new(Mutex::new(Vec::new()));
+    let seen = budgets.clone();
+    let handler: Handler = Arc::new(move |_, name, _, budget| {
+        seen.lock().unwrap().push((name.to_owned(), budget));
+        Ok(Reply {
+            value: json!({"device":"ios:A","width":2,"height":3}),
+            images: vec![super::Image {
+                mime: "image/png",
+                data: vec![1, 2, 3],
+            }],
+        })
+    });
+    let call = |name: &str, arguments: Value| {
+        protocol::dispatch(
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+            credentials.caller(),
+            &handler,
+            &server.issuer.state,
+            &clock,
+        )
+    };
+    let shot = call("device_screenshot", json!({}));
+    let content = shot["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(
+        content[1],
+        json!({"type":"image","mimeType":"image/png","data":"AQID"})
+    );
+    assert_eq!(
+        shot["result"]["structuredContent"],
+        json!({"device":"ios:A","width":2,"height":3})
+    );
+    call("device_open", json!({"device":"ios:A"}));
+    call("device_tap", json!({"x":1.5,"y":2}));
+    call("session_read", json!({"session":2}));
+    assert_eq!(
+        *budgets.lock().unwrap(),
+        [
+            ("device_screenshot".to_owned(), Duration::from_secs(20)),
+            ("device_open".to_owned(), Duration::from_secs(50)),
+            ("device_tap".to_owned(), Duration::from_secs(20)),
+            ("session_read".to_owned(), Duration::from_secs(5)),
+        ]
+    );
+    assert_eq!(
+        call("device_tap", json!({"x":-1,"y":2}))["error"]["code"],
+        -32602
+    );
+}
+
+#[test]
+fn every_tool_schema_uses_types_the_validator_checks() {
+    for tool in protocol::tools() {
+        for (key, property) in tool["inputSchema"]["properties"].as_object().unwrap() {
+            assert!(
+                matches!(
+                    property["type"].as_str(),
+                    Some("string" | "integer" | "number" | "boolean")
+                ),
+                "{}.{key}",
+                tool["name"]
+            );
+        }
+    }
+    for tool in protocol::tools() {
+        let name = tool["name"].as_str().unwrap();
+        assert!(
+            SESSION_TOOLS.contains(&name)
+                || browser::TOOLS.contains(&name)
+                || device::TOOLS.contains(&name),
+            "{name} belongs to no tool family"
+        );
+    }
+    assert!(
+        device::TOOLS
+            .iter()
+            .all(|tool| auto_allowed(tool, &json!({})))
+    );
+    assert!(!auto_allowed("device_reboot", &json!({})));
+    assert!(!auto_allowed(
+        "browser_evaluate",
+        &json!({"expression":"1"})
+    ));
+}
+
+#[test]
 fn browser_tools_get_a_longer_budget_and_an_image_becomes_an_image_block() {
     let server = Server::start(Arc::new(|_, name, arguments, budget| {
         Ok(match name {
-            "browser_screenshot" => json!({"url":"http://localhost:5173/","image":{"mime_type":"image/jpeg","data":"/9j/AA=="}}),
-            _ => json!({"tool":name,"arguments":arguments,"budget":budget.as_secs()}),
+            "browser_screenshot" => Reply {
+                value: json!({"url":"http://localhost:5173/"}),
+                images: vec![super::Image {
+                    mime: "image/jpeg",
+                    data: vec![0xff, 0xd8, 0xff, 0],
+                }],
+            },
+            _ => json!({"tool":name,"arguments":arguments,"budget":budget.as_secs()}).into(),
         })
     }))
     .unwrap();

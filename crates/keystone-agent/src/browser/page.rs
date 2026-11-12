@@ -584,15 +584,15 @@ impl Page {
         Ok(status)
     }
 
-    /// The viewport as a JPEG, base64-encoded.
-    pub fn screenshot(&self) -> Result<String, String> {
+    /// The viewport as a JPEG.
+    pub fn screenshot(&self) -> Result<Vec<u8>, String> {
         let shot = self.call(
             "Page.captureScreenshot",
             json!({"format": "jpeg", "quality": 80}),
         )?;
         shot["data"]
             .as_str()
-            .map(str::to_owned)
+            .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
             .ok_or_else(|| "No screenshot".into())
     }
 

@@ -126,7 +126,7 @@ fn minimum(
                     [0., 0.]
                 }
             }
-            Component::Files | Component::Notes | Component::PullRequest => {
+            Component::Files | Component::Notes | Component::PullRequest | Component::Device => {
                 [FILES_MIN, 160. + header]
             }
             Component::Browser => [CONVERSATION_MIN, 200. + header],
@@ -456,8 +456,8 @@ fn displays(node: &Node, view: ViewId) -> bool {
     }
 }
 
-/// Files, Changes, Notes, Pull request and Browser: one-of-a-kind surfaces that get a
-/// tab strip even alone.
+/// Files, Changes, Notes, Pull request, Browser and Device: one-of-a-kind surfaces that
+/// get a tab strip even alone.
 fn is_side_surface(component: Option<Component>) -> bool {
     component.is_some_and(Component::is_side)
 }
@@ -493,7 +493,8 @@ impl Keystone {
             component @ (Component::Files
             | Component::Notes
             | Component::PullRequest
-            | Component::Browser) => label(component).to_owned(),
+            | Component::Browser
+            | Component::Device) => label(component).to_owned(),
             Component::Changes => self.changes.label(self.files_root(cx).ok().as_deref(), cx),
             Component::Conversation if !self.presentation.current.customization.is_open() => self
                 .view_session(id, cx)
@@ -619,6 +620,7 @@ impl Keystone {
             (Some(Component::Changes), _, _) => self.focus_changes(window, cx),
             (Some(Component::PullRequest), _, _) => self.focus_pull_request(window, cx),
             (Some(Component::Browser), _, _) => self.focus_browser(window, cx),
+            (Some(Component::Device), _, _) => self.focus_device(window, cx),
             (Some(Component::Conversation), Some(view), Some(session)) => self
                 .presentation
                 .current
@@ -684,6 +686,7 @@ impl Keystone {
                 .map(|root| self.files.browser(&root, cx).focus_handle(cx)),
             Some(Component::Changes) => self.changes_panel(cx).map(|panel| panel.focus_handle(cx)),
             Some(Component::PullRequest) => Some(self.pull_request_focus.clone()),
+            Some(Component::Device) => Some(self.device.focus.clone()),
             _ => None,
         };
         handle.is_some_and(|handle| handle.contains_focused(window, cx))
@@ -769,6 +772,36 @@ impl Keystone {
         {
             self.reveal_view(open, window, cx);
             self.focus_view(Some(open), window, cx);
+        }
+    }
+
+    /// Shows `component` beside the side surfaces without moving focus, opening it
+    /// when the window has none.
+    pub(crate) fn show_surface(
+        &mut self,
+        component: Component,
+        width: Size,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .shown_composition(cx)
+            .views()
+            .any(|(_, c)| c == component)
+        {
+            let at = Place::Beside {
+                target: self.side_surface_target(cx),
+                axis: Axis::Row,
+                after: true,
+            };
+            self.open_surface(component, at, width, window, cx);
+        }
+        if let Some((open, _)) = self
+            .shown_composition(cx)
+            .views()
+            .find(|(_, c)| *c == component)
+        {
+            self.reveal_view(open, window, cx);
         }
     }
 
@@ -1602,6 +1635,7 @@ impl Keystone {
                 "surface-add-pull-request",
             ),
             (Component::Browser, IconName::Globe, "surface-add-browser"),
+            (Component::Device, IconName::Phone, "surface-add-device"),
             (
                 Component::Conversation,
                 IconName::Chat,
@@ -1630,6 +1664,7 @@ impl Keystone {
                             Component::Changes => this.focus_changes(window, cx),
                             Component::PullRequest => this.focus_pull_request(window, cx),
                             Component::Browser => this.focus_browser(window, cx),
+                            Component::Device => this.focus_device(window, cx),
                             _ => {}
                         }
                     })),
@@ -1838,6 +1873,9 @@ impl Keystone {
             }
             Component::Browser => {
                 pane = pane.child(self.browser_pane(cx));
+            }
+            Component::Device => {
+                pane = pane.child(self.device_pane(cx));
             }
             Component::Conversation => {
                 self.presentation.current.arrangement.visible.push(id);

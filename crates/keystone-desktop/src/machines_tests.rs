@@ -374,3 +374,137 @@ fn no_row_of_a_remote_session_reads_this_machines_files(cx: &mut TestAppContext)
     );
     assert!(!resolved_under(&folder).is_empty());
 }
+
+/// A device host that lists one local emulator and records whatever it is asked.
+#[derive(Default)]
+struct Watched(std::sync::Mutex<Vec<String>>);
+
+impl Watched {
+    fn asked(&self, what: String) {
+        self.0.lock().unwrap().push(what);
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl keystone_agent::device::DeviceHost for Watched {
+    fn id(&self) -> keystone_agent::device::HostId {
+        keystone_agent::device::HostId::Local
+    }
+
+    fn inventory(&self, _: keystone_agent::device::Deadline) -> keystone_agent::device::Inventory {
+        self.asked("inventory".into());
+        keystone_agent::device::Inventory {
+            devices: vec![keystone_agent::device::Device {
+                id: "android:Pixel_8".parse().unwrap(),
+                name: "Pixel 8".into(),
+                os: "Android".into(),
+                power: keystone_agent::device::Power::Booted,
+            }],
+            platforms: Vec::new(),
+        }
+    }
+
+    fn start(
+        &self,
+        device: &keystone_agent::device::DeviceId,
+        _: keystone_agent::device::Deadline,
+    ) -> Result<keystone_agent::device::Start, keystone_agent::device::DeviceError> {
+        self.asked(format!("start {device}"));
+        Ok(keystone_agent::device::Start::Booted)
+    }
+
+    fn wait(
+        &self,
+        device: &keystone_agent::device::DeviceId,
+        _: keystone_agent::device::Deadline,
+    ) -> Result<keystone_agent::device::BootState, keystone_agent::device::DeviceError> {
+        self.asked(format!("wait {device}"));
+        Ok(keystone_agent::device::BootState::Booted)
+    }
+
+    fn screenshot(
+        &self,
+        device: &keystone_agent::device::DeviceId,
+        _: keystone_agent::device::Deadline,
+    ) -> Result<keystone_agent::device::Frame, keystone_agent::device::DeviceError> {
+        self.asked(format!("screenshot {device}"));
+        Err(keystone_agent::device::DeviceError::NotBooted)
+    }
+
+    fn act(
+        &self,
+        device: &keystone_agent::device::DeviceId,
+        _: &keystone_agent::device::Action,
+        _: keystone_agent::device::Deadline,
+    ) -> Result<(), keystone_agent::device::DeviceError> {
+        self.asked(format!("act {device}"));
+        Ok(())
+    }
+
+    fn shutdown(
+        &self,
+        device: &keystone_agent::device::DeviceId,
+        _: keystone_agent::device::Deadline,
+    ) -> Result<(), keystone_agent::device::DeviceError> {
+        self.asked(format!("shutdown {device}"));
+        Ok(())
+    }
+
+    fn stop(&self) {}
+}
+
+#[gpui::test]
+fn the_device_panel_says_it_isnt_available_for_a_session_on_another_machine(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, cx) = remote_window(&dir.path().join("workspace.json"), dir.path(), cx);
+    let host = std::sync::Arc::new(Watched::default());
+    let session = view.read_with(cx, |view, cx| view.selected(cx)).unwrap();
+    view.update(cx, |view, cx| {
+        let host = host.clone();
+        view.state.update(cx, |state, _| {
+            state.devices = crate::device::Devices::new(host)
+        });
+    });
+    view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));
+    cx.simulate_keystrokes("secondary-alt-v");
+    cx.run_until_parked();
+    assert!(
+        shown(cx, "device-elsewhere"),
+        "the panel names the machine instead of this machine's devices"
+    );
+    assert!(!shown(cx, "device-picker"), "no local device is offered");
+    view.update(cx, |view, cx| {
+        view.state.update(cx, |state, cx| {
+            state.open_device(session, "android:Pixel_8".parse().unwrap(), cx)
+        })
+    });
+    cx.run_until_parked();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    assert!(!shown(cx, "device-frame"), "nothing opens beside it");
+    assert_eq!(
+        host.calls(),
+        Vec::<String>::new(),
+        "no device tool ran here"
+    );
+
+    let refused = view.read_with(cx, |view, cx| {
+        let caller = keystone_agent::mcp::Caller {
+            session,
+            generation: 0,
+        };
+        view.state
+            .read(cx)
+            .device_call(caller, "device_screenshot", &serde_json::json!({}))
+            .err()
+    });
+    assert!(
+        refused.as_deref().is_some_and(|why| why.contains("desk")),
+        "a device tool refuses the caller by its machine: {refused:?}"
+    );
+}

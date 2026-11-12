@@ -51,6 +51,29 @@ impl Server {
     }
 
     fn call(&self, name: &str, arguments: Value) -> Result<Value, &'static str> {
+        let result = self.result(name, arguments)?;
+        if result["isError"] == true {
+            let error = result["structuredContent"]["error"]
+                .as_str()
+                .unwrap_or_default();
+            return Err(if error.contains("ceiling") {
+                "ceiling refused"
+            } else if error.contains("busy") {
+                "busy"
+            } else if error.contains("not act on it") {
+                "act refused"
+            } else {
+                "tool failed"
+            });
+        }
+        result
+            .get("structuredContent")
+            .cloned()
+            .ok_or("missing structured result")
+    }
+
+    /// The whole MCP result of a tool call, including a tool's own refusal.
+    fn result(&self, name: &str, arguments: Value) -> Result<Value, &'static str> {
         let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":name,"arguments":arguments}})
         .to_string();
@@ -62,7 +85,10 @@ impl Server {
         write!(stream, "POST /mcp HTTP/1.1\r\nHost: {}\r\nAuthorization: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             self.authority, self.authorization, body.len(), body)
             .map_err(|_| "request failed")?;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Device tools may take their whole budget, up to the 60 seconds a provider
+        // gives one tool call.
+        let patience = if name.starts_with("device_") { 60 } else { 10 };
+        let deadline = Instant::now() + Duration::from_secs(patience);
         let mut bytes = Vec::new();
         let end = loop {
             if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
@@ -103,7 +129,7 @@ impl Server {
             }
         }
         let length = length
-            .filter(|length| *length <= 1024 * 1024)
+            .filter(|length| *length <= 8 * 1024 * 1024)
             .ok_or("invalid response length")?;
         let mut body = bytes.split_off(end);
         while body.len() < length {
@@ -117,25 +143,7 @@ impl Server {
         if response["id"] != 1 || response.get("error").is_some() {
             return Err("MCP request rejected");
         }
-        let result = response.get("result").ok_or("missing MCP result")?;
-        if result["isError"] == true {
-            let error = result["structuredContent"]["error"]
-                .as_str()
-                .unwrap_or_default();
-            return Err(if error.contains("ceiling") {
-                "ceiling refused"
-            } else if error.contains("busy") {
-                "busy"
-            } else if error.contains("not act on it") {
-                "act refused"
-            } else {
-                "tool failed"
-            });
-        }
-        result
-            .get("structuredContent")
-            .cloned()
-            .ok_or("missing structured result")
+        response.get("result").cloned().ok_or("missing MCP result")
     }
 
     fn redact(&self, text: &str) -> String {
@@ -226,6 +234,104 @@ fn delegate(text: &str, server: Option<&Server>, request: &str) -> Option<String
     })
 }
 
+/// `orchestrator test: device <id> <app>` lists devices, opens `<id>` beside this
+/// session, launches `<app>`, takes a screenshot and taps its centre, reporting each
+/// step. `... device open <id>` only opens, `... device tap` only taps, `... device
+/// close` only closes, and `... device look` lists, takes a screenshot and tries to
+/// launch an app.
+fn device(text: &str, server: Option<&Server>) -> Option<String> {
+    let rest = text.strip_prefix("orchestrator test: device ")?;
+    let Some(server) = server else {
+        return Some("Scripted device failure: missing loopback MCP configuration (test data, no model call).".into());
+    };
+    let step = |name: &str, arguments: Value| -> Result<Value, String> {
+        let result = server
+            .result(name, arguments)
+            .map_err(|error| format!("{name}: {error}"))?;
+        if result["isError"] == true {
+            return Err(format!(
+                "{name}: {}",
+                result["structuredContent"]["error"]
+                    .as_str()
+                    .unwrap_or("refused")
+            ));
+        }
+        Ok(result)
+    };
+    let mut done = Vec::new();
+    let mut steps = || -> Result<String, String> {
+        if rest == "tap" {
+            step("device_tap", json!({"x":1,"y":1}))?;
+            return Ok("tap=done".into());
+        }
+        if rest == "close" {
+            let closed = step("device_close", json!({}))?;
+            return Ok(format!(
+                "close shut_down={} state={}",
+                closed["structuredContent"]["shut_down"], closed["structuredContent"]["state"]
+            ));
+        }
+        if let Some(id) = rest.strip_prefix("open ") {
+            let opened = step("device_open", json!({"device":id}))?;
+            return Ok(format!("open={}", opened["structuredContent"]["state"]));
+        }
+        if rest == "look" {
+            let listed = step("device_list", json!({}))?;
+            let shot = step("device_screenshot", json!({}))?;
+            let launch = match step("device_launch", json!({"app":"com.example.app"})) {
+                Ok(_) => "done".to_owned(),
+                Err(error) => format!("refused ({error})"),
+            };
+            return Ok(format!(
+                "open={} screenshot={}x{} launch={launch}",
+                listed["structuredContent"]["open"],
+                shot["structuredContent"]["width"],
+                shot["structuredContent"]["height"]
+            ));
+        }
+        let (id, app) = rest.split_once(' ').ok_or("device: expected <id> <app>")?;
+        let listed = step("device_list", json!({}))?;
+        let count = listed["structuredContent"]["devices"]
+            .as_array()
+            .map_or(0, Vec::len);
+        done.push(format!("listed={count}"));
+        let opened = step("device_open", json!({"device":id}))?;
+        let state = opened["structuredContent"]["state"].clone();
+        done.push(format!("open={state}"));
+        step("device_launch", json!({"app":app}))?;
+        done.push("launch=done".into());
+        let shot = step("device_screenshot", json!({}))?;
+        let image = &shot["content"][1];
+        if image["type"] != "image" || image["data"].as_str().is_none_or(str::is_empty) {
+            return Err("device_screenshot: no image content".into());
+        }
+        let (width, height) = (
+            shot["structuredContent"]["width"].as_u64().unwrap_or(0),
+            shot["structuredContent"]["height"].as_u64().unwrap_or(0),
+        );
+        done.push(format!(
+            "screenshot={width}x{height} mime={}",
+            image["mimeType"].as_str().unwrap_or_default()
+        ));
+        step(
+            "device_tap",
+            json!({"x":width as f64 / 2.,"y":height as f64 / 2.}),
+        )?;
+        Ok(format!(
+            "listed={count} open={state} launch=done screenshot={width}x{height} mime={} tap=done",
+            image["mimeType"].as_str().unwrap_or_default()
+        ))
+    };
+    let result = steps();
+    Some(match result {
+        Ok(report) => format!("Scripted device success: {report} (test data, no model call)."),
+        Err(error) => format!(
+            "Scripted device failure: {error}; done before it: {} (test data, no model call).",
+            done.join(" ")
+        ),
+    })
+}
+
 /// `orchestrator test: browser` reads the browser page's status, which starts no
 /// browser, and tries to click, which a read-only caller is refused.
 fn browser(text: &str, server: Option<&Server>) -> Option<String> {
@@ -291,7 +397,8 @@ fn drive(text: &str, server: Option<&Server>) -> Option<String> {
 }
 
 pub fn reply(text: &str, server: Option<&Server>, request: &str) -> Option<String> {
-    if let Some(reply) = delegate(text, server, request)
+    if let Some(reply) = device(text, server)
+        .or_else(|| delegate(text, server, request))
         .or_else(|| browser(text, server))
         .or_else(|| drive(text, server))
     {

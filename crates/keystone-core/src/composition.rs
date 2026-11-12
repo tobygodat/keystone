@@ -36,10 +36,12 @@ pub enum Component {
     PullRequest,
     /// The project's browser page, which agents can drive.
     Browser,
+    /// A simulator or emulator open beside the session.
+    Device,
 }
 
 impl Component {
-    pub const ALL: [Component; 8] = [
+    pub const ALL: [Component; 9] = [
         Component::SessionList,
         Component::Conversation,
         Component::Composer,
@@ -48,6 +50,7 @@ impl Component {
         Component::Notes,
         Component::PullRequest,
         Component::Browser,
+        Component::Device,
     ];
 
     pub fn allows(self, count: usize) -> bool {
@@ -57,17 +60,24 @@ impl Component {
             | Self::Changes
             | Self::Notes
             | Self::PullRequest
-            | Self::Browser => count <= 1,
+            | Self::Browser
+            | Self::Device => count <= 1,
             Self::Conversation => count >= 1,
             Self::Composer => count == 1,
         }
     }
 
-    /// Files, Changes, Notes, Pull request and Browser, which open beside a conversation.
+    /// Files, Changes, Notes, Pull request, Browser and Device, which open beside a
+    /// conversation.
     pub fn is_side(self) -> bool {
         matches!(
             self,
-            Self::Files | Self::Changes | Self::Notes | Self::PullRequest | Self::Browser
+            Self::Files
+                | Self::Changes
+                | Self::Notes
+                | Self::PullRequest
+                | Self::Browser
+                | Self::Device
         )
     }
 
@@ -81,6 +91,7 @@ impl Component {
                 | Self::Notes
                 | Self::PullRequest
                 | Self::Browser
+                | Self::Device
         )
     }
 }

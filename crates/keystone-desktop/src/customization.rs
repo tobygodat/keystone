@@ -75,6 +75,7 @@ pub fn label(component: Component) -> &'static str {
         Component::Notes => "Notes",
         Component::PullRequest => "Pull request",
         Component::Browser => "Browser",
+        Component::Device => "Device",
     }
 }
 

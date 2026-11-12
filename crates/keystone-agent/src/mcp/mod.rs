@@ -11,6 +11,7 @@ use serde_json::Value;
 
 mod auth;
 pub mod browser;
+pub mod device;
 mod http;
 mod protocol;
 
@@ -51,8 +52,48 @@ impl std::fmt::Display for HandlerError {
     }
 }
 
+/// An image a tool returns beside its JSON result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Image {
+    pub mime: &'static str,
+    pub data: Vec<u8>,
+}
+
+/// A tool's result: JSON for the caller, and images shown to the model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reply {
+    pub value: Value,
+    pub images: Vec<Image>,
+}
+
+impl From<Value> for Reply {
+    fn from(value: Value) -> Self {
+        Self {
+            value,
+            images: Vec::new(),
+        }
+    }
+}
+
 pub type Handler =
-    Arc<dyn Fn(Caller, &str, Value, Duration) -> Result<Value, HandlerError> + Send + Sync>;
+    Arc<dyn Fn(Caller, &str, Value, Duration) -> Result<Reply, HandlerError> + Send + Sync>;
+
+/// The session tools, which Claude runs without asking.
+const SESSION_TOOLS: [&str; 6] = [
+    "capabilities",
+    "session_launch",
+    "session_send",
+    "session_read",
+    "session_wait",
+    "session_interrupt",
+];
+
+/// Whether Claude runs the `keystone` tool `name` with `input` without asking.
+pub fn auto_allowed(name: &str, input: &Value) -> bool {
+    SESSION_TOOLS.contains(&name)
+        || device::TOOLS.contains(&name)
+        || browser::auto_allowed(name, input)
+}
 
 pub fn mode_allowed(target: ApprovalMode, ceiling: ApprovalMode) -> bool {
     if target == ApprovalMode::Provider || ceiling == ApprovalMode::Provider {

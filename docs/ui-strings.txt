@@ -332,6 +332,100 @@ crates/keystone-agent/src/connection.rs
 	{name} stopped with exit code {code}
 	{name} stopped: {}
 
+crates/keystone-agent/src/device/android.rs
+	Android
+	Connection refused
+	Couldn't list Android Emulators: {error}
+	Couldn't start the emulator: {e}
+	No activities found
+	No launchable app {app} on this emulator
+	The Android emulator was not found. Install it with Android Studio, or set KEYSTONE_EMULATOR_PATH.
+	The emulator Keystone started did not exit in time
+	The emulator at {serial} calls itself {name}, which Keystone can't match to an AVD.
+	The emulator at {serial} did not say which AVD it runs
+	The emulator at {serial} didn't say which AVD it runs
+	The emulator exited ({status})
+	The emulator exited: {error}
+	The emulator exited: {line}
+	[ -z "$a$k" ] || 
+	a=$(getprop ro.boot.qemu.avd_name); k=$(getprop ro.kernel.qemu.avd_name); echo "$a"; echo "$k"; if {or_unnamed}[ "$a" = '{avd}' ] || [ "$k" = '{avd}' ]; then {command}; fi
+	adb did not report the screen size
+	adb lists {} as offline and it didn't say which AVD it runs: {output}. If no emulator is running, `adb kill-server` clears the entry.
+	adb returned a screenshot that isn't a PNG
+	adb was not found. Install Android Studio's platform-tools, or set KEYSTONE_ADB_PATH.
+	getprop sys.boot_completed
+	input swipe {x} {y} {to_x} {to_y} 300
+	input tap {x} {y}
+	input text {escaped}
+	monkey -p {app} -c android.intent.category.LAUNCHER 1
+	monkey aborted
+	screencap -p
+	wm size
+
+crates/keystone-agent/src/device/ios.rs
+	AXe did not report the simulator's screen size
+	AXe types printable ASCII only, not starting with -
+	Couldn't list iOS Simulators: {error}
+	Couldn't read the screenshot: {e}
+	Install AXe to tap, swipe and type on iOS Simulators: brew install cameroncooke/axe/axe
+	No devices are booted
+	Timed out creating the simulator remote automation session
+	Xcode's xcrun was not found. Install Xcode to run iOS Simulators, or set KEYSTONE_XCRUN_PATH.
+	current state: Booted
+	current state: Booting
+	current state: Shutdown
+	iOS Simulators need macOS with Xcode.
+	simctl wrote a screenshot that isn't a PNG
+
+crates/keystone-agent/src/device/local.rs
+	Android/Sdk
+	Couldn't run {}: {reason}
+	Library/Android/sdk
+
+crates/keystone-agent/src/device/mod.rs
+	A device id looks like ios:<udid> or android:<avd>
+	A device id starts with ios: or android:
+	Android
+	Frame({}x{}, {} bytes)
+	No such device here; take an id from device_list
+	The device did not answer in time
+	The device is not running; open it first
+	Unknown device id; take one from device_list
+
+crates/keystone-agent/src/device/parse.rs
+	Android can't type the characters %s; type them separately
+	Android's input text carries only printable ASCII; it can't type {c:?}
+	Booted
+	Booting
+	Override size:
+	Physical size:
+	app must be a bundle id, such as com.apple.Preferences
+	app must be a package name, such as com.android.settings
+	iOS {}
+	simctl printed a device list Keystone can't read
+
+crates/keystone-agent/src/device/tests.rs
+	#!/bin/sh\nD='{dir}'\necho "{name} $*" >> "$D/log"\n{}\n
+	2DDB4799-A985-431E-B16B-09FA92673ACA
+	Apple Watch
+	Booted
+	Booting
+	GONE-1
+	NEWER-1
+	Old iPhone
+	Shutdown
+	WATCH-1
+	android:Pixel_8
+	case "$1 $2" in\n  "simctl list") cat "$D/list.json" ;;\n  "simctl boot") cp "$D/booting.json" "$D/list.json" ;;\n  "simctl bootstatus") while [ ! -f "$D/ready" ]; do sleep 0.05; done ;;\n  "simctl io")\n    if [ -f "$D/hang" ]; then sleep 30; fi\n    if [ -f "$D/off" ]; then echo "Timeout waiting for screen surfaces" >&2; exit 60; fi\n    cp "$D/frame.png" "$6"; if [ -f "$D/fail" ]; then echo "Capture failed" >&2; exit 1; fi ;;\nesac
+	com.apple.CoreSimulator.SimRuntime.iOS-27-0
+	com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4
+	com.apple.CoreSimulator.SimRuntime.watchOS-12-0
+	iPhone 18 Pro
+	iPhone 19
+	if [ "$1" = -list-avds ]; then printf 'Pixel_8\\nTablet_API_35\\n'; exit 0; fi\nif [ -f "$D/emulator-runs" ]; then echo $$ > "$D/emulator.pid"; exec sleep 30; fi\necho "ERROR   | Unknown AVD name [$2], use -list-avds to see valid list."; exit 1
+	if [ -f "$D/swapped" ] || [ -f "$D/reused" ]; then cur=Tablet_API_35; else cur=Pixel_8; fi\nserial=; if [ "$1" = -s ]; then serial=$2; shift 2; fi\ncase "$serial:$*" in\n  ":devices -l")\n    if [ -f "$D/swapped" ]; then t=2; else t=1; fi\n    printf 'List of devices attached\\nemulator-5554          device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emu64a transport_id:%s\\n' "$t"\n    if [ -f "$D/stale" ]; then printf 'emulator-5556          offline transport_id:9\\n'; fi\n    echo; exit 0 ;;\n  "emulator-5556:emu avd name") cat "$D/stale" >&2; exit 1 ;;\n  emulator-5556:*) echo "adb: device offline" >&2; exit 1 ;;\n  "emulator-5554:emu avd name")\n    if [ -f "$D/unnamed" ]; then echo "error: could not connect to TCP port 5554: Operation timed out" >&2; exit 1; fi\n    printf '%s\\r\\nOK\\r\\n' "$cur"; exit 0 ;;\n  "emulator-5554:emu kill") echo "$cur killed" >> "$D/device.log"; echo "OK: killing emulator, bye bye"; exit 0 ;;\nesac\n[ "$serial" = emulator-5554 ] || exit 0\ncase "$1" in exec-out|shell) shift ;; *) exit 0 ;; esac\nif [ -f "$D/exec-fails" ]; then echo "error: closed" >&2; exit 1; fi\ngetprop() {\n  case "$1" in\n    ro.boot.qemu.avd_name)\n      if [ -f "$D/noprops" ]; then echo; elif [ -f "$D/liar" ]; then echo sdk_gphone64_arm64; else echo "$cur"; fi ;;\n    ro.kernel.qemu.avd_name) echo ;;\n    sys.boot_completed) echo 1 ;;\n  esac\n}\nscreencap() {\n  if [ -f "$D/hang-shot" ]; then echo $$ > "$D/shot.pid"; exec sleep 30; fi\n  if [ -f "$D/garbage" ]; then echo not a png; return; fi\n  if [ "$cur" = Pixel_8 ]; then cat "$D/frame.png"; else cat "$D/tablet.png"; fi\n}\ninput() { echo "$cur input $*" >> "$D/device.log"; }\nmonkey() { echo "$cur monkey $*" >> "$D/device.log"; echo "Events injected: 1"; }\nwm() { echo 'Physical size: 1080x2400'; }\neval "$*"
+	simctl io
+
 crates/keystone-agent/src/diff.rs
 	--- {from}\n+++ {to}\n
 	@@ -{old},{} +{new},{} @@
@@ -1099,6 +1193,7 @@ crates/keystone-desktop/src/commands.rs
 	Switch project
 	Toggle browser
 	Toggle changes
+	Toggle device
 	Toggle fast mode
 	Toggle files
 	Toggle notes
@@ -1146,6 +1241,7 @@ crates/keystone-desktop/src/customization.rs
 	Composer
 	Conversation
 	Customize
+	Device
 	Discard
 	Duplicate conversation
 	Files
@@ -1203,6 +1299,156 @@ crates/keystone-desktop/src/delivery.rs
 	{from} arrives when this turn ends.
 	{from} is waiting.
 	{from} waits until you un-settle this session.
+
+crates/keystone-desktop/src/device/frames.rs
+	The screenshot could not be decoded
+	The screenshot could not be encoded: {e}
+
+crates/keystone-desktop/src/device/life.rs
+	Couldn't shut the device down: {error}
+
+crates/keystone-desktop/src/device/mod.rs
+	A later device_open kept the device beside this session
+	Couldn't list devices to find {device}: {error}
+	Couldn't wait for the device to boot: {e}
+	Devices aren't available for sessions on {machine} yet.
+	Keystone's call to the device failed unexpectedly
+	No device {device} here, and none is available; device_list says why
+	No device {device} here. Available: {}
+	The device is no longer open beside this session
+	The device stopped before it finished booting
+	Waiting for the boot failed
+
+crates/keystone-desktop/src/device/pane.rs
+	Booting
+	Booting…
+	Close device
+	Devices
+	Failed
+	It was still booting after 3 minutes, so Keystone stopped waiting. Refresh to check it again.
+	Last frame {}
+	Looking for simulators and emulators…
+	No simulators or emulators found.
+	Not running
+	Off
+	Open
+	Opening
+	Opening the device…
+	Opening…
+	Refresh devices
+	Running
+	Select a session to open a device beside it.
+	Shutting down
+	Shutting down…
+	Still booting
+	Waiting for the device to boot…
+	Waiting for the first frame…
+	{os} ·
+	{seconds} s ago
+	{} min ago
+	{} · {state}
+	{}. Refresh to try again.
+	{}: {reason}
+
+crates/keystone-desktop/src/device/tests/lifecycle.rs
+	Keystone shuts it down
+	Keystone stops waiting
+	Keystone waits on the boot
+	Refresh finds it running
+	a capture finds it stopped
+	a listing that saw the change
+	a listing tries again
+	a second Close shuts it down
+	both let go
+	frames arrive
+	frames keep coming
+	it closes
+	orchestrator test: device close
+	orchestrator test: device open {PHONE}
+	orchestrator test: device open {SLOW}
+	session 1 lets go
+	session 2 has it running
+	session 2 lets go
+	the boot it still waits on
+	the close goes through
+	the close waits on the start
+	the host is asked again
+	the listing fails
+	the listing finds it running
+	the listing runs
+	the next listing
+	the open fails
+	the open joins the shutdown
+	the phone shuts down
+	the replaced phone's shutdown fails
+	the second open joins
+	the shutdown fails
+	the shutdown runs
+	the slow boot is waited on
+	the tap reaches the device
+
+crates/keystone-desktop/src/device/tests/mod.rs
+	Fake {id}
+	Scripted device
+	a new scripted device reply
+	act {device} {described}
+	android:Already_Running
+	iOS 27.0
+	ios:FAKE-PHONE
+	ios:FAKE-SLOW
+	ios:FAKE-STUCK
+	launch {app}
+	screenshot {device}
+	shutdown {device}
+	simctl refused
+	start {device}
+	tap {:.3},{:.3}
+	the device runs
+	the scripted device reply
+	wait {device}
+
+crates/keystone-desktop/src/device/tests/quit.rs
+	both starts run
+	the second start runs
+	the shutdown runs
+
+crates/keystone-desktop/src/device/tests/surface.rs
+	Close during the boot goes back to the picker
+	a frame arrives
+	a frame on the new screen is drawn
+	back to the picker
+	more frames arrive
+	the first frame
+	the label comes up on its own
+	the panel says why
+	the phone's first frame
+	the phone's row says it kept running
+	the picker lists devices
+	the running device opens
+	the running device's first frame
+	the slow device's screen
+
+crates/keystone-desktop/src/device/tests/tools.rs
+	No device android:No_Such_Phone here. Available: 
+	Unknown device id
+	android:No_Such_Phone
+	orchestrator test: device look
+	orchestrator test: device open android:No_Such_Phone
+	orchestrator test: device open {asked}
+	orchestrator test: device tap
+	orchestrator test: device {PHONE} com.example.app
+
+crates/keystone-desktop/src/device/tools.rs
+	A read-only session can't control devices: device_list and device_screenshot still work
+	A second opinion only reads: device_list and device_screenshot work, nothing that controls a device
+	No device is open beside this session; call device_open first
+	Take a device_screenshot first: tap and swipe coordinates are pixels of its image
+	Unknown device tool
+	text must be 1 to 1024 characters
+	x and y must lie within the latest device_screenshot image, {width}x{height}
+	{key} is required
+	{key} must be a number
+	{key} must be text
 
 crates/keystone-desktop/src/diff_view.rs
 	\n\n{} {}:\n{fence}diff\n{quoted}\n{fence}\n{}

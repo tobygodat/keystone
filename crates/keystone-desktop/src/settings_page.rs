@@ -284,6 +284,7 @@ impl Keystone {
             .capture_action(self.leave_settings::<crate::notes::ToggleNotes>(cx))
             .capture_action(self.leave_settings::<crate::browser::ToggleBrowser>(cx))
             .capture_action(self.leave_settings::<crate::pull_request::TogglePullRequest>(cx))
+            .capture_action(self.leave_settings::<crate::device::ToggleDevice>(cx))
             .capture_action(self.leave_settings::<crate::changes::ToggleChanges>(cx))
             .capture_action(self.leave_settings::<OpenCustomize>(cx))
             .capture_action(self.leave_settings::<crate::session_tabs::NewTab>(cx))

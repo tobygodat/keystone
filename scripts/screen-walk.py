@@ -35,6 +35,7 @@ OPTIONAL = [
     ('toggle-changes', 'Toggle changes', 'changes', 'changes-branch', True),
     ('toggle-notes', 'Toggle notes', 'notes', 'notes-editor', True),
     ('toggle-pull-request', 'Toggle pull request', 'pull-request', 'pull-request-empty', True),
+    ('toggle-device', 'Toggle device', 'device', 'device-picker', True),
     ('insert-prompt', 'Insert prompt…', 'insert-prompt', 'settings-section-prompts', False),
     ('attach-files', 'Attach files…', 'attach-files', 'attach-path', False),
     ('new-worktree-session', 'New session in worktree…', 'worktree-dialog', 'worktree-dialog', False),
