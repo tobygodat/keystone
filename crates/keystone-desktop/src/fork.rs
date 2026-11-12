@@ -8,11 +8,11 @@
 
 use crate::conversation::{ForkFrom, Row};
 use crate::handoff::{BUDGET_TOKENS, Source, build};
+use crate::presentation::SessionPlace;
 use crate::view_state::ViewKey;
 use crate::{Keystone, now_ms};
 use gpui::{Context, Focusable, Window};
 use keystone_agent::ItemKind;
-use keystone_core::SessionContext;
 
 gpui::actions!(fork, [ForkFromHere]);
 
@@ -67,10 +67,12 @@ impl Keystone {
             return Err(NOT_OPENED.into());
         };
         let (id, provider) = (session.id(), session.provider());
-        let SessionContext::Recorded { directory, .. } = session.context() else {
-            return Err(crate::handoff::NO_FOLDER.into());
-        };
         let state = self.state.read(cx);
+        let directory = match state.place(id) {
+            Some(SessionPlace::Local(directory)) => directory,
+            Some(SessionPlace::Remote(machine)) => return Err(crate::handoff::elsewhere(&machine)),
+            Some(SessionPlace::Unusable) | None => return Err(crate::handoff::NO_FOLDER.into()),
+        };
         let Some(conversation) = state.conversations().get(&id).filter(|c| !c.is_loading()) else {
             return Err(crate::handoff::LOADING.into());
         };

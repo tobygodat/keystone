@@ -556,7 +556,7 @@ impl Render for QuickComposer {
         let send = crate::send_button(
             "quick-send",
             can_send,
-            Tooltip::with_key("Send", "Enter"),
+            Tooltip::with_key("Send", "Enter").builder(),
             cx,
         )
         .when(can_send, |d| {

@@ -13,7 +13,7 @@ fn quitting_ends_every_shell(cx: &mut TestAppContext) {
     };
     assert_eq!(shells.len(), 2);
     assert!(shells.iter().all(|pid| alive(*pid)));
-    cx.update(request_quit);
+    cx.update(|cx| request_quit(cx, true));
     cx.run_until_parked();
     for pid in shells {
         assert!(!alive(pid), "shell {pid} is gone after Quit");
@@ -100,7 +100,7 @@ fn quitting_ends_a_job_that_ignores_hangup(cx: &mut TestAppContext) {
         cx.simulate_keystrokes("secondary-j");
         start_stubborn_job(cx, dir.path(), false)
     };
-    cx.update(request_quit);
+    cx.update(|cx| request_quit(cx, true));
     cx.run_until_parked();
     assert!(!alive(job), "Quit waited for the job to be killed");
 }
@@ -117,7 +117,7 @@ fn quitting_right_after_closing_a_pane_still_ends_its_jobs(cx: &mut TestAppConte
         click(cx, "terminal-close");
         (job, shell)
     };
-    cx.update(request_quit);
+    cx.update(|cx| request_quit(cx, true));
     cx.run_until_parked();
     assert!(!alive(shell), "the closed pane's shell is gone after Quit");
     assert!(!alive(job), "and its job, inside the closed pane's grace");

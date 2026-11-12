@@ -8,6 +8,7 @@ mod input;
 mod pane;
 
 use crate::Keystone;
+use crate::presentation::SessionPlace;
 use alacritty_terminal::event::Event;
 use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
@@ -792,14 +793,16 @@ fn reported_color(index: usize, cx: &App) -> Rgb {
 }
 
 /// The folder a session's shell starts in: its recorded folder, a worktree session's
-/// being its worktree, else the user's home.
-fn start_directory(session: &keystone_core::Session) -> PathBuf {
+/// being its worktree, else the user's home. A session on another machine gets no
+/// shell here, and `Err` names its machine.
+fn start_directory(place: Option<SessionPlace>) -> Result<PathBuf, String> {
     let home = || std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-    match session.context() {
-        keystone_core::SessionContext::Recorded { directory, .. } if directory.path().is_dir() => {
-            directory.path().to_path_buf()
+    match place {
+        Some(SessionPlace::Local(directory)) if directory.path().is_dir() => {
+            Ok(directory.path().to_path_buf())
         }
-        _ => home(),
+        Some(SessionPlace::Local(_) | SessionPlace::Unusable) | None => Ok(home()),
+        Some(SessionPlace::Remote(machine)) => Err(machine),
     }
 }
 
@@ -808,12 +811,14 @@ impl Keystone {
     /// focuses it. When it is open and focused, hides it and returns to the composer;
     /// open but not focused, focuses it.
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session(cx) else {
+        let Some(id) = self.selected_session(cx).map(|session| session.id()) else {
             self.error = Some("No session open.".into());
             return self.refresh(cx);
         };
-        let id = session.id();
-        let directory = start_directory(session);
+        let directory = match start_directory(self.session_place(id, cx)) {
+            Ok(directory) => directory,
+            Err(_) => return self.toggle_elsewhere(id, window, cx),
+        };
         let terminal = match session_terminal(id, cx) {
             Some(terminal) => terminal,
             None => match SessionTerminal::start(id, directory, cx) {
@@ -835,6 +840,33 @@ impl Keystone {
         cx.notify();
     }
 
+    /// Shows or hides the drawer that says `session`'s terminal isn't available here.
+    fn toggle_elsewhere(&mut self, session: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.elsewhere_drawer == Some(session) {
+            self.elsewhere_drawer = None;
+            self.focus_composer(window, cx);
+        } else {
+            self.elsewhere_drawer = Some(session);
+        }
+        cx.notify();
+    }
+
+    /// The machine the selected session runs on, while this window's drawer says its
+    /// terminal isn't available here.
+    fn terminal_elsewhere(&self, cx: &App) -> Option<String> {
+        if self.settings.is_some() {
+            return None;
+        }
+        let session = self.selected(cx)?;
+        if self.elsewhere_drawer != Some(session) {
+            return None;
+        }
+        match self.session_place(session, cx)? {
+            SessionPlace::Remote(machine) => Some(machine),
+            SessionPlace::Local(_) | SessionPlace::Unusable => None,
+        }
+    }
+
     fn hide_terminal(
         &mut self,
         terminal: Entity<SessionTerminal>,
@@ -852,6 +884,7 @@ impl Keystone {
     pub(crate) fn split_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.shown_terminal(cx) {
             Some(terminal) => terminal.update(cx, |terminal, cx| terminal.split_pane(window, cx)),
+            None if self.terminal_elsewhere(cx).is_some() => {}
             None => self.toggle_terminal(window, cx),
         }
     }
@@ -922,6 +955,30 @@ impl Keystone {
     /// repaint the grid. A reused cached view reports no element geometry, so
     /// verification trades that speed for names, as the sidebar does.
     pub(crate) fn terminal_drawer(&self, window: &Window, cx: &App) -> Option<AnyElement> {
+        if let Some(machine) = self.terminal_elsewhere(cx) {
+            let colors = cx.theme().colors;
+            return Some(
+                div()
+                    .automation_id("terminal-elsewhere")
+                    .w_full()
+                    .h(MIN_HEIGHT)
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px(px(24.))
+                    .bg(colors.terminal.background)
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .child(
+                        Label::new(format!(
+                            "The terminal isn't available for sessions on {machine} yet."
+                        ))
+                        .color(Color::Muted),
+                    )
+                    .into_any_element(),
+            );
+        }
         let terminal = self.shown_terminal(cx)?;
         let main = self.main_min_height();
         let height = clamp_height(terminal.read(cx).height, main, window, cx);
@@ -951,7 +1008,8 @@ impl Keystone {
             return None;
         }
         let session = self.selected(cx)?;
-        let open = session_terminal(session, cx).is_some_and(|t| t.read(cx).open);
+        let open = session_terminal(session, cx).is_some_and(|t| t.read(cx).open)
+            || self.terminal_elsewhere(cx).is_some();
         Some(
             IconButton::new("terminal-toggle", IconName::Terminal)
                 .size(ButtonSize::Compact)

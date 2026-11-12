@@ -1,4 +1,5 @@
 use crate::ProjectId;
+use crate::machine::{MachineId, RemoteFolder};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::io;
@@ -41,6 +42,11 @@ pub enum SessionContext<'a> {
         directory: &'a WorkingDirectory,
         origin: ContextOrigin,
     },
+    /// A folder on another machine. Nothing here may read it.
+    Remote {
+        machine: &'a MachineId,
+        folder: &'a RemoteFolder,
+    },
     LegacyMissing,
     Unsupported,
 }
@@ -61,6 +67,10 @@ pub(crate) enum SavedSessionContext {
         origin: ContextOrigin,
         worktree: Option<WorktreeContext>,
     },
+    Remote {
+        machine: MachineId,
+        folder: RemoteFolder,
+    },
     Unsupported(Value),
 }
 
@@ -72,6 +82,15 @@ struct RecordedContext {
     origin: ContextOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worktree: Option<RecordedWorktree>,
+}
+
+/// Version 3: a folder on another machine.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteContext {
+    version: u32,
+    machine: MachineId,
+    directory: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -87,6 +106,20 @@ impl SavedSessionContext {
             directory: directory.clone(),
             origin,
             worktree: None,
+        }
+    }
+
+    pub(crate) fn remote(machine: &MachineId, folder: &RemoteFolder) -> Self {
+        Self::Remote {
+            machine: machine.clone(),
+            folder: folder.clone(),
+        }
+    }
+
+    pub(crate) fn machine(&self) -> Option<&MachineId> {
+        match self {
+            Self::Remote { machine, .. } => Some(machine),
+            _ => None,
         }
     }
 
@@ -118,6 +151,7 @@ impl SavedSessionContext {
                 directory,
                 origin: *origin,
             },
+            Self::Remote { machine, folder } => SessionContext::Remote { machine, folder },
             Self::Unsupported(_) => SessionContext::Unsupported,
         }
     }
@@ -126,6 +160,16 @@ impl SavedSessionContext {
 impl<'de> Deserialize<'de> for SavedSessionContext {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = Value::deserialize(deserializer)?;
+        if let Ok(remote) = serde_json::from_value::<RemoteContext>(raw.clone())
+            && remote.version == 3
+            && let Ok(folder) = RemoteFolder::new(&remote.directory)
+            && folder.wire() == remote.directory
+        {
+            return Ok(Self::Remote {
+                machine: remote.machine,
+                folder: RemoteFolder::from_saved(remote.directory),
+            });
+        }
         if let Ok(recorded) = serde_json::from_value::<RecordedContext>(raw.clone())
             && ((recorded.version == 1 && raw.get("worktree").is_none())
                 || (recorded.version == 2
@@ -166,6 +210,12 @@ impl Serialize for SavedSessionContext {
                     repository: worktree.repository.as_str().to_owned(),
                     branch: worktree.branch.clone(),
                 }),
+            }
+            .serialize(serializer),
+            Self::Remote { machine, folder } => RemoteContext {
+                version: 3,
+                machine: machine.clone(),
+                directory: folder.wire().to_owned(),
             }
             .serialize(serializer),
             Self::Unsupported(raw) => raw.serialize(serializer),

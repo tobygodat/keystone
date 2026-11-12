@@ -181,11 +181,13 @@ fn repository_root(folder: &Path) -> &Path {
 
 impl AppState {
     fn session_folder(&self, session: u64) -> Option<PathBuf> {
-        match self.conversation_folder(session)? {
-            crate::presentation::ConversationFolder::Recorded(directory) => {
+        match self.place(session)? {
+            crate::presentation::SessionPlace::Local(directory) => {
                 Some(directory.path().to_owned()).filter(|folder| folder.is_dir())
             }
-            _ => None,
+            // `gh` runs here, so a branch on another machine isn't watched yet.
+            crate::presentation::SessionPlace::Remote(_)
+            | crate::presentation::SessionPlace::Unusable => None,
         }
     }
 
@@ -272,6 +274,10 @@ impl AppState {
     }
 
     fn fetch_pull_request(&mut self, session: u64, cx: &mut Context<Self>) {
+        // gh runs here, so a session on another machine isn't asked about at all.
+        if let Some(crate::presentation::SessionPlace::Remote(_)) = self.place(session) {
+            return;
+        }
         let folder = self.session_folder(session);
         let link = self
             .session(session)
@@ -795,6 +801,27 @@ impl Keystone {
     }
 
     fn pull_request_body(&self, session: u64, cx: &mut Context<Self>) -> AnyElement {
+        match self.session_place(session, cx) {
+            Some(crate::presentation::SessionPlace::Remote(machine)) => {
+                return div()
+                    .px(px(12.))
+                    .py_2()
+                    .automation_id("pull-request-elsewhere")
+                    .child(
+                        Label::new(format!(
+                            "Pull requests for sessions on {machine} aren't shown yet."
+                        ))
+                        .size(TextSize::Ui)
+                        .color(Color::Muted),
+                    )
+                    .into_any_element();
+            }
+            Some(
+                crate::presentation::SessionPlace::Local(_)
+                | crate::presentation::SessionPlace::Unusable,
+            )
+            | None => {}
+        }
         let state = self.state.read(cx);
         let watch = state.pull_requests.watches.get(&session);
         let fetching = watch.is_some_and(|w| w.fetching);

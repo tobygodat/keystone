@@ -12,7 +12,6 @@ use gpui::Context;
 use keystone_agent::Connection;
 use keystone_agent::checkpoint::{self, Checkpoints, Restored, Snapshot};
 use keystone_agent::git::Cancel;
-use keystone_core::SessionContext;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -150,9 +149,13 @@ impl AppState {
     }
 
     pub(crate) fn checkpoint_folder(&self, session: u64) -> Option<PathBuf> {
-        match self.session(session)?.context() {
-            SessionContext::Recorded { directory, .. } => Some(directory.path().to_owned()),
-            _ => None,
+        match self.place(session)? {
+            crate::presentation::SessionPlace::Local(directory) => {
+                Some(directory.path().to_owned())
+            }
+            // A checkpoint reads the folder's files, which for a remote session are there.
+            crate::presentation::SessionPlace::Remote(_)
+            | crate::presentation::SessionPlace::Unusable => None,
         }
     }
 
@@ -198,8 +201,10 @@ impl AppState {
         }))
     }
 
+    /// The session's local connection. Checkpoints are off for a session on another
+    /// machine, whose files are there, so it has none here.
     fn session_connection(&mut self, session: u64) -> Option<&dyn Connection> {
-        let saved = self.session(session)?;
+        let saved = self.session(session).filter(|s| s.machine().is_none())?;
         let (provider, account) = (saved.provider(), saved.account().cloned());
         self.connection(provider, account.as_ref()).ok()
     }

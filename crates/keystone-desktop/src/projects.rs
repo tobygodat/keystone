@@ -55,6 +55,9 @@ pub(crate) struct ProjectList {
 pub(crate) fn holds(project: &ProjectId, session: &Session) -> bool {
     match session.context() {
         SessionContext::Recorded { directory, .. } => project.contains(directory.path()),
+        // A window's project is a folder here, so a session on another machine is
+        // listed in every project until projects can be on other machines.
+        SessionContext::Remote { .. } => true,
         SessionContext::LegacyMissing | SessionContext::Unsupported => true,
     }
 }
@@ -200,8 +203,13 @@ impl Keystone {
             Ok(project) if !holds(project, session) => {}
             _ => return None,
         }
-        let SessionContext::Recorded { directory, .. } = session.context() else {
-            return None;
+        let directory = match session.context() {
+            SessionContext::Recorded { directory, .. } => directory,
+            // A session on another machine is in every project's list, so no project
+            // here needs opening for it.
+            SessionContext::Remote { .. }
+            | SessionContext::LegacyMissing
+            | SessionContext::Unsupported => return None,
         };
         let (listed, folders) = self.known_projects(cx);
         listed

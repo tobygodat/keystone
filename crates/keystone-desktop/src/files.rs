@@ -2,7 +2,7 @@ use crate::Keystone;
 use crate::arrangement_editor::FILES_WIDTH;
 use crate::excerpt::Excerpt;
 use crate::file_view::FileView;
-use crate::presentation::ConversationFolder;
+use crate::presentation::SessionPlace;
 use gpui::{
     AnyElement, App, AppContext, ClipboardItem, Context, DismissEvent, Entity, Focusable,
     IntoElement, KeyBinding, Render, Subscription, WeakEntity, Window, div, prelude::*, px,
@@ -562,16 +562,39 @@ impl Render for FileBrowser {
     }
 }
 
+/// Why Files and Changes have no folder to show.
+#[derive(Debug)]
+pub(crate) enum NoRoot {
+    /// The selected session works on another machine, by its label.
+    Elsewhere(String),
+    /// The window has no project folder, for this reason.
+    Project(String),
+}
+
+impl NoRoot {
+    /// What a surface says, `lead` first when the window has no project.
+    pub(crate) fn say(&self, lead: &str) -> String {
+        match self {
+            NoRoot::Elsewhere(machine) => {
+                format!("Files and changes on {machine} aren't shown here yet.")
+            }
+            NoRoot::Project(error) => format!("{lead} {error}"),
+        }
+    }
+}
+
 impl Keystone {
-    /// The selected session's recorded folder, or else the current project.
-    pub(crate) fn files_root(&self, cx: &App) -> Result<PathBuf, String> {
-        let recorded = self
-            .selected(cx)
-            .and_then(|session| self.conversation_folder(session, cx));
-        match (recorded, &self.presentation.project) {
-            (Some(ConversationFolder::Recorded(directory)), _) => Ok(directory.path().to_owned()),
-            (_, Ok(project)) => Ok(project.path().to_owned()),
-            (_, Err(error)) => Err(error.clone()),
+    /// The selected session's folder, or else the current project, for Files and Changes.
+    /// Never the project beside a session on another machine.
+    pub(crate) fn files_root(&self, cx: &App) -> Result<PathBuf, NoRoot> {
+        let project = || match &self.presentation.project {
+            Ok(project) => Ok(project.path().to_owned()),
+            Err(error) => Err(NoRoot::Project(error.clone())),
+        };
+        match self.selected(cx).and_then(|id| self.session_place(id, cx)) {
+            Some(SessionPlace::Local(directory)) => Ok(directory.path().to_owned()),
+            Some(SessionPlace::Remote(machine)) => Err(NoRoot::Elsewhere(machine)),
+            Some(SessionPlace::Unusable) | None => project(),
         }
     }
 
@@ -665,7 +688,7 @@ impl Keystone {
                 .py_2()
                 .automation_id("files-empty")
                 .child(
-                    Label::new(format!("No project folder to browse. {error}"))
+                    Label::new(error.say("No project folder to browse."))
                         .size(TextSize::Ui)
                         .color(Color::Muted),
                 )

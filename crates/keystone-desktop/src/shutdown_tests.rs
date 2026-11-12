@@ -166,8 +166,8 @@ fn dirty_and_reentrant_quit_collects_one_exact_snapshot(cx: &mut TestAppContext)
         view.composer.update(cx, |input, cx| {
             input.set_value("  Exact\nunsaved draft  ".into(), cx)
         });
-        request_quit(cx);
-        request_quit(cx);
+        request_quit(cx, true);
+        request_quit(cx, true);
     });
     assert_eq!(phase(&state, cx), Phase::Exiting);
     state.read_with(cx, |s, _| {
@@ -191,7 +191,7 @@ fn clean_global_quit_without_a_window_does_not_write_a_snapshot(cx: &mut TestApp
     let state = cx.update(|cx| {
         install_app_state(Store::open(dir.path().join("workspace.json")).unwrap(), cx)
     });
-    cx.update(request_quit);
+    cx.update(|cx| request_quit(cx, true));
     state.read_with(cx, |s, _| {
         assert_eq!(s.phase, Phase::Exiting);
         assert_eq!(s.save_calls, 1);
@@ -272,13 +272,13 @@ fn failed_nonselected_log_barrier_vetoes_quit_and_retry_needs_no_send(cx: &mut T
         s.publish(cx);
     });
     draft(&view, cx, "close draft");
-    cx.update(|_, cx| request_quit(cx));
+    cx.update(|_, cx| request_quit(cx, true));
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Running);
     assert!(cx.debug_bounds("shutdown-error").is_some());
     assert!(state.read_with(cx, |s, _| s.conversations()[&2].save_error.is_some()));
     drop(writer);
-    cx.update(|_, cx| request_quit(cx));
+    cx.update(|_, cx| request_quit(cx, true));
     cx.run_until_parked();
     assert_eq!(phase(&state, cx), Phase::Exiting);
     let entries = keystone_agent::log::read(&sessions, 2).unwrap();
@@ -694,7 +694,7 @@ fn failed_nonselected_provider_metadata_is_replayed_before_quit(cx: &mut TestApp
             cx,
         )
     });
-    cx.update(|_, cx| request_quit(cx));
+    cx.update(|_, cx| request_quit(cx, true));
     assert_eq!(phase(&state, cx), Phase::Running);
     view.read_with(cx, |v, cx| {
         let message = v.status_line(cx).unwrap().0;
@@ -705,7 +705,7 @@ fn failed_nonselected_provider_metadata_is_replayed_before_quit(cx: &mut TestApp
         )
     });
     drop(writer);
-    cx.update(|_, cx| request_quit(cx));
+    cx.update(|_, cx| request_quit(cx, true));
     assert_eq!(phase(&state, cx), Phase::Exiting);
     let restored = Store::open(dir.path().join("workspace.json")).unwrap();
     assert_eq!(
@@ -726,8 +726,8 @@ fn quit_during_both_provider_starts_reaps_owned_probes_and_descendants(cx: &mut 
         start(&state, cx, dir.path(), provider, true);
     }
     cx.update(|_, cx| {
-        request_quit(cx);
-        request_quit(cx);
+        request_quit(cx, true);
+        request_quit(cx, true);
     });
     assert_eq!(phase(&state, cx), Phase::Exiting);
     wait(cx, |_| {

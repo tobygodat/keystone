@@ -5,6 +5,7 @@
 use crate::app_state::AppState;
 use crate::arrangement_editor::FILES_WIDTH;
 use crate::diff_view::ViewChanges;
+use crate::presentation::SessionPlace;
 use crate::{Keystone, SendMessage};
 use futures::channel::oneshot;
 use gpui::{
@@ -1611,10 +1612,10 @@ impl Keystone {
     /// Re-reads the changes of each session folder an agent may just have written to.
     pub(crate) fn agent_changed_files(&self, sessions: &[u64], cx: &mut App) {
         for &session in sessions {
-            if let Some(crate::presentation::ConversationFolder::Recorded(directory)) =
-                self.conversation_folder(session, cx)
-            {
-                self.changes.refresh(directory.path(), cx);
+            match self.session_place(session, cx) {
+                Some(SessionPlace::Local(directory)) => self.changes.refresh(directory.path(), cx),
+                // Its files are on the machine, which Changes doesn't read.
+                Some(SessionPlace::Remote(_) | SessionPlace::Unusable) | None => {}
             }
         }
     }
@@ -1686,7 +1687,7 @@ impl Keystone {
                 .py_2()
                 .automation_id("changes-unavailable")
                 .child(
-                    Label::new(format!("No project folder. {error}"))
+                    Label::new(error.say("No project folder."))
                         .size(TextSize::Ui)
                         .color(Color::Muted),
                 )

@@ -89,7 +89,9 @@ code, gains no entry. The key encodings follow xterm's documented control sequen
   Keystone (T3 Code's list), and the `ALACRITTY_WINDOW_ID` and `WINDOWID` the PTY
   sets. It starts in the
   session's recorded folder, which for a worktree session is its worktree. With no
-  recorded folder, or one that is gone, it starts in the user's home. Scrollback is
+  recorded folder, or one that is gone, it starts in the user's home. A session on
+  another machine gets no shell here: the drawer says the terminal isn't available
+  for sessions on that machine yet. Scrollback is
   10,000 lines.
 - The IO thread's events reach the UI over a channel. The UI drains everything queued
   in one go and notifies only the `SessionTerminal`. It answers color and size queries

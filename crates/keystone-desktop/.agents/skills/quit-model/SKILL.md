@@ -16,7 +16,8 @@ Run all commands from the workspace root.
 | `OnlyQuitStopsTurns` | Keystone stops a running turn, or drops a message it accepted for one, only when the user chooses Quit. | An agent's work is cut off mid-turn, or a follow-up the user sent never runs, after the user closed the window so that it would finish. |
 | `NoScheduledRunWhileWaiting` | No scheduled run starts while Keystone has no window open. With no window, Keystone is waiting to quit (`WindowlessMeansWaiting`). | A run starts unseen and holds Keystone open past the turn the user was waiting on, though `docs/design/scheduled-tasks.md` promises it waits for the next launch. |
 | `WindowlessMeansWaiting` | Whenever Keystone has no window and is not quitting, it is waiting to quit. | Keystone runs on with no window and nothing that will ever quit it. |
-| `WindowlessEventuallyEnds` | With no window, Keystone eventually exits or shows a window again. | Same as above, as a liveness check, assuming turns end, providers answer, and a pump runs whenever something wakes it. |
+| `WindowlessEventuallyEnds` | With no window, Keystone eventually exits or shows a window again. | Same as above, as a liveness check, assuming turns end, providers answer, and a pump runs whenever something wakes it. A machine's link may drop and never come back. |
+| `OnlyUserQuitEndsRemoteTurns` | A turn on another machine is ended by Keystone only when the user chose Quit and the machine is set to end its sessions. Closing the last window never ends one. | Work left running on a remote machine so it would go on while the laptop is closed is cut off, though `docs/design/remote.md` promises only Quit with **End sessions on this machine when Keystone quits** does that. |
 
 ## When to use
 
@@ -34,10 +35,10 @@ It lists the covered files changed since the sync commit, committed or not, the 
 bash crates/keystone-desktop/.agents/skills/quit-model/check.sh
 ```
 
-It needs `mise` and, on the first run, the network: it fetches TLC 1.7.4 (checksum-pinned) into `~/.cache/keystone/` and Java through `mise` (`java@temurin-21`). It runs fifteen TLC jobs in parallel in a few seconds, prints one line per run, and exits 0 only when every result matches what it expected:
+It needs `mise` and, on the first run, the network: it fetches TLC 1.7.4 (checksum-pinned) into `~/.cache/keystone/` and Java through `mise` (`java@temurin-21`). It runs eighteen TLC jobs in parallel in a few seconds, prints one line per run, and exits 0 only when every result matches what it expected:
 
 - `code` runs: each rule on the code as it is. All must hold.
-- `can fail` runs: each rule with a deliberate break of the code it guards (`Mutation` in the model). Each must break. If one holds, the rule has stopped checking anything. `quit-skips-recheck`, `turns-ignore-connections`, `work-ignores-queued`, `work-ignores-steer` and `steer-settles-silently` each undo part of the TOB-350 fix. `work-ignores-result` omits a result still waiting for its durable save from work accounting. `result-save-no-wake` loses the wake after that save.
+- `can fail` runs: each rule with a deliberate break of the code it guards (`Mutation` in the model). Each must break. If one holds, the rule has stopped checking anything. `quit-skips-recheck`, `turns-ignore-connections`, `work-ignores-queued`, `work-ignores-steer` and `steer-settles-silently` each undo part of the TOB-350 fix. `work-ignores-result` omits a result still waiting for its durable save from work accounting. `result-save-no-wake` loses the wake after that save. `quit-forgets-who` has `reserve_quit` never record that the user didn't choose the quit, which is how the first build of TOB-441 let closing the last window end a remote turn. `work-counts-remote` counts a remote session's turn in `has_work`, so a windowless Keystone waits on a link that may never come back.
 
 A line marked `UNEXPECTED` prints the path of TLC's output, which holds the full trace. Each run of `check.sh` first deletes the outputs a previous run left there.
 
@@ -89,9 +90,12 @@ Sync commit: `11b9013`. The model was confirmed against the code at this commit.
 | `delivery` | Child's `DeliveryState` and pending send in `AppState.unsent`. `Saving` and `Saved` both mean Delivered in memory, before and after its watched save is durable; `Delivered` means sent. |
 | `WriterConfirmsDelivery` | The Store writer confirms the watched revision and wakes the app through `wake_when_durable`. |
 | `deferred` | callbacks queued with `cx.defer`, run FIFO after the outermost update ends (tGPUI `App::finish_update` and `flush_effects`) |
-| `Runs`, `HasWork`, `TurnRunning`, `Asking` | `runs_turn` (`app_state.rs:1471`), `Connection::has_work` (`keystone-agent` `connection.rs:62`), `has_work` (`app_state.rs:1465`) through `started` (`:2488`) and `route` (`:2261`), `asking` (`app_state.rs:1478`) |
+| `idleQuit` | `AppState.idle_quit`, set by `reserve_quit` (`app_state.rs`) for a quit the user didn't choose and cleared by `quit_failed` |
+| `remoteRunning`, `remoteShown`, `linkUp`, `endOnQuit` | a Claude turn on another machine, run by its `keystone-host`; that session's `Conversation.running`; its `Link` status being `Connected` (`keystone-agent` `remote/link.rs`); `Machine::end_on_quit` (`keystone-core` `machine.rs`) |
+| `UserSendsRemote`, `RemoteEndsTurn`, `LinkChanges`, `RemotePump` | `send_message_from` to a remote session (`Place::Remote`); the host's provider ending the turn; `Link::supervise` dropping and reconnecting; `pump` draining the remote route's turn end, then `publish` |
+| `Runs`, `HasWork`, `TurnRunning`, `Asking` | `runs_turn` (`app_state.rs:1471`), `Connection::has_work` (`keystone-agent` `connection.rs:62`), `has_work` (`app_state.rs:1465`) through `started` (`:2488`) and `route` (`:2261`), `asking` (`app_state.rs:1478`). Both leave out remote sessions (`is_remote`) |
 | `QuitIfIdle` | `quit_if_idle` (`app_state.rs:1489`), run by every `publish` (`:1643`) and `refresh` |
-| `RequestQuit` | `request_quit` (`main.rs:373`) and `reserve_quit` (`app_state.rs:352`) |
+| `RequestQuit` | `request_quit` (`main.rs:373`) and `reserve_quit` (`app_state.rs:352`), which records with `idle_quit` whether the user chose the quit |
 | `CloseLastWindow` | `close_window` with no other window (`main.rs:280`) |
 | `UserQuits` | the `Quit` action (`main.rs:226`) |
 | `UserReopens` | `reopen` (`windows.rs:299`) |
@@ -106,11 +110,11 @@ Sync commit: `11b9013`. The model was confirmed against the code at this commit.
 | `ScheduledRun` | `check_schedules` (`scheduled.rs:201`) with `quitting` (`scheduled.rs:196`), `run_task` and `start_run` |
 | `RequestQuitDeferred` | the callback `quit_if_idle` defers: it checks `has_work` again and sets `quit_when_idle` back while a turn runs, else calls `request_quit` |
 | `ShowApprovalDeferred` | the callback `quit_if_idle` defers for an approval: `notifications::show` (`notifications.rs:219`), then re-arming `quit_when_idle` |
-| `SaveAndTeardownDeferred` | `save_and_teardown` (`main.rs:404`): `save` (`app_state.rs:371`), `quit_failed` (`:360`), `teardown` (`:429`), and `reopen` after a failed save |
+| `SaveAndTeardownDeferred` | `save_and_teardown` (`main.rs:404`): `save` (`app_state.rs:371`), `quit_failed` (`:360`), `teardown` (`:429`) with `leave_machines`, which sends each connected machine `quit` with `keep_running` unless the user quit and the machine ends its sessions, and `reopen` after a failed save |
 
 ## Scope
 
-The original synced model explored 8,311 distinct states. This integration extends it with a pending Delivered save, its background confirmation and wake, and pending-result work accounting. The sync marker remains unchanged so the remaining source drift stays visible. TLC explores the bounded state space for three sessions (Parent, Child, a scheduled task's Task), one window and one launched result. A pass covers the model, not all of Keystone.
+The original synced model explored 8,311 distinct states. An integration extended it with a pending Delivered save, its background confirmation and wake, and pending-result work accounting. TOB-441 adds one session on another machine, its link and its machine's Quit setting, and the model now explores 126,070 distinct states. The sync marker stays where it was, so drift from before these integrations stays visible. TLC explores the bounded state space for three sessions (Parent, Child, a scheduled task's Task), one window and one launched result. A pass covers the model, not all of Keystone.
 
 Assumed, so a break there would not show:
 
@@ -123,6 +127,8 @@ Assumed, so a break there would not show:
 - `ParentLaunchesChild` treats the asynchronous launch and its answer as one update. It also permits Parent's turn end to be queued before the launch; TLC's shortest counterexample uses that order. Launching Child before Parent ends is also reachable in the code.
 
 Left out:
+
+- More than one remote session or machine, a remote approval, and the next launch's catch-up. `remote_tests.rs` covers those.
 
 - The scheduled continue after a usage limit (`continue_when_due`), `session_send` to an existing session, widget answers, crash recovery, and `Event::Failed`.
 - Steering a running task, more than one window, more than one launched session.

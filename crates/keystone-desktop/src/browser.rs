@@ -5,6 +5,7 @@
 
 use crate::Keystone;
 use crate::app_state::AppState;
+use crate::presentation::SessionPlace;
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     IntoElement, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -57,6 +58,9 @@ pub(crate) fn off_thread<T: Send + 'static>(
 pub(crate) struct BrowserView {
     state: Entity<AppState>,
     folder: Option<String>,
+    /// The machine the selected session runs on, when it isn't this one. Its pages
+    /// and dev servers are there, so this view shows none.
+    elsewhere: Option<String>,
     address: Entity<TextInput>,
     focus: FocusHandle,
     /// The frame drawn, by its sequence number.
@@ -89,6 +93,7 @@ impl BrowserView {
         Self {
             state,
             folder: None,
+            elsewhere: None,
             address,
             focus: cx.focus_handle(),
             shown: None,
@@ -105,8 +110,18 @@ impl BrowserView {
         }
     }
 
-    /// Shows `folder`'s page; a change of folder finds its dev servers again.
-    pub(crate) fn set_folder(&mut self, folder: Option<String>, cx: &mut Context<Self>) {
+    /// Shows `folder`'s page; a change of folder finds its dev servers again. With
+    /// `elsewhere`, the selected session runs on that machine and nothing is shown.
+    pub(crate) fn set_folder(
+        &mut self,
+        folder: Option<String>,
+        elsewhere: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.elsewhere != elsewhere {
+            self.elsewhere = elsewhere;
+            cx.notify();
+        }
         if self.folder == folder {
             return;
         }
@@ -119,6 +134,12 @@ impl BrowserView {
         let url = self.page(cx).map(|page| page.url()).unwrap_or_default();
         self.show_address(url, cx);
         self.find_servers(cx);
+    }
+
+    /// The folder whose page this view shows.
+    #[cfg(test)]
+    pub(crate) fn folder(&self) -> Option<&str> {
+        self.folder.as_deref()
     }
 
     fn browsers(&self, cx: &App) -> Arc<Browsers> {
@@ -437,13 +458,27 @@ impl BrowserView {
 
     fn empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut body = v_flex()
-            .automation_id("browser-empty")
+            .automation_id(if self.elsewhere.is_some() {
+                "browser-elsewhere"
+            } else {
+                "browser-empty"
+            })
             .flex_1()
             .min_h_0()
             .items_center()
             .justify_center()
             .gap_2()
             .px(px(24.));
+        if let Some(machine) = &self.elsewhere {
+            return body
+                .child(
+                    Label::new(format!(
+                        "The browser isn't available for sessions on {machine} yet."
+                    ))
+                    .color(Color::Muted),
+                )
+                .into_any_element();
+        }
         if self.folder.is_none() {
             return body
                 .child(Label::new("Select a session to browse its project.").color(Color::Muted))
@@ -799,27 +834,30 @@ impl Keystone {
         self.open_surface(Component::Browser, at, BROWSER_WIDTH, window, cx);
     }
 
-    /// The folder the Browser surface shows: the selected session's, else the project's.
-    fn browser_folder(&self, cx: &App) -> Option<String> {
-        let state = self.state.read(cx);
-        let session = self.selected(cx).and_then(|id| state.session(id));
-        match session.map(|session| session.context()) {
-            Some(keystone_core::SessionContext::Recorded { directory, .. }) => {
-                Some(directory.as_str().to_owned())
-            }
-            _ => self
-                .presentation
+    /// The folder the Browser surface shows: the selected session's, else the project's,
+    /// or the machine the selected session runs on, when it isn't this one.
+    fn browser_folder(&self, cx: &App) -> Result<Option<String>, String> {
+        let project = || {
+            self.presentation
                 .project
                 .as_ref()
                 .ok()
-                .and_then(|project| project.path().to_str().map(str::to_owned)),
+                .and_then(|project| project.path().to_str().map(str::to_owned))
+        };
+        match self.selected(cx).and_then(|id| self.session_place(id, cx)) {
+            Some(SessionPlace::Local(directory)) => Ok(Some(directory.as_str().to_owned())),
+            Some(SessionPlace::Remote(machine)) => Err(machine),
+            Some(SessionPlace::Unusable) | None => Ok(project()),
         }
     }
 
     pub(crate) fn browser_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let folder = self.browser_folder(cx);
+        let (folder, elsewhere) = match self.browser_folder(cx) {
+            Ok(folder) => (folder, None),
+            Err(machine) => (None, Some(machine)),
+        };
         self.browser
-            .update(cx, |view, cx| view.set_folder(folder, cx));
+            .update(cx, |view, cx| view.set_folder(folder, elsewhere, cx));
         div()
             .flex_1()
             .min_h_0()

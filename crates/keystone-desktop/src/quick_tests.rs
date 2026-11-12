@@ -201,7 +201,7 @@ fn escape_closes_and_keeps_the_text_for_the_next_opening_and_relaunch(cx: &mut T
 
     let vcx = &mut VisualTestContext::from_window(window.into(), cx);
     vcx.simulate_input(" more");
-    vcx.update(|_, cx| request_quit(cx));
+    vcx.update(|_, cx| request_quit(cx, true));
     vcx.run_until_parked();
     assert_eq!(
         Store::open(&path)

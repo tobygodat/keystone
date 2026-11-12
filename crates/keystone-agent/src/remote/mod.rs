@@ -15,12 +15,19 @@ mod serve;
 
 pub use attach::attach;
 pub use connection::RemoteConnection;
-pub use frame::PROTOCOL;
-pub use link::{Link, Status, ssh};
+pub use frame::{Found, PROTOCOL, Welcome};
+pub use link::{Link, NOT_CONNECTED, Status, ssh};
 pub use reap::reap;
 pub use serve::serve;
 
 use keystone_core::Provider;
+
+/// A new random ID for a workspace to give the hosts it links, as 32 hex digits.
+pub fn new_client_id() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("the system's random source");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 /// Which connection on a machine an event or call belongs to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

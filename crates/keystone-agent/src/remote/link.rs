@@ -5,7 +5,7 @@
 //! per transport empties.
 
 use super::Route;
-use super::frame::{self, Call, Frame, Op, Outcome, PROTOCOL, SessionState};
+use super::frame::{self, Call, Frame, Op, Outcome, PROTOCOL, SessionState, Welcome};
 use crate::{Catalog, Event, Wake};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -20,12 +20,15 @@ use std::time::{Duration, Instant};
 /// third of that.
 const SILENCE: Duration = Duration::from_secs(15);
 const BACKOFF: [u64; 6] = [1, 2, 4, 8, 16, 30];
+/// How long an ended transport's stderr may stay open before its reason is read.
+const STDERR_WAIT: Duration = Duration::from_secs(1);
 /// How long dropping a link lets its transport end by itself.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
-pub(crate) const NOT_CONNECTED: &str = "The machine isn't connected, so the message wasn't sent";
+pub const NOT_CONNECTED: &str = "The machine isn't connected, so the message wasn't sent";
 const GAP: &str = "Part of this session's transcript was lost: the machine couldn't keep all of it until Keystone received it";
 const INSTALL: &str = "cargo install --locked --path crates/keystone-agent --bin keystone-host";
+const NO_ANSWER: &str = "The machine didn't answer. Check that it is on and reachable over SSH.";
 
 /// Where a link stands. Every state change wakes each of its connections.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,14 +46,7 @@ pub enum Status {
 /// The `ssh` command that links `destination`. It never prompts and fails fast, and
 /// the remote login shell gives `keystone-host` the user's own `PATH`.
 pub fn ssh(destination: &str) -> Result<Vec<OsString>, String> {
-    if destination.is_empty()
-        || destination.starts_with('-')
-        || destination
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control())
-    {
-        return Err(format!("{destination:?} isn't an SSH destination"));
-    }
+    keystone_core::check_destination(destination)?;
     Ok([
         "ssh",
         "-T",
@@ -132,6 +128,14 @@ struct State {
     transport: Option<u32>,
     /// The current transport's writer queue, from its `welcome` until it ends.
     out: Option<Sender<Vec<u8>>>,
+    /// What the host said about itself in its last `welcome`.
+    welcome: Option<Welcome>,
+    /// Why the last transport ended before its host answered, while no later one has.
+    trouble: Option<String>,
+    /// Set when the watchdog ended the current transport for its silence.
+    silenced: bool,
+    /// How many `sessions` reports the host has sent this link.
+    reports: u64,
 }
 
 impl Link {
@@ -156,6 +160,10 @@ impl Link {
                 retry: false,
                 transport: None,
                 out: None,
+                welcome: None,
+                trouble: None,
+                silenced: false,
+                reports: 0,
             }),
             changed: Condvar::new(),
         });
@@ -185,6 +193,36 @@ impl Link {
         let mut state = self.shared.state();
         state.ack(true);
         state.write(&Frame::Quit { keep_running });
+    }
+
+    /// What the host said about itself when it last answered.
+    pub fn welcome(&self) -> Option<Welcome> {
+        self.shared.state().welcome.clone()
+    }
+
+    /// Why the last attempt ended before the host answered, such as SSH's own error,
+    /// while no attempt since has reached it.
+    pub fn trouble(&self) -> Option<String> {
+        self.shared.state().trouble.clone()
+    }
+
+    /// How many times the host has reported every session's state, which it does
+    /// after the replay of an app's first link. Each report replaces what
+    /// [`super::RemoteConnection::is_running`] and [`super::RemoteConnection::waiting`]
+    /// knew.
+    pub fn reports(&self) -> u64 {
+        self.shared.state().reports
+    }
+
+    /// Drops the link and waits up to `within` for its transport to end, so what was
+    /// queued, such as [`Link::quit`], reaches the host before the app exits.
+    pub fn close(self, within: Duration) {
+        let shared = self.shared.clone();
+        drop(self);
+        let state = shared.state();
+        let _ = shared
+            .changed
+            .wait_timeout_while(state, within, |state| state.transport.is_some());
     }
 
     /// The transport process while it runs.
@@ -310,15 +348,27 @@ impl Shared {
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let tail = thread::spawn(move || {
-            let mut text = Vec::new();
-            let _ = stderr.take(64 * 1024).read_to_end(&mut text);
-            String::from_utf8_lossy(&text).into_owned()
-        });
+        // What the transport says on stderr, read as it comes. A process the transport
+        // left behind, such as a `ProxyCommand`, can hold stderr open long after it
+        // exits, so the reason is taken after at most [`STDERR_WAIT`].
+        let tailed = Arc::new(Mutex::new(Vec::new()));
+        let (tail_done, tail) = mpsc::channel::<()>();
+        {
+            let tailed = tailed.clone();
+            thread::spawn(move || {
+                let mut stderr = stderr.take(64 * 1024);
+                let mut buf = [0u8; 4096];
+                while let Ok(n @ 1..) = stderr.read(&mut buf) {
+                    tailed.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+                let _ = tail_done.send(());
+            });
+        }
         let after = {
             let mut state = self.state();
             state.transport = Some(child.id());
             state.heard = Instant::now();
+            state.silenced = false;
             state.linked.then_some(state.received)
         };
         let hello = Frame::Hello {
@@ -339,7 +389,22 @@ impl Shared {
         watch.done();
         let status = finish(&child);
         self.state().transport = None;
-        let stderr = tail.join().unwrap_or_default();
+        self.changed.notify_all();
+        let _ = tail.recv_timeout(STDERR_WAIT);
+        let stderr = String::from_utf8_lossy(&tailed.lock().unwrap()).into_owned();
+        if let Ended::Dropped { welcomed: false } = ended {
+            let mut state = self.state();
+            state.trouble = Some(if state.silenced {
+                NO_ANSWER.to_owned()
+            } else {
+                stderr
+                    .lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map_or_else(|| NO_ANSWER.to_owned(), str::to_owned)
+            });
+        }
         match ended {
             Ended::Dropped { welcomed } => classify(status, &stderr).map_or(
                 if self.state().closed {
@@ -379,9 +444,10 @@ impl Shared {
                 if state.closed {
                     closed_at.get_or_insert(now);
                 }
-                if now.duration_since(state.heard) >= state.silence
-                    || closed_at.is_some_and(|at| now.duration_since(at) >= CLOSE_WAIT)
-                {
+                let silent = now.duration_since(state.heard) >= state.silence;
+                if silent || closed_at.is_some_and(|at| now.duration_since(at) >= CLOSE_WAIT) {
+                    let mut state = state;
+                    state.silenced = silent;
                     drop(state);
                     let _ = child.lock().unwrap().kill();
                     return;
@@ -418,6 +484,11 @@ impl Shared {
                         ));
                     }
                     welcomed = true;
+                    {
+                        let mut state = self.state();
+                        state.welcome = Some(welcome.clone());
+                        state.trouble = None;
+                    }
                     self.resend(
                         out.take().expect("the queue until welcomed"),
                         welcome.latest,
@@ -525,6 +596,7 @@ impl Shared {
                 let target = state.routes.entry(route).or_default();
                 target.sessions.insert(session.session, session);
             }
+            state.reports += 1;
             state.wakes()
         };
         for wake in wakes {
@@ -788,6 +860,9 @@ fn classify(status: Option<ExitStatus>, stderr: &str) -> Option<String> {
         127 => Some(format!(
             "keystone-host isn't installed on that machine. Install it there from a Keystone checkout: {INSTALL}"
         )),
+        255 if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") => Some(
+            "The machine's host key changed since you last connected, so SSH refused it. Keystone won't connect until you have checked why and fixed known_hosts yourself.".into(),
+        ),
         255 if stderr.contains("Host key verification failed") => Some(
             "Keystone never accepts a host key. Run ssh with this destination once in a terminal to accept it.".into(),
         ),

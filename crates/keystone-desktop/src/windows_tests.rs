@@ -331,7 +331,7 @@ fn quit_saves_every_windows_draft_in_one_write_and_restore_opens_each_window(
         });
     }
     let writes = cx.read(|cx| state.read(cx).store().writes());
-    cx.update(request_quit);
+    cx.update(|cx| request_quit(cx, true));
     cx.run_until_parked();
     cx.read(|cx| {
         let state = state.read(cx);
@@ -481,7 +481,7 @@ fn quit_keeps_the_newest_typing_of_a_session_shown_in_two_windows(cx: &mut TestA
         "typed in two",
         "the other window shows the typing at once"
     );
-    vcx.update(|_, cx| request_quit(cx));
+    vcx.update(|_, cx| request_quit(cx, true));
     vcx.run_until_parked();
     let reopened = Store::open(&path).unwrap();
     assert_eq!(reopened.workspace().sessions()[0].draft(), "typed in two");
@@ -594,7 +594,7 @@ fn a_window_entering_a_session_shows_what_another_window_is_typing(cx: &mut Test
         vcx.read(|cx| first.read(cx).composer.read(cx).value().to_owned()),
         "typed before the save"
     );
-    vcx.update(|_, cx| request_quit(cx));
+    vcx.update(|_, cx| request_quit(cx, true));
     vcx.run_until_parked();
     let reopened = Store::open(&path).unwrap();
     assert_eq!(

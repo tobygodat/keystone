@@ -228,7 +228,9 @@ fn a_thumbnail_click_closes_a_right_click_menu_before_its_preview(cx: &mut TestA
 fn escape_closes_the_preview_and_restores_focus(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx);
     let shot = dir.path().join("project/shot.png");
-    view.update_in(cx, |this, window, cx| this.open_preview(shot, window, cx));
+    view.update_in(cx, |this, window, cx| {
+        this.open_preview(crate::local_files::LocalPath::for_test(shot), window, cx)
+    });
     cx.run_until_parked();
     for keys in ["tab", "secondary-l", "secondary-k", "secondary-enter"] {
         cx.simulate_keystrokes(keys);
@@ -255,7 +257,11 @@ fn a_press_outside_the_image_closes_the_preview(cx: &mut TestAppContext) {
     let shot = dir.path().join("project/shot.png");
     for corner in [false, true] {
         view.update_in(cx, |this, window, cx| {
-            this.open_preview(shot.clone(), window, cx)
+            this.open_preview(
+                crate::local_files::LocalPath::for_test(shot.clone()),
+                window,
+                cx,
+            )
         });
         wait(cx, |cx| cx.debug_bounds("preview-image").is_some());
         click(cx, "preview-image");

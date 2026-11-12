@@ -1,0 +1,343 @@
+//! The window's surfaces beside a session on another machine: none of them falls back
+//! to this machine's project folder.
+
+use crate::{Keystone, bind_keys};
+use gpui::{AppContext, Entity, Modifiers, TestAppContext, VisualTestContext};
+use keystone_core::{ProjectId, RemoteFolder, Store, WindowId};
+use std::path::Path;
+
+/// A workspace with `desk` linked and a session on it, opened in a window whose project
+/// is `project`, a folder on this machine.
+fn remote_window<'a>(
+    path: &Path,
+    project: &Path,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Keystone>, &'a mut VisualTestContext) {
+    remote_window_in(path, project, "/srv/app", false, cx)
+}
+
+/// As [`remote_window`], with the session's folder `folder` on the machine, and with
+/// `local` a session working in that same path here as well, the remote one selected.
+fn remote_window_in<'a>(
+    path: &Path,
+    project: &Path,
+    folder: &str,
+    local: bool,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Keystone>, &'a mut VisualTestContext) {
+    let mut store = Store::open(path).unwrap();
+    if local {
+        let here = keystone_core::WorkingDirectory::new(Path::new(folder)).unwrap();
+        store
+            .create(keystone_core::Provider::Claude, &here, 1)
+            .unwrap();
+    }
+    let desk = store.link_machine("desk", "client".into()).unwrap().value;
+    let folder = RemoteFolder::new(folder).unwrap();
+    let remote = store
+        .create_remote_showing(&desk, &folder, 2, WindowId::FIRST, None)
+        .unwrap()
+        .value;
+    store.select(remote).unwrap();
+    store.flush().unwrap();
+    drop(store);
+    let store = Store::open(path).unwrap();
+    cx.update(|cx| {
+        keystone_ui::init(cx);
+        bind_keys(cx);
+        crate::terminal::install(cx);
+        crate::terminal::use_shell("/bin/sh", &[], cx);
+    });
+    cx.executor().allow_parking();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        Keystone::new(
+            cx.new(|cx| crate::AppState::new(store, cx)),
+            false,
+            window,
+            cx,
+        )
+    });
+    view.update(cx, |view, _| {
+        view.presentation.project = ProjectId::new(project).map_err(|e| e.to_string());
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(800.)));
+    cx.run_until_parked();
+    (view, cx)
+}
+
+fn shown(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+    cx.debug_bounds(selector).is_some()
+}
+
+#[gpui::test]
+fn the_browser_says_it_isnt_available_for_a_session_on_another_machine(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, cx) = remote_window(&dir.path().join("workspace.json"), dir.path(), cx);
+    view.update_in(cx, |view, window, cx| view.toggle_browser(window, cx));
+    cx.run_until_parked();
+    assert!(
+        shown(cx, "browser-elsewhere"),
+        "the panel names the machine instead of this project's dev servers"
+    );
+    assert!(!shown(cx, "browser-empty"));
+    view.read_with(cx, |view, cx| {
+        assert_eq!(
+            view.browser.read(cx).folder(),
+            None,
+            "no local folder is browsed"
+        );
+    });
+}
+
+#[gpui::test]
+fn a_terminal_only_command_in_a_remote_session_offers_no_local_command(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, cx) = remote_window(&dir.path().join("workspace.json"), dir.path(), cx);
+    view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));
+    cx.simulate_input("/login");
+    cx.simulate_keystrokes("secondary-enter");
+    cx.run_until_parked();
+    assert!(
+        shown(cx, "slash-terminal-elsewhere"),
+        "the notice says the command runs on the machine"
+    );
+    assert!(
+        !shown(cx, "slash-terminal-copy"),
+        "no command for this machine's terminal is offered"
+    );
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.composer.read(cx).value(), "/login", "the draft stays");
+    });
+}
+
+#[gpui::test]
+fn the_terminal_says_it_isnt_available_for_a_session_on_another_machine(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, cx) = remote_window(&dir.path().join("workspace.json"), dir.path(), cx);
+    let session = view.read_with(cx, |view, cx| view.selected(cx)).unwrap();
+    let no_shell = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| crate::terminal::session_terminal(session, cx).is_none())
+    };
+    view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));
+    cx.simulate_keystrokes("secondary-j");
+    cx.run_until_parked();
+    assert!(
+        shown(cx, "terminal-elsewhere"),
+        "the drawer names the machine instead of opening a shell here"
+    );
+    assert!(!shown(cx, "terminal-drawer"));
+    assert!(no_shell(cx), "no shell starts on this machine");
+
+    cx.simulate_keystrokes("secondary-shift-d");
+    cx.run_until_parked();
+    assert!(
+        shown(cx, "terminal-elsewhere"),
+        "Split shows the same refusal"
+    );
+    assert!(no_shell(cx));
+
+    let toggle = cx
+        .debug_bounds("terminal-toggle")
+        .expect("the top bar button");
+    cx.simulate_click(toggle.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(!shown(cx, "terminal-elsewhere"), "the button hides it");
+    let toggle = cx
+        .debug_bounds("terminal-toggle")
+        .expect("the top bar button");
+    cx.simulate_click(toggle.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(shown(cx, "terminal-elsewhere"), "and shows it again");
+    assert!(no_shell(cx));
+}
+
+/// Every kind of row whose text names a file in `folder`: a mention and a path in the
+/// user's message, a command's output, file changes naming an image, a video and a text
+/// file, by absolute and relative path, and a reply with Markdown images and links.
+fn rows_naming_files(folder: &Path) -> Vec<keystone_agent::Event> {
+    use keystone_agent::{Event, Item, ItemKind, ItemStatus, TurnStatus};
+    let at = folder.display();
+    let item = |id: &str, kind: ItemKind, text: String| {
+        Event::ItemCompleted(Item {
+            id: id.into(),
+            kind,
+            text,
+            status: ItemStatus::Completed,
+        })
+    };
+    let change = |id: &str, path: String| {
+        item(
+            id,
+            ItemKind::FileChange { paths: vec![path] },
+            String::new(),
+        )
+    };
+    vec![
+        Event::TurnStarted,
+        item(
+            "u",
+            ItemKind::UserMessage,
+            format!("look at @notes.txt and {at}/shot.png"),
+        ),
+        item(
+            "c",
+            ItemKind::Command {
+                command: format!("cat {at}/notes.txt"),
+                exit_code: Some(0),
+            },
+            format!("{at}/notes.txt: written on the other machine"),
+        ),
+        change("f1", format!("{at}/shot.png")),
+        change("f2", "shot.png".into()),
+        change("f3", format!("{at}/clip.mp4")),
+        change("f4", format!("{at}/notes.txt")),
+        item(
+            "a",
+            ItemKind::AgentMessage,
+            format!(
+                "Done.\n\n![shot]({at}/shot.png)\n\n![relative](shot.png)\n\n[notes]({at}/notes.txt) and [link](file://{at}/notes.txt)"
+            ),
+        ),
+        Event::TurnCompleted {
+            status: TurnStatus::Completed,
+            error: None,
+            stopped: false,
+        },
+    ]
+}
+
+/// Lets real time pass so any file a row asked for is read and drawn.
+fn settle(cx: &mut VisualTestContext) {
+    for _ in 0..30 {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// The media a transcript drew: each thumbnail or video card, by its row and place.
+fn media(cx: &mut VisualTestContext) -> Vec<String> {
+    let mut found = Vec::new();
+    for row in 0..16 {
+        for n in 0..3 {
+            for kind in ["thumbnail", "video"] {
+                let id: &'static str = format!("{kind}-{row}-{n}").leak();
+                if cx.debug_bounds(id).is_some() {
+                    found.push(id.to_owned());
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The paths a session's rows resolved to files on this machine under `folder`.
+fn resolved_under(folder: &Path) -> Vec<std::path::PathBuf> {
+    crate::local_files::tests::RESOLVED
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|path| path.starts_with(folder))
+        .cloned()
+        .collect()
+}
+
+/// A session on another machine names paths there. Each path here holds a different
+/// file, which must never be shown, opened or read as the agent's: no row draws a
+/// thumbnail or video card, clicking every row opens nothing, attaching and mentioning
+/// refuse before anything is read, and no transcript path resolves to a file here. The
+/// same rows on a session working in that folder here still preview.
+#[gpui::test]
+fn no_row_of_a_remote_session_reads_this_machines_files(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().canonicalize().unwrap().join("app");
+    std::fs::create_dir(&folder).unwrap();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255]))
+        .save(folder.join("shot.png"))
+        .unwrap();
+    std::fs::write(folder.join("notes.txt"), "this machine's notes").unwrap();
+    std::fs::write(folder.join("clip.mp4"), "this machine's video").unwrap();
+    let (view, cx) = remote_window_in(
+        &dir.path().join("workspace.json"),
+        dir.path(),
+        folder.to_str().unwrap(),
+        true,
+        cx,
+    );
+    let (local, remote) = (1, 2);
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.selected(cx)),
+        Some(remote)
+    );
+    view.update(cx, |view, cx| {
+        view.state.update(cx, |state, cx| {
+            for session in [local, remote] {
+                for event in rows_naming_files(&folder) {
+                    state.test_conversation(session).apply(event);
+                }
+            }
+            cx.notify();
+        });
+        view.commit(local, cx);
+        view.commit(remote, cx);
+    });
+    settle(cx);
+
+    let drawn: Vec<&'static str> = (0..16)
+        .map(|row| -> &'static str { format!("transcript-row-{row}").leak() })
+        .filter(|id| cx.debug_bounds(id).is_some())
+        .collect();
+    assert!(
+        drawn.len() >= 6,
+        "the remote session's rows are drawn: {drawn:?}"
+    );
+    assert_eq!(
+        media(cx),
+        Vec::<String>::new(),
+        "no row of the remote session draws media"
+    );
+    for id in drawn {
+        if let Some(bounds) = cx.debug_bounds(id) {
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            settle(cx);
+        }
+    }
+    assert!(
+        !shown(cx, "preview-overlay"),
+        "clicking a row opens nothing"
+    );
+    assert_eq!(media(cx), Vec::<String>::new());
+
+    view.update_in(cx, |view, window, cx| {
+        view.attach_paths(vec![folder.join("shot.png")], window, cx);
+    });
+    settle(cx);
+    view.read_with(cx, |view, cx| {
+        assert!(
+            view.attach
+                .notice
+                .as_ref()
+                .is_some_and(|(_, notice)| notice.contains("can't be attached to sessions on desk")),
+            "attaching refuses before reading: {:?}",
+            view.attach.notice
+        );
+        assert!(view.draft_attachments(cx).is_empty());
+    });
+
+    view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));
+    cx.simulate_input("@not");
+    settle(cx);
+    assert!(shown(cx, "mention-menu"), "@ says why it lists nothing");
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.mention_root(cx), None, "no folder here is listed");
+    });
+    assert_eq!(resolved_under(&folder), Vec::<std::path::PathBuf>::new());
+
+    view.update(cx, |view, cx| view.select(local, cx));
+    settle(cx);
+    let drawn = media(cx);
+    assert!(
+        drawn.iter().any(|id| id.starts_with("thumbnail")),
+        "the same rows on a session here still preview: {drawn:?}"
+    );
+    assert!(!resolved_under(&folder).is_empty());
+}

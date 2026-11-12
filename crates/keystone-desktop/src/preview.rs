@@ -1,8 +1,11 @@
 //! Images and videos in a conversation. A thumbnail is read, decoded and downscaled on
 //! a background thread; clicking it opens [`Overlay`], which shows the image at fit or
 //! at 1:1. A video is a card that opens in the system player. Nothing is fetched from
-//! the network: replies' remote images stay links in the Markdown.
+//! the network: replies' remote images stay links in the Markdown. Every file here is
+//! a [`LocalPath`], so a session on another machine, which has no [`LocalFiles`], shows
+//! none: its transcript's paths name files there.
 
+use crate::local_files::{LocalFiles, LocalPath};
 use futures::channel::oneshot;
 use gpui::{
     AnyElement, App, Asset, ClipboardItem, Context, DismissEvent, ElementId, EventEmitter,
@@ -58,7 +61,7 @@ pub(crate) fn kind(path: &Path) -> Option<Kind> {
 /// writing it is read again once it has.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct Request {
-    path: PathBuf,
+    path: LocalPath,
     within: Option<PathBuf>,
     pixels: u32,
     row: usize,
@@ -69,7 +72,7 @@ struct Request {
 /// size in the file, before any downscaling.
 #[derive(Clone)]
 struct Media {
-    path: PathBuf,
+    path: LocalPath,
     image: Option<(Arc<RenderImage>, gpui::Size<u32>)>,
 }
 
@@ -87,13 +90,13 @@ impl Asset for Load {
 /// The file `request` names, decoded when it asks for pixels, or `None` when it is
 /// missing, outside its folder, too large, or not an image.
 fn load(request: &Request) -> Option<Media> {
-    let path = request.path.canonicalize().ok()?;
+    let path = request.path.canonical()?;
     if let Some(root) = &request.within
-        && !path.starts_with(root.canonicalize().ok()?)
+        && !path.as_path().starts_with(root.canonicalize().ok()?)
     {
         return None;
     }
-    let metadata = std::fs::metadata(&path).ok()?;
+    let metadata = std::fs::metadata(path.as_path()).ok()?;
     if !metadata.is_file() {
         return None;
     }
@@ -103,7 +106,7 @@ fn load(request: &Request) -> Option<Media> {
     if metadata.len() > MAX_BYTES {
         return None;
     }
-    let mut decoder = ImageReader::open(&path)
+    let mut decoder = ImageReader::open(path.as_path())
         .ok()?
         .with_guessed_format()
         .ok()?
@@ -216,13 +219,14 @@ fn fitted(
     size(px((width * shrink).floor()), px((height * shrink).floor()))
 }
 
-pub(crate) type OpenPreview = Rc<dyn Fn(PathBuf, &mut Window, &mut App)>;
+pub(crate) type OpenPreview = Rc<dyn Fn(LocalPath, &mut Window, &mut App)>;
 
-/// How a conversation's rows show media: the session's folder, which a reply's images
-/// must be inside, and what clicking a thumbnail does.
+/// How a conversation's rows show media: the session's files, whose folder a reply's
+/// images must be inside, and what clicking a thumbnail does. Only a session working on
+/// this machine has one.
 #[derive(Clone)]
 pub(crate) struct Previews {
-    pub(crate) root: Option<PathBuf>,
+    files: LocalFiles,
     pub(crate) open: OpenPreview,
 }
 
@@ -241,14 +245,16 @@ impl Previews {
                 .color(Color::Muted)
                 .into_any_element()
             };
-            let Some(root) = &previews.root else {
+            let Some(root) = previews.files.root() else {
                 return fallback();
             };
-            let path = root.join(decode_percent(&image.url));
+            let Some(path) = previews.files.resolve(&decode_percent(&image.url)) else {
+                return fallback();
+            };
             let n = count.get();
             count.set(n + 1);
             previews
-                .media(row, done, n, path, Some(root.clone()), Some(fallback()))
+                .media(row, done, n, path, Some(root.to_owned()), Some(fallback()))
                 .unwrap_or_else(fallback)
         })
     }
@@ -266,16 +272,13 @@ impl Previews {
         let done = status != ItemStatus::InProgress;
         let within = match status {
             ItemStatus::Completed => None,
-            _ => Some(self.root.clone()?),
+            _ => Some(self.files.root()?.to_owned()),
         };
         let media: Vec<AnyElement> = paths
             .iter()
             .enumerate()
             .filter_map(|(n, path)| {
-                let path = match &self.root {
-                    Some(root) => root.join(path),
-                    None => Some(PathBuf::from(path)).filter(|path| path.is_absolute())?,
-                };
+                let path = self.files.resolve(Path::new(path))?;
                 self.media(row, done, n, path, within.clone(), None)
             })
             .collect();
@@ -295,11 +298,11 @@ impl Previews {
         row: usize,
         done: bool,
         n: usize,
-        path: PathBuf,
+        path: LocalPath,
         within: Option<PathBuf>,
         fallback: Option<AnyElement>,
     ) -> Option<AnyElement> {
-        let kind = kind(&path)?;
+        let kind = kind(path.as_path())?;
         let request = |pixels| Request {
             path,
             within,
@@ -362,7 +365,7 @@ impl Thumbnail {
     /// such as an attachment's copy.
     pub(crate) fn new(
         id: impl Into<SharedString>,
-        path: PathBuf,
+        path: LocalPath,
         row: usize,
         open: OpenPreview,
     ) -> Self {
@@ -442,7 +445,7 @@ impl RenderOnce for VideoCard {
         };
         let name = self
             .named
-            .then(|| self.request.path.file_name())
+            .then(|| self.request.path.as_path().file_name())
             .flatten()
             .map(|name| name.to_string_lossy().into_owned());
         let open = format!("{}-open", self.id);
@@ -472,7 +475,7 @@ struct OpenButton {
     id: SharedString,
     label: &'static str,
     style: ButtonStyle,
-    path: PathBuf,
+    path: LocalPath,
 }
 
 impl OpenButton {
@@ -480,7 +483,7 @@ impl OpenButton {
         id: impl Into<SharedString>,
         label: &'static str,
         style: ButtonStyle,
-        path: PathBuf,
+        path: LocalPath,
     ) -> Self {
         Self {
             id: id.into(),
@@ -520,7 +523,7 @@ impl RenderOnce for OpenButton {
                         let (sender, receiver) = oneshot::channel();
                         let path = path.clone();
                         std::thread::spawn(move || {
-                            let _ = sender.send(!crate::files::open_with_system(&path));
+                            let _ = sender.send(!crate::files::open_with_system(path.as_path()));
                         });
                         let error = error.clone();
                         cx.spawn(async move |cx| {
@@ -546,7 +549,7 @@ pub(crate) struct ChipImage {
 }
 
 impl ChipImage {
-    pub(crate) fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: LocalPath) -> Self {
         Self {
             request: Request {
                 path,
@@ -590,7 +593,7 @@ impl RenderOnce for ChipImage {
 /// An image over the whole window, at fit or at 1:1, with Open externally and Copy
 /// path. Escape, the close button or a press outside the image dismisses it.
 pub(crate) struct Overlay {
-    path: PathBuf,
+    path: LocalPath,
     actual: bool,
     copied: bool,
     focus: FocusHandle,
@@ -605,7 +608,7 @@ impl Focusable for Overlay {
 }
 
 impl Overlay {
-    pub(crate) fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(path: LocalPath, cx: &mut Context<Self>) -> Self {
         Self {
             path,
             actual: false,
@@ -631,7 +634,7 @@ impl Overlay {
 
     fn copy_path(&mut self, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(
-            self.path.to_string_lossy().into_owned(),
+            self.path.as_path().to_string_lossy().into_owned(),
         ));
         self.copied = true;
         cx.notify();
@@ -799,12 +802,14 @@ impl Open {
 }
 
 impl crate::Keystone {
-    /// What clicking a thumbnail in this window does.
-    pub(crate) fn previews(&self, session: u64, cx: &Context<Self>) -> Previews {
+    /// How this window shows `session`'s media, or `None` for a session on another
+    /// machine, whose rows show their paths as text.
+    pub(crate) fn previews(&self, session: u64, cx: &Context<Self>) -> Option<Previews> {
+        let files = self.local_files(session, cx)?;
         let activation = self.presentation.activation();
         let entity = cx.weak_entity();
-        Previews {
-            root: self.session_root(session, cx),
+        Some(Previews {
+            files,
             open: Rc::new(move |path, window, cx| {
                 let _ = entity.update(cx, |this, cx| {
                     if this.presentation.matches(activation) {
@@ -812,12 +817,12 @@ impl crate::Keystone {
                     }
                 });
             }),
-        }
+        })
     }
 
     pub(crate) fn open_preview(
         &mut self,
-        path: PathBuf,
+        path: LocalPath,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -879,7 +884,7 @@ mod tests {
     fn large_images_are_downscaled_and_small_ones_kept() {
         let dir = tempfile::tempdir().unwrap();
         let request = |path: PathBuf| Request {
-            path,
+            path: LocalPath::for_test(path),
             within: Some(dir.path().to_owned()),
             pixels: THUMBNAIL_PIXELS,
             row: 0,
@@ -899,7 +904,7 @@ mod tests {
     fn decoded_pixels_are_bgra() {
         let dir = tempfile::tempdir().unwrap();
         let media = load(&Request {
-            path: png(dir.path(), "a.png", 2, 2),
+            path: LocalPath::for_test(png(dir.path(), "a.png", 2, 2)),
             within: None,
             pixels: THUMBNAIL_PIXELS,
             row: 0,
@@ -927,7 +932,7 @@ mod tests {
             root.path().join("link.png"),
         ] {
             let result = load(&Request {
-                path: path.clone(),
+                path: LocalPath::for_test(path.clone()),
                 within: Some(root.path().to_owned()),
                 pixels: THUMBNAIL_PIXELS,
                 row: 0,
@@ -937,7 +942,7 @@ mod tests {
         }
         let inside = png(root.path(), "shot.png", 4, 4);
         let media = load(&Request {
-            path: inside,
+            path: LocalPath::for_test(inside),
             within: Some(root.path().to_owned()),
             pixels: 0,
             row: 0,
@@ -954,7 +959,7 @@ mod tests {
         std::fs::write(&broken, b"not a png").unwrap();
         for path in [dir.path().join("gone.png"), broken, dir.path().to_owned()] {
             let request = Request {
-                path,
+                path: LocalPath::for_test(path),
                 within: None,
                 pixels: THUMBNAIL_PIXELS,
                 row: 0,
@@ -967,7 +972,7 @@ mod tests {
     #[test]
     fn only_the_most_recently_shown_stay_decoded() {
         let request = |n: usize| Request {
-            path: PathBuf::from(format!("/{n}.png")),
+            path: LocalPath::for_test(PathBuf::from(format!("/{n}.png"))),
             within: None,
             pixels: THUMBNAIL_PIXELS,
             row: n,

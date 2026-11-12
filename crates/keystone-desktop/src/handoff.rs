@@ -4,6 +4,7 @@
 
 use crate::conversation::Row;
 use crate::model_selector::{account_label, provider_name};
+use crate::presentation::SessionPlace;
 use crate::view_state::ViewKey;
 use crate::{Keystone, arrangement, now_ms};
 use gpui::{
@@ -11,7 +12,7 @@ use gpui::{
     div, prelude::*, px,
 };
 use keystone_agent::{ItemKind, ItemStatus, TurnStatus};
-use keystone_core::{Place, Provider, SessionContext};
+use keystone_core::{Place, Provider};
 use keystone_ui::prelude::*;
 
 gpui::actions!(handoff, [HandOff]);
@@ -303,6 +304,11 @@ pub(crate) fn provider_label(
 /// it has sent nothing, has no folder, or its history is still loading or unreadable.
 pub(crate) const UNSENT: &str = "Nothing sent yet.";
 pub(crate) const NO_FOLDER: &str = "Choose a conversation folder.";
+
+/// Why a handoff, second opinion or fork of a session on `machine` isn't offered.
+pub(crate) fn elsewhere(machine: &str) -> String {
+    format!("Handoffs and forks of sessions on {machine} aren't available yet.")
+}
 pub(crate) const LOADING: &str = "Still loading.";
 pub(crate) const UNREADABLE: &str = "Could not read the history. Restart Keystone.";
 
@@ -406,26 +412,29 @@ impl Keystone {
         let session = self.session(id, cx)?;
         let provider = session.provider();
         let state = self.state.read(cx);
-        let refusal = if !session.started() {
-            UNSENT
-        } else if let SessionContext::Recorded { directory, .. } = session.context() {
-            match state.conversations().get(&id).filter(|c| !c.is_loading()) {
-                None => LOADING,
-                Some(conversation) if conversation.load_error.is_some() => UNREADABLE,
-                Some(conversation) => {
-                    let source = Source {
-                        id,
-                        title: session.title(),
-                        provider,
-                        folder: directory.as_str(),
-                    };
-                    return Some((provider, text(source, &conversation.rows)));
+        let refusal = match state.place(id) {
+            _ if !session.started() => UNSENT.to_owned(),
+            Some(SessionPlace::Local(directory)) => {
+                match state.conversations().get(&id).filter(|c| !c.is_loading()) {
+                    None => LOADING.to_owned(),
+                    Some(conversation) if conversation.load_error.is_some() => {
+                        UNREADABLE.to_owned()
+                    }
+                    Some(conversation) => {
+                        let source = Source {
+                            id,
+                            title: session.title(),
+                            provider,
+                            folder: directory.as_str(),
+                        };
+                        return Some((provider, text(source, &conversation.rows)));
+                    }
                 }
             }
-        } else {
-            NO_FOLDER
+            Some(SessionPlace::Remote(machine)) => elsewhere(&machine),
+            Some(SessionPlace::Unusable) | None => NO_FOLDER.to_owned(),
         };
-        self.error = Some(refusal.into());
+        self.error = Some(refusal);
         self.refresh(cx);
         None
     }

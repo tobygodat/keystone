@@ -20,6 +20,8 @@ mod import;
 mod integrations;
 mod keymap;
 mod limit;
+mod local_files;
+mod machines;
 mod mentions;
 mod model_selector;
 mod notes;
@@ -215,7 +217,7 @@ fn install_app_state(store: Store, cx: &mut App) -> Entity<AppState> {
         windows: Vec::new(),
         quick: None,
     });
-    cx.on_action(|_: &Quit, cx| request_quit(cx));
+    cx.on_action(|_: &Quit, cx| request_quit(cx, true));
     cx.on_action(|_: &quick::OpenQuickComposer, cx| {
         quick::open(cx);
     });
@@ -302,7 +304,8 @@ fn close_window(root: &WeakEntity<Keystone>, window: &mut Window, cx: &mut App) 
         return false;
     }
     if others == 0 && !state.read(cx).has_work() {
-        request_quit(cx);
+        // Closing the last window isn't Quit, so remote sessions keep running.
+        request_quit(cx, false);
         return false;
     }
     let id = view.read(cx).window_id;
@@ -373,12 +376,14 @@ fn unsaved_file_message(name: &str) -> String {
     format!("Unsaved changes in {name}. Save or discard them first.")
 }
 
-fn request_quit(cx: &mut App) {
+/// Quits, saving first. `user` is whether the user chose Quit, rather than Keystone
+/// quitting once its last window closed, which leaves every remote session running.
+fn request_quit(cx: &mut App, user: bool) {
     let Some(app) = cx.try_global::<DesktopApp>() else {
         return;
     };
     let state = app.state.clone();
-    if !state.update(cx, |state, _| state.reserve_quit()) {
+    if !state.update(cx, |state, _| state.reserve_quit(user)) {
         return;
     }
     cx.defer(move |cx| {
@@ -396,7 +401,7 @@ fn save_on_system_quit(cx: &mut App) {
         return;
     };
     let state = app.state.clone();
-    if state.update(cx, |state, _| state.reserve_quit()) {
+    if state.update(cx, |state, _| state.reserve_quit(true)) {
         save_and_teardown(&state, false, cx);
     }
 }
@@ -504,6 +509,9 @@ struct Keystone {
     session_sidebar: Entity<SessionSidebar>,
     /// The terminal whose drawer this window showed when it last rendered.
     drawer_shown: Option<gpui::EntityId>,
+    /// The session on another machine whose drawer, saying its terminal isn't
+    /// available here, this window shows.
+    elsewhere_drawer: Option<u64>,
     _subscriptions: Vec<Subscription>,
     draft_save_task: Option<gpui::Task<()>>,
     focus: FocusHandle,
@@ -583,6 +591,9 @@ struct Keystone {
 
 impl Keystone {
     fn runtime_changed(&mut self, changed: &RuntimeChanged, cx: &mut Context<Self>) {
+        if changed.sidebar {
+            self.clear_linked_destination(cx);
+        }
         let state = self.state.read(cx);
         let now = self.clock.now();
         for change in &changed.rows {
@@ -742,6 +753,15 @@ impl Keystone {
     }
     fn conversation_folder(&self, id: u64, cx: &App) -> Option<presentation::ConversationFolder> {
         self.state.read(cx).conversation_folder(id)
+    }
+    /// Where session `id` works. See [`presentation::SessionPlace`].
+    pub(crate) fn session_place(&self, id: u64, cx: &App) -> Option<presentation::SessionPlace> {
+        self.state.read(cx).place(id)
+    }
+
+    /// Leave to read this machine's files for session `id`; see [`local_files`].
+    pub(crate) fn local_files(&self, id: u64, cx: &App) -> Option<local_files::LocalFiles> {
+        self.state.read(cx).local_files(id)
     }
     fn folder_error(&mut self, id: u64, error: String, cx: &mut Context<Self>) {
         self.state
@@ -910,7 +930,10 @@ impl Keystone {
                     keystone_core::SessionContext::Recorded { directory, .. } => {
                         Some(keystone_core::ProjectId::of(directory))
                     }
-                    _ => None,
+                    // A window opens on a project here, never on another machine's folder.
+                    keystone_core::SessionContext::Remote { .. }
+                    | keystone_core::SessionContext::LegacyMissing
+                    | keystone_core::SessionContext::Unsupported => None,
                 })
                 .filter(|_| launch_project.is_none())
         };
@@ -966,6 +989,7 @@ impl Keystone {
             search,
             session_sidebar,
             drawer_shown: None,
+            elsewhere_drawer: None,
             _subscriptions: subscriptions,
             draft_save_task: None,
             focus: cx.focus_handle(),
@@ -1427,6 +1451,21 @@ impl Keystone {
         }
     }
 
+    /// The selected session's machine and its link's state, when it runs on another
+    /// machine. The word always shows here, since the header has room to say it.
+    fn header_machine(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let session = self.selected(cx)?;
+        let state = self.state.read(cx);
+        let (machine, status) = state.session_machine(session)?;
+        Some(machines::mark(
+            machine.label(),
+            &status,
+            true,
+            "session-header-machine".into(),
+            cx,
+        ))
+    }
+
     /// Lets a press on `bar` move the window, for window managers that draw no title
     /// bar. The press arms the move before any control sees it, and a control wrapped in
     /// [`Keystone::own_press`] disarms it, so a press that drifts on a control still clicks.
@@ -1554,6 +1593,7 @@ impl Keystone {
                     .children(
                         branch.map(|(branch, missing)| worktrees::branch_chip(branch, missing)),
                     )
+                    .children(self.header_machine(cx))
                     .children(self.pull_request_link(cx))
             })
             .child(div().flex_1())
@@ -1860,6 +1900,14 @@ impl Keystone {
                 })),
         )
         .child(
+            MenuItem::new("new-remote", "On a machine…")
+                .kbd(commands::hint("new-remote-session", cx))
+                .debug_selector(|| "new-remote".into())
+                .on_click(self.scoped_listener(cx, |this, _, window, cx| {
+                    this.open_machine_palette(window, cx)
+                })),
+        )
+        .child(
             MenuItem::new("new-worktree", "In worktree…")
                 .kbd(commands::hint("new-worktree-session", cx))
                 .debug_selector(|| "new-worktree".into())
@@ -1904,7 +1952,11 @@ impl Keystone {
         let waiting =
             conversation.is_some_and(|c| !c.approvals.is_empty() || !c.questions.is_empty());
         let mode = self.selected_session(cx).map(|s| s.approval_mode());
+        // While a session's machine isn't connected, Send is off and says why. The
+        // draft stays.
+        let offline = current.and_then(|(id, _)| self.state.read(cx).offline(id));
         let can_send = current.is_some_and(|(id, _)| !self.importing(id))
+            && offline.is_none()
             && (!self.composer.read(cx).value().trim().is_empty()
                 || !self.draft_attachments(cx).is_empty());
         let (field, toolbar) = match current {
@@ -1954,7 +2006,8 @@ impl Keystone {
                                     presentation::ConversationFolder::LegacyMissing => {
                                         this.choose_legacy_folder(id, cx)
                                     }
-                                    presentation::ConversationFolder::Unsupported => {}
+                                    presentation::ConversationFolder::Unsupported
+                                    | presentation::ConversationFolder::Remote(..) => {}
                                 }
                             })),
                     );
@@ -2014,10 +2067,7 @@ impl Keystone {
                                 send_button(
                                     "send",
                                     can_send,
-                                    Tooltip::with_key(
-                                        if running { "Steer" } else { "Send" },
-                                        keystone_ui::shortcut_text("secondary-enter"),
-                                    ),
+                                    machines::SendTooltip::builder(self.state.clone(), session),
                                     cx,
                                 )
                                 .when(can_send, |d| {
@@ -2855,7 +2905,7 @@ impl Keystone {
                         Box::new(ask) as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
                     )
                 });
-                let previews = Some(self.previews(session, cx));
+                let previews = self.previews(session, cx);
                 Some(transcript::row(
                     row,
                     index,
@@ -2978,6 +3028,7 @@ impl Keystone {
         }
         if let Some(approval) = conversation.approvals.first() {
             empty = false;
+            let offline = self.state.read(cx).offline(session);
             let (allow, deny) = (approval.request.clone(), approval.request.clone());
             let name = self
                 .provider(session, cx)
@@ -3010,11 +3061,13 @@ impl Keystone {
                     })
                     .child(
                         h_flex()
+                            .flex_wrap()
                             .gap_2()
                             .child(
                                 Button::new(arrangement::selector("approve", key.view), "Allow")
                                     .style(ButtonStyle::Primary)
                                     .icon(IconName::Check)
+                                    .disabled(offline.is_some())
                                     .debug_selector(move || {
                                         arrangement::selector("approve", key.view).to_string()
                                     })
@@ -3026,13 +3079,24 @@ impl Keystone {
                                 Button::new(arrangement::selector("deny", key.view), "Deny")
                                     .style(ButtonStyle::Subtle)
                                     .icon(IconName::Close)
+                                    .disabled(offline.is_some())
                                     .debug_selector(move || {
                                         arrangement::selector("deny", key.view).to_string()
                                     })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.answer(session, deny.clone(), false, window, cx)
                                     })),
-                            ),
+                            )
+                            .children(offline.map(|reason| {
+                                // Wraps in a narrow column rather than running past the card.
+                                div()
+                                    .automation_id("approval-offline")
+                                    .min_w(px(120.))
+                                    .flex_1()
+                                    .child(
+                                        Label::new(reason).size(TextSize::Sm).color(Color::Muted),
+                                    )
+                            })),
                     ),
             );
         } else if let Some(asked) = conversation.questions.first() {
@@ -3335,6 +3399,8 @@ struct SessionRow {
     provider: Provider,
     /// The session's account, named only when it is not the provider's default.
     account: Option<String>,
+    /// The machine a session on another machine runs on, and its link's state.
+    machine: Option<(String, keystone_agent::remote::Status)>,
     settled: bool,
     selected: bool,
     /// The session's worktree branch, and whether its folder is gone.
@@ -3461,6 +3527,7 @@ impl SessionSidebar {
             excerpt,
             provider,
             account,
+            machine,
             settled,
             selected,
             branch,
@@ -3499,15 +3566,33 @@ impl SessionSidebar {
                 )
         });
         let reason = attention.filter(|_| !settled).and_then(attention_reason);
-        let has_detail =
-            reason.is_some() || account.is_some() || branch.is_some() || !excerpt.is_empty();
+        let machine = machine.map(|(label, status)| {
+            machines::mark(&label, &status, false, format!("session-machine-{id}"), cx)
+        });
+        let has_detail = reason.is_some()
+            || account.is_some()
+            || branch.is_some()
+            || machine.is_some()
+            || !excerpt.is_empty();
+        // The line holds at the sidebar's width in every state: the reason keeps its
+        // words, and a machine's name gives way first.
         let detail = match reason {
             Some(reason) => h_flex()
+                .min_w_0()
+                .overflow_hidden()
                 .gap(px(6.))
-                .child(Label::new(reason).size(TextSize::Sm).color(Color::Warning))
+                .child(
+                    div()
+                        .flex_none()
+                        .child(Label::new(reason).size(TextSize::Sm).color(Color::Warning)),
+                )
+                .children(machine)
                 .children(branch),
             None => h_flex()
+                .min_w_0()
+                .overflow_hidden()
                 .gap(px(6.))
+                .children(machine)
                 .children(account.map(|account| {
                     div()
                         .flex_none()
@@ -3735,21 +3820,21 @@ impl SessionSidebar {
                     .contains(&query)
             })
         {
-            let live = this.state.read(cx).conversations().get(&session.id());
             let row = SessionRow {
                 id: session.id(),
                 title: session.title().to_owned(),
                 excerpt: excerpt(session.draft()),
                 provider: session.provider(),
                 account,
+                machine: this
+                    .state
+                    .read(cx)
+                    .session_machine(session.id())
+                    .map(|(machine, status)| (machine.label().to_owned(), status)),
                 settled: session.settled(),
                 selected: Some(session.id()) == this.selected(cx),
                 branch: worktrees::branch(session),
-                attention: session.attention(
-                    live.is_some_and(|c| !c.approvals.is_empty()),
-                    live.is_some_and(Conversation::awaiting_input),
-                    live.is_some_and(|c| c.running),
-                ),
+                attention: this.state.read(cx).attention(session),
                 pull_request_dot: this.state.read(cx).pull_request_unseen(session.id()),
                 time: session
                     .updated_at()
@@ -4115,6 +4200,17 @@ impl Render for Keystone {
             .on_action(self.scoped_listener(cx, |this, _: &NewCodex, window, cx| {
                 this.start(Provider::Codex, window, cx)
             }))
+            .on_action(self.scoped_listener(
+                cx,
+                |this, _: &machines::NewRemoteSession, window, cx| {
+                    this.open_machine_palette(window, cx)
+                },
+            ))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &machines::LinkMachine, window, cx| {
+                    this.open_link_machine(window, cx)
+                }),
+            )
             .on_action(
                 self.scoped_listener(cx, |this, _: &ToggleSettle, _, cx| this.toggle_settle(cx)),
             )
@@ -11343,7 +11439,7 @@ mod tests {
 fn send_button(
     id: &'static str,
     can_send: bool,
-    tooltip: Tooltip,
+    tooltip: impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static,
     cx: &App,
 ) -> gpui::Stateful<gpui::Div> {
     let colors = cx.theme().colors;
@@ -11366,7 +11462,7 @@ fn send_button(
         } else {
             Color::Faint
         }))
-        .tooltip(tooltip.builder())
+        .tooltip(tooltip)
         .map(|d| {
             if can_send {
                 d.cursor_pointer().hover(|s| s.opacity(0.85))

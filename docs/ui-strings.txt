@@ -487,15 +487,17 @@ crates/keystone-agent/src/remote/link.rs
 	No command reaches this machine
 	Part of this session's transcript was lost: the machine couldn't keep all of it until Keystone received it
 	Permission denied
+	REMOTE HOST IDENTIFICATION HAS CHANGED
 	SSH refused the login. Keystone signs in with keys and the SSH agent only, so add a key for this machine.
 	ServerAliveCountMax=3
 	ServerAliveInterval=5
+	The machine didn't answer. Check that it is on and reachable over SSH.
 	The machine isn't connected, so the message wasn't sent
+	The machine's host key changed since you last connected, so SSH refused it. Keystone won't connect until you have checked why and fixed known_hosts yourself.
 	The machine's keystone-host {} speaks protocol {}, and Keystone needs {PROTOCOL}. Install the matching version there: {INSTALL}
 	cargo install --locked --path crates/keystone-agent --bin keystone-host
 	keystone-host isn't installed on that machine. Install it there from a Keystone checkout: {INSTALL}
 	sh -lc "exec keystone-host attach"
-	{destination:?} isn't an SSH destination
 
 crates/keystone-agent/src/remote/paths.rs
 	Could not create {}: {e}
@@ -562,6 +564,7 @@ crates/keystone-agent/src/remote/serve.rs
 	{BACKLOGGED} ({error})
 	{UNSAVED} ({error})
 	{bytes} bytes of events wait for the journal, so no turn starts until it takes them ({error})
+	{cwd} isn't a folder on this machine
 	{error}; events wait for the journal
 	{name} must be a whole number, not {value:?}
 
@@ -708,6 +711,8 @@ crates/keystone-core/src/lib.rs
 	Second opinion on session {source}
 	Second opinion: {}
 	Use your own Codex or Claude Code configuration
+	a session on another machine can't be forked yet
+	a session on another machine can't be handed off yet
 	a title cannot be blank
 	account {account} is not a {provider} account
 	an account home must be an absolute path without `.` or `..`
@@ -717,6 +722,7 @@ crates/keystone-core/src/lib.rs
 	choose this session's folder before handing it off
 	handoff fork
 	invalid or duplicate account ID
+	invalid or duplicate machine
 	invalid or duplicate project
 	invalid or duplicate prompt ID
 	invalid or duplicate session ID
@@ -729,17 +735,27 @@ crates/keystone-core/src/lib.rs
 	this conversation is already in Keystone
 	unknown account {account}
 	unknown account {id}
+	unknown machine {id}
+	unknown machine {machine}
 	unknown prompt {id}
 	unknown session ID {id}
 	unknown session ID {parent}
 	unknown session ID {session}
 	unknown session ID {source}
 	unsupported state version {} (expected {FORMAT_VERSION})
+	{users} session{} run{} on this machine; it stays until none does
 	{users} session{} use{} this account; it stays until no session does
 	{} ({kind})
+	{} is already linked
 	{} is already used by the account “{}”; each account needs a folder of its own
 	{} overlaps {}, which a provider's own setup or another account uses; choose a separate folder
 	“Default” names each provider's own setup; choose another name
+
+crates/keystone-core/src/machine.rs
+	A folder path can't hold a control character.
+	Type an SSH destination, such as a Host from ~/.ssh/config.
+	Type the folder's full path on that machine, starting with /.
+	{destination:?} isn't an SSH destination.
 
 crates/keystone-core/src/note.rs
 	invalid or duplicate note
@@ -827,17 +843,24 @@ crates/keystone-desktop/src/app_state.rs
 	Keystone is shutting down
 	Keystone kept it: the conversation could not be saved: {error}
 	Keystone kept it: {reason}
+	Keystone was closed during this turn on
+	Models on other machines aren't listed yet. Claude uses its default.
 	Not imported. {error}
 	Not kept: {error}.
 	Not quit. {reason}
 	Not saved. {error}
 	Not sent. Choose a conversation folder using the folder button beside the model.
 	Not sent. Could not finish saving changes. {error}
+	Not sent. Images can't be sent to a session on another machine yet.
+	Not sent. Only Claude runs on other machines so far.
+	Not sent. Sessions on other machines use that machine's default login so far.
 	Not sent. The account “{}” now resolves to {}, which overlaps the account “{}”. Give each account a folder of its own.
 	Not sent. The account “{}” uses {}, which overlaps a default home Keystone was started with ({}). Start Keystone without that setting, or start a new session.
 	Not sent. This conversation has saved folder data that this version cannot use.
+	Not sent. This conversation's folder is on another machine.
 	Not sent. This conversation's saved folder is unavailable.
 	Not sent. This folder's worktree is being removed.
+	Not sent. This session's machine isn't linked any more. Link it again in Settings → Machines.
 	Not sent. This session's worktree folder is missing or is no longer its worktree: {}. Its branch {} may still exist.
 	Not sent. This session's {provider} account “{id}” is not set up. Add it again in Settings → Accounts, or start a new session.
 	Not sent: the approval mode could not be saved first. {error}
@@ -866,7 +889,9 @@ crates/keystone-desktop/src/app_state.rs
 	this conversation has no saved folder to check against
 	this conversation's provider ID was never saved, so sending starts a new provider conversation
 	this session's account is not set up
+	{REMOTE_CLOSED} {label}.
 	{lost} log entries were
+	{} is already linked.
 	{} is not a folder.
 
 crates/keystone-desktop/src/arrangement.rs
@@ -892,6 +917,7 @@ crates/keystone-desktop/src/attachments.rs
 	Attach files…
 	Attachment not saved. {error}
 	Capture screenshot
+	Files and images can't be attached to sessions on {machine} yet.
 	Image.{}
 	Path to a file
 	Remove
@@ -917,6 +943,7 @@ crates/keystone-desktop/src/browser.rs
 	Reload
 	Select a session to browse its project.
 	String(getSelection())
+	The browser isn't available for sessions on {machine} yet.
 	The page was busy past this call's deadline, so nothing was done. Retry it.
 	Unknown tool
 	chose {value} in {reference}
@@ -970,7 +997,7 @@ crates/keystone-desktop/src/changes.rs
 	No branch
 	No changes.
 	No changes. Untracked files are hidden by git config.
-	No project folder. {error}
+	No project folder.
 	No remote. Add one:
 	Not pushed
 	Push
@@ -1026,12 +1053,16 @@ crates/keystone-desktop/src/commands.rs
 	Focus previous transcript
 	Focus search
 	Focus transcript
+	Folder on that machine, such as /home/you/src/app
 	Hand off…
 	Import sessions…
 	Insert prompt…
 	Leave transcript for composer
+	Link a machine
+	Machine
 	Move tab to window…
 	New Claude session
+	New Claude session on a machine
 	New Codex session
 	New session in worktree…
 	New tab
@@ -1242,9 +1273,11 @@ crates/keystone-desktop/src/files.rs
 	Couldn't read {}: {error}
 	Couldn't run {command}: {error}
 	Edit
+	Files and changes on {machine} aren't shown here yet.
 	Mention in composer
-	No project folder to browse. {error}
+	No project folder to browse.
 	Space
+	{lead} {error}
 
 crates/keystone-desktop/src/fork.rs
 	Choose a message to fork from.
@@ -1270,6 +1303,7 @@ crates/keystone-desktop/src/handoff.rs
 	Forked from
 	Forked in
 	Hand off…
+	Handoffs and forks of sessions on {machine} aren't available yet.
 	Nothing sent yet.
 	Ran `{}` · {outcome}
 	Showed widget `{}`
@@ -1384,6 +1418,40 @@ crates/keystone-desktop/src/limit.rs
 	{label} limit likely reached
 	{} · {label}
 
+crates/keystone-desktop/src/machines.rs
+	A Host from ~/.ssh/config, user@host, or a tailnet name. Keystone signs in with your SSH keys and runs keystone-host there.
+	Can't connect
+	Can't connect to {label}
+	Claude not found
+	Claude {missing}
+	Claude {version}
+	Connected
+	Connecting
+	Connecting to {label}
+	Connecting to {}…
+	End sessions on this machine when Keystone quits
+	In use
+	Link
+	Link a machine
+	Link a machine…
+	Machine not removed. {error}
+	New Claude session here
+	New Claude session on this machine
+	Not saved. {error}
+	Reconnecting
+	Reconnecting to {label}
+	Remove
+	Remove machine
+	Retry
+	Run Claude on another machine you reach over SSH. Its sessions keep running when Keystone quits.
+	SSH destination
+	Send
+	Start Claude in {}
+	Steer
+	{claude} · {} {}
+	{sessions} session{}
+	· {detail}
+
 crates/keystone-desktop/src/main.rs
 	 · applies next turn
 	A restore didn't finish.
@@ -1418,6 +1486,7 @@ crates/keystone-desktop/src/main.rs
 	New session
 	No matches
 	No session open.
+	On a machine…
 	Provider not changed. {error}
 	Put files back
 	Recovered history not saved. {error}
@@ -1427,7 +1496,6 @@ crates/keystone-desktop/src/main.rs
 	Retry
 	Saving…
 	Search
-	Send
 	Sending paused.
 	Session title
 	Settings
@@ -1436,7 +1504,6 @@ crates/keystone-desktop/src/main.rs
 	Settle: move out of active work
 	Settled
 	Show sidebar
-	Steer
 	Stop
 	The agent
 	The provider
@@ -1463,6 +1530,7 @@ crates/keystone-desktop/src/main.rs
 
 crates/keystone-desktop/src/mentions.rs
 	Couldn't list files. {error}
+	Files on {machine} can't be mentioned yet.
 	First 200,000 files only.
 	Listing files…
 	No matching files
@@ -1534,6 +1602,7 @@ crates/keystone-desktop/src/presentation.rs
 	Open project
 	Project not opened. {error}
 	Saved conversation folder is not supported by this version
+	{folder} on {machine}
 
 crates/keystone-desktop/src/preview.rs
 	Close
@@ -1602,6 +1671,7 @@ crates/keystone-desktop/src/pull_request.rs
 	Merging…
 	No pull request.
 	Open
+	Pull requests for sessions on {machine} aren't shown yet.
 	Refresh
 	Review required
 	Reviews
@@ -1764,6 +1834,7 @@ crates/keystone-desktop/src/settings_page.rs
 	Integrations
 	Interface font
 	Light
+	Machines
 	Needs afplay
 	Needs paplay or pw-play
 	Notifications
@@ -1890,6 +1961,7 @@ crates/keystone-desktop/src/setup.rs
 
 crates/keystone-desktop/src/slash_menu.rs
 	Choose a conversation folder to list commands.
+	Commands on {} aren't listed yet.
 	Commands unavailable for this folder.
 	Copied
 	Copy terminal command
@@ -1905,6 +1977,7 @@ crates/keystone-desktop/src/slash_menu.rs
 	Terminal only
 	User
 	{first} {}
+	{} runs only in a terminal, and Keystone can't open one on {machine} yet.
 	{} runs only in a terminal. Run this, then type {}:
 
 crates/keystone-desktop/src/terminal.rs
@@ -1914,6 +1987,7 @@ crates/keystone-desktop/src/terminal.rs
 	Split terminal
 	Terminal
 	Terminal did not start. {error}
+	The terminal isn't available for sessions on {machine} yet.
 	Up to 4 terminals side by side
 
 crates/keystone-desktop/src/transcript.rs

@@ -24,6 +24,7 @@ COVERED=(
   crates/keystone-desktop/src/conversation.rs
   crates/keystone-desktop/src/orchestrator.rs
   crates/keystone-desktop/src/checkpoints.rs
+  crates/keystone-agent/src/remote/link.rs
   crates/keystone-core/src/delivery.rs
   crates/keystone-agent/src/codex.rs
   crates/keystone-agent/src/claude.rs
@@ -38,6 +39,7 @@ FUNCTIONS=(
   turn_ended take_turn_end is_running hold_follow_ups release_follow_ups
   started route send_inner unqueue deliver on_response flush enqueue carry finish
   take_recheck spawn run start
+  leave_machines is_remote watch_links quit close supervise
 )
 # The model relies on how tGPUI runs cx.defer callbacks (App::finish_update, flush_effects).
 GPUI_REV=59c962b4207236d1e99840399be25d1c52a469f7
@@ -110,6 +112,7 @@ EXPECT=(
   "NoScheduledRunWhileWaiting   none                      holds     code"
   "WindowlessMeansWaiting       none                      holds     code"
   "WindowlessEventuallyEnds     none                      holds     code"
+  "OnlyUserQuitEndsRemoteTurns  none                      holds     code"
   "OnlyQuitStopsTurns           close-ignores-turns       breaks    can fail"
   "OnlyQuitStopsTurns           quit-skips-recheck        breaks    can fail: a delivered result's turn (TOB-350)"
   "OnlyQuitStopsTurns           turns-ignore-connections  breaks    can fail: a held follow-up's turn (TOB-350)"
@@ -121,6 +124,8 @@ EXPECT=(
   "WindowlessMeansWaiting       close-forgets-wait        breaks    can fail"
   "WindowlessEventuallyEnds     close-forgets-wait        breaks    can fail"
   "WindowlessEventuallyEnds     steer-settles-silently    breaks    can fail: a late steer's answer wakes nothing (TOB-350)"
+  "OnlyUserQuitEndsRemoteTurns  quit-forgets-who          breaks    can fail: closing the last window ends a remote turn (TOB-441)"
+  "WindowlessEventuallyEnds     work-counts-remote        breaks    can fail: a remote turn behind a dropped link holds Keystone open (TOB-441)"
 )
 
 run() {
@@ -160,7 +165,7 @@ for i in "${!EXPECT[@]}"; do
 done
 wait "${pids[@]}"
 
-printf '%-28s %-24s %-7s %s\n' RULE MUTATION RESULT EXPECTED
+printf '%-29s %-24s %-7s %s\n' RULE MUTATION RESULT EXPECTED
 for i in "${!EXPECT[@]}"; do
   read -r rule mutation expected why <<<"${EXPECT[$i]}"
   got=$(cat "$work/result-$i")
@@ -171,7 +176,7 @@ for i in "${!EXPECT[@]}"; do
     keep=$cache/quit-model-$rule-$mutation.out
     cp "$work/$rule-$mutation/tlc.out" "$keep"
   fi
-  printf '%-28s %-24s %-7s %-7s %s %s\n' "$rule" "$mutation" "$got" "$expected" "$mark" "$why"
+  printf '%-29s %-24s %-7s %-7s %s %s\n' "$rule" "$mutation" "$got" "$expected" "$mark" "$why"
   [[ $mark == UNEXPECTED ]] && echo "    TLC output: $keep"
 done
 exit $failed

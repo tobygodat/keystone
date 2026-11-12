@@ -21,7 +21,7 @@ fn copy_key(pair: &crate::integrations::copy::Pair) -> io::Result<String> {
     ))
 }
 
-pub(crate) const SCHEMA_VERSION: u32 = 6;
+pub(crate) const SCHEMA_VERSION: u32 = 7;
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
@@ -66,7 +66,7 @@ CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 /// Forward migrations, one per schema version after 1, each run in the opening
 /// IMMEDIATE transaction that also records the new `user_version`. A build that
 /// knows fewer versions refuses a newer database.
-const MIGRATIONS: [&str; 5] = [
+const MIGRATIONS: [&str; 6] = [
     "
 CREATE TABLE accounts (
     id TEXT PRIMARY KEY,
@@ -98,6 +98,13 @@ CREATE TABLE deliveries (
     "
 CREATE TABLE notes (
     project TEXT PRIMARY KEY,
+    position INTEGER NOT NULL,
+    payload TEXT NOT NULL CHECK(json_valid(payload))
+);
+",
+    "
+CREATE TABLE machines (
+    id TEXT PRIMARY KEY,
     position INTEGER NOT NULL,
     payload TEXT NOT NULL CHECK(json_valid(payload))
 );
@@ -472,6 +479,18 @@ impl Database {
                 snapshot
                     .workspace
                     .accounts
+                    .push(serde_json::from_str(&row.map_err(sql_error)?)?);
+            }
+            let mut statement = tx
+                .prepare("SELECT payload FROM machines ORDER BY position")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?;
+            for row in rows {
+                snapshot
+                    .workspace
+                    .machines
                     .push(serde_json::from_str(&row.map_err(sql_error)?)?);
             }
             let mut statement = tx
@@ -917,6 +936,34 @@ fn write_projection(
         .map_err(sql_error)?;
         tx.execute("INSERT INTO accounts(id, position, payload) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET position=excluded.position, payload=excluded.payload", params![id, position as i64, payload]).map_err(sql_error)?;
     }
+    let machines = &snapshot.workspace.machines;
+    for removed in previous
+        .into_iter()
+        .flat_map(|workspace| &workspace.machines)
+        .filter(|old| !machines.iter().any(|machine| machine.id() == old.id()))
+    {
+        let id = removed.id().as_str();
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('machine.removed', ?1, ?2)",
+            params![id, serde_json::to_string(removed)?],
+        )
+        .map_err(sql_error)?;
+        tx.execute("DELETE FROM machines WHERE id=?1", [id])
+            .map_err(sql_error)?;
+    }
+    for (position, machine) in machines.iter().enumerate() {
+        if previous.is_some_and(|workspace| workspace.machines.get(position) == Some(machine)) {
+            continue;
+        }
+        let payload = serde_json::to_string(machine)?;
+        let id = machine.id().as_str();
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('machine.upserted', ?1, ?2)",
+            params![id, payload],
+        )
+        .map_err(sql_error)?;
+        tx.execute("INSERT INTO machines(id, position, payload) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET position=excluded.position, payload=excluded.payload", params![id, position as i64, payload]).map_err(sql_error)?;
+    }
     let projects = &snapshot.workspace.projects;
     for removed in previous
         .into_iter()
@@ -1099,6 +1146,7 @@ fn write_projection(
     };
     metadata.workspace.sessions.clear();
     metadata.workspace.accounts.clear();
+    metadata.workspace.machines.clear();
     metadata.workspace.projects.clear();
     metadata.workspace.prompts.clear();
     metadata.workspace.deliveries.clear();

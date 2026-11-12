@@ -1,4 +1,5 @@
 use super::*;
+use crate::presentation::SessionPlace;
 use keystone_agent::mcp::{Caller, HandlerError, Server, mode_allowed};
 use keystone_core::{DeliveryState, WorktreeContext, worktree};
 use serde::Deserialize;
@@ -465,10 +466,15 @@ impl AppState {
         {
             return Err("Caller must have a running turn".into());
         }
-        let SessionContext::Recorded { directory, .. } = session.context() else {
-            return Err("Caller has no supported project directory".into());
-        };
-        Ok((directory.clone(), session.approval_mode()))
+        match self.place(caller.session) {
+            Some(SessionPlace::Local(directory)) => Ok((directory, session.approval_mode())),
+            Some(SessionPlace::Remote(machine)) => Err(format!(
+                "Keystone's tools aren't available to sessions on {machine} yet"
+            )),
+            Some(SessionPlace::Unusable) | None => {
+                Err("Caller has no supported project directory".into())
+            }
+        }
     }
 
     /// The caller may reach a session in its own folder, and within one repository, the
@@ -480,9 +486,16 @@ impl AppState {
         project: &WorkingDirectory,
     ) -> Result<ApprovalMode, String> {
         let session = self.session(id).ok_or("Unknown target session")?;
-        let SessionContext::Recorded { directory, .. } = session.context() else {
-            return Err("Target must belong to the caller's project".into());
+        let directory = match self.place(id) {
+            Some(SessionPlace::Local(directory)) => directory,
+            Some(SessionPlace::Remote(machine)) => {
+                return Err(format!("The target session runs on {machine}, not here"));
+            }
+            Some(SessionPlace::Unusable) | None => {
+                return Err("Target must belong to the caller's project".into());
+            }
         };
+        let directory = &directory;
         let own = self.session(caller).and_then(|s| s.worktree());
         if reachable(project, own, directory, session.worktree()) {
             Ok(session.approval_mode())

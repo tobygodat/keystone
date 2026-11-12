@@ -263,7 +263,7 @@ fn each_window_keeps_its_own_project(cx: &mut TestAppContext) {
         };
         assert_eq!(directory.path(), folders.beta.path(), "it starts in beta");
     });
-    cx.update(|_, cx| request_quit(cx));
+    cx.update(|_, cx| request_quit(cx, true));
     cx.run_until_parked();
     let saved = Store::open(&path).unwrap();
     let prefs = saved.workspace().preferences();

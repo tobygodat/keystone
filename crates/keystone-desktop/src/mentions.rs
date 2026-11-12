@@ -252,23 +252,26 @@ impl Keystone {
     /// session without one has no mentions: the project folder Files falls back to
     /// may not be the folder it will run in.
     pub(crate) fn mention_root(&self, cx: &App) -> Option<PathBuf> {
-        self.session_root(self.selected(cx)?, cx)
-    }
-
-    /// `session`'s recorded folder; see [`Self::mention_root`].
-    pub(crate) fn session_root(&self, session: u64, cx: &App) -> Option<PathBuf> {
-        match self.conversation_folder(session, cx)? {
-            crate::presentation::ConversationFolder::Recorded(directory) => {
-                Some(directory.path().to_owned())
-            }
-            _ => None,
-        }
+        let files = self.local_files(self.selected(cx)?, cx)?;
+        files.root().map(Path::to_owned)
     }
 
     /// Where the picker would insert, while it is open: this window's composer last
     /// edited the selected session's draft into an `@word` at the caret, Escape has
     /// not closed it, and no palette or project list is open over it.
     fn mention_target(&self, cx: &App) -> Option<Target> {
+        let (session, range, query) = self.mention_word(cx)?;
+        Some(Target {
+            session,
+            root: self.mention_root(cx)?,
+            range,
+            query,
+        })
+    }
+
+    /// The selected session and the `@word` at this window's caret, as for
+    /// [`Self::mention_target`], whether or not the session has a folder here.
+    fn mention_word(&self, cx: &App) -> Option<(u64, Range<usize>, String)> {
         let session = self.selected(cx)?;
         let input = self.composer.read(cx);
         let draft = input.value();
@@ -281,12 +284,41 @@ impl Keystone {
         if !edited_here || self.palette.is_some() || self.projects.is_some() {
             return None;
         }
-        Some(Target {
-            session,
-            root: self.mention_root(cx)?,
-            range,
-            query: query.to_owned(),
-        })
+        Some((session, range, query.to_owned()))
+    }
+
+    /// The machine the selected session runs on, while an `@word` is at the caret of
+    /// its draft in this window.
+    fn mention_machine(&self, cx: &App) -> Option<String> {
+        let (session, ..) = self.mention_word(cx)?;
+        match self.session_place(session, cx)? {
+            crate::presentation::SessionPlace::Remote(machine) => Some(machine),
+            crate::presentation::SessionPlace::Local(_)
+            | crate::presentation::SessionPlace::Unusable => None,
+        }
+    }
+
+    /// In place of the picker for a session on another machine, whose files aren't
+    /// listed here: a card that says so.
+    fn mention_elsewhere(
+        &self,
+        window_width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let machine = self.mention_machine(cx)?;
+        let list = self.mentions.list.clone();
+        let card = self.menu_card(
+            "mention-menu",
+            &list,
+            0,
+            |_, _, _, _| div().into_any_element(),
+            |_, _, _| {},
+            Some(format!("Files on {machine} can't be mentioned yet.")),
+            None::<fn(&gpui::ClickEvent, &mut Window, &mut App)>,
+            None,
+            cx,
+        );
+        Some(composer_overlay(card, window_width))
     }
 
     /// The picker's rows for `target`, ranked for an earlier query while this one's
@@ -396,7 +428,7 @@ impl Keystone {
 
     /// Escape: closes an open picker, and reports whether there was one.
     pub(crate) fn dismiss_mention(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.mention_target(cx).is_none() {
+        if self.mention_target(cx).is_none() && self.mention_machine(cx).is_none() {
             return false;
         }
         self.mentions.edited = None;
@@ -498,7 +530,9 @@ impl Keystone {
         window_width: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let target = self.mention_target(cx)?;
+        let Some(target) = self.mention_target(cx) else {
+            return self.mention_elsewhere(window_width, cx);
+        };
         let index = self.mentions.indexes.get(&target.root);
         let stale =
             index.is_none_or(|i| !i.loading && i.built.is_none_or(|b| b.elapsed() >= FRESH));

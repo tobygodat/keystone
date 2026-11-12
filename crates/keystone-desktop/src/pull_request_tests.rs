@@ -411,7 +411,7 @@ fn the_pull_request_tab_follows_checks_and_reviews_and_merges_only_once_confirme
         "a merged pull request is not asked about again"
     );
 
-    cx.update(|_, cx| request_quit(cx));
+    cx.update(|_, cx| request_quit(cx, true));
     cx.run_until_parked();
     drop(view);
     let (view, handle) = launch(&path, app);

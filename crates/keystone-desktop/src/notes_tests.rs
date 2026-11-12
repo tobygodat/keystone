@@ -132,7 +132,7 @@ fn a_note_autosaves_on_the_draft_timer_and_quit_saves_the_rest(cx: &mut TestAppC
     assert_eq!(saved(&view, &folders.alpha, cx), "Plan\nthen ship");
 
     cx.simulate_input(" today");
-    cx.update(|_, cx| request_quit(cx));
+    cx.update(|_, cx| request_quit(cx, true));
     cx.run_until_parked();
     let store = Store::open(&path).unwrap();
     assert_eq!(
@@ -154,7 +154,7 @@ fn a_relaunch_restores_the_notes_view_and_its_text(app: &mut TestAppContext) {
         let cx = visual(handle, app);
         cx.simulate_keystrokes("secondary-shift-j");
         cx.simulate_input("Before quitting");
-        cx.update(|_, cx| request_quit(cx));
+        cx.update(|_, cx| request_quit(cx, true));
         cx.run_until_parked();
     }
     drop(view);

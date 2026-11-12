@@ -14,6 +14,7 @@ use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
 use crate::import::ImportSessions;
 use crate::keymap::{self, Keymap};
+use crate::machines::{LinkMachine, NewRemoteSession};
 use crate::model_selector::{NextEffort, NextModel, ToggleFastMode};
 use crate::notes::ToggleNotes;
 use crate::projects::{ChangeProjectColor, OpenProject, SwitchProject};
@@ -472,6 +473,22 @@ pub(crate) const COMMANDS: &[Command] = &[
         in_terminal: false,
     },
     Command {
+        id: "new-remote-session",
+        label: "New Claude session on a machine",
+        keys: &[],
+        context: Some(APP),
+        action: || Box::new(NewRemoteSession),
+        in_terminal: false,
+    },
+    Command {
+        id: "link-machine",
+        label: "Link a machine",
+        keys: &[],
+        context: Some(APP),
+        action: || Box::new(LinkMachine),
+        in_terminal: false,
+    },
+    Command {
         id: "remove-worktree",
         label: "Remove worktree…",
         keys: &["secondary-alt-shift-g"],
@@ -692,6 +709,10 @@ pub(crate) enum Listing {
     Destinations(ViewId),
     /// The colors the window's project can take.
     ProjectColors,
+    /// The linked machines a session can start on.
+    Machines,
+    /// The folder on a machine a session starts in, typed.
+    RemoteFolder(keystone_core::MachineId),
 }
 
 /// The palette row that moves a tab into a new window.
@@ -729,6 +750,12 @@ impl Keystone {
             .flatten();
         let state = cx.new(|cx| match listing {
             Listing::ProjectColors => CommandPaletteState::with_placeholder(items, "Color", cx),
+            Listing::Machines => CommandPaletteState::with_placeholder(items, "Machine", cx),
+            Listing::RemoteFolder(_) => CommandPaletteState::with_placeholder(
+                items,
+                "Folder on that machine, such as /home/you/src/app",
+                cx,
+            ),
             Listing::Commands | Listing::Destinations(_) => CommandPaletteState::new(items, cx),
         });
         state.focus_handle(cx).focus(window, cx);
@@ -788,6 +815,13 @@ impl Keystone {
         };
         if let Listing::ProjectColors = palette.listing {
             return self.confirm_project_color(item, window, cx);
+        }
+        if let Listing::Machines = palette.listing {
+            return self.confirm_machine(item, window, cx);
+        }
+        if let Listing::RemoteFolder(machine) = &palette.listing {
+            let machine = machine.clone();
+            return self.confirm_remote_folder(&machine, item, window, cx);
         }
         if let Listing::Destinations(view) = palette.listing {
             self.close_palette(window, cx);

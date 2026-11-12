@@ -99,6 +99,28 @@ impl Keystone {
         self.state.read(cx).attachments.dir().to_owned()
     }
 
+    /// Says why nothing can be attached to `session` when it works on another machine,
+    /// before anything is picked, captured or read, and returns whether it does.
+    fn attach_elsewhere(&mut self, session: u64, cx: &mut Context<Self>) -> bool {
+        let machine = match self.session_place(session, cx) {
+            Some(crate::presentation::SessionPlace::Remote(machine)) => machine,
+            Some(
+                crate::presentation::SessionPlace::Local(_)
+                | crate::presentation::SessionPlace::Unusable,
+            )
+            | None => return false,
+        };
+        self.attach.menu = false;
+        self.show_attach_notice(
+            session,
+            Some(format!(
+                "Files and images can't be attached to sessions on {machine} yet."
+            )),
+            cx,
+        );
+        true
+    }
+
     fn show_attach_notice(&mut self, session: u64, notice: Option<String>, cx: &mut Context<Self>) {
         self.attach.notice = notice.map(|notice| (session, notice));
         cx.notify();
@@ -184,20 +206,22 @@ impl Keystone {
         let Some(session) = self.selected(cx) else {
             return;
         };
+        if self.attach_elsewhere(session, cx) {
+            return;
+        }
+        let Some(files) = self.local_files(session, cx) else {
+            return;
+        };
         let attachments = self.state.read(cx).attachments.clone();
-        let root = self.session_root(session, cx);
         self.start_import(session, cx);
         let task = cx.background_spawn(async move {
             paths
                 .into_iter()
                 .map(|path| {
-                    let path = match &root {
-                        Some(root) if path.is_relative() => root.join(path),
-                        _ => path,
-                    };
-                    match attachments.import_file(&path) {
+                    let path = files.picked(path);
+                    match attachments.import_file(path.as_path()) {
                         Ok(Some(image)) => Attached::Image(image),
-                        Ok(None) => Attached::Mention(path),
+                        Ok(None) => Attached::Mention(path.as_path().to_owned()),
                         Err(reason) => Attached::Refused(reason),
                     }
                 })
@@ -220,12 +244,13 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) {
         self.end_import(session, cx);
-        let root = self.session_root(session, cx);
+        let files = self.local_files(session, cx);
+        let root = files.as_ref().and_then(|files| files.root());
         let (mut images, mut mentions, mut refused) = (Vec::new(), Vec::new(), Vec::new());
         for attached in attached {
             match attached {
                 Attached::Image(image) => images.push(image),
-                Attached::Mention(path) => match mention(&path, root.as_deref()) {
+                Attached::Mention(path) => match mention(&path, root) {
                     Some(mention) => mentions.push(mention),
                     None => refused.push(format!(
                         "{} can't be mentioned: quote or line break in its path.",
@@ -291,6 +316,9 @@ impl Keystone {
         }) else {
             return false;
         };
+        if self.attach_elsewhere(session, cx) {
+            return true;
+        }
         let attachments = self.state.read(cx).attachments.clone();
         let name = format!(
             "Image.{}",
@@ -321,7 +349,7 @@ impl Keystone {
         let Some(session) = self.selected(cx) else {
             return;
         };
-        if self.attach.capturing {
+        if self.attach.capturing || self.attach_elsewhere(session, cx) {
             return;
         }
         self.attach.capturing = true;
@@ -354,6 +382,9 @@ impl Keystone {
         let Some(session) = self.selected(cx) else {
             return;
         };
+        if self.attach_elsewhere(session, cx) {
+            return;
+        }
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -382,7 +413,10 @@ impl Keystone {
 
     /// Shows the typed-path field.
     pub(crate) fn open_attach_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected(cx).is_none() {
+        let Some(session) = self.selected(cx) else {
+            return;
+        };
+        if self.attach_elsewhere(session, cx) {
             return;
         }
         self.attach.path_open = true;
@@ -575,7 +609,9 @@ pub(crate) fn chip(
         .border_1()
         .border_color(colors.border)
         .bg(colors.surface_raised)
-        .child(crate::preview::ChipImage::new(attachment.path(dir)))
+        .child(crate::preview::ChipImage::new(
+            crate::local_files::LocalPath::kept(attachment, dir),
+        ))
         .child(
             div().max_w(px(160.)).min_w_0().child(
                 Label::new(attachment.name.clone())
@@ -612,11 +648,14 @@ pub(crate) fn sent(
             let id = SharedString::from(format!("sent-attachment-{index}-{n}"));
             let chip = chip(id.clone(), attachment, &dir, cx).into_any_element();
             match &open {
-                Some(open) => {
-                    crate::preview::Thumbnail::new(id, attachment.path(&dir), index, open.clone())
-                        .fallback(chip)
-                        .into_any_element()
-                }
+                Some(open) => crate::preview::Thumbnail::new(
+                    id,
+                    crate::local_files::LocalPath::kept(attachment, &dir),
+                    index,
+                    open.clone(),
+                )
+                .fallback(chip)
+                .into_any_element(),
                 None => chip,
             }
         }))

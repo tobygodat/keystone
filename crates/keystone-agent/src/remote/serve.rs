@@ -1015,9 +1015,14 @@ impl Daemon {
                 choice,
                 approval,
                 text,
-            } => claude
-                .send(session, &cwd, resume.as_deref(), &choice, approval, text)
-                .map_err(str::to_owned)?,
+            } => {
+                if !std::path::Path::new(&cwd).is_dir() {
+                    return Err(format!("{cwd} isn't a folder on this machine"));
+                }
+                claude
+                    .send(session, &cwd, resume.as_deref(), &choice, approval, text)
+                    .map_err(str::to_owned)?
+            }
             Op::Command(Command::Send { images, .. }) if !images.is_empty() => {
                 return Err(NO_IMAGES.into());
             }

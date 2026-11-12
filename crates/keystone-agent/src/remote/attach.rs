@@ -4,7 +4,7 @@
 
 use super::frame::{self, Frame};
 use super::paths::{Paths, private_dir};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -36,14 +36,33 @@ pub fn attach() -> Result<(), String> {
     let stream = connect(&paths)?;
     let mut up = stream.try_clone().map_err(|e| e.to_string())?;
     thread::spawn(move || {
-        let _ = io::copy(&mut io::stdin().lock(), &mut up);
+        forward(&mut io::stdin().lock(), &mut up);
         let _ = up.shutdown(std::net::Shutdown::Write);
     });
     let mut down = stream;
     let mut stdout = io::stdout().lock();
-    let _ = io::copy(&mut down, &mut stdout);
+    forward(&mut down, &mut stdout);
     let _ = stdout.flush();
     Ok(())
+}
+
+/// Copies until either side ends, writing each read out at once. With `io::copy`,
+/// which std may turn into a kernel splice from the pipe, a `hello` reached the daemon
+/// only when the daemon next wrote, 5 to 15 s later on Linux 7.2.
+fn forward(from: &mut impl Read, to: &mut impl Write) {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                if to.write_all(&buf[..n]).and_then(|()| to.flush()).is_err() {
+                    return;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
 }
 
 fn connect(paths: &Paths) -> Result<UnixStream, String> {

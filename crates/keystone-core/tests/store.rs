@@ -691,3 +691,82 @@ fn a_stale_store_keeps_its_error_and_flush_does_not_fail_for_it() {
         Provider::Claude
     );
 }
+
+#[test]
+fn machines_and_their_sessions_survive_restart_without_any_local_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.sqlite3");
+    let mut store = Store::open(&path).unwrap();
+    assert!(store.link_machine("-oProxyCommand=x", "c1".into()).is_err());
+    let desk = store
+        .link_machine(" dev@Desk ", "c1".into())
+        .unwrap()
+        .value;
+    assert!(store.link_machine("dev@Desk", "c2".into()).is_err());
+    let lab = store.link_machine("desk", "c2".into()).unwrap().value;
+    assert_eq!((desk.as_str(), lab.as_str()), ("desk", "desk-2"));
+    let missing = keystone_core::RemoteFolder::new("/nowhere/on/this/machine").unwrap();
+    let local = keystone_core::RemoteFolder::new(dir.path().to_str().unwrap()).unwrap();
+    let a = store
+        .create_remote_showing(&desk, &missing, 1, keystone_core::WindowId::FIRST, None)
+        .unwrap()
+        .value;
+    let b = store
+        .create_remote_showing(&desk, &local, 2, keystone_core::WindowId::FIRST, None)
+        .unwrap()
+        .value;
+    store.set_machine_end_on_quit(&lab, true).unwrap();
+    assert!(store.remove_machine(&desk).is_err());
+    store.remove_machine(&lab).unwrap();
+    store.flush().unwrap();
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    let workspace = store.workspace();
+    assert_eq!(workspace.remote_client(), Some("c1"));
+    let machines: Vec<_> = workspace
+        .machines()
+        .iter()
+        .map(|m| (m.id().as_str(), m.destination(), m.end_on_quit()))
+        .collect();
+    assert_eq!(machines, [("desk", "dev@Desk", false)]);
+    for (id, folder) in [(a, &missing), (b, &local)] {
+        let session = workspace.sessions().iter().find(|s| s.id() == id).unwrap();
+        assert_eq!(session.machine(), Some(&desk));
+        assert_eq!(session.provider(), Provider::Claude);
+        assert_eq!(
+            session.context(),
+            keystone_core::SessionContext::Remote {
+                machine: &desk,
+                folder,
+            }
+        );
+        assert!(session.worktree().is_none());
+    }
+}
+
+#[test]
+fn a_schema_6_database_gains_an_empty_machine_list_and_keeps_its_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.sqlite3");
+    let folder = WorkingDirectory::new(dir.path()).unwrap();
+    let mut store = Store::open(&path).unwrap();
+    store.create(Provider::Claude, &folder, 1).unwrap();
+    store.flush().unwrap();
+    drop(store);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE machines; PRAGMA user_version=6;")
+        .unwrap();
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.workspace().sessions().len(), 1);
+    assert!(store.workspace().machines().is_empty());
+    store.link_machine("desk", "c".into()).unwrap();
+    store.flush().unwrap();
+    let schema: u32 = Connection::open(&path)
+        .unwrap()
+        .query_one("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 7);
+    assert_eq!(Store::open(&path).unwrap().workspace().machines().len(), 1);
+}

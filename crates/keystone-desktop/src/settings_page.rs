@@ -52,6 +52,7 @@ enum Section {
     Notifications,
     Sounds,
     Accounts,
+    Machines,
     Integrations,
     Prompts,
     Shortcuts,
@@ -63,7 +64,7 @@ enum Section {
 type Rows = &'static [(&'static str, Field)];
 
 /// Each section with its label, automation name, and rows, in sidebar order.
-const SECTIONS: [(Section, &str, &str, Rows); 10] = [
+const SECTIONS: [(Section, &str, &str, Rows); 11] = [
     (
         Section::Appearance,
         "Appearance",
@@ -116,6 +117,12 @@ const SECTIONS: [(Section, &str, &str, Rows); 10] = [
         &[],
     ),
     (
+        Section::Machines,
+        "Machines",
+        "settings-section-machines",
+        &[],
+    ),
+    (
         Section::Integrations,
         "Integrations",
         "settings-section-integrations",
@@ -151,6 +158,7 @@ pub(crate) struct SettingsPage {
     text_size: FocusHandle,
     transcript_size: FocusHandle,
     pub(crate) accounts: crate::settings_accounts::AccountsPage,
+    pub(crate) machines: crate::machines::MachinesPage,
     pub(crate) integrations: crate::integrations::IntegrationsPage,
     pub(crate) prompts: crate::settings_prompts::PromptsPage,
     pub(crate) shortcuts: crate::settings_shortcuts::ShortcutsPage,
@@ -173,6 +181,7 @@ impl SettingsPage {
             text_size: stop(),
             transcript_size: stop(),
             accounts: crate::settings_accounts::AccountsPage::new(cx),
+            machines: crate::machines::MachinesPage::new(cx),
             integrations: crate::integrations::IntegrationsPage::new(cx),
             prompts: crate::settings_prompts::PromptsPage::new(cx),
             shortcuts: crate::settings_shortcuts::ShortcutsPage::new(cx),
@@ -217,6 +226,11 @@ impl Keystone {
         self.open_section(Section::Accounts, window, cx)
     }
 
+    /// Opens the page on Machines.
+    pub(crate) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_section(Section::Machines, window, cx)
+    }
+
     /// Opens the page on Prompts, the prompt library.
     pub(crate) fn open_prompts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_section(Section::Prompts, window, cx)
@@ -241,7 +255,7 @@ impl Keystone {
         self.refresh(cx);
     }
 
-    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
         self.focus_composer(window, cx);
         self.refresh(cx);
@@ -412,6 +426,7 @@ impl Keystone {
             .collect::<Vec<_>>();
         let custom = match page.section {
             Section::Accounts => Some(self.accounts_section(page, cx).into_any_element()),
+            Section::Machines => Some(self.machines_section(page, cx)),
             Section::Integrations => Some(self.integrations_section(page, cx).into_any_element()),
             Section::Prompts => Some(self.prompts_section(page, cx).into_any_element()),
             Section::Shortcuts => Some(self.shortcuts_section(page, cx)),
@@ -1527,10 +1542,10 @@ mod tests {
         assert!(shown(cx, "settings-theme"), "Up shows Appearance");
 
         // Appearance's row holds focus; next come Fonts, Notifications, Sounds, Accounts,
-        // Integrations, Prompts, Shortcuts, Scheduled, Project, then System, the first
-        // theme. Right and Left move the choice; three more Tabs pass Light and Dark to the
-        // first action color.
-        keys(cx, &["tab"; 10].join(" "));
+        // Machines, Integrations, Prompts, Shortcuts, Scheduled, Project, then System, the
+        // first theme. Right and Left move the choice; three more Tabs pass Light and Dark
+        // to the first action color.
+        keys(cx, &["tab"; 11].join(" "));
         keys(cx, "right");
         assert_eq!(saved(&path).theme, ThemeMode::Light);
         keys(cx, "left");
@@ -1557,9 +1572,9 @@ mod tests {
         assert!(shown(cx, "settings-page"), "Escape closes only the palette");
 
         // From Default back past Compact, the six action colors, Theme's three choices,
-        // Project, Scheduled, Shortcuts, Prompts, Integrations, Accounts, Sounds,
+        // Project, Scheduled, Shortcuts, Prompts, Integrations, Machines, Accounts, Sounds,
         // Notifications, Fonts, and Appearance to Back.
-        keys(cx, &["shift-tab"; 21].join(" "));
+        keys(cx, &["shift-tab"; 22].join(" "));
         press(cx, "space");
         assert!(!shown(cx, "settings-page"), "Back closes");
         assert!(composer_focused(&view, cx));
@@ -1571,11 +1586,12 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        // Fonts' row holds focus; Notifications', Sounds', Accounts', Integrations', Prompts',
-        // Shortcuts', Scheduled's and Project's rows come before the first font menu.
+        // Fonts' row holds focus; Notifications', Sounds', Accounts', Machines',
+        // Integrations', Prompts', Shortcuts', Scheduled's and Project's rows come before
+        // the first font menu.
         keys(
             cx,
-            "secondary-, down tab tab tab tab tab tab tab tab tab down",
+            "secondary-, down tab tab tab tab tab tab tab tab tab tab down",
         );
         assert!(shown(cx, "settings-ui-font-option-0"));
 

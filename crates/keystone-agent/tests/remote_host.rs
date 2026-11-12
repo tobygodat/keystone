@@ -2198,3 +2198,103 @@ fn every_four_event_route_assignment_acknowledges_only_the_drained_prefix() {
         }
     }
 }
+
+#[test]
+fn a_send_to_a_folder_the_machine_lacks_fails_in_its_session() {
+    let machine = Machine::new();
+    let mut client = machine.client("app-1");
+    client.connected();
+    let welcome = client.link.welcome().expect("the host said who it is");
+    assert_eq!(welcome.protocol, keystone_agent::remote::PROTOCOL);
+    client
+        .send(Path::new("/nowhere/keystone-test"), "hello")
+        .unwrap();
+    client.wait("the host to refuse the folder", |events, _| {
+        events.iter().any(|(session, event)| {
+            *session == SESSION
+                && matches!(event, Event::Failed { message }
+                    if message == "/nowhere/keystone-test isn't a folder on this machine")
+        })
+    });
+}
+
+#[test]
+fn a_first_attempt_that_ends_before_the_host_answers_says_why() {
+    let argv = [
+        "sh",
+        "-c",
+        "echo 'ssh: connect to host desk port 22: Connection refused' >&2; exit 255",
+    ]
+    .map(OsString::from)
+    .to_vec();
+    let link = Link::new(argv, "app-1".into());
+    wait_for("the link to give a reason", || link.trouble().is_some());
+    assert_eq!(
+        link.trouble().as_deref(),
+        Some("ssh: connect to host desk port 22: Connection refused")
+    );
+    assert_eq!(link.status(), Status::Reconnecting);
+    assert!(link.welcome().is_none());
+
+    let silent = Link::new(["sleep", "30"].map(OsString::from).to_vec(), "app-1".into());
+    silent.set_silence(Duration::from_millis(300));
+    wait_for("the silent link to give a reason", || {
+        silent.trouble().is_some()
+    });
+    assert!(
+        silent
+            .trouble()
+            .unwrap()
+            .starts_with("The machine didn't answer")
+    );
+    let started = Instant::now();
+    silent.close(Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// `attach` hands each frame on at once. A `hello` that waited in the pipe until the
+/// daemon next wrote, as when `attach` spliced its stdin into the socket, left a link
+/// connecting for 5 to 15 s.
+#[test]
+fn attach_hands_a_hello_to_the_daemon_at_once() {
+    let machine = Machine::new();
+    drop(machine.raw().hello("warm", None));
+    for n in 0..5 {
+        let started = Instant::now();
+        let mut raw = machine.raw();
+        raw.hello(&format!("client-{n}"), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "hello {n} took {:?}",
+            started.elapsed()
+        );
+        raw.kill();
+    }
+}
+
+/// A transport that refuses and leaves a process holding its stderr, as a
+/// `ProxyCommand` can, still fails at once with its reason.
+#[test]
+fn a_refusal_whose_stderr_stays_open_still_says_why_at_once() {
+    let argv = [
+        "sh",
+        "-c",
+        "read hello; echo '{\"t\":\"welcome\",\"protocol\":99,\"version\":\"9.0.0\",\"os\":\"linux\",\"arch\":\"x86_64\",\"hostname\":\"desk\",\"providers\":[],\"oldest\":0,\"latest\":0}'; (sleep 30 &); sleep 30",
+    ]
+    .map(OsString::from)
+    .to_vec();
+    let link = Link::new(argv, "app-1".into());
+    let started = Instant::now();
+    wait_for("the link to fail", || {
+        matches!(link.status(), Status::Failed(_))
+    });
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let Status::Failed(reason) = link.status() else {
+        unreachable!()
+    };
+    assert!(reason.contains("speaks protocol 99"), "{reason}");
+}

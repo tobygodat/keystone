@@ -168,9 +168,26 @@ impl FolderPick {
     }
 }
 
+/// Where a session works, for every surface that reads its folder or acts in it. Each
+/// surface names all three, so a session on another machine can't fall through to the
+/// window's project folder, and a new kind of folder doesn't compile until each surface
+/// says what it does with it. [`AppState::place`] makes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionPlace {
+    /// A folder on this machine.
+    Local(WorkingDirectory),
+    /// A folder on another machine, which nothing here may read, with the machine's label.
+    Remote(String),
+    /// No folder this version can use: none was recorded, or it can't read the one that
+    /// was. A surface may show the window's project instead.
+    Unusable,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ConversationFolder {
     Recorded(WorkingDirectory),
+    /// A folder on another machine. Nothing in this app may read it.
+    Remote(keystone_core::MachineId, keystone_core::RemoteFolder),
     LegacyMissing,
     Unsupported,
 }
@@ -180,6 +197,7 @@ impl ConversationFolder {
             Self::Recorded(directory) => {
                 format!("Open conversation folder · {}", directory.as_str())
             }
+            Self::Remote(machine, folder) => format!("{folder} on {machine}"),
             Self::LegacyMissing => "Choose conversation folder".into(),
             Self::Unsupported => {
                 "Saved conversation folder is not supported by this version".into()
@@ -189,7 +207,7 @@ impl ConversationFolder {
     pub fn button(&self, id: &'static str) -> IconButton {
         IconButton::new(id, IconName::Folder)
             .size(ButtonSize::Default)
-            .disabled(matches!(self, Self::Unsupported))
+            .disabled(matches!(self, Self::Unsupported | Self::Remote(..)))
     }
 }
 impl Keystone {

@@ -4,6 +4,7 @@ use crate::*;
 use gpui::EventEmitter;
 use keystone_agent::idle::{IdleCandidate, IdlePolicy};
 use keystone_agent::recovery::{self, RecoveryBatch, Snapshot, TurnEvidence};
+use keystone_agent::remote::{self, Link, RemoteConnection, Status as LinkStatus};
 use keystone_agent::{Catalog, Commands, LaunchProfile};
 use keystone_core::SessionContext;
 use keystone_core::{
@@ -11,11 +12,16 @@ use keystone_core::{
     ProjectColor, ProjectId, SaveError, SavedComposition, SessionTabs, ViewId, WindowId,
     WindowView, WorkingDirectory,
 };
+use keystone_core::{MachineId, RemoteFolder};
 use std::collections::BTreeMap;
 
 #[cfg(all(test, feature = "ui-tests"))]
 #[path = "app_state_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "ui-tests"))]
+#[path = "remote_tests.rs"]
+mod remote_tests;
 
 #[path = "orchestrator.rs"]
 mod orchestrator;
@@ -62,6 +68,36 @@ enum Sent {
     Later,
 }
 
+/// The connection a session runs on: its machine, `None` for this one, then its
+/// provider and account, `None` for the provider's default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Route {
+    pub machine: Option<MachineId>,
+    pub provider: Provider,
+    pub account: Option<AccountId>,
+}
+
+/// A connection on another machine: the machine, provider and account it serves.
+type RemoteKey = (MachineId, Provider, Option<AccountId>);
+
+/// Where a message goes: a folder on this machine, checked here, or one on another
+/// machine, which only its host checks.
+enum Place {
+    Local(WorkingDirectory),
+    Remote(MachineId, RemoteFolder),
+}
+
+/// A machine being linked from Settings → Machines. It is saved only once its host
+/// answers.
+pub(crate) struct Linking {
+    pub(crate) destination: String,
+    /// The workspace's client ID, new when it has none yet.
+    client: String,
+    link: Option<(Link, RemoteConnection)>,
+    /// Why linking failed, which the form shows until the next try.
+    pub(crate) failed: Option<String>,
+}
+
 #[derive(Default)]
 pub(crate) struct RuntimeChanged {
     pub rows: Vec<RowChange>,
@@ -105,6 +141,19 @@ pub(crate) struct AppState {
     codex: BTreeMap<Option<AccountId>, CodexConnection>,
     /// One connection per Claude account, each with a process per session.
     claude: BTreeMap<Option<AccountId>, ClaudeConnection>,
+    /// One link per linked machine, made on the first pump, so what happened there
+    /// while Keystone was closed arrives without waiting for a message.
+    links: BTreeMap<MachineId, Link>,
+    /// One connection per provider and account on each linked machine.
+    remote: HashMap<RemoteKey, RemoteConnection>,
+    /// Each link's state and host reports as the app last applied them, so a change
+    /// redraws the sidebar and a new report reaches the machine's conversations.
+    shown_links: BTreeMap<MachineId, (LinkStatus, u64)>,
+    /// The machine Settings → Machines is linking, until it is saved or given up.
+    pub(crate) linking: Option<Linking>,
+    /// Set by a quit the user didn't choose, such as the one after the last window
+    /// closes. It leaves every remote session running, whatever its machine's setting.
+    idle_quit: bool,
     conversations: HashMap<u64, Conversation>,
     /// Each session's checkpoints, as last read from its repository.
     checkpoints: HashMap<u64, checkpoints::State>,
@@ -197,6 +246,10 @@ pub(crate) struct AppState {
     /// The `codex` and `claude` every new connection runs, in place of the ones found.
     #[cfg(test)]
     pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
+    /// The command every new link runs in place of `ssh`, such as `keystone-host
+    /// attach`. Without one a test's link runs nothing and fails.
+    #[cfg(test)]
+    pub(crate) test_transport: Option<Vec<std::ffi::OsString>>,
     /// Whether a test put its own Claude connection in place, which runs the program
     /// it names. A connection started without one runs the `claude` on `PATH`.
     #[cfg(test)]
@@ -283,6 +336,23 @@ const WIDGET_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(
 pub(crate) const RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 const UNREAD: &str = "Keystone could not read this conversation's history";
+
+/// How long Quit waits for every machine to hear that Keystone is quitting.
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const REMOTE_CODEX: &str = "Not sent. Only Claude runs on other machines so far.";
+const REMOTE_ACCOUNTS: &str =
+    "Not sent. Sessions on other machines use that machine's default login so far.";
+const REMOTE_IMAGES: &str = "Not sent. Images can't be sent to a session on another machine yet.";
+const REMOTE_UNLINKED: &str =
+    "Not sent. This session's machine isn't linked any more. Link it again in Settings → Machines.";
+/// Where a restart left a remote session's turn open. The turn's own rows after it say
+/// whether it went on there or Quit ended it.
+const REMOTE_CLOSED: &str = "Keystone was closed during this turn on";
+
+/// The model menu of a session on another machine, whose catalog isn't asked yet.
+const REMOTE_MODELS: &str = "Models on other machines aren't listed yet. Claude uses its default.";
+/// Never shown: a session on another machine never asks for a folder here.
+const REMOTE_LOCAL_FOLDER: &str = "Not sent. This conversation's folder is on another machine.";
 
 const NO_THREAD: &str = "this conversation's provider ID was never saved, so sending starts a new provider conversation";
 
@@ -396,16 +466,20 @@ impl AppState {
         &self.wake
     }
 
-    pub(crate) fn reserve_quit(&mut self) -> bool {
+    /// Starts quitting, unless a quit already runs. `user` is whether the user chose
+    /// Quit; one that didn't leaves every remote session running.
+    pub(crate) fn reserve_quit(&mut self, user: bool) -> bool {
         if self.phase != Phase::Running {
             return false;
         }
         self.phase = Phase::Saving;
+        self.idle_quit = !user;
         true
     }
 
     pub(crate) fn quit_failed(&mut self, reason: String, cx: &mut Context<Self>) {
         self.phase = Phase::Running;
+        self.idle_quit = false;
         self.shutdown_error = Some(format!("Not quit. {reason}"));
         self.publish(cx);
     }
@@ -506,7 +580,30 @@ impl AppState {
         self.browsers.shut_down();
         self.codex.clear();
         self.claude.clear();
+        self.leave_machines();
         self.publish(cx);
+    }
+
+    /// Tells each connected machine that Keystone is quitting, after acknowledging what
+    /// it drained, and waits a moment for the word to arrive. A machine keeps its
+    /// sessions running unless the user quit and the machine is set to end them. One
+    /// that isn't connected hears nothing, and its sessions keep running.
+    fn leave_machines(&mut self) {
+        self.linking = None;
+        for (id, link) in &self.links {
+            let end = !self.idle_quit
+                && self
+                    .store
+                    .workspace()
+                    .machine(id)
+                    .is_some_and(|machine| machine.end_on_quit());
+            link.quit(!end);
+        }
+        self.remote.clear();
+        let deadline = std::time::Instant::now() + QUIT_WAIT;
+        for link in std::mem::take(&mut self.links).into_values() {
+            link.close(deadline.saturating_duration_since(std::time::Instant::now()));
+        }
     }
 
     pub(crate) fn set_draft(
@@ -1505,7 +1602,10 @@ impl AppState {
     pub(crate) fn has_work(&self) -> bool {
         (!self.unsent.is_empty() && self.store.save_error().is_none())
             || self.conversations.iter().any(|(&id, conversation)| {
-                conversation.running || self.started(id).is_some_and(|c| c.has_work(id))
+                // Quit leaves a session on another machine running, so its turn never
+                // holds Keystone open with no window.
+                !self.is_remote(id)
+                    && (conversation.running || self.started(id).is_some_and(|c| c.has_work(id)))
             })
     }
 
@@ -1517,9 +1617,10 @@ impl AppState {
     /// The lowest-numbered session whose running turn waits for the user to answer an
     /// approval request.
     pub(crate) fn asking(&self) -> Option<u64> {
+        // A remote session's approval waits on its machine, through Quit.
         self.conversations
             .iter()
-            .filter(|(_, c)| c.running && c.awaiting_approval())
+            .filter(|&(&id, c)| c.running && c.awaiting_approval() && !self.is_remote(id))
             .map(|(&session, _)| session)
             .min()
     }
@@ -1538,7 +1639,7 @@ impl AppState {
                 if state.read(cx).has_work() {
                     state.update(cx, |state, _| state.quit_when_idle = true);
                 } else {
-                    request_quit(cx);
+                    request_quit(cx, false);
                 }
             });
         } else if let Some(session) = self.asking() {
@@ -1597,6 +1698,11 @@ impl AppState {
             shutdown_error: None,
             codex: BTreeMap::new(),
             claude: BTreeMap::new(),
+            links: BTreeMap::new(),
+            remote: HashMap::new(),
+            shown_links: BTreeMap::new(),
+            linking: None,
+            idle_quit: false,
             conversations: HashMap::new(),
             checkpoints: HashMap::new(),
             turn_starts: checkpoints::Starts::default(),
@@ -1659,6 +1765,8 @@ impl AppState {
             save_calls: 0,
             #[cfg(test)]
             test_programs: None,
+            #[cfg(test)]
+            test_transport: None,
             #[cfg(test)]
             test_claude_installed: false,
             #[cfg(test)]
@@ -1756,7 +1864,10 @@ impl AppState {
                 account: self.catalog_account(session, provider),
                 directory,
             }),
-            _ => None,
+            // A remote machine's catalog isn't asked yet (TOB-320).
+            presentation::ConversationFolder::Remote(..)
+            | presentation::ConversationFolder::LegacyMissing
+            | presentation::ConversationFolder::Unsupported => None,
         }
     }
 
@@ -1786,6 +1897,9 @@ impl AppState {
             }
             Some(presentation::ConversationFolder::LegacyMissing) => {
                 Choices::Unavailable("Choose a conversation folder to load choices.")
+            }
+            Some(presentation::ConversationFolder::Remote(..)) => {
+                Choices::Unavailable(REMOTE_MODELS)
             }
             Some(presentation::ConversationFolder::Unsupported) | None => Choices::Unavailable(
                 "Choices need this conversation's saved folder, which this version cannot use.",
@@ -1965,19 +2079,47 @@ impl AppState {
         let mut events = Vec::new();
         // A catalog belongs to the connection it came from, whatever provider or
         // account the asking session has since moved to.
+        let local = |provider, account: &Option<AccountId>| Route {
+            machine: None,
+            provider,
+            account: account.clone(),
+        };
         let drained: Vec<_> = self
             .codex
             .iter()
-            .map(|(account, c)| (Provider::Codex, account.clone(), c.drain()))
+            .map(|(account, c)| (local(Provider::Codex, account), c.drain()))
             .chain(
                 self.claude
                     .iter()
-                    .map(|(account, c)| (Provider::Claude, account.clone(), c.drain())),
+                    .map(|(account, c)| (local(Provider::Claude, account), c.drain())),
             )
+            .chain(self.remote.iter().map(|((machine, provider, account), c)| {
+                let route = Route {
+                    machine: Some(machine.clone()),
+                    provider: *provider,
+                    account: account.clone(),
+                };
+                (route, c.drain())
+            }))
             .collect();
-        for (provider, account, batch) in drained {
+        for (route, batch) in drained {
+            let Route {
+                provider,
+                ref account,
+                ..
+            } = route;
+            let remote = route.machine.is_some();
             for (session, event) in batch {
                 match event {
+                    // What a provider on another machine reports about its account is
+                    // that machine's, and Keystone keeps catalogs, usage and MCP
+                    // status for this machine's accounts only, so it never overwrites
+                    // theirs.
+                    Event::Catalog(_)
+                    | Event::Commands(_)
+                    | Event::Usage(_)
+                    | Event::McpStatus(_)
+                        if remote => {}
                     Event::Catalog(catalog) => {
                         self.catalogs
                             .apply(provider, account.clone(), session, catalog);
@@ -1993,7 +2135,7 @@ impl AppState {
                         self.record_mcp_status(provider, account.as_ref(), session, servers, cx)
                     }
                     Event::ProviderNotice { .. }
-                        if self.route(session) != Some((provider, account.clone())) => {}
+                        if self.route(session).as_ref() != Some(&route) => {}
                     Event::ThreadsListed { ticket, result } => {
                         answer(&self.native, ticket, Native::Listed(result));
                     }
@@ -2004,6 +2146,7 @@ impl AppState {
                 }
             }
         }
+        self.watch_links();
         self.receive(reports, events, cx);
         self.pump_setups(cx);
         self.pump_orchestrator(cx);
@@ -2042,6 +2185,12 @@ impl AppState {
                             .is_some_and(|saved| saved.provider_thread().is_some());
                     if let Some(conversation) = self.conversations.get_mut(&session) {
                         conversation.restore(entries);
+                        if self.is_remote(session) {
+                            self.apply_host_state(session);
+                        }
+                        let Some(conversation) = self.conversations.get_mut(&session) else {
+                            continue;
+                        };
                         if conversation.recovery == Some(Recovery::Loading) {
                             conversation.recovery = None;
                         }
@@ -2263,9 +2412,10 @@ impl AppState {
         servers: Vec<keystone_core::integrations::ServerStatus>,
         cx: &mut Context<Self>,
     ) {
-        let folder = match self.conversation_folder(session) {
-            Some(ConversationFolder::Recorded(directory)) => Some(directory.path().to_owned()),
-            _ => None,
+        let folder = match self.place(session) {
+            Some(presentation::SessionPlace::Local(directory)) => Some(directory.path().to_owned()),
+            Some(presentation::SessionPlace::Remote(_) | presentation::SessionPlace::Unusable)
+            | None => None,
         };
         self.mcp_status.insert(
             session,
@@ -2370,9 +2520,369 @@ impl AppState {
 
     /// The provider and account a session runs on; `None` as the account is the
     /// provider's default.
-    fn route(&self, session: u64) -> Option<(Provider, Option<AccountId>)> {
-        self.session(session)
-            .map(|s| (s.provider(), s.account().cloned()))
+    fn route(&self, session: u64) -> Option<Route> {
+        self.session(session).map(|s| Route {
+            machine: s.machine().cloned(),
+            provider: s.provider(),
+            account: s.account().cloned(),
+        })
+    }
+
+    /// Whether the session runs on another machine.
+    pub(crate) fn is_remote(&self, session: u64) -> bool {
+        self.session(session).is_some_and(|s| s.machine().is_some())
+    }
+
+    /// The state of `machine`'s link, which the sidebar, the session header and the
+    /// composer show. A machine with no link yet is connecting: the next pump makes one.
+    pub(crate) fn machine_status(&self, machine: &MachineId) -> LinkStatus {
+        self.links
+            .get(machine)
+            .map_or(LinkStatus::Connecting, Link::status)
+    }
+
+    /// The machine a session runs on and its link's state, for a session on another
+    /// machine.
+    pub(crate) fn session_machine(
+        &self,
+        session: u64,
+    ) -> Option<(&keystone_core::Machine, LinkStatus)> {
+        let id = self.session(session)?.machine()?;
+        let machine = self.store.workspace().machine(id)?;
+        Some((machine, self.machine_status(id)))
+    }
+
+    /// Why the session can't send or answer now: its machine isn't connected. `None`
+    /// for a session on this machine, or on a connected one.
+    pub(crate) fn offline(&self, session: u64) -> Option<String> {
+        let (machine, status) = self.session_machine(session)?;
+        crate::machines::offline_reason(machine.label(), &status)
+    }
+
+    /// What the host said about itself when `machine` last connected.
+    pub(crate) fn machine_welcome(&self, machine: &MachineId) -> Option<remote::Welcome> {
+        self.links.get(machine)?.welcome()
+    }
+
+    /// The command that reaches `destination`: `ssh`. A test runs its own transport,
+    /// or nothing.
+    fn transport(&self, destination: &str) -> Result<Vec<std::ffi::OsString>, String> {
+        let ssh = remote::ssh(destination)?;
+        #[cfg(test)]
+        let ssh = {
+            let _ = ssh;
+            self.test_transport
+                .clone()
+                .unwrap_or_else(|| vec!["/nonexistent/keystone-test-ssh".into()])
+        };
+        Ok(ssh)
+    }
+
+    /// A link to `destination` with its Claude connection, which wakes the pump on
+    /// every event and state change.
+    fn open_link(
+        &self,
+        destination: &str,
+        client: &str,
+    ) -> Result<(Link, RemoteConnection), String> {
+        let link = Link::new(self.transport(destination)?, client.to_owned());
+        let connection = RemoteConnection::new(&link, Provider::Claude, None, self.wake.clone());
+        Ok((link, connection))
+    }
+
+    /// Makes the link of each linked machine that has none, then notes each link's
+    /// changes: a new state redraws the sidebar, and a host's report of its sessions
+    /// reaches their conversations.
+    fn watch_links(&mut self) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        self.watch_linking();
+        let workspace = self.store.workspace();
+        let missing: Vec<(MachineId, String)> = workspace
+            .machines()
+            .iter()
+            .filter(|machine| !self.links.contains_key(machine.id()))
+            .map(|machine| (machine.id().clone(), machine.destination().to_owned()))
+            .collect();
+        if let Some(client) = workspace.remote_client().map(str::to_owned) {
+            for (id, destination) in missing {
+                match self.open_link(&destination, &client) {
+                    Ok((link, connection)) => {
+                        self.links.insert(id.clone(), link);
+                        self.remote.insert((id, Provider::Claude, None), connection);
+                    }
+                    Err(error) => eprintln!("Keystone could not link {destination}: {error}"),
+                }
+            }
+        }
+        let changed: Vec<(MachineId, LinkStatus, u64)> = self
+            .links
+            .iter()
+            .map(|(id, link)| (id.clone(), link.status(), link.reports()))
+            .filter(|(id, status, reports)| {
+                self.shown_links
+                    .get(id)
+                    .is_none_or(|shown| (&shown.0, shown.1) != (status, *reports))
+            })
+            .collect();
+        for (id, status, reports) in changed {
+            if status == LinkStatus::Connected {
+                self.clear_offline_errors(&id);
+            }
+            let reported = self
+                .shown_links
+                .get(&id)
+                .is_none_or(|shown| shown.1 != reports);
+            self.shown_links.insert(id.clone(), (status, reports));
+            self.changes.sidebar = true;
+            if reported {
+                self.apply_host_report(&id);
+            }
+        }
+    }
+
+    /// Drops the note that a message wasn't sent because `machine` wasn't connected,
+    /// once it is again, so it doesn't read as current.
+    fn clear_offline_errors(&mut self, machine: &MachineId) {
+        let sessions: Vec<u64> = self
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .filter(|s| s.machine() == Some(machine))
+            .map(|s| s.id())
+            .collect();
+        for session in sessions {
+            if let Some(conversation) = self.conversations.get_mut(&session)
+                && conversation.error.as_deref() == Some(remote::NOT_CONNECTED)
+            {
+                conversation.error = None;
+                self.commit(session);
+            }
+        }
+    }
+
+    /// Puts what `machine`'s host last reported about each of its sessions into their
+    /// loaded conversations: whether a turn runs there and the approvals it waits on.
+    fn apply_host_report(&mut self, machine: &MachineId) {
+        let sessions: Vec<u64> = self
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .filter(|s| s.machine() == Some(machine))
+            .map(|s| s.id())
+            .collect();
+        for session in sessions {
+            self.apply_host_state(session);
+        }
+    }
+
+    /// Puts what its machine's host last reported about `session` into its
+    /// conversation, once the host has reported and the history has loaded. A report
+    /// that arrives during the load is applied when the load ends.
+    fn apply_host_state(&mut self, session: u64) {
+        let Some(machine) = self.session(session).and_then(|s| s.machine()).cloned() else {
+            return;
+        };
+        if self
+            .links
+            .get(&machine)
+            .is_none_or(|link| link.reports() == 0)
+        {
+            return;
+        }
+        let Some(connection) = self.remote.get(&(machine.clone(), Provider::Claude, None)) else {
+            return;
+        };
+        let (running, waiting) = (connection.is_running(session), connection.waiting(session));
+        let label = self
+            .store
+            .workspace()
+            .machine(&machine)
+            .map_or_else(|| machine.to_string(), |m| m.label().to_owned());
+        let Some(conversation) = self.conversations.get_mut(&session) else {
+            return;
+        };
+        if conversation.is_loading() {
+            return;
+        }
+        conversation.host_state(running, waiting, format!("{REMOTE_CLOSED} {label}."));
+        self.commit(session);
+    }
+
+    /// Follows the machine Settings → Machines is linking: saves it once its host
+    /// answers, and keeps why it failed otherwise. A failed attempt isn't saved.
+    fn watch_linking(&mut self) {
+        let Some(linking) = &mut self.linking else {
+            return;
+        };
+        let Some((link, _)) = &linking.link else {
+            return;
+        };
+        let failed = match link.status() {
+            LinkStatus::Connected => None,
+            LinkStatus::Failed(reason) => Some(reason),
+            LinkStatus::Connecting | LinkStatus::Reconnecting => match link.trouble() {
+                Some(trouble) => Some(trouble),
+                None => return,
+            },
+        };
+        if let Some(reason) = failed {
+            linking.link = None;
+            linking.failed = Some(reason);
+            self.changes.sidebar = true;
+            return;
+        }
+        let Some(Linking {
+            destination,
+            client,
+            link: Some((link, connection)),
+            ..
+        }) = self.linking.take()
+        else {
+            return;
+        };
+        match self.store.link_machine(&destination, client) {
+            Ok(applied) => {
+                self.links.insert(applied.value.clone(), link);
+                self.remote
+                    .insert((applied.value, Provider::Claude, None), connection);
+            }
+            Err(error) => {
+                self.linking = Some(Linking {
+                    destination,
+                    client: String::new(),
+                    link: None,
+                    failed: Some(format!("Not saved. {error}")),
+                })
+            }
+        }
+        self.changes.sidebar = true;
+    }
+
+    /// Starts linking `destination`. It is saved once its host answers.
+    pub(crate) fn link_machine(&mut self, destination: &str, cx: &mut Context<Self>) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        let destination = destination.trim().to_owned();
+        let client = self
+            .store
+            .workspace()
+            .remote_client()
+            .map_or_else(remote::new_client_id, str::to_owned);
+        let refused = keystone_core::check_destination(&destination)
+            .err()
+            .or_else(|| {
+                self.store
+                    .workspace()
+                    .machines()
+                    .iter()
+                    .find(|machine| machine.destination() == destination)
+                    .map(|machine| format!("{} is already linked.", machine.label()))
+            });
+        let (link, failed) = match refused {
+            Some(reason) => (None, Some(reason)),
+            None => match self.open_link(&destination, &client) {
+                Ok(link) => (Some(link), None),
+                Err(error) => (None, Some(error)),
+            },
+        };
+        self.linking = Some(Linking {
+            destination,
+            client,
+            link,
+            failed,
+        });
+        self.refresh(cx);
+    }
+
+    /// Tries a failed machine's link again at once.
+    pub(crate) fn retry_machine(&mut self, machine: &MachineId, cx: &mut Context<Self>) {
+        if let Some(link) = self.links.get(machine) {
+            link.retry();
+        }
+        self.refresh(cx);
+    }
+
+    pub(crate) fn set_machine_end_on_quit(
+        &mut self,
+        machine: &MachineId,
+        end: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let result = self
+            .store
+            .set_machine_end_on_quit(machine, end)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        self.refresh(cx);
+        result
+    }
+
+    /// Forgets a machine no session runs on, and ends its link.
+    pub(crate) fn remove_machine(
+        &mut self,
+        machine: &MachineId,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let result = self
+            .store
+            .remove_machine(machine)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        if result.is_ok() {
+            self.remote.retain(|(id, ..), _| id != machine);
+            self.links.remove(machine);
+            self.shown_links.remove(machine);
+        }
+        self.refresh(cx);
+        result
+    }
+
+    /// Creates a Claude session in `folder` on `machine`, selected in `window`.
+    pub(crate) fn create_remote(
+        &mut self,
+        machine: &MachineId,
+        folder: &RemoteFolder,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<u64>, Box<dyn std::error::Error>> {
+        if self.phase != Phase::Running {
+            return Err(std::io::Error::other("Keystone is quitting.").into());
+        }
+        let created = self
+            .store
+            .create_remote_showing(machine, folder, now_ms(), window, show);
+        self.refresh(cx);
+        created
+    }
+
+    /// The connection on `machine` for `provider`'s `account`. Only Claude on the
+    /// machine's default login runs there so far.
+    fn remote_connection(
+        &mut self,
+        machine: &MachineId,
+        provider: Provider,
+        account: Option<&AccountId>,
+    ) -> Result<&dyn Connection, String> {
+        if provider != Provider::Claude {
+            return Err(REMOTE_CODEX.into());
+        }
+        if account.is_some() {
+            return Err(REMOTE_ACCOUNTS.into());
+        }
+        if self.store.workspace().machine(machine).is_none() {
+            return Err(REMOTE_UNLINKED.into());
+        }
+        self.watch_links();
+        self.remote
+            .get(&(machine.clone(), provider, None))
+            .map(|c| c as &dyn Connection)
+            .ok_or_else(|| REMOTE_UNLINKED.into())
     }
 
     /// How `provider`'s CLI is launched for `account`. An account this workspace no
@@ -2459,7 +2969,9 @@ impl AppState {
             .sessions()
             .iter()
             .filter(|session| {
-                session.provider() == provider && (any_account || session.account() == account)
+                session.machine().is_none()
+                    && session.provider() == provider
+                    && (any_account || session.account() == account)
             })
             .any(|session| {
                 let key = session.account().cloned();
@@ -2601,7 +3113,17 @@ impl AppState {
 
     /// The connection a session's account already has, if any.
     fn started(&self, session: u64) -> Option<&dyn Connection> {
-        let (provider, account) = self.route(session)?;
+        let Route {
+            machine,
+            provider,
+            account,
+        } = self.route(session)?;
+        if let Some(machine) = machine {
+            return self
+                .remote
+                .get(&(machine, provider, account))
+                .map(|c| c as &dyn Connection);
+        }
         match provider {
             Provider::Codex => self.codex.get(&account).map(|c| c as &dyn Connection),
             Provider::Claude => self.claude.get(&account).map(|c| c as &dyn Connection),
@@ -2612,7 +3134,9 @@ impl AppState {
     /// holds the next message until the result is shown and saved. Read only: nothing
     /// is sent, resumed or answered.
     pub(crate) fn start_recovery(&mut self, session: u64, cx: &mut Context<Self>) {
-        if self.phase != Phase::Running {
+        // Recovery reads the provider's files, which for a session on another machine
+        // are there. Its host reports the session's state instead.
+        if self.phase != Phase::Running || self.is_remote(session) {
             return;
         }
         let Some(saved) = self.session(session).cloned() else {
@@ -2640,7 +3164,14 @@ impl AppState {
                             thread,
                             cwd: directory.path().to_owned(),
                         }),
-                        _ => Err("this conversation has no saved folder to check against".into()),
+                        Some(
+                            ConversationFolder::Remote(..)
+                            | ConversationFolder::LegacyMissing
+                            | ConversationFolder::Unsupported,
+                        )
+                        | None => {
+                            Err("this conversation has no saved folder to check against".into())
+                        }
                     }
                 });
                 match read {
@@ -3391,6 +3922,12 @@ impl AppState {
         if text.is_empty() && draft.attachments.is_empty() {
             return Sent::No;
         }
+        if session.machine().is_some() && !draft.attachments.is_empty() {
+            self.conversation(id).error = Some(REMOTE_IMAGES.into());
+            self.commit(id);
+            self.publish(cx);
+            return Sent::No;
+        }
         // An image whose copy is gone or cannot be opened keeps the draft, with a reason,
         // rather than going without it.
         let mut images = Vec::new();
@@ -3459,17 +3996,28 @@ impl AppState {
             }
             return Sent::No;
         }
-        let Some(directory) = self.dispatch_directory(id, cx) else {
-            return Sent::No;
+        // A folder on another machine is checked there, as part of the send.
+        let place = match self.conversation_folder(id) {
+            Some(ConversationFolder::Remote(machine, folder)) => Place::Remote(machine, folder),
+            _ => match self.dispatch_directory(id, cx) {
+                Some(directory) => Place::Local(directory),
+                None => return Sent::No,
+            },
         };
         // A session whose account is gone keeps its draft and stays unstarted.
-        if let Err(error) = self.profile(session.provider(), session.account()) {
+        if let Place::Local(_) = place
+            && let Err(error) = self.profile(session.provider(), session.account())
+        {
             self.conversation(id).error = Some(error);
             self.commit(id);
             self.publish(cx);
             return Sent::No;
         }
-        let cwd = directory.as_str();
+        let cwd = match &place {
+            Place::Local(directory) => directory.as_str().to_owned(),
+            Place::Remote(_, folder) => folder.wire().to_owned(),
+        };
+        let cwd = cwd.as_str();
         // Read after pumping: the pump may have just saved a newer thread ID.
         let resume = self
             .store
@@ -3508,7 +4056,10 @@ impl AppState {
         let Some((provider, approval)) = self.approval(id) else {
             return Sent::No;
         };
-        if let Err(error) = self.ensure_orchestrator() {
+        // The orchestrator's tools aren't offered on other machines yet.
+        if let Place::Local(_) = place
+            && let Err(error) = self.ensure_orchestrator()
+        {
             self.conversation(id).error = Some(format!("Not sent: {error}"));
             self.commit(id);
             self.publish(cx);
@@ -3555,8 +4106,17 @@ impl AppState {
         }
         // A message that starts a turn first reads the files the turn starts from.
         let steer = self.runs_turn(id);
-        self.begin_checkpoint(id, cwd, steer);
-        let sent = match self.connection(provider, account.as_ref()) {
+        // A checkpoint reads the folder's files, which for a remote session are there.
+        if let Place::Local(_) = place {
+            self.begin_checkpoint(id, cwd, steer);
+        }
+        let connection = match &place {
+            Place::Local(_) => self.connection(provider, account.as_ref()),
+            Place::Remote(machine, _) => {
+                self.remote_connection(machine, provider, account.as_ref())
+            }
+        };
+        let sent = match connection {
             Ok(connection) => {
                 // A native fork's first message opens the provider's fork of its source.
                 if resume.is_none()
@@ -3648,6 +4208,10 @@ impl AppState {
         if self.phase != Phase::Running {
             return;
         }
+        // An answer waits, unsent and unrecorded, until the machine is connected again.
+        if self.offline(id).is_some() {
+            return;
+        }
         // The buttons take focus from the composer; give it back for the next message.
         let Some(approval) = self.conversation(id).decide(&request, allow) else {
             return;
@@ -3705,6 +4269,49 @@ impl AppState {
         cx.notify();
     }
 
+    /// Where `session` works. See [`presentation::SessionPlace`].
+    pub(crate) fn place(&self, session: u64) -> Option<presentation::SessionPlace> {
+        use presentation::SessionPlace;
+        Some(match self.session(session)?.context() {
+            SessionContext::Recorded { directory, .. } => SessionPlace::Local(directory.clone()),
+            SessionContext::Remote { machine, .. } => {
+                SessionPlace::Remote(self.machine_label(machine))
+            }
+            SessionContext::LegacyMissing | SessionContext::Unsupported => SessionPlace::Unusable,
+        })
+    }
+
+    /// What `session` needs from the user, as its sidebar row says. A turn on another
+    /// machine outlives Keystone, so one saved as running is running until its host says
+    /// how it ended, rather than cut off by the last quit as a local one is.
+    pub(crate) fn attention(
+        &self,
+        session: &keystone_core::Session,
+    ) -> Option<keystone_core::Attention> {
+        let live = self.conversations.get(&session.id());
+        let elsewhere = self.session_machine(session.id()).is_some()
+            && session.last_turn() == Some(keystone_core::LastTurn::Running);
+        session.attention(
+            live.is_some_and(|c| !c.approvals.is_empty()),
+            live.is_some_and(crate::Conversation::awaiting_input),
+            live.is_some_and(|c| c.running) || elsewhere,
+        )
+    }
+
+    /// Leave to read this machine's files for `session`, which only a session working
+    /// here has. See [`crate::local_files`].
+    pub(crate) fn local_files(&self, session: u64) -> Option<crate::local_files::LocalFiles> {
+        crate::local_files::LocalFiles::of(self.session(session)?.context())
+    }
+
+    /// The label of `machine`, or its ID once it is no longer linked.
+    pub(crate) fn machine_label(&self, machine: &MachineId) -> String {
+        self.store
+            .workspace()
+            .machine(machine)
+            .map_or_else(|| machine.to_string(), |m| m.label().to_owned())
+    }
+
     pub(crate) fn conversation_folder(&self, session: u64) -> Option<ConversationFolder> {
         self.store
             .workspace()
@@ -3714,6 +4321,9 @@ impl AppState {
             .map(|s| match s.context() {
                 SessionContext::Recorded { directory, .. } => {
                     ConversationFolder::Recorded(directory.clone())
+                }
+                SessionContext::Remote { machine, folder } => {
+                    ConversationFolder::Remote(machine.clone(), folder.clone())
                 }
                 SessionContext::LegacyMissing => ConversationFolder::LegacyMissing,
                 SessionContext::Unsupported => ConversationFolder::Unsupported,
@@ -3784,6 +4394,7 @@ impl AppState {
                 }
                 _ => Err("Not sent. This conversation's saved folder is unavailable."),
             },
+            ConversationFolder::Remote(..) => Err(REMOTE_LOCAL_FOLDER),
             ConversationFolder::LegacyMissing => Err(
                 "Not sent. Choose a conversation folder using the folder button beside the model.",
             ),

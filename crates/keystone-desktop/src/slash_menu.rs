@@ -279,15 +279,20 @@ impl Keystone {
     ) -> Option<String> {
         let state = self.state.read(cx);
         if state.catalog_key(session, provider).is_none() {
-            return Some(
-                match state.conversation_folder(session) {
-                    Some(presentation::ConversationFolder::LegacyMissing) => {
-                        "Choose a conversation folder to list commands."
-                    }
-                    _ => "Commands unavailable for this folder.",
+            return Some(match state.conversation_folder(session) {
+                Some(presentation::ConversationFolder::LegacyMissing) => {
+                    "Choose a conversation folder to list commands.".to_owned()
                 }
-                .to_owned(),
-            );
+                Some(presentation::ConversationFolder::Remote(machine, _)) => format!(
+                    "Commands on {} aren't listed yet.",
+                    state.machine_label(&machine)
+                ),
+                Some(
+                    presentation::ConversationFolder::Recorded(_)
+                    | presentation::ConversationFolder::Unsupported,
+                )
+                | None => "Commands unavailable for this folder.".to_owned(),
+            });
         }
         match state.commands(session, provider)? {
             Commands::Failed(message) => Some(format!("Couldn't list commands. {message}")),
@@ -352,8 +357,9 @@ impl Keystone {
     }
 
     /// The command that opens the provider's terminal in the session's folder on its
-    /// account, as they are now.
-    fn notice_command(&self, notice: &Notice, cx: &App) -> String {
+    /// account, as they are now. A session on another machine has no command here: its
+    /// terminal would be on that machine, so this says so instead, as `Err`.
+    fn notice_command(&self, notice: &Notice, cx: &App) -> Result<String, String> {
         let state = self.state.read(cx);
         let home = notice.account.as_ref().and_then(|id| {
             state
@@ -364,13 +370,17 @@ impl Keystone {
                 .find(|a| a.id() == id)
                 .map(|a| a.home().to_path_buf())
         });
-        let folder = match state.conversation_folder(notice.session) {
-            Some(presentation::ConversationFolder::Recorded(directory)) => {
-                directory.path().to_path_buf()
+        let folder = match state.place(notice.session) {
+            Some(presentation::SessionPlace::Local(directory)) => directory.path().to_path_buf(),
+            Some(presentation::SessionPlace::Remote(machine)) => {
+                return Err(format!(
+                    "{} runs only in a terminal, and Keystone can't open one on {machine} yet.",
+                    notice.invocation
+                ));
             }
-            _ => self.presentation_folder(),
+            Some(presentation::SessionPlace::Unusable) | None => self.presentation_folder(),
         };
-        terminal_command(notice.provider, home.as_deref(), &folder)
+        Ok(terminal_command(notice.provider, home.as_deref(), &folder))
     }
 
     /// The project folder, for a session whose own folder this version cannot use.
@@ -624,7 +634,18 @@ impl Keystone {
         notice: &Notice,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let command = self.notice_command(notice, cx);
+        let command = match self.notice_command(notice, cx) {
+            Ok(command) => command,
+            Err(elsewhere) => {
+                return v_flex()
+                    .id("slash-terminal")
+                    .automation_id("slash-terminal-elsewhere")
+                    .occlude()
+                    .p(spacing::MD)
+                    .surface(Elevation::Overlay, cx)
+                    .child(Label::new(elsewhere).size(TextSize::Ui).color(Color::Muted));
+            }
+        };
         let copied = notice.copied;
         v_flex()
             .id("slash-terminal")

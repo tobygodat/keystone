@@ -655,7 +655,7 @@ fn a_quit_refused_by_a_failed_save_leaves_the_script_running_and_the_next_stops_
             state.publish(cx);
         })
     });
-    cx.update(|_, cx| crate::request_quit(cx));
+    cx.update(|_, cx| crate::request_quit(cx, true));
     cx.run_until_parked();
     let phase = |view: &Entity<Keystone>, cx: &mut VisualTestContext| {
         view.read_with(cx, |this, cx| this.state.read(cx).phase)
@@ -669,7 +669,7 @@ fn a_quit_refused_by_a_failed_save_leaves_the_script_running_and_the_next_stops_
             .is_some_and(Setup::running)
     }));
     drop(writer);
-    cx.update(|_, cx| crate::request_quit(cx));
+    cx.update(|_, cx| crate::request_quit(cx, true));
     cx.run_until_parked();
     assert_eq!(phase(&view, cx), Phase::Exiting);
     assert!(

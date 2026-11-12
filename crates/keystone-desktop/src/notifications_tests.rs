@@ -470,7 +470,7 @@ fn a_notification_activated_while_quitting_changes_nothing(cx: &mut TestAppConte
     let state = launch(&seeded(dir.path(), |_| {}), cx);
     let first = view(WindowId::FIRST, cx);
     receive(&state, vec![(3, finished())], cx);
-    assert!(state.update(cx, |state, _| state.reserve_quit()));
+    assert!(state.update(cx, |state, _| state.reserve_quit(true)));
     cx.simulate_system_notification_response(SystemNotificationResponse {
         tag: "session-3".into(),
         action_id: None,

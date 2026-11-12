@@ -17,6 +17,7 @@ mod database;
 mod delivery;
 pub mod integrations;
 mod layout;
+mod machine;
 mod note;
 mod project;
 mod prompt;
@@ -44,6 +45,7 @@ pub use delivery::{Delivery, DeliveryState};
 pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,
 };
+pub use machine::{Machine, MachineId, RemoteFolder, check_destination};
 pub use note::Note;
 pub use project::{Project, ProjectColor, ProjectId};
 use project::{ProjectLayouts, ProjectMap};
@@ -350,11 +352,19 @@ impl Session {
     /// A session not yet sent from, with a placeholder title and an empty draft.
     fn new(id: u64, provider: Provider, directory: &WorkingDirectory, now: u64) -> Self {
         Session {
+            execution_context: SavedSessionContext::recorded(directory, ContextOrigin::Created),
+            ..Self::new_unplaced(id, provider, now)
+        }
+    }
+
+    /// [`Session::new`] with no folder, for a caller that sets its own context.
+    fn new_unplaced(id: u64, provider: Provider, now: u64) -> Self {
+        Session {
             id,
             title: format!("New {provider} session"),
             title_source: TitleSource::Placeholder,
             provider,
-            execution_context: SavedSessionContext::recorded(directory, ContextOrigin::Created),
+            execution_context: SavedSessionContext::Missing,
             settled: false,
             draft: String::new(),
             draft_attachments: Vec::new(),
@@ -401,6 +411,12 @@ impl Session {
 
     pub fn worktree(&self) -> Option<&WorktreeContext> {
         self.execution_context.worktree()
+    }
+
+    /// The machine the session runs on. `None` is this machine. Fixed when the
+    /// session is created.
+    pub fn machine(&self) -> Option<&MachineId> {
+        self.execution_context.machine()
     }
 
     pub fn settled(&self) -> bool {
@@ -803,11 +819,33 @@ pub struct Workspace {
     commit_drafts: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scheduled_tasks: Vec<ScheduledTask>,
+    /// Machines the user linked, in the order they were linked. Saved in their own
+    /// projection, never in the workspace payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    machines: Vec<Machine>,
+    /// The random ID this workspace gives every linked machine's host, so two
+    /// workspaces linked to one machine never see each other's sessions. Made when the
+    /// first machine is linked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_client: Option<String>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
 
 impl Workspace {
+    pub fn machines(&self) -> &[Machine] {
+        &self.machines
+    }
+
+    pub fn machine(&self, id: &MachineId) -> Option<&Machine> {
+        self.machines.iter().find(|machine| machine.id() == id)
+    }
+
+    /// See [`Workspace::remote_client`]'s field. `None` until a machine is linked.
+    pub fn remote_client(&self) -> Option<&str> {
+        self.remote_client.as_deref()
+    }
+
     pub fn sessions(&self) -> &[Session] {
         &self.sessions
     }
@@ -1210,8 +1248,12 @@ impl Store {
             .iter()
             .find(|session| session.id == source)
             .ok_or_else(|| invalid(format!("unknown session ID {source}")))?;
-        let SessionContext::Recorded { directory, .. } = from.context() else {
-            return Err(invalid("choose this session's folder before handing it off").into());
+        let directory = match from.context() {
+            SessionContext::Recorded { directory, .. } => directory,
+            SessionContext::Remote { .. } => {
+                return Err(invalid(REMOTE_HANDOFF).into());
+            }
+            _ => return Err(invalid("choose this session's folder before handing it off").into()),
         };
         let directory = directory.clone();
         let worktree = from.worktree().cloned();
@@ -1269,8 +1311,10 @@ impl Store {
             .iter()
             .find(|session| session.id == source)
             .ok_or_else(|| invalid(format!("unknown session ID {source}")))?;
-        let SessionContext::Recorded { directory, .. } = from.context() else {
-            return Err(invalid("choose this session's folder before forking it").into());
+        let directory = match from.context() {
+            SessionContext::Recorded { directory, .. } => directory,
+            SessionContext::Remote { .. } => return Err(invalid(REMOTE_FORK).into()),
+            _ => return Err(invalid("choose this session's folder before forking it").into()),
         };
         let mut fork = Session::new(0, from.provider, directory, now);
         fork.execution_context = from.execution_context.clone();
@@ -1755,6 +1799,109 @@ impl Store {
         Ok(self.commit(next, self.next_id))
     }
 
+    /// Saves a machine reached at `destination`, once its host answered. `client` is
+    /// a new random ID, kept as the workspace's own when it has none yet. Refuses a
+    /// destination [`check_destination`] refuses or that a linked machine already uses.
+    pub fn link_machine(
+        &mut self,
+        destination: &str,
+        client: String,
+    ) -> StoreResult<Applied<MachineId>> {
+        let destination = destination.trim();
+        check_destination(destination).map_err(invalid)?;
+        if let Some(linked) = self
+            .workspace
+            .machines
+            .iter()
+            .find(|machine| machine.destination() == destination)
+        {
+            return Err(invalid(format!("{} is already linked", linked.label())).into());
+        }
+        let taken: Vec<MachineId> = self
+            .workspace
+            .machines
+            .iter()
+            .map(|machine| machine.id().clone())
+            .collect();
+        let id = machine::slug(destination, &taken);
+        let mut next = self.workspace.clone();
+        next.machines
+            .push(Machine::new(id.clone(), destination.to_owned()));
+        next.remote_client.get_or_insert(client);
+        let applied = self.commit(next, self.next_id);
+        Ok(Applied {
+            value: id,
+            revision: applied.revision,
+        })
+    }
+
+    /// Forgets a machine. Refused while any session runs on it, so no session loses
+    /// the machine its conversation lives on.
+    pub fn remove_machine(&mut self, id: &MachineId) -> StoreResult<Applied<()>> {
+        if self.workspace.machine(id).is_none() {
+            return Err(invalid(format!("unknown machine {id}")).into());
+        }
+        let users = self
+            .workspace
+            .sessions
+            .iter()
+            .filter(|session| session.machine() == Some(id))
+            .count();
+        if users > 0 {
+            return Err(invalid(format!(
+                "{users} session{} run{} on this machine; it stays until none does",
+                if users == 1 { "" } else { "s" },
+                if users == 1 { "s" } else { "" },
+            ))
+            .into());
+        }
+        let mut next = self.workspace.clone();
+        next.machines.retain(|machine| machine.id() != id);
+        Ok(self.commit(next, self.next_id))
+    }
+
+    /// Whether Quit ends the machine's sessions instead of leaving them running.
+    pub fn set_machine_end_on_quit(
+        &mut self,
+        id: &MachineId,
+        end: bool,
+    ) -> StoreResult<Applied<()>> {
+        let mut next = self.workspace.clone();
+        let machine = next
+            .machines
+            .iter_mut()
+            .find(|machine| machine.id() == id)
+            .ok_or_else(|| invalid(format!("unknown machine {id}")))?;
+        machine.set_end_on_quit(end);
+        if next == self.workspace {
+            return Ok(self.unchanged());
+        }
+        Ok(self.commit(next, self.next_id))
+    }
+
+    /// Creates a Claude session in `folder` on `machine` and selects it in `window`,
+    /// saving `show` with it as [`Store::create_showing`] does. Its machine is fixed
+    /// from now on. Only Claude runs on other machines so far.
+    pub fn create_remote_showing(
+        &mut self,
+        machine: &MachineId,
+        folder: &RemoteFolder,
+        now: u64,
+        window: WindowId,
+        show: Option<(&ProjectId, Composition, SessionTabs, ViewId)>,
+    ) -> StoreResult<Applied<u64>> {
+        if self.workspace.machine(machine).is_none() {
+            return Err(invalid(format!("unknown machine {machine}")).into());
+        }
+        self.add_session(
+            |id| Session {
+                execution_context: SavedSessionContext::remote(machine, folder),
+                ..Session::new_unplaced(id, Provider::Claude, now)
+            },
+            Opening::Window(window, show),
+        )
+    }
+
     /// Removes an account Keystone no longer offers. Refused while any session uses
     /// it, so no session is ever moved to another account behind the user's back.
     /// Its home folder and everything in it stay on disk.
@@ -2084,6 +2231,9 @@ impl Store {
     }
 }
 
+const REMOTE_HANDOFF: &str = "a session on another machine can't be handed off yet";
+const REMOTE_FORK: &str = "a session on another machine can't be forked yet";
+
 fn validate(snapshot: &Snapshot) -> StoreResult<()> {
     if snapshot.version != FORMAT_VERSION {
         return Err(invalid(format!(
@@ -2122,6 +2272,15 @@ fn validate(snapshot: &Snapshot) -> StoreResult<()> {
             || !accounts.insert(account.id())
         {
             return Err(invalid("invalid or duplicate account ID").into());
+        }
+    }
+    let mut machines = HashSet::new();
+    for machine in &snapshot.workspace.machines {
+        if machine.id().as_str().is_empty()
+            || !machines.insert(machine.id())
+            || check_destination(machine.destination()).is_err()
+        {
+            return Err(invalid("invalid or duplicate machine").into());
         }
     }
     let mut prompts = HashSet::new();

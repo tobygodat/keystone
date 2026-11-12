@@ -640,6 +640,27 @@ impl Conversation {
         self.write(Entry::ProviderExited, true);
     }
 
+    /// What the machine running a session on another machine reports about it, after
+    /// Keystone reconnects: whether its turn runs and the approvals it waits on. The
+    /// turn a restart left open went on there, so its marker says so instead of calling
+    /// it interrupted, and no recovery runs. Loaded conversations only.
+    pub fn host_state(&mut self, running: bool, approvals: Vec<Approval>, note: String) {
+        if self.pending.is_some() {
+            return;
+        }
+        if let Some(marker) = self.closed_marker.take() {
+            self.rows[marker] = Row::Note(note);
+            self.mark(marker);
+        }
+        if self.uncertain_tail && running {
+            self.running = true;
+        }
+        self.uncertain_tail = false;
+        for approval in approvals {
+            self.apply(Event::ApprovalRequested(approval));
+        }
+    }
+
     /// Checks the last turn again, open or not as the earlier check found it.
     pub fn recheck(&mut self, open: bool) {
         self.uncertain_tail = open;
@@ -1151,7 +1172,12 @@ impl Conversation {
                 let index = self.place(item.clone());
                 self.log_item(index, item);
             }
-            Event::ApprovalRequested(approval) => self.approvals.push(approval),
+            Event::ApprovalRequested(approval) => {
+                // A host's report of a session can show an approval its event also brings.
+                if !self.approvals.iter().any(|a| a.request == approval.request) {
+                    self.approvals.push(approval)
+                }
+            }
             Event::QuestionAsked(question) => {
                 let answers = vec![Answer::default(); question.fields.len()];
                 self.questions.push(Asked { question, answers });

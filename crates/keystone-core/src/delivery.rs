@@ -189,9 +189,12 @@ mod tests {
         for (version, removed) in [
             (
                 3,
-                "DROP TABLE notes; DROP TABLE deliveries; DROP TABLE prompts;",
+                "DROP TABLE machines; DROP TABLE notes; DROP TABLE deliveries; DROP TABLE prompts;",
             ),
-            (4, "DROP TABLE notes; DROP TABLE deliveries;"),
+            (
+                4,
+                "DROP TABLE machines; DROP TABLE notes; DROP TABLE deliveries;",
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("workspace.json");
@@ -244,7 +247,7 @@ mod tests {
                 .query_one("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(schema, crate::database::SCHEMA_VERSION);
-            assert_eq!(schema, 6);
+            assert_eq!(schema, 7);
         }
     }
 
