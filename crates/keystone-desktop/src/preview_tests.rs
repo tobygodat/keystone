@@ -11,13 +11,7 @@ const REPLY: &str =
     "Here it is.\n\n![](./shot.png)\n\n![](../outside.png)\n\n![](http://127.0.0.1:9/remote.png)";
 
 fn claude(dir: &Path) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("keystone-fake-claude");
+    let binary = keystone_core::test_support::built_binary("keystone-fake-claude");
     let environment = serde_json::json!({
         "KEYSTONE_FAKE_CLAUDE_DELAY_MS": "2",
         "KEYSTONE_FAKE_CLAUDE_REPLY": REPLY,

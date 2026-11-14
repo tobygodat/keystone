@@ -9,17 +9,7 @@ use std::time::{Duration, Instant};
 
 /// A built binary beside the test executable.
 fn binary(name: &str) -> PathBuf {
-    let path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(name);
-    assert!(
-        path.is_file(),
-        "build {name} first: cargo build -p keystone-agent --bins"
-    );
+    let path = keystone_core::test_support::built_binary(name);
     path
 }
 

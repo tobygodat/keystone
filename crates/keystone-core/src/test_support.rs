@@ -2,8 +2,28 @@
 //! `test-support` feature, for the other crates' tests.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+/// The binary `name` that cargo built for this workspace, such as `keystone-fake-claude`.
+///
+/// Cargo puts built binaries in `target/<profile>` and runs a test binary from a folder
+/// below it. How far below changed in Cargo 1.100 (`deps/` before, `build/<package>/<hash>/out/`
+/// after) and is not a stable interface, so this takes the nearest folder above the test
+/// binary that holds `name`.
+pub fn built_binary(name: &str) -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    exe.ancestors()
+        .skip(1)
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "build {name} first: cargo build -p keystone-agent --bins (no folder above {} holds it)",
+                exe.display()
+            )
+        })
+}
 
 /// Writes `contents` to `path` and makes it executable, so a test can run it at once.
 ///

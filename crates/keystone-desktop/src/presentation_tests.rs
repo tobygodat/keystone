@@ -772,28 +772,12 @@ fn first_send_lock_waits_for_the_send_barrier_when_its_sync_is_pending(cx: &mut 
 }
 
 fn fake_codex() -> std::path::PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    exe.parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("keystone-fake-codex")
+    keystone_core::test_support::built_binary("keystone-fake-codex")
 }
 
 /// The scripted Claude itself, run straight from the build, so the test writes no script.
 fn fake_claude() -> std::path::PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let fake = exe
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("keystone-fake-claude");
-    assert!(
-        fake.exists(),
-        "build it with `cargo build -p keystone-agent --bins`"
-    );
-    fake
+    keystone_core::test_support::built_binary("keystone-fake-claude")
 }
 
 fn logged_claude(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {

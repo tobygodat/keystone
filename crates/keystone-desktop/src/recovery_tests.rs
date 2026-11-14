@@ -535,13 +535,7 @@ fn a_recovery_the_log_budget_rejects_says_it_is_not_saved_and_continue_goes_on(
 
 /// A scripted provider that records its store and keeps Keystone's environment.
 fn store_wrapper(dir: &Path, name: &str) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("keystone-fake-{name}"));
+    let binary = keystone_core::test_support::built_binary(&format!("keystone-fake-{name}"));
     let environment = json!({
         "KEYSTONE_FAKE_CODEX_DELAY_MS": "5",
         "KEYSTONE_FAKE_CLAUDE_DELAY_MS": "5",
@@ -1178,13 +1172,7 @@ fn a_result_waits_for_its_parents_recovery_check_and_acknowledgement(
     store
         .set_delivery(child, DeliveryState::Ready { message })
         .unwrap();
-    let claude = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("keystone-fake-claude");
+    let claude = keystone_core::test_support::built_binary("keystone-fake-claude");
     cx.executor().allow_parking();
     // Nothing asks for the parent's history: the ready result loads it at startup.
     let state = cx.new(|cx| {

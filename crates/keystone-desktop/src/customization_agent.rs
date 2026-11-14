@@ -654,12 +654,7 @@ pub(crate) mod tests_support {
     use std::path::{Path, PathBuf};
 
     pub(crate) fn wrapper(dir: &Path, name: &str, env: &str) -> PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        let fake = exe.parent().unwrap().parent().unwrap().join(name);
-        assert!(
-            fake.exists(),
-            "build it with `cargo build -p keystone-agent --bins`"
-        );
+        let fake = keystone_core::test_support::built_binary(name);
         let script = dir.join(format!("{name}-wrapper"));
         keystone_core::test_support::write_executable(
             &script,

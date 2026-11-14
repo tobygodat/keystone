@@ -6,14 +6,7 @@ fn scripted(provider: Provider) -> PathBuf {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
     };
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("keystone-fake-{name}"));
-    assert!(binary.is_file(), "build scripted provider binaries first");
+    let binary = keystone_core::test_support::built_binary(&format!("keystone-fake-{name}"));
     binary
 }
 

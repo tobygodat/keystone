@@ -7847,17 +7847,10 @@ mod tests {
         );
     }
 
-    /// A scripted provider built by `keystone-agent`. Test binaries live in
-    /// target/<profile>/deps; the scripts are one level up. `scripts/check.sh ui` builds
-    /// them first.
+    /// A scripted provider built by `keystone-agent`. `scripts/check.sh ui` builds them
+    /// first.
     fn fake(name: &str) -> PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        let path = exe.parent().unwrap().parent().unwrap().join(name);
-        assert!(
-            path.exists(),
-            "build it with `cargo build -p keystone-agent --bins`"
-        );
-        path
+        keystone_core::test_support::built_binary(name)
     }
 
     /// Points Keystone at the scripted Codex. The variables are process-wide, so every

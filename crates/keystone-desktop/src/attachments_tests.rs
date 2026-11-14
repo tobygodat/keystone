@@ -20,13 +20,7 @@ fn sha256(bytes: &[u8]) -> String {
 
 /// A scripted provider with short delays, writing its image receipt in `dir`.
 fn wrapper(dir: &Path, name: &str) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("keystone-fake-{name}"));
+    let binary = keystone_core::test_support::built_binary(&format!("keystone-fake-{name}"));
     let environment = serde_json::json!({
         "KEYSTONE_FAKE_CODEX_DELAY_MS": "2",
         "KEYSTONE_FAKE_CLAUDE_DELAY_MS": "2",

@@ -14,19 +14,8 @@ use std::time::Duration;
 /// The scripted providers, each run with this test's own default config home and
 /// writing an environment receipt, so no run reads the user's own.
 fn fake_programs(dir: &Path) -> (PathBuf, PathBuf) {
-    let bins = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_owned();
     let wrap = |name: &str, var: &str| {
-        let binary = bins.join(format!("keystone-fake-{name}"));
-        assert!(
-            binary.exists(),
-            "build it with `cargo build -p keystone-agent --bins`"
-        );
+        let binary = keystone_core::test_support::built_binary(&format!("keystone-fake-{name}"));
         let script = dir.join(format!("{name}-limit-wrapper"));
         let root = dir.display();
         keystone_core::test_support::write_executable(

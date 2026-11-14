@@ -22,17 +22,7 @@ fn skill(root: &Path, name: &str) {
 
 /// A wrapper that runs the scripted provider `name` with `env` set.
 fn fake(dir: &Path, name: &str, env: &str) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(name);
-    assert!(
-        binary.exists(),
-        "build it with `cargo build -p keystone-agent --bins`"
-    );
+    let binary = keystone_core::test_support::built_binary(name);
     let script = dir.join(format!("{name}-wrapper"));
     keystone_core::test_support::write_executable(
         &script,

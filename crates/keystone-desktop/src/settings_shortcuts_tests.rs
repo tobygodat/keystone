@@ -64,13 +64,7 @@ fn open_window<'a>(
 /// A scripted provider built beside this test binary, run as it is, so a session the
 /// recorded keys start never reaches the real `claude` or `codex`.
 fn fake(name: &str) -> std::path::PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let path = exe.parent().unwrap().parent().unwrap().join(name);
-    assert!(
-        path.exists(),
-        "build it with `cargo build -p keystone-agent --bins`"
-    );
-    path
+    keystone_core::test_support::built_binary(name)
 }
 
 fn shown(cx: &mut VisualTestContext, selector: &'static str) -> bool {

@@ -93,13 +93,29 @@ impl RenderOnce for Label {
                 if self.truncate {
                     d.min_w_0()
                         .overflow_hidden()
-                        .child(Truncated { text: self.text })
+                        .child(Truncated {
+                            text: one_line(self.text),
+                        })
                         .into_any_element()
                 } else {
                     d.child(self.text).into_any_element()
                 }
             })
     }
+}
+
+/// `text` with each run of line breaks made one space. `shape_line` takes a single line,
+/// and text from outside, such as a provider's error, can span several.
+fn one_line(text: SharedString) -> SharedString {
+    if !text.contains(['\n', '\r']) {
+        return text;
+    }
+    text.split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .into()
 }
 
 /// One line of text cut to its final width with a trailing "…". GPUI 0.2.2's
@@ -232,6 +248,16 @@ mod tests {
             assert!(!kept.is_empty() && title.starts_with(kept), "{}", cut.text);
             assert!(!kept.ends_with(' '));
             assert!(cut.width <= width, "{:?} > {width:?}", cut.width);
+
+            let lines = one_line("Traceback:\n  File \"codex\"\r\n\nFileNotFoundError".into());
+            assert_eq!(
+                lines.as_ref(),
+                "Traceback: File \"codex\" FileNotFoundError"
+            );
+            assert_eq!(
+                fit(shape(lines.clone(), window), px(1000.), window).text,
+                lines
+            );
 
             assert_eq!(
                 fit(shape(title.into(), window), px(0.), window)

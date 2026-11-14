@@ -50,17 +50,7 @@ fn open<'a>(
     store
         .set_draft(1, "Saved draft before Send".into())
         .unwrap();
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("keystone-fake-codex");
-    assert!(
-        binary.is_file(),
-        "build scripted providers with the UI lane"
-    );
+    let binary = keystone_core::test_support::built_binary("keystone-fake-codex");
     let script = dir.join("codex-wrapper");
     keystone_core::test_support::write_executable(
         &script,

@@ -34,9 +34,12 @@ jobs:
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libxcb1-dev libvulkan1
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # rust-toolchain.toml names the exact release, its components and targets.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc -V
 
       # GITHUB_TOKEN only reads Keystone; this deploy key only reads tGPUI.
       - name: Let cargo fetch the private tGPUI fork

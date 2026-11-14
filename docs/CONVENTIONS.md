@@ -4,6 +4,8 @@
 
 Cargo lives in `~/.cargo/bin`. Put it on `PATH` (`export PATH=$HOME/.cargo/bin:$PATH`) in a non-login shell.
 
+`rust-toolchain.toml` pins the exact Rust release, with clippy, rustfmt and the targets `check.sh apple` and `check.sh linux` need. CI installs the same file. rustup installs that toolchain the first time cargo runs in the checkout, unless auto-install is off (`rustup set auto-install disable` or `RUSTUP_AUTO_INSTALL=0`). Then run `rustup toolchain install` in the checkout. Moving to a new release is a PR that changes the file, so a new stable release can't change CI on its own.
+
 - `cargo run -p keystone-desktop --locked` runs the app in a Linux graphical session or on an Apple Silicon Mac. Set `KEYSTONE_STATE_PATH` to an isolated path so a test run doesn't touch your real workspace.
 - `cargo run -p keystone-ui --example gallery` shows every component in every state.
 - `KEYSTONE_VISUAL_FIXTURE=1` shows a labeled sample transcript (Markdown, a list, a table and a code block) in the normal window.

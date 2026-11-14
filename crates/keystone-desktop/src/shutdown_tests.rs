@@ -72,14 +72,7 @@ fn tracked_provider(dir: &Path, provider: Provider, starting: bool) -> PathBuf {
         Provider::Codex => "codex",
         Provider::Claude => "claude",
     };
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("keystone-fake-{name}"));
-    assert!(binary.is_file());
+    let binary = keystone_core::test_support::built_binary(&format!("keystone-fake-{name}"));
     let path = dir.join(format!("{name}-wrapper"));
     let code = format!(
         "#!/usr/bin/python3\nimport os,subprocess,sys,time\nprobe = '--version' in sys.argv\nif not probe or {starting}:\n child = subprocess.Popen(['/bin/sleep','60'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n with open({},'a') as f: f.write(f'{{os.getpid()}} {{child.pid}}\\n')\nif probe and {starting}: time.sleep(1)\nos.execve({},[{}]+sys.argv[1:],{{'PATH':'/usr/bin:/bin','KEYSTONE_FAKE_CODEX_DELAY_MS':'150','KEYSTONE_FAKE_CLAUDE_DELAY_MS':'150'}})\n",

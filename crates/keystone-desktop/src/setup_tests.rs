@@ -21,17 +21,7 @@ fn git(directory: &Path, args: &[&str]) {
 }
 
 fn fake_claude(dir: &Path) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("keystone-fake-claude");
-    assert!(
-        binary.exists(),
-        "build keystone-fake-claude first: cargo build -p keystone-agent --bins"
-    );
+    let binary = keystone_core::test_support::built_binary("keystone-fake-claude");
     let script = dir.join("claude-setup-wrapper");
     keystone_core::test_support::write_executable(
         &script,

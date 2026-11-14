@@ -22,17 +22,7 @@ fn write(path: &Path, text: &str) {
 /// settings file shortens its pause between words. It runs as built, with no wrapper
 /// script for the test to write and then execute.
 fn claude(folder: &Path) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("keystone-fake-claude");
-    assert!(
-        binary.exists(),
-        "build keystone-fake-claude first: cargo build -p keystone-agent --bins"
-    );
+    let binary = keystone_core::test_support::built_binary("keystone-fake-claude");
     write(&folder.join(".fake-claude-delay-ms"), "2");
     binary
 }

@@ -12,13 +12,7 @@ const TEN_MINUTES: Duration = Duration::from_secs(600);
 
 /// The scripted Claude in idle mode, logging its launches, environment and messages.
 fn idle_claude(dir: &Path) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("keystone-fake-claude");
+    let binary = keystone_core::test_support::built_binary("keystone-fake-claude");
     let environment = json!({
         "KEYSTONE_FAKE_CLAUDE_IDLE": "1",
         "KEYSTONE_FAKE_CLAUDE_DELAY_MS": "1",

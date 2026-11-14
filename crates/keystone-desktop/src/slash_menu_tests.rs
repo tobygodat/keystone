@@ -14,13 +14,7 @@ fn write(path: &Path, text: &str) {
 
 /// A scripted provider with short delays and, for Claude, its message log in `dir`.
 fn wrapper(dir: &Path, name: &str) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("keystone-fake-{name}"));
+    let binary = keystone_core::test_support::built_binary(&format!("keystone-fake-{name}"));
     let environment = serde_json::json!({
         "KEYSTONE_FAKE_CODEX_DELAY_MS": "2",
         "KEYSTONE_FAKE_CLAUDE_DELAY_MS": "2",
@@ -411,6 +405,35 @@ fn a_failed_command_list_can_be_retried_from_the_menu(cx: &mut TestAppContext) {
     cx.simulate_click(retry.center(), gpui::Modifiers::none());
     wait(cx, &view, listed);
     assert!(cx.debug_bounds("slash-menu-retry").is_none());
+}
+
+/// A provider that fails to list its commands can say why on several lines, as a
+/// traceback does. The menu shows it on one line, with its Retry.
+#[gpui::test]
+fn a_command_list_failure_on_several_lines_shows_on_one(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(Provider::Codex, cx);
+    cx.simulate_input("/");
+    wait(cx, &view, listed);
+    view.update(cx, |view, cx| {
+        view.state.update(cx, |state, _| {
+            let key = state.catalog_key(1, Provider::Codex).unwrap();
+            let account = key.account.clone();
+            let catalogs = state.test_catalogs_mut();
+            catalogs.clear(&key);
+            assert!(catalogs.ask(key, 1));
+            let failed = Commands::Failed(
+                "Traceback (most recent call last):\n  File \"codex\", line 5\r\nFileNotFoundError"
+                    .into(),
+            );
+            catalogs.apply_commands(Provider::Codex, account, 1, failed);
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("slash-menu-retry").is_some(),
+        "the menu draws the failure with its Retry"
+    );
 }
 
 /// A session whose folder this version cannot use says why instead of loading forever.

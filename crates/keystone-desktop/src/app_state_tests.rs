@@ -28,17 +28,7 @@ fn wrapper(dir: &Path, provider: Provider, delay_ms: u64, descendants: bool) -> 
         Provider::Codex => "codex",
         Provider::Claude => "claude",
     };
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("keystone-fake-{name}"));
-    assert!(
-        binary.is_file(),
-        "build scripted providers with the UI lane"
-    );
+    let binary = keystone_core::test_support::built_binary(&format!("keystone-fake-{name}"));
     let environment = serde_json::json!({
         "PATH": "/usr/bin:/bin",
         "KEYSTONE_FAKE_CODEX_DELAY_MS": delay_ms.to_string(),
@@ -752,13 +742,7 @@ fn recovered_provider_metadata_invalidates_the_cached_sidebar(cx: &mut gpui::Tes
 /// A scripted provider that keeps the environment Keystone gave it, so its env receipt
 /// shows the account home it ran under.
 fn account_wrapper(dir: &Path, name: &str) -> PathBuf {
-    let binary = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("keystone-fake-{name}"));
+    let binary = keystone_core::test_support::built_binary(&format!("keystone-fake-{name}"));
     let environment = serde_json::json!({
         "KEYSTONE_FAKE_ENV_RECEIPT": dir.join("receipts.jsonl").to_str().unwrap(),
         "KEYSTONE_FAKE_CODEX_DELAY_MS": "5",
