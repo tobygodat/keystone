@@ -2,7 +2,7 @@
 //! It reads the saved log, so it covers every session in the workspace, settled ones and
 //! those on other machines included, whether or not their history is loaded.
 
-use crate::item::ItemKind;
+use crate::item::{Item, ItemKind};
 use crate::log::Entry;
 use keystone_core::Database;
 use keystone_core::search::{Query, Snippet, snippet};
@@ -42,22 +42,27 @@ const KIND_WITHIN: usize = 512;
 /// Returns `None` when `cancelled` turns true first, so a newer query can take over.
 /// Tool output, reasoning and commands are not searched: the sidebar finds what was
 /// said.
-pub fn messages(
+///
+/// Each message is searched as the texts its row draws, which `drawn` gives for the
+/// session and the message: a reply's Markdown texts, so a link's address or the
+/// asterisks around a bold word are not found, just as find in the session does not
+/// find them.
+pub fn messages<T: AsRef<str>>(
     database: &Database,
     query: &Query,
+    drawn: impl Fn(u64, &Item) -> Vec<T>,
     cancelled: impl Fn() -> bool,
 ) -> io::Result<Option<Found>> {
-    // The log saves text as JSON, which escapes quotes, backslashes and control
-    // characters. For a query without them, text that holds the query has it in its
-    // saved form too, so other entries need no parsing.
-    let screen = !query
-        .typed()
-        .chars()
-        .any(|c| c == '"' || c == '\\' || c.is_control());
+    // Markdown's syntax is ASCII punctuation and whitespace, and the log saves text as
+    // JSON, which escapes quotes, backslashes and control characters. So a message whose
+    // drawn text holds the query holds the query's longest run of other characters in
+    // its saved form, and other entries need no parsing.
+    let screen = longest_word(query.typed()).and_then(Query::new);
     let kinds = [
         Finder::new(br#""kind":{"type":"user_message"}"#),
         Finder::new(br#""kind":{"type":"agent_message"}"#),
     ];
+    // Whether an entry is a saved message, by its kind near its start.
     let message = |payload: &str| {
         let head = &payload.as_bytes()[..payload.len().min(KIND_WITHIN)];
         kinds.iter().any(|kind| kind.find(head).is_some())
@@ -71,7 +76,10 @@ pub fn messages(
             stopped = true;
             return false;
         }
-        if done.contains(&session) || !message(payload) || (screen && !query.is_in(payload)) {
+        if done.contains(&session) {
+            return true;
+        }
+        if !message(payload) || screen.as_ref().is_some_and(|word| !word.is_in(payload)) {
             return true;
         }
         found.parsed += 1;
@@ -81,17 +89,30 @@ pub fn messages(
         if !matches!(item.kind, ItemKind::UserMessage | ItemKind::AgentMessage) {
             return true;
         }
-        if let Some(first) = query.find(&item.text).into_iter().next() {
+        let texts = drawn(session, &item);
+        if let Some((text, first)) = texts.iter().find_map(|text| {
+            let text = text.as_ref();
+            Some((text, query.find(text).into_iter().next()?))
+        }) {
             done.insert(session);
             found.hits.push(MessageHit {
                 session,
-                snippet: snippet(&item.text, first),
+                snippet: snippet(text, first),
                 item: item.id,
             });
         }
         true
     })?;
     Ok((!stopped).then_some(found))
+}
+
+/// The longest run of `typed` without whitespace, ASCII punctuation or control
+/// characters, if any.
+fn longest_word(typed: &str) -> Option<&str> {
+    typed
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation() || c.is_control())
+        .max_by_key(|word| word.chars().count())
+        .filter(|word| !word.is_empty())
 }
 
 #[cfg(test)]

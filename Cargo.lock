@@ -2874,6 +2874,7 @@ dependencies = [
  "keystone-core",
  "libc",
  "memchr",
+ "pulldown-cmark",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2888,6 +2889,7 @@ name = "keystone-core"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "icu_normalizer",
  "libc",
  "memchr",
  "percent-encoding",
@@ -2898,7 +2900,9 @@ dependencies = [
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "toml_edit 0.25.17+spec-1.1.0",
+ "unicase",
  "unicode-segmentation",
+ "unicode-width",
  "url",
 ]
 

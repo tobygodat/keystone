@@ -259,6 +259,114 @@ fn typing_more_of_a_query_reads_no_row_again(cx: &mut gpui::TestAppContext) {
     assert_eq!(second, 0, "a longer query searches the texts already read");
 }
 
+#[gpui::test]
+fn enter_waits_for_a_new_query_and_the_count_keeps_the_field_still(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let needles: Vec<usize> = (0..12).map(|n| 10 + n * 15).collect();
+    let path = find_workspace(dir.path(), 200, &needles, &[]);
+    let (view, cx) = open_find_window(&path, 600, cx);
+    cx.simulate_keystrokes("secondary-f");
+    let empty = cx.debug_bounds("find-field").unwrap();
+    cx.simulate_input("needle");
+    shows(&view, cx, "1 of 12");
+    let one = cx.debug_bounds("find-field").unwrap();
+    for _ in 0..9 {
+        cx.simulate_keystrokes("enter");
+    }
+    shows(&view, cx, "10 of 12");
+    let ten = cx.debug_bounds("find-field").unwrap();
+    assert_eq!(
+        (empty.size.width, one.size.width),
+        (ten.size.width, ten.size.width),
+        "the count's slot keeps one width"
+    );
+
+    let row = current_row(&view, cx);
+    view.update(cx, |this, cx| {
+        let input = this.finds.bars[&MAIN_1].input.clone();
+        input.update(cx, |input, cx| input.set_value("needle you".to_owned(), cx));
+        this.search_find(MAIN_1, crate::find::Reason::Typed, cx);
+        this.step_find(MAIN_1, false, cx);
+        let bar = &this.finds.bars[&MAIN_1];
+        assert_eq!(bar.count(cx), None, "the old count goes as the query changes");
+        assert_eq!(bar.matches[bar.current.unwrap()].row, row, "Enter waits");
+    });
+    // The new query lands on the first match from the top of the view.
+    shows(&view, cx, "10 of 12");
+}
+
+#[gpui::test]
+fn an_edit_row_is_searched_by_its_paths_and_preview_lines(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::diff::{FileDiff, Hunk, Patch};
+    use keystone_agent::log::{Entry, SessionLog};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.json");
+    let mut store = Store::open(&path).unwrap();
+    store.create(Provider::Codex, &working_directory(), 1).unwrap();
+    drop(store);
+    let mut log = SessionLog::open(&dir.path().join("sessions"), 1).unwrap();
+    let item = |id: &str, kind: ItemKind, text: &str| Entry::Item {
+        item: Item {
+            id: id.into(),
+            kind,
+            text: text.into(),
+            status: ItemStatus::Completed,
+        },
+        seq: None,
+        run: None,
+    };
+    let lines = ["+fn first() {}", "+// the giraffe line", "+fn last() {}"]
+        .map(String::from)
+        .to_vec();
+    let patch = Patch::edit(vec![FileDiff {
+        path: "src/zebra_edit.rs".into(),
+        hunks: vec![Hunk::new(1, 1, lines).unwrap()],
+        ..FileDiff::default()
+    }]);
+    log.append(&Entry::TurnStarted).unwrap();
+    log.append(&item("u", ItemKind::UserMessage, "Add the functions")).unwrap();
+    log.append(&item(
+        "edit",
+        ItemKind::FileChange {
+            paths: vec!["src/zebra_edit.rs".into()],
+            patch: Some(patch),
+        },
+        "",
+    ))
+    .unwrap();
+    log.append(&item("a", ItemKind::AgentMessage, "Done.")).unwrap();
+    log.append(&Entry::TurnEnded {
+        status: TurnStatus::Completed,
+        error: None,
+        limit: None,
+        seq: None,
+        run: None,
+    })
+    .unwrap();
+    let (view, cx) = open_find_window(&path, 3, cx);
+    cx.simulate_keystrokes("secondary-f");
+    cx.simulate_input("zebra_edit");
+    shows(&view, cx, "1 of 1");
+    assert_eq!(current_row(&view, cx), 1, "the edit's label holds its path");
+
+    view.update_in(cx, |this, window, cx| {
+        let input = this.finds.bars[&MAIN_1].input.clone();
+        input.update(cx, |input, cx| input.select_all(&keystone_ui::text_input::SelectAll, window, cx));
+    });
+    cx.simulate_input("GIRAFFE");
+    shows(&view, cx, "1 of 1");
+    cx.run_until_parked();
+    let marks = view.read_with(cx, |v, _| v.finds.bars[&MAIN_1].marks(1));
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].text, 2, "the label, then the preview's lines");
+    assert!(
+        cx.debug_bounds("edit-1-line-1").is_some(),
+        "finding a line of the preview opens the edit"
+    );
+}
+
 /// A workspace of sessions 1 to 3, titled Alpha, Needle notes and Gamma, with Gamma
 /// settled. Each session's messages are `messages[n]`, oldest first; session 1 also has
 /// `filler` turns before its messages, so it is long enough to scroll.
@@ -435,6 +543,181 @@ fn clicking_a_message_result_opens_its_session(cx: &mut gpui::TestAppContext) {
                 .get(&key)
                 .is_some_and(|bar| bar.count(cx).as_deref() == Some("1 of 1"))
     });
+}
+
+#[gpui::test]
+fn the_sidebar_finds_a_reply_by_the_text_it_draws(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = search_workspace(
+        dir.path(),
+        [&["See [the docs](https://zebra.example/guide) for the **sharp needle**."], &[], &[]],
+        0,
+    );
+    let (view, cx) = open_window(&path, cx);
+    cx.run_until_parked();
+    type_search(&view, cx, "zebra");
+    assert!(
+        cx.debug_bounds("message-result-1").is_none(),
+        "a link's address is not what the reply draws"
+    );
+    cx.simulate_keystrokes("secondary-a");
+    cx.simulate_input("docs for the sharp");
+    let typed = "docs for the sharp".to_owned();
+    wait_until(cx, &view, move |v, _| v.messages.searched.as_deref() == Some(typed.as_str()));
+    let hits = view.read_with(cx, |v, cx| v.message_rows(cx));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].snippet.text, "See the docs for the sharp needle.");
+}
+
+#[gpui::test]
+fn enter_during_a_scan_opens_the_new_query_s_first_result(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = search_workspace(
+        dir.path(),
+        [&["the haystack holds it"], &[], &["a settled needle"]],
+        0,
+    );
+    let (view, cx) = open_window(&path, cx);
+    cx.run_until_parked();
+    type_search(&view, cx, "needle");
+    assert_eq!(view.read_with(cx, |v, cx| v.message_rows(cx).len()), 1);
+
+    view.update(cx, |this, cx| {
+        this.search
+            .update(cx, |input, cx| input.set_value("haystack".to_owned(), cx));
+        this.search_messages(cx);
+    });
+    assert!(
+        view.read_with(cx, |v, cx| v.message_rows(cx).is_empty()),
+        "the old query's results open nothing while the new scan runs"
+    );
+    cx.simulate_keystrokes("enter");
+    wait_with_clock(cx, &view, |v, cx| {
+        v.selected(cx) == Some(1)
+            && v.finds.bars.get(&MAIN_1).is_some_and(|bar| {
+                bar.input.read(cx).value() == "haystack"
+                    && bar.count(cx).as_deref() == Some("1 of 1")
+            })
+    });
+}
+
+/// Presses Enter while the sidebar's scan for "notes" runs, then `moves_on` before the
+/// scan lands. Session 2's title holds "notes" and session 1's message does, so Enter
+/// alone would open session 1.
+fn enter_then_move_on(
+    cx: &mut gpui::TestAppContext,
+    moves_on: impl FnOnce(&mut gpui::VisualTestContext),
+) -> (tempfile::TempDir, Entity<Keystone>, &mut gpui::VisualTestContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = search_workspace(dir.path(), [&["the meeting notes are here"], &[], &[]], 0);
+    let (view, cx) = open_window(&path, cx);
+    cx.run_until_parked();
+    type_search(&view, cx, "note");
+    view.update(cx, |this, cx| {
+        this.search
+            .update(cx, |input, cx| input.set_value("notes".to_owned(), cx));
+        this.search_messages(cx);
+    });
+    cx.update(|window, cx| {
+        window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx)
+    });
+    moves_on(cx);
+    wait_until(cx, &view, |v, _| v.messages.searched.as_deref() == Some("notes"));
+    cx.run_until_parked();
+    (dir, view, cx)
+}
+
+#[gpui::test]
+fn ctrl_n_after_enter_mid_scan_keeps_the_new_session(cx: &mut gpui::TestAppContext) {
+    let (_dir, view, cx) = enter_then_move_on(cx, |cx| cx.simulate_keystrokes("secondary-n"));
+    view.read_with(cx, |v, cx| {
+        let selected = v.selected(cx);
+        assert!(
+            selected.is_some_and(|s| s > 3),
+            "the new session stays selected, not the old result: {selected:?}"
+        );
+        assert!(v.finds.bars.is_empty(), "no find bar opens behind it");
+    });
+}
+
+#[gpui::test]
+fn a_click_after_enter_mid_scan_opens_nothing_old(cx: &mut gpui::TestAppContext) {
+    let (_dir, view, cx) = enter_then_move_on(cx, |cx| click(cx, "session-2"));
+    view.read_with(cx, |v, cx| {
+        assert_eq!(v.selected(cx), Some(2), "the clicked session stays");
+        assert!(v.finds.bars.is_empty());
+    });
+}
+
+#[gpui::test]
+fn escape_after_enter_mid_scan_opens_nothing(cx: &mut gpui::TestAppContext) {
+    let (_dir, view, cx) = enter_then_move_on(cx, |cx| cx.simulate_keystrokes("escape"));
+    view.read_with(cx, |v, cx| {
+        assert_eq!(v.selected(cx), Some(2), "the selection is where it was");
+        assert!(v.finds.bars.is_empty());
+    });
+}
+
+#[gpui::test]
+fn the_sidebar_finds_a_delivered_result_by_the_reply_it_draws(cx: &mut gpui::TestAppContext) {
+    use crate::app_state::delivery::{Outcome, message};
+    use keystone_agent::log::{Entry, SessionLog};
+    use keystone_core::DeliveryState;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.json");
+    let mut store = Store::open(&path).unwrap();
+    store.create(Provider::Claude, &working_directory(), 1).unwrap();
+    store.rename(1, "Alpha").unwrap();
+    store
+        .create_unselected(Provider::Codex, &working_directory(), 2, 1)
+        .unwrap();
+    store.rename(2, "Beta").unwrap();
+    let delivered = message(
+        2,
+        "Beta",
+        &Outcome::Finished,
+        Some("The **zebra** answer, see [docs](https://wrapper.example)."),
+    );
+    store
+        .set_delivery(
+            2,
+            DeliveryState::Delivered {
+                message: delivered.clone(),
+            },
+        )
+        .unwrap();
+    store.select(1).unwrap();
+    store.flush().unwrap();
+    drop(store);
+    let mut log = SessionLog::open(&dir.path().join("sessions"), 1).unwrap();
+    log.append(&Entry::TurnStarted).unwrap();
+    log.append(&Entry::Item {
+        item: Item {
+            id: "result".into(),
+            kind: ItemKind::UserMessage,
+            text: delivered,
+            status: ItemStatus::Completed,
+        },
+        seq: None,
+        run: None,
+    })
+    .unwrap();
+    log.sync().unwrap();
+    let (view, cx) = open_window(&path, cx);
+    cx.run_until_parked();
+    for wrapper in ["which you launched", "session_read", "wrapper.example"] {
+        type_search(&view, cx, wrapper);
+        assert!(
+            view.read_with(cx, |v, cx| v.message_rows(cx).is_empty()),
+            "{wrapper:?} is not what the result's row draws"
+        );
+        cx.simulate_keystrokes("secondary-a backspace");
+    }
+    type_search(&view, cx, "zebra answer");
+    let hits = view.read_with(cx, |v, cx| v.message_rows(cx));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session, 1);
+    assert_eq!(hits[0].snippet.text, "The zebra answer, see docs.");
 }
 
 fn ms(since: std::time::Instant) -> f64 {

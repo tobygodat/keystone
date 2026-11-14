@@ -37,8 +37,37 @@ fn rand_key() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// What a message's row draws: a user message as typed, and a reply's Markdown through
+/// [`markdown`].
+fn drawn(_session: u64, item: &Item) -> Vec<String> {
+    match item.kind {
+        ItemKind::AgentMessage => markdown(&item.text),
+        _ => vec![item.text.clone()],
+    }
+}
+
+/// A stand-in for the Markdown a reply's row draws: bold markers go, and a link shows
+/// its label without its address.
+fn markdown(source: &str) -> Vec<String> {
+    let mut out = String::new();
+    let mut rest = source.replace("**", "");
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find("](").map(|at| open + at) else {
+            break;
+        };
+        let end = rest[close..]
+            .find(')')
+            .map_or(rest.len(), |at| close + at + 1);
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..close]);
+        rest = rest[end..].to_owned();
+    }
+    out.push_str(&rest);
+    vec![out]
+}
+
 fn search(database: &Database, query: &str) -> super::Found {
-    messages(database, &Query::new(query).unwrap(), || false)
+    messages(database, &Query::new(query).unwrap(), drawn, || false)
         .unwrap()
         .unwrap()
 }
@@ -151,6 +180,53 @@ fn a_cancelled_search_returns_nothing() {
         .map(|n| item(&format!("m{n}"), ItemKind::AgentMessage, "needle"))
         .collect();
     log(&database, 1, &entries);
-    let result = messages(&database, &Query::new("needle").unwrap(), || true).unwrap();
+    let result = messages(&database, &Query::new("needle").unwrap(), drawn, || true).unwrap();
     assert_eq!(result, None);
+}
+
+#[test]
+fn a_reply_is_searched_as_its_drawn_text() {
+    let database = Database::in_memory().unwrap();
+    log(
+        &database,
+        1,
+        &[item(
+            "a",
+            ItemKind::AgentMessage,
+            "See [the guide](https://zebra.example/guide) for the **sharp needle**.",
+        )],
+    );
+    // The link's address is in the source, not in what the row draws.
+    assert!(search(&database, "zebra").hits.is_empty());
+    for query in ["the guide for", "sharp needle"] {
+        let found = search(&database, query);
+        assert_eq!(found.hits.len(), 1, "{query}");
+        let snippet = &found.hits[0].snippet;
+        assert_eq!(snippet.text, "See the guide for the sharp needle.");
+        assert_eq!(snippet.text[snippet.marked.clone()].to_lowercase(), query);
+    }
+}
+
+#[test]
+fn a_user_message_is_searched_as_typed() {
+    let database = Database::in_memory().unwrap();
+    log(
+        &database,
+        1,
+        &[item("u", ItemKind::UserMessage, "keep **these** stars")],
+    );
+    assert_eq!(search(&database, "**these**").hits.len(), 1);
+    assert!(search(&database, "keep these").hits.is_empty());
+}
+
+#[test]
+fn a_control_character_inside_a_word_is_still_found() {
+    let database = Database::in_memory().unwrap();
+    log(
+        &database,
+        1,
+        &[item("u", ItemKind::UserMessage, "a bell\u{7}ringer here")],
+    );
+    let found = search(&database, "bell\u{7}ringer");
+    assert_eq!(found.hits.len(), 1, "the screen skips what JSON escapes");
 }

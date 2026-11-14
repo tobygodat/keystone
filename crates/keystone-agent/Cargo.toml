@@ -22,3 +22,5 @@ libc = "0.2"
 [dev-dependencies]
 keystone-core = { path = "../keystone-core", features = ["test-support"] }
 tempfile = "3"
+# The sidebar scan benchmark parses replies as the desktop does.
+pulldown-cmark = { version = "0.13.4", default-features = false }

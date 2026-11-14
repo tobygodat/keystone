@@ -147,7 +147,47 @@ impl Hold {
     }
 }
 
+/// The delivered results a search can tell from typed messages off the UI thread: for
+/// each launched session still in the workspace whose result was delivered, the message
+/// and every session that continues its parent.
+#[derive(Default)]
+pub(crate) struct DeliveredResults(HashMap<u64, (String, std::collections::HashSet<u64>)>);
+
+impl DeliveredResults {
+    /// The launched session a delivered result in `parent`'s transcript came from, as
+    /// [`AppState::result_source`] tells it while that session exists.
+    pub(crate) fn source(&self, parent: u64, text: &str) -> Option<u64> {
+        let child = parse(text)?.child;
+        let (message, parents) = self.0.get(&child)?;
+        (parents.contains(&parent) && message.trim() == text.trim()).then_some(child)
+    }
+}
+
 impl AppState {
+    /// A snapshot of the delivered results, for a search on a background thread.
+    pub(crate) fn delivered_results(&self) -> DeliveredResults {
+        let workspace = self.store.workspace();
+        DeliveredResults(
+            workspace
+                .deliveries()
+                .iter()
+                .filter(|d| self.session(d.child()).is_some())
+                .filter_map(|d| match d.state() {
+                    DeliveryState::Delivered { message } => {
+                        let parents = workspace
+                            .sessions()
+                            .iter()
+                            .map(|s| s.id())
+                            .filter(|&s| self.continues(s, d.parent()))
+                            .collect();
+                        Some((d.child(), (message.clone(), parents)))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
     /// Something changed that may let a ready result go. The next pump sends it.
     pub(crate) fn deliveries_due(&mut self) {
         self.deliveries_due = true;

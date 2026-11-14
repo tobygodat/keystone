@@ -7,6 +7,13 @@ publish.workspace = true
 [dependencies]
 aho-corasick = "1"
 memchr = "2"
+# NFC and full case folding for search. Both are already in the build: `url` uses the
+# first, and `pulldown-cmark` the second.
+icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }
+unicase = "2.10"
+# How wide a snippet's lead draws. Already in the build, through the terminal emulator
+# and the GPU stack.
+unicode-width = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"

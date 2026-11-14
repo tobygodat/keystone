@@ -1028,7 +1028,23 @@ impl Keystone {
         }));
         subscriptions.push(cx.on_blur(&search_focus, window, |this, _, cx| {
             this.search_focused = false;
+            this.messages.forget_open();
             this.refresh(cx);
+        }));
+        // Any key but a lone modifier means the user moved on from an Enter pressed while
+        // the sidebar's scan ran. This runs before the key is handled, so the Enter itself
+        // still asks for its open.
+        let (search_owner, search_window) = (cx.weak_entity(), window.window_handle());
+        subscriptions.push(cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != search_window
+                || matches!(
+                    event.keystroke.key.as_str(),
+                    "shift" | "control" | "alt" | "platform" | "function"
+                )
+            {
+                return;
+            }
+            let _ = search_owner.update(cx, |this, _| this.messages.forget_open());
         }));
         // An open right-click menu closes on any key but a lone modifier, and takes Escape
         // before any binding of the focused element, such as a reply's Clear or Files' Back.
@@ -4014,9 +4030,13 @@ impl SessionSidebar {
         }
         if !hits.is_empty() {
             let workspace = this.state.read(cx).store().workspace();
+            // An older query's results, while the typed one's scan runs: they open
+            // nothing, and fade as disabled controls do.
+            let stale = this.messages.pending(typed);
             list = list.child(
                 v_flex()
                     .gap(px(2.))
+                    .when(stale, |d| d.opacity(0.4))
                     .child(
                         h_flex()
                             .automation_id("message-results")
@@ -4063,7 +4083,8 @@ impl SessionSidebar {
             .on_click(move |_, window, cx| {
                 let hit = hit.clone();
                 let _ = open.update(cx, |this, cx| {
-                    if this.presentation.matches(activation) {
+                    let stale = this.messages.pending(this.search.read(cx).value());
+                    if this.presentation.matches(activation) && !stale {
                         this.open_message(hit, window, cx);
                     }
                 });
@@ -4145,6 +4166,10 @@ impl Render for Keystone {
             .text_size(TextSize::Base.px())
             .line_height(TextSize::Base.line_height())
             .track_focus(&self.focus)
+            // A press anywhere means the user moved on from an Enter pressed mid-scan.
+            .capture_any_mouse_down(
+                cx.listener(|this, _: &MouseDownEvent, _, _| this.messages.forget_open()),
+            )
             .key_context(if customizing {
                 "Keystone Customize"
             } else {

@@ -1,8 +1,10 @@
 //! Adds labelled test sessions to a closed workspace for the search journey
 //! (`scripts/search-journey.py`): `count` short sessions, some settled, some of whose
-//! messages mention the needle, and one long session to find in.
+//! messages mention the needle, and one long session to find in. With `french` or
+//! `japanese` last, the short sessions' messages are in that language instead, a third
+//! of them mentioning "crème brûlée" or "検索".
 //!
-//! cargo run -p keystone-agent --example seed_search --locked -- STATE FOLDER COUNT TURNS
+//! cargo run -p keystone-agent --example seed_search --locked -- STATE FOLDER COUNT TURNS [LANGUAGE]
 
 use keystone_agent::log::Entry;
 use keystone_agent::{Item, ItemKind, ItemStatus, TurnStatus};
@@ -35,8 +37,75 @@ fn turn_end() -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [state, folder, count, turns] = args.as_slice() else {
-        panic!("usage: seed_search STATE FOLDER COUNT TURNS");
+    let (state, folder, count, turns, language) = match args.as_slice() {
+        [state, folder, count, turns] => (state, folder, count, turns, None),
+        [state, folder, count, turns, language] => {
+            (state, folder, count, turns, Some(language.as_str()))
+        }
+        _ => panic!("usage: seed_search STATE FOLDER COUNT TURNS [french|japanese]"),
+    };
+    // Words of a language, and the needle a third of its sessions mention.
+    let (words, needle, space): (&[&str], &str, &str) = match language {
+        None => (&[], "", " "),
+        Some("french") => (
+            &[
+                "le",
+                "café",
+                "est",
+                "très",
+                "chaud",
+                "et",
+                "la",
+                "fenêtre",
+                "reste",
+                "ouverte",
+                "après",
+                "l'étape",
+                "première",
+                "vérifiée",
+                "déjà",
+                "où",
+            ],
+            "crème brûlée",
+            " ",
+        ),
+        Some("japanese") => (
+            &[
+                "設定",
+                "を",
+                "変更",
+                "して",
+                "結果",
+                "が",
+                "表示",
+                "されました",
+                "ファイル",
+                "の",
+                "確認",
+                "は",
+                "完了",
+                "です",
+                "テスト",
+                "実行",
+            ],
+            "検索",
+            "",
+        ),
+        Some(other) => panic!("no words for {other:?}"),
+    };
+    let sentence = |n: u64, turn: usize, with_needle: bool| -> String {
+        let mut text = String::new();
+        for k in 0..24 {
+            if k > 0 {
+                text.push_str(space);
+            }
+            text.push_str(words[(n as usize * 7 + turn * 3 + k * 5) % words.len()]);
+            if with_needle && k == 12 {
+                text.push_str(space);
+                text.push_str(needle);
+            }
+        }
+        text
     };
     let (count, turns): (u64, usize) = (count.parse().unwrap(), turns.parse().unwrap());
     let directory = WorkingDirectory::new(std::path::Path::new(folder)).unwrap();
@@ -49,7 +118,10 @@ fn main() {
             .into_iter()
             .map(|payload| {
                 key += 1;
-                (format!("seed-search-{key}"), payload)
+                (
+                    format!("seed-search-{}-{key}", language.unwrap_or("en")),
+                    payload,
+                )
             })
             .collect()
     };
@@ -118,6 +190,20 @@ fn main() {
         let mut entries = Vec::new();
         for turn in 0..8 {
             entries.push(started.clone());
+            if language.is_some() {
+                entries.push(item(
+                    format!("u{n}-{turn}"),
+                    ItemKind::UserMessage,
+                    sentence(n, turn, false),
+                ));
+                entries.push(item(
+                    format!("a{n}-{turn}"),
+                    ItemKind::AgentMessage,
+                    format!("**{}**", sentence(n + 1, turn, turn == 5 && n % 3 == 0)),
+                ));
+                entries.push(turn_end());
+                continue;
+            }
             entries.push(item(
                 format!("u{n}-{turn}"),
                 ItemKind::UserMessage,

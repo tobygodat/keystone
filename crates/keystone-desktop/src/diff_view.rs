@@ -229,7 +229,7 @@ fn review_prompt(source: Source, patch: &Patch, comments: &[LineComment]) -> Str
 }
 
 /// A line as drawn: tabs as four spaces, and at most [`MAX_SHOWN`] characters.
-fn shown(text: &str) -> String {
+pub(crate) fn shown(text: &str) -> String {
     let mut shown: String = text.chars().take(MAX_SHOWN).collect();
     if shown.len() < text.len() {
         shown.push('…');
@@ -262,6 +262,17 @@ pub(crate) fn hunk_row(header: &str, cx: &App) -> gpui::Div {
 /// and its text, on the added or removed wash. A line the file ends on without a newline
 /// is followed by a muted `\ No newline at end of file`.
 pub(crate) fn line_row(line: &Line, gutter: Pixels, selected: bool, cx: &App) -> gpui::Div {
+    line_row_with(line, shown(&line.text), gutter, selected, cx)
+}
+
+/// [`line_row`] with the line's text drawn as `text`, such as with find's marks.
+pub(crate) fn line_row_with(
+    line: &Line,
+    text: impl IntoElement,
+    gutter: Pixels,
+    selected: bool,
+    cx: &App,
+) -> gpui::Div {
     let colors = cx.theme().colors;
     let (sign, mark, wash) = match line.kind {
         Kind::Added => ("+", colors.success, Some(colors.diff_added)),
@@ -293,7 +304,7 @@ pub(crate) fn line_row(line: &Line, gutter: Pixels, selected: bool, cx: &App) ->
                 .min_w_0()
                 .pr(px(8.))
                 .text_color(colors.code_text)
-                .child(shown(&line.text)),
+                .child(text),
         );
     v_flex()
         .w_full()

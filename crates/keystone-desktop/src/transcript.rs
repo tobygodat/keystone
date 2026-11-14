@@ -215,6 +215,35 @@ fn preview_rows(patch: &Patch) -> Vec<PreviewRow<'_>> {
     rows
 }
 
+/// The texts an edit's preview draws that find searches, in drawing order: each file's
+/// name when it names them, and each line. Hunk headers are not searched.
+pub fn preview_texts(patch: &Patch, folder: &EditFolder) -> Vec<String> {
+    preview_rows(patch)
+        .iter()
+        .filter_map(|row| match row {
+            PreviewRow::Name(file) => Some(file_name(file, folder)),
+            PreviewRow::Hunk(_) => None,
+            PreviewRow::Line(line) => Some(crate::diff_view::shown(&line.text)),
+        })
+        .collect()
+}
+
+/// A file's name over its part of an edit's preview.
+fn file_name(file: &FileDiff, folder: &EditFolder) -> String {
+    let change = match file.change {
+        Change::Added => " · added",
+        Change::Deleted => " · deleted",
+        Change::Renamed | Change::Modified => "",
+    };
+    format!("{}{change}", folder.shown(&file.path))
+}
+
+/// An edit row's label: the paths it changed, and how it ended when it did not apply.
+pub fn edit_label(folder: &EditFolder, paths: &[String], status: ItemStatus) -> String {
+    let shown: Vec<_> = paths.iter().map(|path| folder.shown(path)).collect();
+    format!("Changed {}{}", shown.join(", "), outcome_note(status))
+}
+
 /// A preview row's height. Rows never wrap, so the preview's height is known before it
 /// is drawn, which a cached view needs.
 fn preview_row_height(row: &PreviewRow) -> gpui::Pixels {
@@ -228,7 +257,7 @@ fn preview_row_height(row: &PreviewRow) -> gpui::Pixels {
 
 /// The start of one edit's diff, drawn with the diff view's own rows. It is its own
 /// view, so outside verification it is cached: a keystroke elsewhere, which redraws the
-/// transcript, does not lay it out again.
+/// transcript, does not lay it out again. While find marks it, the row draws it itself.
 pub struct EditPreview {
     index: usize,
     patch: Patch,
@@ -251,12 +280,20 @@ impl EditPreview {
 
 impl Render for EditPreview {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        preview_element(self.index, &self.patch, &self.folder, cx)
+        preview_element(self.index, &self.patch, &self.folder, &[], None, cx)
     }
 }
 
-/// The preview's rows as one element of [`EditPreview::height`].
-fn preview_element(index: usize, patch: &Patch, folder: &EditFolder, cx: &App) -> gpui::Div {
+/// The preview's rows as one element of [`EditPreview::height`], with find's `marks`,
+/// whose texts count from 1 as [`preview_texts`] lists them after the row's label.
+fn preview_element(
+    index: usize,
+    patch: &Patch,
+    folder: &EditFolder,
+    marks: &[Mark],
+    slot: Option<&MarkSlot>,
+    cx: &App,
+) -> gpui::Div {
     {
         let colors = cx.theme().colors;
         let rows = preview_rows(patch);
@@ -269,25 +306,23 @@ fn preview_element(index: usize, patch: &Patch, folder: &EditFolder, cx: &App) -
             .max();
         let gutter = crate::diff_view::gutter(biggest.unwrap_or(1), cx);
         let mut drawn = 0;
+        let mut text = 0;
+        let mut marked = |shown: String| {
+            text += 1;
+            marked_text(shown, text, marks, slot, cx)
+        };
         let mut children = Vec::with_capacity(rows.len());
         for row in &rows {
             let content = match row {
-                PreviewRow::Name(file) => {
-                    let change = match file.change {
-                        Change::Added => " · added",
-                        Change::Deleted => " · deleted",
-                        Change::Renamed | Change::Modified => "",
-                    };
-                    let path = folder.shown(&file.path);
-                    div()
-                        .px(px(8.))
-                        .text_color(colors.text_muted)
-                        .child(format!("{path}{change}"))
-                }
+                PreviewRow::Name(file) => div()
+                    .px(px(8.))
+                    .text_color(colors.text_muted)
+                    .child(marked(file_name(file, folder))),
                 PreviewRow::Hunk(hunk) => crate::diff_view::hunk_row(&hunk.header, cx),
                 PreviewRow::Line(line) => {
                     drawn += 1;
-                    crate::diff_view::line_row(line, gutter, false, cx)
+                    let shown = marked(crate::diff_view::shown(&line.text));
+                    crate::diff_view::line_row_with(line, shown, gutter, false, cx)
                         .automation_id(format!("edit-{index}-line-{}", drawn - 1))
                 }
             };
@@ -314,6 +349,8 @@ struct EditBody<'a> {
     index: usize,
     patch: &'a Patch,
     preview: Option<gpui::Entity<EditPreview>>,
+    /// Find's marks on the row, and where to record the current one.
+    marks: (&'a [Mark], Option<&'a MarkSlot>),
     folder: &'a EditFolder,
     selector: String,
     open_edit: ClickHandler,
@@ -325,6 +362,7 @@ fn edit_body(body: EditBody, cx: &App) -> AnyElement {
         index,
         patch,
         preview,
+        marks: (marks, slot),
         folder,
         selector,
         open_edit,
@@ -341,12 +379,15 @@ fn edit_body(body: EditBody, cx: &App) -> AnyElement {
     let height = EditPreview::height(patch);
     // A reused cached view reports no element geometry, so verification draws it
     // uncached, as the sidebar and the terminal do.
+    let marked = marks.iter().any(|mark| mark.text > 0);
     let preview = match preview {
-        Some(preview) if !keystone_ui::automation::enabled() => gpui::AnyView::from(preview)
-            .cached(gpui::StyleRefinement::default().w_full().h(height))
-            .into_any_element(),
-        Some(preview) => div().w_full().h(height).child(preview).into_any_element(),
-        None => preview_element(index, patch, folder, cx).into_any_element(),
+        Some(preview) if !marked && !keystone_ui::automation::enabled() => {
+            gpui::AnyView::from(preview)
+                .cached(gpui::StyleRefinement::default().w_full().h(height))
+                .into_any_element()
+        }
+        Some(preview) if !marked => div().w_full().h(height).child(preview).into_any_element(),
+        _ => preview_element(index, patch, folder, marks, slot, cx).into_any_element(),
     };
     let note = |id: String, text: String| {
         div()
@@ -844,8 +885,7 @@ pub fn row(
             }
             ItemKind::FileChange { paths, patch } => {
                 let folder = edit_folder.unwrap_or_default();
-                let shown: Vec<_> = paths.iter().map(|path| folder.shown(path)).collect();
-                let label = format!("Changed {}{}", shown.join(", "), outcome_note(item.status));
+                let label = marked(edit_label(&folder, paths, item.status), 0);
                 let previews = previews
                     .as_ref()
                     .and_then(|previews| previews.changed(index, item.status, paths));
@@ -906,6 +946,7 @@ pub fn row(
                                 index,
                                 patch,
                                 preview,
+                                marks: (&marks, mark_slot.as_ref()),
                                 folder: &folder,
                                 selector: body_selector,
                                 open_edit,

@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -35,7 +36,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DRAFT = 'Draft kept across the search journey'
 SEEDED = 220
-TURNS = 300
+# Each turn is three rows: a question, a command and a reply.
+TURNS = 500
 LARGE, SMALL = (1920, 1080), (1100, 720)
 
 SSH = '''#!/bin/sh
@@ -142,18 +144,36 @@ class Search:
             [str(ROOT / 'target/debug/examples/seed_search'), self.state, str(j.project),
              str(SEEDED), str(TURNS)], check=True, capture_output=True, text=True)
         long = int(re.search(r'long session (\d+)', result.stdout).group(1))
+        rows = self.rows(long)
+        j.step('the long session has about 1,500 rows', 1400 <= rows <= 1600, f'{rows} rows')
         j.relaunch()
         count = len(j.sessions())
         j.step(f'the workspace holds {SEEDED + 3} sessions', count == SEEDED + 3, f'{count}')
         return long
+
+    def rows(self, session):
+        """The transcript rows `session`'s saved log holds: one per item."""
+        database = self.j.native.database_path(self.state)
+        with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as connection:
+            return connection.execute(
+                "SELECT count(*) FROM log_entries WHERE session_id = ? "
+                "AND json_extract(payload, '$.entry') = 'item'", (str(session),)).fetchone()[0]
+
+    def listed(self):
+        return {int(e['id'][len('session-'):]) for e in self.j.elements()
+                if re.fullmatch(r'session-\d+', e['id']) and e['visible']}
 
     def open_session(self, session, title):
         j = self.j
         j.keys('ctrl', 'shift', 'f')
         j.keys('ctrl', 'a')
         j.type(title)
+        # A row clicked from a frame before the filter redraws can be another session's,
+        # so wait until the list holds only the sessions the title filter keeps.
+        kept = {s['id'] for s in j.sessions() if title.lower() in (s.get('title') or '').lower()}
+        j.wait(f'the list filtered to {title!r}',
+               lambda: session in self.listed() and self.listed() <= kept)
         j.settle()
-        j.wait_for(f'session-{session}')
         j.click(f'session-{session}')
         j.wait('the session to open', lambda: j.workspace()['workspace'].get('selected') == session)
         j.keys('ctrl', 'shift', 'f')

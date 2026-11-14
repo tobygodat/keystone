@@ -4,9 +4,11 @@
 //! find bar on the same words, at that message.
 
 use crate::Keystone;
-use gpui::{AppContext, Context, Task, Window};
+use gpui::{AppContext, Context, Focusable, Task, Window};
 use keystone_agent::search::MessageHit;
+use keystone_agent::{Item, ItemKind};
 use keystone_core::search::Query;
+use keystone_ui::markdown::Document;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,15 +19,25 @@ pub struct MessageSearch {
     pub hits: Vec<MessageHit>,
     /// The result Up and Down moved to, by its place among the results shown.
     pub highlighted: Option<usize>,
+    /// Enter was pressed while the scan for the typed query ran, with this session
+    /// selected: open the first result once it lands, unless the user moved on first.
+    open_when_found: Option<Option<u64>>,
     /// Counts searches, so an older scan stops when a newer one starts.
     generation: Arc<AtomicU64>,
     task: Option<Task<()>>,
 }
 
 impl MessageSearch {
-    /// Whether a scan for the typed query is still running.
+    /// Whether a scan for the typed query is still running. The results shown meanwhile
+    /// are an older query's: they are dimmed and open nothing.
     pub fn pending(&self, typed: &str) -> bool {
         !typed.is_empty() && self.searched.as_deref() != Some(typed)
+    }
+
+    /// The user moved on from the Enter they pressed mid-scan: another key, a click, or
+    /// focus leaving the field. Nothing opens when the scan lands.
+    pub fn forget_open(&mut self) {
+        self.open_when_found = None;
     }
 }
 
@@ -36,20 +48,36 @@ impl Keystone {
         let search = &mut self.messages;
         let generation = search.generation.fetch_add(1, Ordering::SeqCst) + 1;
         search.highlighted = None;
+        search.open_when_found = None;
         if typed.is_empty() {
             search.hits.clear();
             search.searched = None;
             search.task = None;
             return;
         }
-        let database = self.state.read(cx).store().database();
+        let state = self.state.read(cx);
+        let database = state.store().database();
+        let results = state.delivered_results();
         let current = search.generation.clone();
         let query = typed.clone();
         let task = cx.background_spawn(async move {
             let query = Query::new(&query).expect("not empty");
-            keystone_agent::search::messages(&database, &query, || {
-                current.load(Ordering::SeqCst) != generation
-            })
+            keystone_agent::search::messages(
+                &database,
+                &query,
+                // Each message is searched as the texts its row draws, as find searches
+                // it: a reply's Markdown, and a delivered result as the reply it holds.
+                |session, item: &Item| match item.kind {
+                    ItemKind::UserMessage => match crate::app_state::delivery::parse(&item.text)
+                        .filter(|_| results.source(session, &item.text).is_some())
+                    {
+                        Some(read) => Document::parse(read.reply).texts(),
+                        None => vec![item.text.clone().into()],
+                    },
+                    _ => Document::parse(&item.text).texts(),
+                },
+                || current.load(Ordering::SeqCst) != generation,
+            )
         });
         search.task = Some(cx.spawn(async move |this, cx| {
             let found = task.await;
@@ -68,6 +96,22 @@ impl Keystone {
                     }
                 }
                 this.refresh(cx);
+                // Enter belongs to its moment: it opens only if the same session is still
+                // selected and the field still has focus. A key or a click since dropped it.
+                if let Some(selected) = this.messages.open_when_found.take()
+                    && selected == this.selected(cx)
+                {
+                    let (handle, this) = (this.handle, cx.weak_entity());
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                if this.search.focus_handle(cx).is_focused(window) {
+                                    this.open_highlighted_message(window, cx)
+                                }
+                            });
+                        });
+                    });
+                }
             });
         }));
     }
@@ -111,15 +155,25 @@ impl Keystone {
     }
 
     /// Enter in the search field: opens the highlighted message result, or the first.
+    /// While the typed query's scan runs, the first of its results once they land.
     pub(crate) fn open_highlighted_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.search.read(cx).value();
+        if self.messages.pending(typed) {
+            self.messages.open_when_found = Some(self.selected(cx));
+            return;
+        }
         let rows = self.message_rows(cx);
         if let Some(hit) = rows.get(self.messages.highlighted.unwrap_or(0)).cloned() {
             self.open_message(hit, window, cx);
         }
     }
 
-    /// The message results as the sidebar lists them now.
+    /// The message results Up, Down and Enter move through: none while they are an
+    /// older query's.
     pub(crate) fn message_rows(&self, cx: &gpui::App) -> Vec<MessageHit> {
+        if self.messages.pending(self.search.read(cx).value()) {
+            return Vec::new();
+        }
         let titles = self.title_matches(cx);
         self.shown_hits(&titles, cx)
     }

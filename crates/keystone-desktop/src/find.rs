@@ -8,6 +8,7 @@
 
 use crate::Keystone;
 use crate::conversation::Row;
+use crate::transcript::{EditFolder, edit_label, preview_texts};
 use crate::view_state::ViewKey;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -51,8 +52,9 @@ pub struct RowTexts {
 }
 
 /// What a row is searched as. A delivered result is a user message the transcript draws
-/// as its reply's Markdown, which only the app state can tell.
-pub fn row_texts(row: &Row, result: bool) -> Option<RowTexts> {
+/// as its reply's Markdown, which only the app state can tell, and an edit row shows its
+/// paths from the session's folder.
+pub fn row_texts(row: &Row, result: bool, folder: Option<&EditFolder>) -> Option<RowTexts> {
     let Row::Item(item) = row else {
         return None;
     };
@@ -86,7 +88,18 @@ pub fn row_texts(row: &Row, result: bool) -> Option<RowTexts> {
             texts: vec![item.text.clone().into()],
             hidden_from: 0,
         }),
-        // An edit row draws its paths and a preview of its diff; neither is searched.
+        // Its label, then, while open, its preview's file names and lines.
+        ItemKind::FileChange { paths, patch } => {
+            let folder = folder.cloned().unwrap_or_default();
+            let mut texts = vec![edit_label(&folder, paths, item.status).into()];
+            if let Some(patch) = patch {
+                texts.extend(preview_texts(patch, &folder).into_iter().map(Into::into));
+            }
+            Some(RowTexts {
+                texts,
+                hidden_from: 1,
+            })
+        }
         _ => None,
     }
 }
@@ -98,15 +111,18 @@ struct Stamp {
     len: usize,
     status: ItemStatus,
     result: bool,
+    /// For an edit row, the folder its paths are shown from.
+    folder: Option<EditFolder>,
 }
 
-fn stamp(row: &Row, result: bool) -> Option<Stamp> {
+fn stamp(row: &Row, result: bool, folder: &EditFolder) -> Option<Stamp> {
     match row {
         Row::Item(item) => Some(Stamp {
             id: item.id.clone(),
             len: item.text.len(),
             status: item.status,
             result,
+            folder: matches!(item.kind, ItemKind::FileChange { .. }).then(|| folder.clone()),
         }),
         _ => None,
     }
@@ -135,7 +151,9 @@ fn search(query: Query, jobs: Vec<Job>) -> Outcome {
             Job::Skip => continue,
             Job::Read(texts) => texts,
             Job::Fresh(stamp, content) => {
-                let texts = Arc::new(row_texts(&content, stamp.result).unwrap_or_default());
+                let texts = Arc::new(
+                    row_texts(&content, stamp.result, stamp.folder.as_ref()).unwrap_or_default(),
+                );
                 fresh.push((row, stamp, texts.clone()));
                 texts
             }
@@ -206,10 +224,16 @@ pub struct FindBar {
 }
 
 impl FindBar {
+    /// Whether `matches` were found for the query in the field. While a newer query's
+    /// search runs they are an older one's, so Enter and the arrows wait for it.
+    fn current_query(&self, cx: &App) -> bool {
+        let typed = self.input.read(cx).value();
+        !typed.is_empty() && self.searched.as_deref() == Some(typed)
+    }
+
     /// The count the bar shows: "3 of 12", or "No matches" once a search found none.
     pub fn count(&self, cx: &App) -> Option<String> {
-        let typed = self.input.read(cx).value();
-        if typed.is_empty() || self.searched.as_deref() != Some(typed) {
+        if !self.current_query(cx) {
             return None;
         }
         Some(match (self.current, self.matches.len()) {
@@ -346,11 +370,15 @@ impl Keystone {
     }
 
     /// Moves to the next match, or with `backwards` the previous one, wrapping at the
-    /// ends, and shows it.
+    /// ends, and shows it. While a new query's search runs it does nothing: the search
+    /// shows its first match when it lands.
     pub(crate) fn step_find(&mut self, key: ViewKey, backwards: bool, cx: &mut Context<Self>) {
         let Some(bar) = self.finds.bars.get_mut(&key) else {
             return;
         };
+        if !bar.current_query(cx) {
+            return;
+        }
         let total = bar.matches.len();
         if total == 0 {
             return;
@@ -399,6 +427,7 @@ impl Keystone {
 
     /// Searches `key`'s session for the bar's query on a background thread.
     pub(crate) fn search_find(&mut self, key: ViewKey, reason: Reason, cx: &mut Context<Self>) {
+        let folder = self.edit_folder(key.session, cx);
         let Some(bar) = self.finds.bars.get_mut(&key) else {
             return;
         };
@@ -426,7 +455,7 @@ impl Keystone {
             .map(|(index, row)| {
                 let result = matches!(row, Row::Item(item) if item.kind == ItemKind::UserMessage
                     && state.result_source(key.session, &item.text).and_then(|child| state.session(child)).is_some());
-                let Some(stamp) = stamp(row, result) else {
+                let Some(stamp) = stamp(row, result, &folder) else {
                     return Job::Skip;
                 };
                 match &cached[index] {
@@ -622,7 +651,7 @@ impl Keystone {
         let selector = |name: &str| crate::arrangement::selector(name, key.view).to_string();
         let colors = cx.theme().colors;
         let focused = bar.focused;
-        let any = !bar.matches.is_empty();
+        let any = !bar.matches.is_empty() && bar.current_query(cx);
         let count = bar.count(cx);
         let button = |id: &str, icon: IconName, label: &'static str, keys: &str| {
             let id = selector(id);
@@ -632,11 +661,18 @@ impl Keystone {
                 .tooltip(Tooltip::with_key(label, keystone_ui::shortcut_text(keys)))
                 .debug_selector(move || id.clone())
         };
+        // The count's slot is always as wide as "9999 of 9999", so neither stepping nor
+        // typing moves the field.
+        let count_width = TextSize::Sm.px() * 6.5;
         Some(
-            div()
+            // Spans the column, so the bar narrows with it rather than spilling over the
+            // sidebar when side panels squeeze the column to its narrowest.
+            h_flex()
                 .absolute()
                 .top_2()
+                .left_4()
                 .right_4()
+                .justify_end()
                 .child(gpui::deferred(
                     h_flex()
                         .id(SharedString::from(selector("find-bar")))
@@ -690,14 +726,20 @@ impl Keystone {
                                 .automation_id(selector("find-field"))
                                 .child(bar.input.clone()),
                         )
-                        .children(count.map(|count| {
-                            div().automation_id(selector("find-count")).child(
-                                Label::new(count)
-                                    .size(TextSize::Sm)
-                                    .color(Color::Muted)
-                                    .tabular(),
-                            )
-                        }))
+                        .child(
+                            h_flex()
+                                .flex_none()
+                                .min_w(count_width)
+                                .justify_end()
+                                .children(count.map(|count| {
+                                    div().automation_id(selector("find-count")).child(
+                                        Label::new(count)
+                                            .size(TextSize::Sm)
+                                            .color(Color::Muted)
+                                            .tabular(),
+                                    )
+                                })),
+                        )
                         .child(
                             button(
                                 "find-previous",
