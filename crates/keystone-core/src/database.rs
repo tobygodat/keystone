@@ -27,6 +27,8 @@ pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 const USAGE_PREFIX: &str = "usage/";
 /// The `metadata` keys that hold each folder's unfinished commit message.
 const COMMIT_DRAFT_PREFIX: &str = "commit_draft/";
+/// The `metadata` keys that hold the address each folder's browser page was on.
+const BROWSER_PAGE_PREFIX: &str = "browser_page/";
 /// The `metadata` keys that hold each copy Settings → Integrations made, by its copy.
 const COPY_PREFIX: &str = "integration_copy/";
 /// The `metadata` keys that hold each scheduled task, by its ID.
@@ -556,6 +558,23 @@ impl Database {
                         .workspace
                         .commit_drafts
                         .insert(folder.to_owned(), text);
+                }
+            }
+            let mut statement = tx
+                .prepare("SELECT key, value FROM metadata WHERE substr(key, 1, length(?1)) = ?1")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([BROWSER_PAGE_PREFIX], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sql_error)?;
+            for row in rows {
+                let (key, url) = row.map_err(sql_error)?;
+                if let Some(folder) = key.strip_prefix(BROWSER_PAGE_PREFIX) {
+                    snapshot
+                        .workspace
+                        .browser_pages
+                        .insert(folder.to_owned(), url);
                 }
             }
             let mut statement = tx
@@ -1145,6 +1164,23 @@ fn write_projection(
         )
         .map_err(sql_error)?;
     }
+    let pages = &snapshot.workspace.browser_pages;
+    let saved = previous.map(|workspace| &workspace.browser_pages);
+    for (folder, url) in pages {
+        if saved.and_then(|saved| saved.get(folder)) == Some(url) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO events(kind, entity_id, payload) VALUES ('browser_page.saved', ?1, ?2)",
+            params![folder, serde_json::to_string(url)?],
+        )
+        .map_err(sql_error)?;
+        tx.execute(
+            "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![format!("{BROWSER_PAGE_PREFIX}{folder}"), url],
+        )
+        .map_err(sql_error)?;
+    }
     let tasks = &snapshot.workspace.scheduled_tasks;
     for removed in previous
         .into_iter()
@@ -1183,6 +1219,7 @@ fn write_projection(
     metadata.workspace.deliveries.clear();
     metadata.workspace.notes.clear();
     metadata.workspace.commit_drafts.clear();
+    metadata.workspace.browser_pages.clear();
     metadata.workspace.scheduled_tasks.clear();
     let payload = serde_json::to_string(&metadata)?;
     let previous: Option<String> = tx

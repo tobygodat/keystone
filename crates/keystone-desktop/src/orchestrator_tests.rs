@@ -1135,3 +1135,44 @@ fn a_read_only_agent_reads_the_browser_status_but_may_not_act(cx: &mut gpui::Tes
         "neither call started a browser page"
     );
 }
+
+#[gpui::test]
+fn claude_asks_before_an_agent_evaluates_script_in_the_page(cx: &mut gpui::TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let state = setup(directory.path(), Provider::Claude, cx);
+    state.update(cx, |state, cx| {
+        state.set_approval_mode(1, ApprovalMode::Ask, cx).unwrap();
+        assert!(state.send_message(
+            ComposerDraft {
+                session: 1,
+                text: "orchestrator test: evaluate browser document.title".into(),
+                attachments: Vec::new(),
+            },
+            cx
+        ))
+    });
+    wait_until(&state, cx, |state| {
+        state
+            .conversations
+            .get(&1)
+            .is_some_and(|c| !c.approvals.is_empty())
+    });
+    let (request, action) = state.read_with(cx, |state, _| {
+        let approval = &state.conversations[&1].approvals[0];
+        (approval.request.clone(), approval.action.clone())
+    });
+    assert!(action.contains("browser_evaluate"), "{action}");
+    state.update(cx, |state, cx| state.answer(1, request, false, cx));
+    wait_until(&state, cx, |state| {
+        state.conversations.get(&1).is_some_and(|c| !c.running)
+            && transcript(state, 1).contains("browser evaluate was declined")
+    });
+    assert!(
+        state
+            .read_with(cx, |state, _| state.browsers.existing(
+                WorkingDirectory::new(directory.path()).unwrap().as_str()
+            ))
+            .is_none(),
+        "a declined script never starts the browser"
+    );
+}

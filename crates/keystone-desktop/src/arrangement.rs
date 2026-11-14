@@ -59,6 +59,8 @@ pub struct Arrangement {
     narrowed: Option<Narrowed>,
     /// The check that follows a window resize, once the resize settles.
     refit: Option<gpui::Task<()>>,
+    /// The window width the last check saw, or the first frame's.
+    settled_width: Option<f32>,
 }
 struct Resize {
     start: Point<Pixels>,
@@ -129,7 +131,7 @@ fn minimum(
             Component::Files | Component::Notes | Component::PullRequest | Component::Device => {
                 [FILES_MIN, 160. + header]
             }
-            Component::Browser => [CONVERSATION_MIN, 200. + header],
+            Component::Browser => [FILES_MIN, 200. + header],
             // The message box and Commit button sit above the list.
             Component::Changes => [FILES_MIN, 260. + header],
         },
@@ -209,6 +211,9 @@ pub(crate) struct SideUnit {
     /// The unit's size beside the composer's column, which it keeps under the composer
     /// and returns with.
     size: Size,
+    /// The window width it sat beside the composer's column at before a resize moved
+    /// it, so a window that wide again shows it there again.
+    shown_at: Option<f32>,
 }
 
 /// The side units a resize moved under the composer, and the layout it left. They go
@@ -227,11 +232,13 @@ impl SideUnit {
                 views: vec![*id],
                 selected: 0,
                 size,
+                shown_at: None,
             }),
             Node::Tabs { selected, views } if views.iter().all(side) => Some(Self {
                 views: views.clone(),
                 selected: *selected,
                 size,
+                shown_at: None,
             }),
             _ => None,
         }
@@ -828,6 +835,7 @@ impl Keystone {
                             views: vec![view],
                             selected: 0,
                             size,
+                            shown_at: None,
                         };
                         self.narrowed(Vec::from([unit]), &layout, cx);
                         let tabs = self.session_tabs(cx);
@@ -967,37 +975,66 @@ impl Keystone {
             return;
         };
         let width = f32::from(window.viewport_size().width);
+        let before = self
+            .presentation
+            .current
+            .arrangement
+            .settled_width
+            .replace(width);
         let (sidebar, composer) = (
             self.presentation.current.sidebar,
             self.presentation.current.arrangement.composer_min_width,
         );
-        let beside = side_units_beside(c.root(), &c, &column);
-        let layout = if !beside.is_empty()
-            && width < preferred_width(c.root(), &c, sidebar, composer)
-        {
-            let moved = beside
-                .iter()
-                .rev()
-                .try_fold(c.clone(), |c, unit| unit.place(c, conversation, false));
-            if let Some(moved) = &moved {
-                self.narrowed(beside, moved, cx);
-            }
-            moved
-        } else if let Some(narrowed) = self.presentation.current.arrangement.narrowed.take() {
-            let wide = narrowed
-                .units
-                .iter()
-                .try_fold(c.clone(), |c, unit| unit.place(c, conversation, true))
-                .filter(|wide| {
-                    width >= preferred_width(wide.root(), wide, sidebar, composer) + REFIT_MARGIN
-                });
-            if wide.is_none() {
-                self.presentation.current.arrangement.narrowed = Some(narrowed);
-            }
-            wide
-        } else {
-            None
-        };
+        let mut beside = side_units_beside(c.root(), &c, &column);
+        for unit in &mut beside {
+            unit.shown_at = before;
+        }
+        let layout =
+            if !beside.is_empty() && width < preferred_width(c.root(), &c, sidebar, composer) {
+                let moved = beside
+                    .iter()
+                    .rev()
+                    .try_fold(c.clone(), |c, unit| unit.place(c, conversation, false));
+                if let Some(moved) = &moved {
+                    self.narrowed(beside, moved, cx);
+                }
+                moved
+            } else if let Some(narrowed) = self.presentation.current.arrangement.narrowed.take() {
+                // Each unit goes back next to the composer's column, so the last goes first
+                // and the first ends up nearest, as they were. One too wide for the window
+                // stays under the composer while the others go back.
+                let mut wide = c.clone();
+                let mut stay = Vec::new();
+                for unit in narrowed.units.iter().rev() {
+                    match unit
+                        .place(wide.clone(), conversation, true)
+                        .filter(|placed| {
+                            unit.shown_at.is_some_and(|shown| width >= shown)
+                                || width
+                                    >= preferred_width(placed.root(), placed, sidebar, composer)
+                                        + REFIT_MARGIN
+                        }) {
+                        Some(placed) => wide = placed,
+                        None => stay.insert(0, unit.clone()),
+                    }
+                }
+                let moved = stay.len() < narrowed.units.len();
+                self.presentation.current.arrangement.narrowed = if stay.is_empty() {
+                    None
+                } else {
+                    Some(Narrowed {
+                        units: stay,
+                        layout: if moved {
+                            wide.root().clone()
+                        } else {
+                            narrowed.layout
+                        },
+                    })
+                };
+                moved.then_some(wide)
+            } else {
+                None
+            };
         if let Some(layout) = layout {
             let tabs = self.session_tabs(cx);
             if self.save_view(Some(layout), tabs, cx) {
@@ -1080,6 +1117,11 @@ impl Keystone {
         let c = self.shown_composition(cx);
         let required = self.required_size(&c, cx);
         let viewport = window.viewport_size();
+        self.presentation
+            .current
+            .arrangement
+            .settled_width
+            .get_or_insert(f32::from(viewport.width));
         let toolbar = if self.presentation.current.customization.is_open() {
             f32::from(self.presentation.current.arrangement.toolbar_height)
         } else {
@@ -1111,6 +1153,7 @@ impl Keystone {
         let viewport = window.viewport_size();
         self.presentation.current.arrangement.visible.clear();
         self.presentation.current.arrangement.bars.clear();
+        self.browser_drawn = false;
         if self
             .presentation
             .current
@@ -1162,8 +1205,7 @@ impl Keystone {
                                 format!("fitted-tab-{}", id.0),
                                 self.tab_label(id, &c, cx),
                                 selected == id,
-                                c.component(id) == Some(Component::PullRequest)
-                                    && self.pull_request_tab_dot(cx),
+                                self.tab_dot(id, &c, cx) && selected != id,
                                 cx,
                             )
                             .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
@@ -1481,9 +1523,9 @@ impl Keystone {
         };
         let tabs: Vec<_> = views
             .iter()
-            .map(|&id| {
-                let unseen = c.component(id) == Some(Component::PullRequest)
-                    && self.pull_request_tab_dot(cx);
+            .enumerate()
+            .map(|(index, &id)| {
+                let unseen = self.tab_dot(id, c, cx) && index != selected;
                 Tab::new(("surface-tab", id.0 as usize), self.tab_label(id, c, cx)).dot(
                     if running(self, id, cx) {
                         Some(TabDot::Working)
@@ -1617,7 +1659,9 @@ impl Keystone {
                 .size(ButtonSize::Compact)
                 .selected(open)
                 .debug_selector(|| "surface-add".into())
-                .tooltip(Tooltip::text("Open a surface")),
+                .when(!open, |button| {
+                    button.tooltip(Tooltip::text("Open a surface"))
+                }),
         )
         .anchor(Anchor::TopRight)
         .open(open)
@@ -1671,6 +1715,16 @@ impl Keystone {
             );
         }
         menu
+    }
+
+    /// Whether a side surface's tab has news its surface hasn't shown: a pull request's
+    /// failed check or review, or the page an agent drove behind another tab.
+    fn tab_dot(&self, view: ViewId, c: &Composition, cx: &App) -> bool {
+        match c.component(view) {
+            Some(Component::PullRequest) => self.pull_request_tab_dot(cx),
+            Some(Component::Browser) => self.browser_unseen,
+            _ => false,
+        }
     }
 
     fn conversation_tab(

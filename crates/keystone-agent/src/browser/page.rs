@@ -1,11 +1,12 @@
 //! One browser page: what the user watches in the Browser surface and what agents drive.
 
 use super::cdp::Chrome;
+use super::consent::{self, Driver};
 use super::outline;
 use crate::Wake;
 use base64::Engine;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -42,6 +43,39 @@ struct State {
     main_frame: Mutex<Option<String>>,
     /// What an agent last did here, shown in the surface until the user acts.
     note: Mutex<Option<String>>,
+    driver: Mutex<Driver>,
+    /// Requests let through to addresses off this machine, whose redirects follow them.
+    approved: Mutex<HashSet<String>>,
+    /// The last address a navigation an agent caused was stopped at, until an agent
+    /// is told, and how many have been stopped.
+    refused: Mutex<Option<String>>,
+    refusals: AtomicU64,
+    /// Documents the main frame has loaded, Chrome's error pages left out.
+    documents: AtomicU64,
+}
+
+impl State {
+    /// Records that a navigation an agent caused to `url` was stopped, wakes any
+    /// navigation waiting on it, and says so in the note.
+    fn refuse(&self, url: &str) {
+        *self.refused.lock().unwrap() = Some(url.to_owned());
+        *self.note.lock().unwrap() = Some(consent::refused(url));
+        self.refusals.fetch_add(1, Ordering::AcqRel);
+        *self.loads.lock().unwrap() += 1;
+        self.loaded.notify_all();
+    }
+
+    /// Whether the page, driven as it is now, may go to `url` from `current`.
+    fn admits(&self, url: &str, current: &str) -> bool {
+        consent::admits(
+            &self.driver.lock().unwrap(),
+            &consent::Request {
+                url,
+                current,
+                after_approved: false,
+            },
+        )
+    }
 }
 
 /// Snapshot refs. Each backend DOM node keeps its ref across snapshots, and a ref is
@@ -301,11 +335,12 @@ impl Page {
             .to_owned();
         let state = Arc::new(State::default());
         *state.url.lock().unwrap() = "about:blank".into();
-        let (listening, acking, ack_session, woken) = (
+        let (listening, acking, ack_session, woken, main_target) = (
             state.clone(),
             Arc::downgrade(&chrome),
             session.clone(),
             wake.clone(),
+            target.clone(),
         );
         chrome.listen(
             &session,
@@ -330,10 +365,33 @@ impl Page {
                     "Page.frameNavigated" if params["frame"].get("parentId").is_none() => {
                         *listening.main_frame.lock().unwrap() =
                             params["frame"]["id"].as_str().map(str::to_owned);
-                        if let Some(url) = params["frame"]["url"].as_str() {
+                        // Chrome's error page names the address that failed to load.
+                        let frame = &params["frame"];
+                        let previous = listening.url.lock().unwrap().clone();
+                        if let Some(url) =
+                            frame["unreachableUrl"].as_str().or(frame["url"].as_str())
+                        {
                             *listening.url.lock().unwrap() = url.to_owned();
+                            if frame.get("unreachableUrl").is_none() && url != "about:blank" {
+                                listening.documents.fetch_add(1, Ordering::AcqRel);
+                            }
+                            // A page from the back/forward cache comes back with no
+                            // request for the document check to see, so a script's
+                            // history.back() is checked here, and the page sent back.
+                            if params["type"] == "BackForwardCacheRestore"
+                                && !listening.admits(url, &previous)
+                                && let Some(chrome) = acking.upgrade()
+                            {
+                                chrome.send(
+                                    Some(&ack_session),
+                                    "Page.navigate",
+                                    json!({"url": previous}),
+                                );
+                                listening.refuse(url);
+                            }
                         }
                         listening.refs.lock().unwrap().forget();
+                        listening.approved.lock().unwrap().clear();
                     }
                     "Page.navigatedWithinDocument" => {
                         if let Some(url) = params["url"].as_str() {
@@ -351,6 +409,53 @@ impl Page {
                     "Page.loadEventFired" => {
                         *listening.loads.lock().unwrap() += 1;
                         listening.loaded.notify_all();
+                    }
+                    "Fetch.requestPaused" => {
+                        let Some(chrome) = acking.upgrade() else {
+                            return;
+                        };
+                        let id = params["requestId"].as_str().unwrap_or("").to_owned();
+                        let url = params["request"]["url"].as_str().unwrap_or("");
+                        let main = params["frameId"].as_str() == Some(main_target.as_str());
+                        let after_approved = params["redirectedRequestId"]
+                            .as_str()
+                            .is_some_and(|from| listening.approved.lock().unwrap().remove(from));
+                        let current = listening.url.lock().unwrap().clone();
+                        let request = consent::Request {
+                            url,
+                            current: &current,
+                            after_approved,
+                        };
+                        if !main || consent::admits(&listening.driver.lock().unwrap(), &request) {
+                            if !crate::mcp::browser::is_local(url) {
+                                listening.approved.lock().unwrap().insert(id.clone());
+                            }
+                            chrome.send(
+                                Some(&ack_session),
+                                "Fetch.continueRequest",
+                                json!({"requestId": id}),
+                            );
+                            return;
+                        }
+                        // A 204 ends a navigation and leaves the page where it was.
+                        chrome.send(
+                            Some(&ack_session),
+                            "Fetch.fulfillRequest",
+                            json!({"requestId": id, "responseCode": 204, "responseHeaders": []}),
+                        );
+                        listening.refuse(url);
+                    }
+                    "Runtime.consoleAPICalled" => {
+                        let args = &params["args"];
+                        if args[0]["value"].as_str() != Some(consent::PERMISSION_MARK) {
+                            return;
+                        }
+                        let Some(note) =
+                            args[1]["value"].as_str().and_then(consent::permission_note)
+                        else {
+                            return;
+                        };
+                        *listening.note.lock().unwrap() = Some(note);
                     }
                     // Headless Chrome leaves a dialog open until it is answered, and the
                     // page does nothing else meanwhile. Dismiss it, as Playwright does,
@@ -393,6 +498,15 @@ impl Page {
             wake,
         };
         page.call("Page.enable", json!({}))?;
+        page.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": consent::PERMISSIONS_SCRIPT}),
+        )?;
+        page.call("Runtime.enable", json!({}))?;
+        page.call(
+            "Fetch.enable",
+            json!({"patterns": [{"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"}]}),
+        )?;
         page.apply_viewport(*page.viewport.lock().unwrap())?;
         page.call("Page.startScreencast", screencast())?;
         Ok(page)
@@ -446,6 +560,34 @@ impl Page {
         *self.state.note.lock().unwrap() = note;
     }
 
+    /// The user acted in the surface, so where the page goes next is their doing.
+    pub fn user_drives(&self) {
+        *self.state.driver.lock().unwrap() = Driver::User;
+    }
+
+    /// An agent acts on the page, having loaded `asked` by name when given, so where
+    /// the page goes next is its doing until the user acts.
+    pub fn agent_drives(&self, asked: Option<&str>) {
+        let mut driver = self.state.driver.lock().unwrap();
+        let kept = match &*driver {
+            Driver::Agent { asked } => asked.clone(),
+            Driver::User => None,
+        };
+        *driver = Driver::Agent {
+            asked: asked.map(str::to_owned).or(kept),
+        };
+    }
+
+    /// How many documents the main frame has loaded, Chrome's error pages left out.
+    pub fn documents(&self) -> u64 {
+        self.state.documents.load(Ordering::Acquire)
+    }
+
+    /// The address a navigation an agent caused was last stopped at, once.
+    pub fn take_refused(&self) -> Option<String> {
+        self.state.refused.lock().unwrap().take()
+    }
+
     /// The tab's target ID, which is also its main frame's ID.
     pub(super) fn target(&self) -> &str {
         &self.target
@@ -493,13 +635,36 @@ impl Page {
     pub fn navigate(&self, url: &str) -> Result<(), String> {
         let url = normalize_url(url)?;
         let before = *self.state.loads.lock().unwrap();
+        let refusals = self.state.refusals.load(Ordering::Acquire);
         let result = self.call("Page.navigate", json!({"url": url}))?;
+        let stopped = || {
+            (self.state.refusals.load(Ordering::Acquire) != refusals)
+                .then(|| self.take_refused())
+                .flatten()
+        };
+        if let Some(to) = stopped() {
+            return Err(consent::refused_hint(&to));
+        }
         if let Some(error) = result["errorText"].as_str().filter(|e| !e.is_empty()) {
             return Err(format!("{url} did not load: {error}"));
         }
         if result.get("loaderId").is_some() {
             self.wait_for_load(before, LOAD_WAIT);
         }
+        match stopped() {
+            Some(to) => Err(consent::refused_hint(&to)),
+            None => Ok(()),
+        }
+    }
+
+    /// Loads `url` again after a relaunch, from the server rather than Chrome's cache,
+    /// so a page that changed shows as it is now and a server that is down shows
+    /// Chrome's error, not a stale copy.
+    pub fn restore(&self, url: &str) -> Result<(), String> {
+        self.navigate(url)?;
+        let before = *self.state.loads.lock().unwrap();
+        self.call("Page.reload", json!({"ignoreCache": true}))?;
+        self.wait_for_load(before, LOAD_WAIT);
         Ok(())
     }
 
@@ -526,6 +691,14 @@ impl Page {
                         }
                     ));
                 };
+                // A page in the back/forward cache loads with no request, so the
+                // entry is checked here as any navigation of the agent's would be.
+                let url = entry["url"].as_str().unwrap_or_default();
+                if !self.state.admits(url, &self.url()) {
+                    self.state.refuse(url);
+                    self.take_refused();
+                    return Err(consent::refused_hint(url));
+                }
                 self.call(
                     "Page.navigateToHistoryEntry",
                     json!({"entryId": entry["id"]}),
@@ -559,6 +732,7 @@ impl Page {
         let title = self.evaluate("document.title").unwrap_or(Value::Null);
         let viewport = self.viewport();
         Ok(json!({
+            "open": true,
             "url": self.url(),
             "title": title,
             "loading": self.loading(),

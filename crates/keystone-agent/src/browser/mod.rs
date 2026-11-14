@@ -2,11 +2,13 @@
 //! page per project folder. See `docs/design/browser-preview.md`.
 
 pub mod cdp;
+pub mod consent;
 mod outline;
 pub mod page;
 pub mod servers;
 
 pub use cdp::Chrome;
+pub use consent::Driver;
 pub use page::{Act, Frame, History, Mouse, Page, Target, Viewport, modifiers, normalize_url};
 pub use servers::DevServer;
 
@@ -63,6 +65,17 @@ impl Browsers {
             .cloned()
     }
 
+    /// Each open page's folder and the address it is on.
+    pub fn addresses(&self) -> Vec<(String, String)> {
+        self.pages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, page)| !page.is_closed())
+            .map(|(folder, page)| (folder.clone(), page.url()))
+            .collect()
+    }
+
     /// `folder`'s page, starting the browser and the page if needed.
     pub fn page(&self, folder: &str) -> Result<Arc<Page>, String> {
         if let Some(page) = self.existing(folder) {
@@ -115,57 +128,94 @@ impl Browsers {
 
 /// Keeps what pages do in their tab, where the user and agents can see it: downloads are
 /// refused, since a page or an agent could otherwise save files into the user's
-/// Downloads folder unseen, and a pop-up is closed, its address loaded in the tab that
-/// opened it.
+/// Downloads folder unseen, and a pop-up is closed before it loads anything, its address
+/// loaded in the tab that opened it, where the tab's own checks apply.
 fn contain(chrome: &Arc<Chrome>, tabs: Tabs) -> Result<(), String> {
     const CALL: Duration = Duration::from_secs(10);
     let browser = Arc::downgrade(chrome);
-    let blank = Arc::new(Mutex::new(HashSet::<String>::new()));
+    // Pop-ups that have not asked for a document yet, by target ID.
+    let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
     chrome.listen(
         "",
         Arc::new(move |method: &str, params: &Value| {
             let opener_of = |id: &str| tabs.lock().unwrap().get(id).and_then(Weak::upgrade);
             match method {
-                "Target.targetCreated" | "Target.targetInfoChanged" => {
+                // Every new tab starts paused, so a pop-up can be held before its first
+                // request leaves; any other tab runs on at once. Workers aren't held.
+                "Target.attachedToTarget" if params["waitingForDebugger"] == true => {
+                    let Some(chrome) = browser.upgrade() else {
+                        return;
+                    };
                     let info = &params["targetInfo"];
-                    let (Some(id), Some(opener)) = (
-                        info["targetId"].as_str(),
-                        info["openerId"].as_str().and_then(opener_of),
-                    ) else {
+                    let session = params["sessionId"].as_str().unwrap_or("").to_owned();
+                    let id = info["targetId"].as_str().unwrap_or("").to_owned();
+                    let opener = info["openerId"]
+                        .as_str()
+                        .filter(|opener| *opener != id)
+                        .and_then(opener_of)
+                        .filter(|_| info["type"] == "page" && opener_of(&id).is_none());
+                    let Some(opener) = opener else {
+                        chrome.send(Some(&session), "Runtime.runIfWaitingForDebugger", json!({}));
+                        chrome.send(None, "Target.detachFromTarget", json!({"sessionId": session}));
                         return;
                     };
-                    if info["type"] != "page" || id == opener.target() {
-                        return;
-                    }
-                    let url = info["url"].as_str().unwrap_or("");
-                    let close = |browser: &Weak<Chrome>, id: &str| {
-                        if let Some(chrome) = browser.upgrade() {
-                            chrome.send(None, "Target.closeTarget", json!({"targetId": id}));
-                        }
-                    };
-                    if url.is_empty() || url == "about:blank" {
-                        if !blank.lock().unwrap().insert(id.to_owned()) {
-                            return;
-                        }
-                        let (blank, browser, id) = (blank.clone(), browser.clone(), id.to_owned());
-                        let opener = Arc::downgrade(&opener);
-                        let _ = std::thread::Builder::new()
-                            .name("keystone-browser-popup".into())
-                            .spawn(move || {
-                                std::thread::sleep(BLANK_POPUP);
-                                if blank.lock().unwrap().remove(&id) {
-                                    close(&browser, &id);
-                                    if let Some(opener) = opener.upgrade() {
-                                        opener.popped_up(None);
-                                    }
+                    pending.lock().unwrap().insert(id.clone());
+                    let (held, closing, popup, opened_by, held_session) = (
+                        pending.clone(),
+                        browser.clone(),
+                        id.clone(),
+                        Arc::downgrade(&opener),
+                        session.clone(),
+                    );
+                    chrome.listen(
+                        &session,
+                        Arc::new(move |method: &str, params: &Value| {
+                            if method != "Fetch.requestPaused" {
+                                return;
+                            }
+                            let Some(chrome) = closing.upgrade() else {
+                                return;
+                            };
+                            // The pop-up never loads: its address loads in the tab instead.
+                            chrome.send(
+                                Some(&held_session),
+                                "Fetch.fulfillRequest",
+                                json!({"requestId": params["requestId"], "responseCode": 204, "responseHeaders": []}),
+                            );
+                            if held.lock().unwrap().remove(&popup) {
+                                chrome.send(None, "Target.closeTarget", json!({"targetId": popup}));
+                                if let Some(opener) = opened_by.upgrade() {
+                                    opener.popped_up(params["request"]["url"].as_str());
                                 }
-                            });
-                        return;
-                    }
-                    let was_blank = blank.lock().unwrap().remove(id);
-                    if method == "Target.targetCreated" || was_blank {
-                        close(&browser, id);
-                        opener.popped_up(Some(url));
+                            }
+                        }),
+                    );
+                    chrome.send(
+                        Some(&session),
+                        "Fetch.enable",
+                        json!({"patterns": [{"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"}]}),
+                    );
+                    chrome.send(Some(&session), "Runtime.runIfWaitingForDebugger", json!({}));
+                    let (held, closing, opener) = (pending.clone(), browser.clone(), Arc::downgrade(&opener));
+                    let _ = std::thread::Builder::new()
+                        .name("keystone-browser-popup".into())
+                        .spawn(move || {
+                            std::thread::sleep(BLANK_POPUP);
+                            if held.lock().unwrap().remove(&id)
+                                && let Some(chrome) = closing.upgrade()
+                            {
+                                chrome.send(None, "Target.closeTarget", json!({"targetId": id}));
+                                if let Some(opener) = opener.upgrade() {
+                                    opener.popped_up(None);
+                                }
+                            }
+                        });
+                }
+                "Target.detachedFromTarget" => {
+                    if let (Some(chrome), Some(session)) =
+                        (browser.upgrade(), params["sessionId"].as_str())
+                    {
+                        chrome.forget(session);
                     }
                 }
                 "Browser.downloadWillBegin" => {
@@ -186,8 +236,11 @@ fn contain(chrome: &Arc<Chrome>, tabs: Tabs) -> Result<(), String> {
     )?;
     chrome.call(
         None,
-        "Target.setDiscoverTargets",
-        json!({"discover": true}),
+        "Target.setAutoAttach",
+        // Only pages are held: a service worker or shared worker paused here and
+        // resumed by a session that then detached never started.
+        json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true,
+               "filter": [{"type": "page"}]}),
         CALL,
     )?;
     Ok(())

@@ -93,9 +93,21 @@ What it costs:
 - `browser.rs` in the desktop is the surface, a `Component::Browser` beside the others,
   so it docks, tabs and persists like Notes. It shows the page of the selected
   session's folder: a toolbar (Back, Forward, Reload, the address, dev servers) above
-  the frame, and a line naming what an agent last did there. ⌘⌥B (Ctrl+Alt+B on
+  the frame, and a small card over the frame's bottom-left corner naming what an agent
+  last did there. The card takes no input and never moves the page, so a click lands
+  where the user aimed; the next click or key in the page clears it. Its minimum
+  width is the side panels' 220 px.
+- An agent that drives the page while the Browser sits behind another tab, or behind
+  the narrow window's fitted tabs, puts the Pull request tab's dot on its tab until it
+  is shown.
+- Each folder's address is saved as the page moves (`browser_page/` rows beside the
+  commit drafts). After a relaunch the first surface to show that folder loads it
+  again, then reloads it past Chrome's cache, so a server that is down shows as down
+  rather than as the copy Chrome kept. A page that no longer loads shows Chrome's error above the project's dev
+  servers, and the address keeps the one that failed. ⌘⌥B (Ctrl+Alt+B on
   Linux), the palette's Toggle browser and the surface "+" menu open it.
-- A frame's arrival wakes `AppState`, which emits one `BrowserChanged` per burst. Only
+- A frame's arrival wakes `AppState`, which saves any page's new address and emits one
+  `BrowserChanged` per burst. Only
   the `BrowserView` redraws, and it decodes the newest JPEG off the UI thread, one at a
   time, so a busy page skips frames rather than queueing them.
 - The user's clicks, drags, wheel and keys go to the page as CDP input. ⌘V types the
@@ -137,15 +149,41 @@ exceptions that go through the provider's own approval, so Ask mode asks:
 `browser_open` or `browser_navigate` whose `url` isn't this machine's (`localhost`,
 `*.localhost`, `127.0.0.0/8`, `[::1]` or `0.0.0.0`). That matches Claude's own web
 fetches, and keeps an agent from taking the page to a site, or sending data to one in
-an address, unasked. A page's own links and redirects aren't checked. Codex decides
-its MCP calls under its own approval policy, as it does for the session tools. Refs are stable: an element
+an address, unasked. Codex decides
+its MCP calls under its own approval policy, as it does for the session tools.
+
+The same rule covers where an agent's actions lead. Whoever acted on the page last,
+the user in the surface or an agent through `browser_open`, `browser_navigate`,
+`browser_act` or `browser_evaluate`, owns the navigations it makes until the other
+acts. Keystone pauses each main-frame document request (`Fetch.enable` for
+`Document`). One an agent caused, by a link, a form, a script, a service worker's
+`client.navigate()`, a redirect or a pop-up, goes ahead only to this machine, to the address the agent asked for by name, to the
+page it is on, or within the redirects of an address already let through. Anywhere
+else gets an empty 204, which leaves the page where it was, the note says so,
+and the agent's next reply carries `refused_navigation` with the address and the
+instruction to ask for it with `browser_navigate`, which goes through the approval
+above. The user's own clicks and typing go where they lead.
+
+A page in Chrome's back/forward cache comes back with no request, so history moves
+are checked apart from it. `browser_navigate` with `history` reads the entry it
+would move to (`Page.getNavigationHistory`) and applies the same rule before it
+moves. A script's `history.back()` that restores another machine's page from the
+cache while an agent owns the page is caught when the page is shown
+(`Page.frameNavigated` of type `BackForwardCacheRestore`) and sent back to where it
+was, with the note. The restored page is shown, and its scripts run, until that
+navigation lands, a moment later.
+
+The check covers the page itself, the main frame. Its iframes, `fetch` and beacons
+reach any address, as in any browser.
+
+Refs are stable: an element
 keeps its ref across snapshots and a ref is never reused for another element, so an
 old ref names the same element or fails.
 
 Headless Chrome leaves a JavaScript dialog open until it is answered, and the page
 does nothing else meanwhile. Keystone dismisses `alert`, `confirm` and `prompt`, as
 Playwright does, accepts `beforeunload` so navigations finish, and shows what it
-dismissed in the surface's note line.
+dismissed in the surface's note.
 
 ## What a page can reach
 
@@ -155,12 +193,15 @@ The pages are agents' choice, so the engine keeps them in their tab. A live test
 - **Local files.** Typed and agent addresses are `http` and `https` only. Chrome
   itself refuses a web page's navigation to `file:`, `chrome:` and `data:` addresses,
   and `fetch` of `file:`.
-- **Downloads** are refused (`Browser.setDownloadBehavior`), and the note line says
+- **Downloads** are refused (`Browser.setDownloadBehavior`), and the note says
   so. Before, a page or an agent's click saved files into the user's Downloads folder
   without a word.
 - **Pop-ups.** A `window.open` or `target=_blank` page used to keep running where
-  nobody could see it. Keystone now closes it and loads its address in the tab, as a
-  one-tab browser would. A pop-up that stays blank is closed after a second.
+  nobody could see it. Every new tab now starts paused (`Target.setAutoAttach` with
+  `waitForDebuggerOnStart`, filtered to pages, so service and shared workers start as
+  usual), so Keystone answers a pop-up's first document request
+  itself, closes it, and loads its address in the tab, where the checks above apply.
+  The pop-up never fetches its page. One that stays blank is closed after a second.
 - **Other origins and localhost.** Pages reach any site and any loopback port, as in
   any browser. The profile is Keystone's own, shared by every project's page, with no
   sign-ins of the user's.
@@ -168,26 +209,36 @@ The pages are agents' choice, so the engine keeps them in their tab. A live test
   binding is exposed, and only frames, the address, the title and dismissed dialog
   text (cut to 120 characters) come back. Snapshot text reaches the agent as page
   content.
-- **Permissions.** Notifications and clipboard reads are denied. A geolocation request
-  waits unanswered, which a page's own timeout ends.
+- **Permissions.** Chrome runs with `--deny-permission-prompts`, so every prompt,
+  location, notifications, camera and microphone, screen capture, MIDI, clipboard
+  reads and the rest, is refused at once. A script run before each page's own
+  (`Page.addScriptToEvaluateOnNewDocument`) reports each refusal through the console,
+  and the note says "The page asked for its location, and Keystone refused".
+  Only a name from Keystone's own list is read from that message, so a page can't
+  write its own note. A page's `navigator.clipboard.writeText` needs no prompt and
+  resolves, but the text stays in headless Chrome's own clipboard: it doesn't reach
+  the system clipboard. The surface's own copy (⌘C, Ctrl+C on Linux) does.
 - **Ports.** Chrome opens no debugging port.
 
 ## Dev servers
 
 The surface and `browser_status` list the project's dev servers: loopback TCP listeners
 whose process works inside the project directory, that answer `GET /` with HTML or a
-redirect. Listeners come from `lsof` (macOS, and Linux when present) or `/proc/net/tcp`
-(Linux). The process's working directory comes from `lsof -d cwd` or `/proc/<pid>/cwd`.
-T3 Code instead tags agent processes with an environment variable; Keystone doesn't
-change the provider's environment, so it matches on the folder. `/proc/net/tcp` isn't
-read yet, so on Linux discovery needs `lsof`.
+redirect. Listeners and each process's working directory come from `lsof` (`lsof
+-Fpcn` and `lsof -a -d cwd -Fpn`) on macOS and Linux alike, so discovery needs `lsof`
+installed; without it the list is empty. T3 Code instead tags agent processes with an
+environment variable; Keystone doesn't change the provider's environment, so it
+matches on the folder.
 
 ## Proof
 
 `cargo test -p keystone-agent --test browser_live -- --ignored` drives a real Chrome
 against a page the test serves: snapshot refs, clicks, typing, clearing, a select,
 Enter submitting a form, stale refs after a reload, screenshots, evaluation, frames,
-and the containment above. It passes on macOS and on Linux with Chrome 157.
+the containment above, refused permission prompts and their note, where an
+agent's clicks, scripts, redirects, pop-ups, service workers and history moves may
+lead the page, and service and shared workers starting. It passes on Linux
+with Chrome 157; the permission and navigation checks haven't run on macOS yet.
 On a Mac, `python3 scripts/macos-browser.py` runs the whole journey in the
 real app: it opens the surface by shortcut and by mouse, loads a demo dev server,
 types into it, has a real Claude session drive it, quits and relaunches.

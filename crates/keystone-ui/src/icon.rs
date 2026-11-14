@@ -45,6 +45,7 @@ icons! {
     Phone => "icons/phone.svg", "<rect x='6.75' y='2.25' width='10.5' height='19.5' rx='2.25'/><path d='M10.5 18.75h3'/>";
     Folder => "icons/folder.svg", "<path d='M2.25 6.75h6l1.5 3h12v10.5H2.25Z M2.25 6.75v-3h6l1.5 1.5h9v4.5'/>";
     Globe => "icons/globe.svg", "<circle cx='12' cy='12' r='8.25'/><path d='M3.75 12h16.5 M12 3.75c-2.25 2.25-3.37 5-3.37 8.25s1.12 6 3.37 8.25 M12 3.75c2.25 2.25 3.37 5 3.37 8.25s-1.12 6-3.37 8.25'/>";
+    Server => "icons/server.svg", "<rect x='3.75' y='3.75' width='16.5' height='6' rx='2'/><rect x='3.75' y='14.25' width='16.5' height='6' rx='2'/><path d='M6.75 6.75h1.5 M6.75 17.25h1.5'/>";
     Refresh => "icons/refresh.svg", "<path d='M20.25 12a8.25 8.25 0 1 1-2.42-5.83 M20.25 3.75v6h-6'/>";
     Restore => "icons/restore.svg", "<path d='M3.75 12a8.25 8.25 0 1 0 2.42-5.83 M3.75 3.75v6h6'/>";
     Diff => "icons/diff.svg", "<path d='M11.25 3v7.5 M7.5 6.75h7.5 M7.5 17.25h7.5'/>";

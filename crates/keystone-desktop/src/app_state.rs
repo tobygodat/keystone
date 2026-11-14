@@ -13,7 +13,7 @@ use keystone_core::{
     WindowView, WorkingDirectory,
 };
 use keystone_core::{MachineId, RemoteFolder};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[cfg(all(test, feature = "ui-tests"))]
 #[path = "app_state_tests.rs"]
@@ -265,6 +265,9 @@ pub(crate) struct AppState {
     pub(crate) attachments: keystone_core::attachment::Attachments,
     /// The browser preview's pages, one per project folder.
     pub(crate) browsers: Arc<keystone_agent::browser::Browsers>,
+    /// Folders whose saved browser address a surface has already loaded again since
+    /// launch, so it loads once, not in every window or after every failure.
+    browser_restored: HashSet<String>,
     scheduler: scheduled::Scheduler,
 }
 impl EventEmitter<RuntimeChanged> for AppState {}
@@ -278,7 +281,10 @@ fn browser_signal(cx: &mut Context<AppState>) -> Wake {
         while rx.next().await.is_some() {
             while rx.try_recv().is_ok() {}
             if this
-                .update(cx, |_, cx| cx.emit(crate::browser::BrowserChanged))
+                .update(cx, |state, cx| {
+                    state.save_browser_pages();
+                    cx.emit(crate::browser::BrowserChanged)
+                })
                 .is_err()
             {
                 break;
@@ -653,6 +659,33 @@ impl AppState {
         let result = self.store.set_note(project, text);
         self.publish(cx);
         result
+    }
+
+    /// Saves the address each browser page is on, so it comes back after a relaunch.
+    /// A page that failed to load keeps the address it tried.
+    fn save_browser_pages(&mut self) {
+        if self.phase == Phase::Exiting {
+            return;
+        }
+        for (folder, url) in self.browsers.addresses() {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                let _ = self.store.set_browser_page(&folder, &url);
+            }
+        }
+    }
+
+    /// The address `folder`'s page was on before this launch, the first time a surface
+    /// asks for it.
+    pub(crate) fn browser_to_restore(&mut self, folder: &str) -> Option<String> {
+        if !self.browser_restored.insert(folder.to_owned())
+            || self.browsers.existing(folder).is_some()
+        {
+            return None;
+        }
+        self.store
+            .workspace()
+            .browser_page(folder)
+            .map(str::to_owned)
     }
 
     pub(crate) fn commit_draft(&self, folder: &str) -> String {
@@ -1696,6 +1729,7 @@ impl AppState {
         ));
         let mut state = Self {
             browsers,
+            browser_restored: HashSet::new(),
             removing_worktrees: Arc::default(),
             error: None,
             shutdown_error: None,

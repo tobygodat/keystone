@@ -15,15 +15,37 @@ crates/keystone-agent/src/browser/cdp.rs
 	unknown error
 	{method}: {error}
 
+crates/keystone-agent/src/browser/consent.rs
+	An action led the page to {url}, which isn't on this machine, so the page stayed where it was. To go there, call browser_navigate with that url, which goes through the user's approval.
+	Kept the page here: an agent's action led to {url}, which isn't on this machine
+	MIDI devices
+	The page asked for {label}, and Keystone refused
+	idle detection
+	its location
+	local fonts
+	screen capture
+	storage access
+	the camera or microphone
+	the clipboard
+	window placement
+	⁣keystone-permission
+
 crates/keystone-agent/src/browser/mod.rs
 	Browser.downloadWillBegin
 	Browser.setDownloadBehavior
+	Document
+	Fetch.enable
+	Fetch.fulfillRequest
+	Fetch.requestPaused
 	No Chrome, Chromium, Edge or Brave found. Install one, or set KEYSTONE_BROWSER_PATH.
 	Refused a download of {name}
+	Request
+	Runtime.runIfWaitingForDebugger
+	Target.attachedToTarget
 	Target.closeTarget
-	Target.setDiscoverTargets
-	Target.targetCreated
-	Target.targetInfoChanged
+	Target.detachFromTarget
+	Target.detachedFromTarget
+	Target.setAutoAttach
 	a file
 	{} did not start: {error}
 
@@ -44,11 +66,16 @@ crates/keystone-agent/src/browser/page.rs
 	Delete
 	Digit{c}
 	Dismissed a {kind} dialog: “{message}”
+	Document
 	Emulation.setDeviceMetricsOverride
 	End
 	Enter
 	Enter an http or https address
 	Escape
+	Fetch.continueRequest
+	Fetch.enable
+	Fetch.fulfillRequest
+	Fetch.requestPaused
 	Home
 	Input.dispatchKeyEvent
 	Input.dispatchMouseEvent
@@ -59,6 +86,7 @@ crates/keystone-agent/src/browser/page.rs
 	No target
 	Only http and https addresses open here
 	Opened a pop-up's page here: {url}
+	Page.addScriptToEvaluateOnNewDocument
 	Page.captureScreenshot
 	Page.enable
 	Page.frameNavigated
@@ -76,7 +104,10 @@ crates/keystone-agent/src/browser/page.rs
 	Page.screencastFrameAck
 	Page.startScreencast
 	Page.stopScreencast
+	Request
 	Runtime.callFunctionOn
+	Runtime.consoleAPICalled
+	Runtime.enable
 	Runtime.evaluate
 	Space
 	Tab

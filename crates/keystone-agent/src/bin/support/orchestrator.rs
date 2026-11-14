@@ -50,7 +50,7 @@ impl Server {
         })
     }
 
-    fn call(&self, name: &str, arguments: Value) -> Result<Value, &'static str> {
+    pub fn call(&self, name: &str, arguments: Value) -> Result<Value, &'static str> {
         let result = self.result(name, arguments)?;
         if result["isError"] == true {
             let error = result["structuredContent"]["error"]

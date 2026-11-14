@@ -149,6 +149,9 @@
 //! a prompt that asks for a widget (see `support/widgets.rs`) calls `show_ui`: it asks
 //! permission with `can_use_tool`, sends `tools/call` with the tool use ID in `_meta`,
 //! waits for the answer, and replies with what each call returned.
+//! `orchestrator test: evaluate browser EXPRESSION` calls the `keystone` server's
+//! `browser_evaluate` the same way, asking with `can_use_tool` first outside
+//! `bypassPermissions`, so Keystone's own approval decides it.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -1463,6 +1466,97 @@ fn show_ui(
     Some(text)
 }
 
+/// `orchestrator test: evaluate browser EXPRESSION` calls `browser_evaluate` the way
+/// Claude Code calls a `keystone` tool: outside `bypassPermissions` it first asks with
+/// `can_use_tool`, and calls the tool only once that is allowed. Returns `None` for
+/// any other prompt, and `Some(None)` when the turn was stopped while it asked.
+fn evaluate_browser(
+    out: &Out,
+    shared: &Shared,
+    turn: u64,
+    text: &str,
+    mode: &str,
+) -> Option<Option<String>> {
+    let expression = text
+        .strip_prefix("orchestrator test: evaluate browser ")?
+        .trim();
+    let server = shared.mcp.lock().unwrap().clone()?;
+    let pid = std::process::id();
+    let (message, tool) = (
+        format!("fake-evaluate-{pid}-{turn}"),
+        format!("fake-evaluate-toolu-{pid}-{turn}"),
+    );
+    let name = "mcp__keystone__browser_evaluate";
+    let arguments = json!({"expression": expression});
+    stream(
+        out,
+        json!({"type": "message_start", "message": {"id": message}}),
+    );
+    stream(
+        out,
+        json!({"type": "content_block_start", "index": 0, "content_block":
+               {"type": "tool_use", "id": tool, "name": name, "input": {}}}),
+    );
+    let content = json!([{"type": "tool_use", "id": tool, "name": name, "input": arguments}]);
+    emit(
+        out,
+        json!({"type": "assistant", "message": {"id": message, "content": content},
+               "parent_tool_use_id": null}),
+    );
+    store(
+        "assistant",
+        json!({"id": message, "role": "assistant", "content": content}),
+        None,
+    );
+    let allowed = mode == "bypassPermissions" || {
+        let Some(answer) = ask(
+            out,
+            shared,
+            &format!("fake-evaluate-permission-{pid}-{turn}"),
+            json!({"subtype": "can_use_tool", "tool_name": name, "display_name": "browser_evaluate",
+                   "input": arguments, "tool_use_id": tool}),
+        ) else {
+            return Some(None);
+        };
+        answer["response"]["behavior"] == "allow"
+    };
+    let (text, is_error, reply) = if allowed {
+        match server.call("browser_evaluate", arguments) {
+            Ok(value) => {
+                let value = value["value"].to_string();
+                (
+                    value.clone(),
+                    false,
+                    format!(
+                        "Scripted orchestrator success: browser evaluate returned {value} (test data, no model call)."
+                    ),
+                )
+            }
+            Err(error) => (
+                error.to_owned(),
+                true,
+                format!("Scripted orchestrator failure: browser evaluate {error} (test data)."),
+            ),
+        }
+    } else {
+        (
+            "The user denied this in Keystone.".to_owned(),
+            true,
+            "Scripted orchestrator: browser evaluate was declined (test data, no model call)."
+                .to_owned(),
+        )
+    };
+    let result = json!([{"type": "tool_result", "tool_use_id": tool,
+        "content": [{"type": "text", "text": text}], "is_error": is_error}]);
+    emit(
+        out,
+        json!({"type": "user", "message": {"role": "user", "content": result},
+               "parent_tool_use_id": null}),
+    );
+    store("user", json!({"role": "user", "content": result}), None);
+    Some(Some(reply))
+}
+
 /// Runs one message's turn and returns its lifecycle end state.
 #[allow(clippy::too_many_arguments)]
 fn answer(
@@ -1528,7 +1622,11 @@ fn answer(
     }
     let server = shared.mcp.lock().unwrap().clone();
     let request = format!("{}-{turn}-{request}", std::process::id());
-    let scripted = orchestrator::reply(text, server.as_ref(), &request);
+    let scripted = match evaluate_browser(out, shared, turn, text, mode) {
+        Some(None) => return stopped(out),
+        Some(Some(reply)) => Some(reply),
+        None => orchestrator::reply(text, server.as_ref(), &request),
+    };
     let mut reply = scripted.or_else(|| std::env::var("KEYSTONE_FAKE_CLAUDE_REPLY").ok()).unwrap_or_else(|| {
         format!(
             "Claude test reply (test data): You wrote: {prompt} **Mode:** `{mode}`{left_plan} **Model:** `{model}`{settings}{images}"

@@ -54,4 +54,5 @@ date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_
 2026-11-12T07:20:31Z	db4a3a5b9	6.43	6.34	509	1.26	1.49	TOB-310 edit rows: 40-line cached preview, full edit in the diff view; 6 build jobs, no incremental, shared host load	1.79	1.87	3.48	1.16	1.43	1.73
 2026-11-12T08:28:47Z	3e1a3008c	7.91	8.44	515	1.48	1.82	TOB-310 merged with main 1e3f928 (remote machines); edit paths from the session folder, Open full edit focusable; 6 build jobs, no incremental, shared host load	1.85	1.90	3.85	0.88	1.96	3.04
 2026-11-12T09:20:50Z	ef27b4e3b	7.60	6.78	515	1.27	1.96	TOB-310 no-final-newline marker on diff lines, copy built when copied; 6 build jobs, no incremental, shared host load	1.85	1.94	3.86	0.89	1.61	1.64
+2026-11-14T06:19:29Z	a710d39ff	7.17	9.03	526	1.10	1.40	TOB-443 browser follow-ups: note card over the page, Browser tab dot, saved address, server icon; 6 build jobs, no incremental, private sccache server, shared host load	1.45	1.33	2.92	0.77	1.72	1.61
 2026-11-14T06:37:57Z	9d51b91cb	6.95	7.08	529	1.09	1.49	TOB-456 find bar and message search; --runs 1, 6 build jobs, no incremental	1.32	1.36	2.96	0.79	1.88	2.11

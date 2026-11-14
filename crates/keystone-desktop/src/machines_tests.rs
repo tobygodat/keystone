@@ -39,6 +39,11 @@ fn remote_window_in<'a>(
         .unwrap()
         .value;
     store.select(remote).unwrap();
+    // This machine's project had a browser page open before; a remote session never
+    // loads it.
+    store
+        .set_browser_page(project.to_str().unwrap(), "http://localhost:5173/")
+        .unwrap();
     store.flush().unwrap();
     drop(store);
     let store = Store::open(path).unwrap();
@@ -87,6 +92,16 @@ fn the_browser_says_it_isnt_available_for_a_session_on_another_machine(cx: &mut 
             "no local folder is browsed"
         );
     });
+    let project = dir.path().to_str().unwrap().to_owned();
+    let saved = view.update(cx, |view, cx| {
+        view.state
+            .update(cx, |state, _| state.browser_to_restore(&project))
+    });
+    assert_eq!(
+        saved.as_deref(),
+        Some("http://localhost:5173/"),
+        "this machine's saved page was left for a local session"
+    );
 }
 
 #[gpui::test]

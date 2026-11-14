@@ -463,7 +463,9 @@ impl Keystone {
                 .aria_label("Attach")
                 .selected(self.attach.menu)
                 .debug_selector(|| "attach".into())
-                .tooltip(Tooltip::text("Attach")),
+                .when(!self.attach.menu, |button| {
+                    button.tooltip(Tooltip::text("Attach"))
+                }),
         )
         .anchor(Anchor::BottomRight)
         .open(self.attach.menu)

@@ -1748,3 +1748,103 @@ fn a_conversation_added_to_a_moved_panel_stays_where_it_was_put(cx: &mut TestApp
     let wide = view.update(cx, |this, cx| this.shown_composition(cx).root().clone());
     assert_eq!(wide, narrow, "the group the user added to stays put");
 }
+
+#[gpui::test]
+fn files_and_the_browser_come_back_in_their_order_after_a_narrow_window(cx: &mut TestAppContext) {
+    side_panels_round_trip(false, cx);
+}
+
+#[gpui::test]
+fn the_device_panel_stays_under_the_composer_and_the_rest_come_back(cx: &mut TestAppContext) {
+    side_panels_round_trip(true, cx);
+}
+
+/// Opens Files, the Browser and, with `device`, the Device panel at 1920 px, then
+/// narrows the window and widens it again: every panel is back where it was.
+fn side_panels_round_trip(device: bool, cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    resize_and_settle(gpui::size(px(1920.), px(1080.)), cx);
+    cx.dispatch_action(crate::files::ToggleFiles);
+    cx.run_until_parked();
+    cx.dispatch_action(crate::browser::ToggleBrowser);
+    cx.run_until_parked();
+    if device {
+        cx.dispatch_action(crate::device::ToggleDevice);
+        cx.run_until_parked();
+    }
+    let side_order = |cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            let c = this.shown_composition(cx);
+            ordered_views(c.root())
+                .into_iter()
+                .filter_map(|view| c.component(view).filter(|k| k.is_side()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let opened = (beside_column(&view, cx), side_order(cx));
+    assert_eq!(
+        opened.1.len(),
+        2 + usize::from(device),
+        "all open: {opened:?}"
+    );
+    assert_eq!(opened.0.len(), 2, "Files and the Browser beside the column");
+    for narrow in [
+        gpui::size(px(1100.), px(720.)),
+        gpui::size(px(720.), px(900.)),
+    ] {
+        resize_and_settle(narrow, cx);
+        resize_and_settle(gpui::size(px(1920.), px(1080.)), cx);
+        assert_eq!(
+            (beside_column(&view, cx), side_order(cx)),
+            opened,
+            "back from {narrow:?} where and in the order they were"
+        );
+    }
+}
+
+#[gpui::test]
+fn the_browser_tab_shows_a_dot_while_an_agent_drives_it_out_of_sight(cx: &mut TestAppContext) {
+    let (_dir, view, cx) = open(cx);
+    click(cx, "customize-apply");
+    click(cx, "customize-close");
+    resize_and_settle(gpui::size(px(1920.), px(1080.)), cx);
+    cx.dispatch_action(crate::files::ToggleFiles);
+    cx.run_until_parked();
+    let files = view.update_in(cx, |this, window, cx| {
+        let c = this.shown_composition(cx);
+        let (files, _) = c.views().find(|(_, k)| *k == Component::Files).unwrap();
+        this.open_surface(
+            Component::Browser,
+            Place::TabWith(files),
+            Size::Fill(NonZeroU16::MIN),
+            window,
+            cx,
+        );
+        files
+    });
+    cx.run_until_parked();
+    show_tab(&view, Component::Files, cx);
+    let dot = format!("surface-tabs-{}-tab-1-dot", files.0);
+    let shown = |cx: &mut VisualTestContext| cx.debug_bounds(dot.clone().leak()).is_some();
+    assert!(!shown(cx), "no dot before an agent acts");
+    let drive = |cx: &mut VisualTestContext| {
+        view.update(cx, |this, cx| {
+            let session = this.selected(cx).unwrap();
+            this.state
+                .update(cx, |state, cx| state.reveal_browser_for(session, cx));
+        });
+        cx.run_until_parked();
+    };
+    drive(cx);
+    assert!(shown(cx), "an agent drove the page behind Files");
+    show_tab(&view, Component::Browser, cx);
+    assert!(!shown(cx), "showing the Browser clears it");
+    drive(cx);
+    show_tab(&view, Component::Files, cx);
+    assert!(
+        !shown(cx),
+        "an agent driving the page in view leaves nothing to see later"
+    );
+}

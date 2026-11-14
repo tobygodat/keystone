@@ -821,6 +821,10 @@ pub struct Workspace {
     /// in their own projection, never in the workspace payload.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     commit_drafts: BTreeMap<String, String>,
+    /// The address each folder's browser page was last on. Saved in its own
+    /// projection, never in the workspace payload.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    browser_pages: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scheduled_tasks: Vec<ScheduledTask>,
     /// Machines the user linked, in the order they were linked. Saved in their own
@@ -894,6 +898,11 @@ impl Workspace {
     /// The unfinished commit message for `folder`, empty when there is none.
     pub fn commit_draft(&self, folder: &str) -> &str {
         self.commit_drafts.get(folder).map_or("", String::as_str)
+    }
+
+    /// The address `folder`'s browser page was last on, if it was on one.
+    pub fn browser_page(&self, folder: &str) -> Option<&str> {
+        self.browser_pages.get(folder).map(String::as_str)
     }
 
     /// The projects the user took off the list.
@@ -2158,6 +2167,16 @@ impl Store {
         Ok(self.commit(next, self.next_id))
     }
 
+    /// Keeps `url` as the address `folder`'s browser page is on.
+    pub fn set_browser_page(&mut self, folder: &str, url: &str) -> StoreResult<Applied<()>> {
+        if self.workspace.browser_page(folder) == Some(url) {
+            return Ok(self.unchanged());
+        }
+        let mut next = self.workspace.clone();
+        next.browser_pages.insert(folder.to_owned(), url.to_owned());
+        Ok(self.commit(next, self.next_id))
+    }
+
     fn update_preferences(
         &mut self,
         change: impl FnOnce(&mut Preferences),
@@ -2874,6 +2893,53 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(title(&reopened, 1), "Release notes");
         assert_eq!(title(&reopened, 2), "Notes, take two");
+    }
+
+    #[test]
+    fn a_folders_browser_address_comes_back_after_a_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .set_browser_page("/repo", "http://localhost:5173/a")
+            .unwrap();
+        store
+            .set_browser_page("/other", "http://localhost:3000/")
+            .unwrap();
+        let writes = store.writes();
+        store
+            .set_browser_page("/repo", "http://localhost:5173/a")
+            .unwrap();
+        assert_eq!(
+            store.writes(),
+            writes,
+            "an unchanged address writes nothing"
+        );
+        let before = store.database().events_after(0, 1000).unwrap().len();
+        store
+            .set_browser_page("/repo", "http://localhost:5173/b")
+            .unwrap();
+        let events = store.database().events_after(0, 1000).unwrap();
+        let added: Vec<_> = events[before..]
+            .iter()
+            .map(|event| (event.kind.as_str(), event.payload.as_str()))
+            .collect();
+        assert_eq!(
+            added,
+            [("browser_page.saved", r#""http://localhost:5173/b""#)],
+            "an address is its own small event, never a copy of the workspace"
+        );
+        let reopened = Store::open(&path).unwrap();
+        let workspace = reopened.workspace();
+        assert_eq!(
+            workspace.browser_page("/repo"),
+            Some("http://localhost:5173/b")
+        );
+        assert_eq!(
+            workspace.browser_page("/other"),
+            Some("http://localhost:3000/")
+        );
+        assert_eq!(workspace.browser_page("/elsewhere"), None);
     }
 
     #[test]

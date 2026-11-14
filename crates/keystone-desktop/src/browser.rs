@@ -80,6 +80,9 @@ pub(crate) struct BrowserView {
     finding: Option<Task<()>>,
     working: Option<Task<()>>,
     error: Option<String>,
+    /// The page's count of loaded documents when `error` was shown. A document that
+    /// loads after it, whoever led there, clears the error.
+    error_at: u64,
     menu: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -106,6 +109,7 @@ impl BrowserView {
             finding: None,
             working: None,
             error: None,
+            error_at: 0,
             menu: false,
             _subscriptions: vec![changed],
         }
@@ -135,6 +139,15 @@ impl BrowserView {
         let url = self.page(cx).map(|page| page.url()).unwrap_or_default();
         self.show_address(url, cx);
         self.find_servers(cx);
+        // Back on the page it was on before the last quit, loading it again.
+        if let Some(folder) = self.folder.clone()
+            && let Some(url) = self
+                .state
+                .update(cx, |state, _| state.browser_to_restore(&folder))
+        {
+            self.show_address(url.clone(), cx);
+            self.run(move |page| page.restore(&url), cx);
+        }
     }
 
     /// The folder whose page this view shows.
@@ -196,13 +209,14 @@ impl BrowserView {
                 let page = browsers.page(&folder)?;
                 let _operation = page.operation();
                 page.set_note(None);
+                page.user_drives();
                 job(&page)
             })
             .await
             .unwrap_or_else(|_| Err(browser::cdp::CLOSED.into()));
             let _ = this.update(cx, |this, cx| {
                 this.working = None;
-                this.error = result.err();
+                this.show_error(result.err(), cx);
                 cx.notify();
             });
         }));
@@ -217,10 +231,15 @@ impl BrowserView {
                 self.run(move |page| page.navigate(&url), cx);
             }
             Err(error) => {
-                self.error = Some(error);
+                self.show_error(Some(error), cx);
                 cx.notify();
             }
         }
+    }
+
+    fn show_error(&mut self, error: Option<String>, cx: &App) {
+        self.error = error;
+        self.error_at = self.page(cx).map_or(0, |page| page.documents());
     }
 
     fn go(&mut self, history: History, cx: &mut Context<Self>) {
@@ -295,6 +314,7 @@ impl BrowserView {
         {
             if kind == Mouse::Pressed {
                 page.set_note(None);
+                page.user_drives();
             }
             page.mouse(kind, x, y, count, bits(held));
         }
@@ -306,6 +326,7 @@ impl BrowserView {
         };
         let keystroke = &event.keystroke;
         page.set_note(None);
+        page.user_drives();
         // Paste, copy, cut and select all take the platform's chord, Command on macOS and
         // Control elsewhere, and use the system clipboard rather than Chrome's own.
         let held = keystroke.modifiers;
@@ -368,11 +389,13 @@ impl BrowserView {
         let loading = page.is_some_and(Page::loading) || self.working.is_some();
         let mut servers = PopoverMenu::new(
             "browser-servers-menu",
-            IconButton::new("browser-servers", IconName::Down)
+            IconButton::new("browser-servers", IconName::Server)
                 .size(ButtonSize::Compact)
                 .selected(self.menu)
                 .debug_selector(|| "browser-servers".into())
-                .tooltip(Tooltip::text("Dev servers")),
+                .when(!self.menu, |button| {
+                    button.tooltip(Tooltip::text("Dev servers"))
+                }),
         )
         .anchor(gpui::Anchor::TopRight)
         .open(self.menu)
@@ -457,6 +480,8 @@ impl BrowserView {
             .child(servers)
     }
 
+    /// The surface with no page to show: what to open, under the error of the last
+    /// attempt when there is one, so the project's dev servers stay a click away.
     fn empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut body = v_flex()
             .automation_id(if self.elsewhere.is_some() {
@@ -469,7 +494,15 @@ impl BrowserView {
             .items_center()
             .justify_center()
             .gap_2()
-            .px(px(24.));
+            .px(px(24.))
+            .when_some(self.error.clone(), |body, error| {
+                body.child(
+                    div()
+                        .automation_id("browser-error")
+                        .pb_2()
+                        .child(Label::new(error).color(Color::Danger)),
+                )
+            });
         if let Some(machine) = &self.elsewhere {
             return body
                 .child(
@@ -647,36 +680,59 @@ impl Render for BrowserView {
         {
             self.show_address(page.url(), cx);
         }
+        if page
+            .as_ref()
+            .is_some_and(|page| page.documents() > self.error_at)
+        {
+            self.error = None;
+        }
         let note = page.as_ref().and_then(|page| page.note());
         let blank = page.as_ref().is_none_or(|page| page.url() == "about:blank");
-        let body = match (&self.error, page) {
-            (Some(error), _) => div()
-                .automation_id("browser-error")
-                .px(px(14.))
-                .py_2()
-                .child(Label::new(error.clone()).color(Color::Danger))
-                .into_any_element(),
-            (None, Some(page)) if !blank => self.frame(page, window, cx),
+        let body = match page {
+            Some(page) if !blank && self.error.is_none() => self.frame(page, window, cx),
             _ => self.empty(cx),
         };
+        let colors = cx.theme().colors;
         v_flex()
             .size_full()
             .min_h_0()
             .child(self.toolbar(self.page(cx).as_deref(), cx))
-            .children(note.map(|note| {
+            .child(
                 div()
-                    .automation_id("browser-agent-note")
-                    .flex_none()
-                    .px(px(12.))
-                    .pb(px(6.))
-                    .child(
-                        Label::new(note)
-                            .size(TextSize::Sm)
-                            .color(Color::Muted)
-                            .truncate(),
-                    )
-            }))
-            .child(body)
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(body)
+                    // Over the page's bottom edge, so it never moves the page under
+                    // the pointer. It takes no input: a press there reaches the page.
+                    .children(note.map(|note| {
+                        h_flex()
+                            .absolute()
+                            .bottom(px(8.))
+                            .left(px(8.))
+                            .right(px(8.))
+                            .child(
+                                div()
+                                    .automation_id("browser-agent-note")
+                                    .min_w_0()
+                                    .max_w_full()
+                                    .px(px(8.))
+                                    .py(px(3.))
+                                    .rounded(radius::CONTROL)
+                                    .bg(colors.overlay)
+                                    .border_1()
+                                    .border_color(colors.border)
+                                    .child(
+                                        Label::new(note)
+                                            .size(TextSize::Sm)
+                                            .color(Color::Muted)
+                                            .truncate(),
+                                    ),
+                            )
+                    })),
+            )
     }
 }
 
@@ -712,7 +768,17 @@ impl AppState {
         let browsers = self.browsers.clone();
         let tool = tool.to_owned();
         Ok(Box::new(move || {
-            run_tool(&browsers, &folder, &title, &tool, &arguments, deadline)
+            let mut reply = run_tool(&browsers, &folder, &title, &tool, &arguments, deadline)?;
+            // A navigation an agent's action led to, stopped since its last call.
+            if let Some(url) = browsers
+                .existing(&folder)
+                .and_then(|page| page.take_refused())
+                && reply.value.is_object()
+            {
+                reply.value["refused_navigation"] =
+                    json!({"url": url, "message": browser::consent::refused_hint(&url)});
+            }
+            Ok(reply)
         }))
     }
 }
@@ -747,6 +813,13 @@ fn run_tool(
         return Err(
             "The page was busy past this call's deadline, so nothing was done. Retry it.".into(),
         );
+    }
+    // Where the page goes next is this agent's doing, until the user acts in it.
+    if matches!(
+        tool,
+        "browser_open" | "browser_navigate" | "browser_act" | "browser_evaluate"
+    ) {
+        page.agent_drives(arguments["url"].as_str());
     }
     match tool {
         "browser_open" => {
@@ -824,13 +897,18 @@ impl Keystone {
     }
 
     /// Opens the Browser surface beside the conversation without moving focus, when an
-    /// agent in a session this window shows opens the page.
+    /// agent in a session this window shows drives the page. One open behind another
+    /// tab gets a dot until it is shown.
     pub(crate) fn reveal_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .shown_composition(cx)
             .views()
             .any(|(_, component)| component == Component::Browser)
         {
+            if !self.browser_drawn {
+                self.browser_unseen = true;
+                cx.notify();
+            }
             return;
         }
         let at = Place::Beside {
@@ -863,6 +941,8 @@ impl Keystone {
             Ok(folder) => (folder, None),
             Err(machine) => (None, Some(machine)),
         };
+        self.browser_drawn = true;
+        self.browser_unseen = false;
         self.browser
             .update(cx, |view, cx| view.set_folder(folder, elsewhere, cx));
         div()

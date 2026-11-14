@@ -581,6 +581,10 @@ struct Keystone {
     changes: changes::Changes,
     notes: notes::Notes,
     browser: Entity<browser::BrowserView>,
+    /// Whether the frame being built draws the Browser surface.
+    browser_drawn: bool,
+    /// An agent drove the page while the Browser was behind another tab.
+    browser_unseen: bool,
     pull_request_focus: FocusHandle,
     /// The session the Pull request surface showed in the frame being built.
     pull_request_drawn: Option<u64>,
@@ -1107,6 +1111,8 @@ impl Keystone {
             changes: changes::Changes::default(),
             notes: notes::Notes::default(),
             browser,
+            browser_drawn: false,
+            browser_unseen: false,
             pull_request_focus: cx.focus_handle(),
             pull_request_drawn: None,
             merge_confirm: None,
@@ -1941,7 +1947,9 @@ impl Keystone {
             IconButton::new("filter", IconName::Filter)
                 .debug_selector(|| "filter".into())
                 .selected(self.filter_menu || self.provider_filter.is_some())
-                .tooltip(Tooltip::text("Filter sessions")),
+                .when(!self.filter_menu, |button| {
+                    button.tooltip(Tooltip::text("Filter sessions"))
+                }),
         )
         .anchor(Anchor::TopRight)
         .open(self.filter_menu)
@@ -1970,7 +1978,9 @@ impl Keystone {
             IconButton::new("new-session", IconName::Pencil)
                 .debug_selector(|| "new-session".into())
                 .selected(self.new_menu)
-                .tooltip(Tooltip::text("New session")),
+                .when(!self.new_menu, |button| {
+                    button.tooltip(Tooltip::text("New session"))
+                }),
         )
         .anchor(Anchor::TopRight)
         .open(self.new_menu)

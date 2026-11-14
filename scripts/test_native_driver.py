@@ -314,6 +314,10 @@ class WheelTest(unittest.TestCase):
             self.server.handle('wheel', {'id': 'hidden', 'vertical': -1})
         self.run.call.assert_not_called()
 
+    def test_a_run_may_name_the_browser(self):
+        env = {'KEYSTONE_BROWSER_PATH': '/usr/bin/chromium'}
+        self.assertEqual(driver.app_env(env), env)
+
     def test_raw_scroll_input_remains_unchanged(self):
         actions = [{'action': 'scroll', 'x': 1, 'y': 2, 'scroll_x': 0, 'scroll_y': -45}]
         self.server.handle('input', {'actions': actions})

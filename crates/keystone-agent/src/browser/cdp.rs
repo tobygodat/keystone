@@ -259,6 +259,9 @@ impl Chrome {
                 "--disable-extensions",
                 "--disable-sync",
                 "--mute-audio",
+                // Headless Chrome has nowhere to show a permission prompt, so one waited
+                // forever. Every prompt is refused at once instead.
+                "--deny-permission-prompts",
                 // Chrome's own background traffic: variation seeds, component updates,
                 // pings and reports. Besides calling Google from the agents' browser, on
                 // Linux it held a page's first load for more than 10 seconds.
