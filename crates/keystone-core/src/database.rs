@@ -634,6 +634,37 @@ impl Database {
         })
     }
 
+    /// Calls `visit` with every saved log entry of every session, newest first: the
+    /// session's ID and the entry's payload. Stops early when `visit` returns `false`.
+    /// It runs on a read-only connection of its own, so writes go on meanwhile.
+    pub fn scan_logs(&self, mut visit: impl FnMut(u64, &str) -> bool) -> io::Result<()> {
+        self.read(|connection| {
+            let mut statement = connection
+                .prepare("SELECT session_id, payload FROM log_entries ORDER BY sequence DESC")
+                .map_err(sql_error)?;
+            let mut rows = statement.query([]).map_err(sql_error)?;
+            while let Some(row) = rows.next().map_err(sql_error)? {
+                let session = row
+                    .get_ref(0)
+                    .map_err(sql_error)?
+                    .as_str()
+                    .map_err(|error| invalid(error.to_string()))?;
+                let Ok(session) = session.parse() else {
+                    continue;
+                };
+                let payload = row
+                    .get_ref(1)
+                    .map_err(sql_error)?
+                    .as_str()
+                    .map_err(|error| invalid(error.to_string()))?;
+                if !visit(session, payload) {
+                    break;
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// The name this workspace's checkpoints are saved under in each repository:
     /// `fresh` the first time it is asked for, and the same name from then on.
     pub fn checkpoint_store(&self, fresh: &str) -> io::Result<String> {

@@ -28,6 +28,7 @@ mod profile;
 mod question;
 pub mod recovery;
 pub mod remote;
+pub mod search;
 #[cfg(unix)]
 pub mod setup;
 pub mod surface;

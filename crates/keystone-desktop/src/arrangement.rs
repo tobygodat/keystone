@@ -2047,6 +2047,7 @@ impl Keystone {
                                                         cx.notify();
                                                     }
                                                     this.release_undrawn_widget_focus(key, window, cx);
+                                                    this.reveal_found(key, cx);
                                                     this.observe_conversation(
                                                         key, revision, window, cx,
                                                     )
@@ -2058,7 +2059,8 @@ impl Keystone {
                                 .absolute()
                                 .inset_0(),
                             )
-                            .children(self.jump_to_latest(key, cx)),
+                            .children(self.jump_to_latest(key, cx))
+                            .children(self.find_bar(key, cx)),
                     );
                 } else if self.fixture {
                     pane = pane.child(

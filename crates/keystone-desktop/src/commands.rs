@@ -11,6 +11,7 @@ use crate::diff_view::{ViewChanges, ViewUncommitted};
 use crate::excerpt::{SEND_SELECTION, SendSelection, Taken};
 use crate::file_view::{SAVE_FILE, Save};
 use crate::files::ToggleFiles;
+use crate::find::{CloseFind, FindInSession};
 use crate::fork::ForkFromHere;
 use crate::handoff::HandOff;
 use crate::import::ImportSessions;
@@ -61,6 +62,8 @@ pub(crate) struct Command {
 /// behind an open overlay.
 const APP: &str = "!Dialog && !CommandPalette";
 const TRANSCRIPT: &str = "Conversation && !Dialog && !CommandPalette";
+/// The find bar over a transcript.
+const FIND_BAR: &str = "FindBar && !Dialog && !CommandPalette";
 /// The Files editor, where Save runs.
 const FILE_EDITOR: &str = "FileView && !Dialog && !CommandPalette";
 
@@ -194,9 +197,25 @@ pub(crate) const COMMANDS: &[Command] = &[
         in_terminal: false,
     },
     Command {
+        id: "find-in-session",
+        label: "Find in session",
+        keys: &["secondary-f"],
+        context: Some(APP),
+        action: || Box::new(FindInSession),
+        in_terminal: false,
+    },
+    Command {
+        id: "close-find",
+        label: "Close find",
+        keys: &["escape"],
+        context: Some(FIND_BAR),
+        action: || Box::new(CloseFind),
+        in_terminal: false,
+    },
+    Command {
         id: "focus-search",
         label: "Focus search",
-        keys: &["secondary-f"],
+        keys: &["secondary-shift-f"],
         context: Some(APP),
         action: || Box::new(FocusSearch),
         in_terminal: false,
@@ -604,7 +623,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         id: "fork-from-here",
         label: "Transcript: fork from row",
-        keys: &["secondary-shift-f"],
+        keys: &["secondary-alt-shift-f"],
         context: Some(TRANSCRIPT),
         action: || Box::new(ForkFromHere),
         in_terminal: false,

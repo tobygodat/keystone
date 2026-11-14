@@ -271,6 +271,7 @@ impl Keystone {
         root.capture_action(self.leave_settings::<NewClaude>(cx))
             .capture_action(self.leave_settings::<NewCodex>(cx))
             .capture_action(self.leave_settings::<FocusSearch>(cx))
+            .capture_action(self.leave_settings::<crate::find::FindInSession>(cx))
             .capture_action(self.leave_settings::<FocusComposer>(cx))
             .capture_action(self.leave_settings::<crate::transcript_keyboard::FocusTranscript>(cx))
             .capture_action(self.leave_settings::<crate::transcript_keyboard::NextTranscript>(cx))
@@ -1836,7 +1837,7 @@ mod tests {
         let path = dir.path().join("workspace.json");
         seeded(&path);
         let (view, cx) = open_window(&path, cx);
-        keys(cx, "secondary-, secondary-f");
+        keys(cx, "secondary-, secondary-shift-f");
         assert!(!shown(cx, "settings-page"));
         cx.update(|window, cx| assert!(view.read(cx).search.focus_handle(cx).is_focused(window)));
         settings_shortcuts_work(cx);

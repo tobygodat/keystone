@@ -1141,6 +1141,7 @@ crates/keystone-desktop/src/commands.rs
 	Cancel setup script
 	Capture screenshot
 	Change project color…
+	Close find
 	Close tab
 	Close terminal
 	Close window
@@ -1148,6 +1149,7 @@ crates/keystone-desktop/src/commands.rs
 	Copy pull request link
 	Customize layout
 	Edit worktree setup script…
+	Find in session
 	Focus composer
 	Focus next terminal pane
 	Focus next transcript
@@ -1535,6 +1537,16 @@ crates/keystone-desktop/src/files.rs
 	Space
 	{lead} {error}
 
+crates/keystone-desktop/src/find.rs
+	$ {command}
+	Close find
+	Find in session
+	Next match
+	No matches
+	Previous match
+	{total} found
+	{} of {total}
+
 crates/keystone-desktop/src/fork.rs
 	Choose a message to fork from.
 	Fork from here
@@ -1729,6 +1741,7 @@ crates/keystone-desktop/src/main.rs
 	Filter sessions
 	Hide sidebar
 	Import…
+	In messages
 	In worktree…
 	Interface preview · sample transcript
 	Jump to latest
@@ -2028,6 +2041,9 @@ crates/keystone-desktop/src/second_opinion.rs
 	waiting for you
 	{draft}\n\n{quote}
 	{provider}'s reply #{at}
+
+crates/keystone-desktop/src/session_search.rs
+	Couldn't search messages. {error}
 
 crates/keystone-desktop/src/session_tabs.rs
 	Layout not changed. Cannot save this project's layout. {error}

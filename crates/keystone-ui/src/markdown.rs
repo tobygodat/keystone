@@ -123,6 +123,16 @@ impl Document {
         self.blocks.is_empty()
     }
 
+    /// The texts this document draws, in order: each paragraph, heading, code block
+    /// and table cell. Find searches these, and [`Markdown::marks`] counts them.
+    pub fn texts(&self) -> Vec<SharedString> {
+        let mut texts = Vec::new();
+        for top in &self.blocks {
+            selection::visit(&top.block, &mut |text, _| texts.push(text.clone()));
+        }
+        texts
+    }
+
     /// Whether this document has rendered text that supports range selection.
     /// Mermaid diagrams and rules keep their own interaction surfaces.
     pub fn has_selectable_text(&self) -> bool {
@@ -734,6 +744,8 @@ pub struct Markdown {
     selection_focus: Option<FocusHandle>,
     on_selection_start: Option<selection::StartHandler>,
     images: Option<ImageRenderer>,
+    marks: Vec<crate::Mark>,
+    mark_slot: Option<crate::MarkSlot>,
 }
 
 impl Markdown {
@@ -749,7 +761,18 @@ impl Markdown {
             selection_focus: None,
             on_selection_start: None,
             images: None,
+            marks: Vec::new(),
+            mark_slot: None,
         }
+    }
+
+    /// Draws find's matches. Each mark's `text` counts the document's texts in the
+    /// order [`Document::texts`] lists them.
+    /// `slot` learns where the current match is drawn.
+    pub fn marks(mut self, marks: Vec<crate::Mark>, slot: Option<crate::MarkSlot>) -> Self {
+        self.marks = marks;
+        self.mark_slot = slot;
+        self
     }
 
     /// Parses and renders `source`. Hosts that redraw often should cache the parse and
@@ -810,6 +833,8 @@ struct Ctx {
     managed_focus: bool,
     selection: Entity<selection::Selection>,
     images: Option<ImageRenderer>,
+    marks: Vec<crate::Mark>,
+    mark_slot: Option<crate::MarkSlot>,
 }
 
 impl RenderOnce for Markdown {
@@ -839,6 +864,8 @@ impl RenderOnce for Markdown {
             managed_focus: self.managed_focus,
             selection: selection.clone(),
             images: self.images,
+            marks: self.marks,
+            mark_slot: self.mark_slot,
         };
         let blocks: Vec<_> = self
             .document
@@ -1202,8 +1229,16 @@ fn inline_text(inline: &Inline, base: &TextStyle, ctx: &mut Ctx, cx: &App) -> An
     let index = ctx.texts;
     ctx.texts += 1;
     let n = ctx.texts;
+    let runs = crate::marks::apply(runs, index, &ctx.marks, cx);
     let text = selection::text(inline.text.clone(), runs, index, &ctx.selection, cx);
     let layout = text.layout().clone();
+    crate::marks::record(
+        &layout,
+        index,
+        &ctx.marks,
+        inline.text.len(),
+        ctx.mark_slot.as_ref(),
+    );
     if inline.links.is_empty() {
         return selection::track(
             text.into_any_element(),

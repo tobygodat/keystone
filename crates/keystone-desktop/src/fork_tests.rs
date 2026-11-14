@@ -248,7 +248,7 @@ fn the_keyboard_forks_the_focused_message(cx: &mut gpui::TestAppContext) {
 
     view.update(cx, |v, cx| v.select(1, cx));
     cx.run_until_parked();
-    activity_keys(cx, "secondary-shift-t end secondary-shift-f");
+    activity_keys(cx, "secondary-shift-t end secondary-alt-shift-f");
     view.read_with(cx, |v, cx| {
         let workspace = v.state.read(cx).store().workspace();
         assert_eq!(workspace.sessions().len(), 3, "{:?}", v.error);

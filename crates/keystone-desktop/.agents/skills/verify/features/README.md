@@ -16,7 +16,8 @@ Read state with `workspace`. Preserve it with `snapshot`. These tools observe th
 - [Drafts and restart](drafts.md) covers focus, typing, autosave, and restoration.
 - [Save and Quit](quit.md) covers the shared close/Quit gate, sticky failed-save recovery, provider teardown, and interrupted restoration.
 - [Settlement](settlement.md) covers row and shortcut settling, un-settling, and the collapsible Settled section.
-- [Search and navigation](search.md) covers search entry points, matching, clearing, and sidebar visibility.
+- [Search and navigation](search.md) covers search entry points, matching titles and message text, opening a message result, clearing, and sidebar visibility.
+- [Find in a session](find.md) covers the find bar over the transcript: Ctrl+F from the conversation or composer, the count, Enter and Shift+Enter with wrapping, collapsed rows opening, streaming replies, Escape giving focus back, and the terminal keeping Ctrl+F on Linux.
 - [Customize](customize.md) covers native component moves, split sizing, duplicate conversations, tabs, restricted Claude Code helper previews, Codex helper refusal, Borrow, per-project Apply/Discard/Undo/Reset, fitting, focus, and restart.
 - [Wheel and maximize](wheel-and-maximize.md) covers emitted native wheel events, independent pane movement, deliberate unread observation, long-draft scrolling and an honest compositor maximize/restore verdict.
 - [Machines](machines.md) covers linking a machine over SSH, each failure, Settings → Machines, starting a Claude session in a folder on it, the link state in the sidebar, header and composer, a dropped link, and Quit with the next launch's catch-up.

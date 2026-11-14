@@ -15,6 +15,7 @@ mod excerpt;
 mod file_disk;
 mod file_view;
 mod files;
+mod find;
 mod fork;
 mod handoff;
 mod import;
@@ -40,6 +41,7 @@ mod restore;
 mod reveal;
 mod screenshot;
 mod second_opinion;
+mod session_search;
 mod session_tabs;
 mod settings;
 mod settings_accounts;
@@ -590,12 +592,21 @@ struct Keystone {
     mentions: mentions::Mentions,
     attach: attachments::Attach,
     usage_focus: FocusHandle,
+    /// Each view's find bar, and the rows' texts it searches.
+    finds: find::Finds,
+    /// The sidebar search's matches in saved messages.
+    messages: session_search::MessageSearch,
+    /// The sidebar's search field has focus, so the highlighted result shows a ring.
+    search_focused: bool,
 }
 
 impl Keystone {
     fn runtime_changed(&mut self, changed: &RuntimeChanged, cx: &mut Context<Self>) {
         if changed.sidebar {
             self.clear_linked_destination(cx);
+        }
+        for change in &changed.rows {
+            self.find_rows_changed(change.session, cx);
         }
         let state = self.state.read(cx);
         let now = self.clock.now();
@@ -729,6 +740,47 @@ impl Keystone {
             _ => Some(selected),
         }
     }
+    /// Whether the sidebar lists `s` under the project, the provider filter and the
+    /// search's title filter, and if so the account name its row shows.
+    fn listed(&self, s: &keystone_core::Session, cx: &App) -> Option<Option<String>> {
+        let workspace = self.state.read(cx).store().workspace();
+        let project = self.presentation.project.as_ref().ok();
+        if !project.is_none_or(|project| projects::holds(project, s))
+            || !self.provider_filter.is_none_or(|p| s.provider() == p)
+        {
+            return None;
+        }
+        let account = s.account().and(model_selector::account_label(
+            s.provider(),
+            s.account(),
+            workspace.accounts(),
+        ));
+        let query = self.search.read(cx).value().to_lowercase();
+        format!(
+            "{} {} {} {}",
+            s.title(),
+            s.provider(),
+            account.as_deref().unwrap_or_default(),
+            s.worktree().map_or("", |w| w.branch.as_str())
+        )
+        .to_lowercase()
+        .contains(&query)
+        .then_some(account)
+    }
+
+    /// The sessions whose titles match the sidebar's search.
+    fn title_matches(&self, cx: &App) -> Vec<u64> {
+        self.state
+            .read(cx)
+            .store()
+            .workspace()
+            .sessions()
+            .iter()
+            .filter(|s| self.listed(s, cx).is_some())
+            .map(|s| s.id())
+            .collect()
+    }
+
     fn selected_session<'a>(&self, cx: &'a App) -> Option<&'a keystone_core::Session> {
         self.state.read(cx).session(self.selected(cx)?)
     }
@@ -847,7 +899,10 @@ impl Keystone {
                 }));
                 cx.notify();
             }),
-            cx.subscribe(&search, |this, _, _: &Changed, cx| this.refresh(cx)),
+            cx.subscribe(&search, |this, _, _: &Changed, cx| {
+                this.search_messages(cx);
+                this.refresh(cx)
+            }),
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
@@ -961,6 +1016,15 @@ impl Keystone {
         // A notify from a session's terminal reaches only windows whose last frame read
         // it, so a window showing the session without a terminal yet learns of one here.
         subscriptions.push(cx.observe_global::<terminal::Terminals>(|_, cx| cx.notify()));
+        let search_focus = search.focus_handle(cx);
+        subscriptions.push(cx.on_focus(&search_focus, window, |this, _, cx| {
+            this.search_focused = true;
+            this.refresh(cx);
+        }));
+        subscriptions.push(cx.on_blur(&search_focus, window, |this, _, cx| {
+            this.search_focused = false;
+            this.refresh(cx);
+        }));
         // An open right-click menu closes on any key but a lone modifier, and takes Escape
         // before any binding of the focused element, such as a reply's Clear or Files' Back.
         let (menu_owner, menu_window) = (cx.weak_entity(), window.window_handle());
@@ -1052,6 +1116,9 @@ impl Keystone {
             mentions,
             attach: attachments::Attach::new(cx),
             usage_focus: cx.focus_handle().tab_stop(true),
+            finds: find::Finds::default(),
+            messages: session_search::MessageSearch::default(),
+            search_focused: false,
         };
         result.save_opened_project(cx);
         result.sync_draft(cx);
@@ -1801,6 +1868,29 @@ impl Keystone {
                                     .flex_1()
                                     .min_w_0()
                                     .automation_id("search-field")
+                                    // Up, Down and Enter move through and open the
+                                    // message results; the field keeps focus.
+                                    .capture_action(self.scoped_listener(
+                                        cx,
+                                        |this, _: &keystone_ui::text_input::Up, _, cx| {
+                                            this.move_message_highlight(false, cx);
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                    .capture_action(self.scoped_listener(
+                                        cx,
+                                        |this, _: &keystone_ui::text_input::Down, _, cx| {
+                                            this.move_message_highlight(true, cx);
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                    .capture_action(self.scoped_listener(
+                                        cx,
+                                        |this, _: &keystone_ui::text_input::Newline, window, cx| {
+                                            this.open_highlighted_message(window, cx);
+                                            cx.stop_propagation();
+                                        },
+                                    ))
                                     .child(self.search.clone()),
                             ),
                     )
@@ -2924,6 +3014,7 @@ impl Keystone {
                     )
                 });
                 let previews = self.previews(session, cx);
+                let (marks, mark_slot) = self.find_marks(key, index);
                 Some(transcript::row(
                     row,
                     index,
@@ -2948,6 +3039,8 @@ impl Keystone {
                             })
                         )
                         .then(|| self.edit_folder(session, cx)),
+                        marks,
+                        mark_slot,
                     },
                     cx,
                 ))
@@ -3812,11 +3905,8 @@ impl SessionSidebar {
         let sidebar = cx.entity().downgrade();
         let this = app.read(cx);
         let workspace = this.state.read(cx).store().workspace();
-        let query = this.search.read(cx).value().to_lowercase();
-        let provider_filter = this.provider_filter;
         let now = LocalTime::at(now_ms());
         let mut sections: [Vec<SessionRow>; 3] = Default::default();
-        let accounts = workspace.accounts();
         let project = this.presentation.project.as_ref().ok();
         let in_project =
             |s: &&keystone_core::Session| project.is_none_or(|project| projects::holds(project, s));
@@ -3824,27 +3914,7 @@ impl SessionSidebar {
         for (session, account) in workspace
             .sessions()
             .iter()
-            .filter(in_project)
-            .map(|s| {
-                let account = s.account().and(model_selector::account_label(
-                    s.provider(),
-                    s.account(),
-                    accounts,
-                ));
-                (s, account)
-            })
-            .filter(|(s, account)| {
-                provider_filter.is_none_or(|p| s.provider() == p)
-                    && format!(
-                        "{} {} {} {}",
-                        s.title(),
-                        s.provider(),
-                        account.as_deref().unwrap_or_default(),
-                        s.worktree().map_or("", |w| w.branch.as_str())
-                    )
-                    .to_lowercase()
-                    .contains(&query)
-            })
+            .filter_map(|s| this.listed(s, cx).map(|account| (s, account)))
         {
             let row = SessionRow {
                 id: session.id(),
@@ -3868,7 +3938,21 @@ impl SessionSidebar {
             };
             sections[Section::of(&row) as usize].push(row);
         }
-        let empty = (sections.iter().all(Vec::is_empty) && !project_empty).then_some("No matches");
+        let typed = this.search.read(cx).value();
+        let searching = !typed.is_empty();
+        let titled: Vec<u64> = sections.iter().flatten().map(|row| row.id).collect();
+        let hits = if searching {
+            this.shown_hits(&titled, cx)
+        } else {
+            Vec::new()
+        };
+        let empty = (sections.iter().all(Vec::is_empty)
+            && hits.is_empty()
+            && !this.messages.pending(typed)
+            && !project_empty)
+            .then_some("No matches");
+        let highlighted = this.messages.highlighted;
+        let field_focused = this.search_focused;
         let settled_open = this.settled_open;
         self.shows_time = false;
         let mut list = v_flex()
@@ -3889,8 +3973,9 @@ impl SessionSidebar {
             }
             let header = Self::header(section, rows.len(), open, app, cx);
             list = list
-                // Spare height sits above Settled, which keeps it at the bottom.
-                .when(section == Section::Settled, |d| {
+                // Spare height sits above Settled, which keeps it at the bottom. While
+                // searching the list is results, top to bottom.
+                .when(section == Section::Settled && !searching, |d| {
                     d.child(div().flex_grow(1.))
                 })
                 .child(
@@ -3916,7 +4001,77 @@ impl SessionSidebar {
                         }),
                 );
         }
+        if !hits.is_empty() {
+            let workspace = this.state.read(cx).store().workspace();
+            list = list.child(
+                v_flex()
+                    .gap(px(2.))
+                    .child(
+                        h_flex()
+                            .automation_id("message-results")
+                            .flex_shrink_0()
+                            .h(px(28.))
+                            .pl_2()
+                            .child(Label::group("In messages", hits.len())),
+                    )
+                    .children(hits.into_iter().enumerate().map(|(index, hit)| {
+                        let title = workspace
+                            .sessions()
+                            .iter()
+                            .find(|s| s.id() == hit.session)
+                            .map_or_else(String::new, |s| s.title().to_owned());
+                        let ring = field_focused && highlighted == Some(index);
+                        Self::message_row(hit, title, ring, app, cx)
+                    })),
+            );
+        }
         list
+    }
+
+    /// A session found by its messages: its title, then the matching line, with the
+    /// match marked.
+    fn message_row(
+        hit: keystone_agent::search::MessageHit,
+        title: String,
+        ring: bool,
+        app: &Entity<Keystone>,
+        cx: &App,
+    ) -> impl IntoElement {
+        let session = hit.session;
+        let open = app.downgrade();
+        let activation = app.read(cx).presentation.activation();
+        let marks = [keystone_ui::Mark {
+            text: 0,
+            range: hit.snippet.marked.clone(),
+            current: false,
+        }];
+        let line = keystone_ui::marked_text(hit.snippet.text.clone(), 0, &marks, None, cx);
+        ListItem::new(("message-result", session))
+            .ring(ring)
+            .debug_selector(move || format!("message-result-{session}"))
+            .on_click(move |_, window, cx| {
+                let hit = hit.clone();
+                let _ = open.update(cx, |this, cx| {
+                    if this.presentation.matches(activation) {
+                        this.open_message(hit, window, cx);
+                    }
+                });
+            })
+            .child(
+                div()
+                    .pl(px(21.))
+                    .child(Label::new(title).truncate().color(Color::Muted)),
+            )
+            .child(
+                div()
+                    .pl(px(21.))
+                    .min_w_0()
+                    .truncate()
+                    .text_size(TextSize::Sm.px())
+                    .line_height(TextSize::Sm.line_height())
+                    .text_color(cx.theme().colors.text_faint)
+                    .child(line),
+            )
     }
 }
 
@@ -4337,6 +4492,11 @@ impl Render for Keystone {
                     this.ask_second_opinion(None, window, cx)
                 },
             ))
+            .on_action(
+                self.scoped_listener(cx, |this, _: &find::FindInSession, window, cx| {
+                    this.open_find(window, cx)
+                }),
+            )
             .on_action(
                 self.scoped_listener(cx, |this, _: &FocusSearch, window, cx| {
                     if !this.arrangement_has_sidebar(cx) {
@@ -9318,7 +9478,7 @@ mod tests {
         click(cx, "sidebar-toggle");
         assert_eq!(toggle_x(cx), home);
 
-        cx.simulate_keystrokes("secondary-f");
+        cx.simulate_keystrokes("secondary-shift-f");
         assert_eq!(toggle_x(cx), home);
         assert!(cx.debug_bounds("search-field").is_some());
         view.update_in(cx, |this, window, cx| {
@@ -10859,6 +11019,11 @@ mod tests {
     mod edit_rows {
         use super::*;
         include!("edit_rows_tests.rs");
+    }
+
+    mod find {
+        use super::*;
+        include!("find_tests.rs");
     }
 
     mod second_opinion {

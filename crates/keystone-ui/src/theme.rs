@@ -194,6 +194,9 @@ pub struct Colors {
 
     pub code_text: Hsla,
     pub selection: Hsla,
+    /// Washes under text that find matched, and under its current match.
+    pub find_match: Hsla,
+    pub find_current: Hsla,
     pub caret: Hsla,
     /// Washes under a diff's added and removed lines. The `+` and `-` marks carry
     /// `success` and `danger`.
@@ -457,6 +460,8 @@ impl Colors {
 
             code_text: rgb(0xc8c8c8).into(),
             selection: rgba(0x5b87d660).into(),
+            find_match: rgba(0xd9b26a33).into(),
+            find_current: rgba(0xd9b26a80).into(),
             caret: rgb(0xebebeb).into(),
             diff_added: rgba(0x7fbf8e1a).into(),
             diff_removed: rgba(0xe5847a1a).into(),
@@ -536,6 +541,8 @@ impl Colors {
 
             code_text: rgb(0x3d3d3d).into(),
             selection: rgba(0x3a6ea540).into(),
+            find_match: rgba(0xe8b33a40).into(),
+            find_current: rgba(0xe8a21aa6).into(),
             caret: rgb(0x171717).into(),
             diff_added: rgba(0x2e7d4314).into(),
             diff_removed: rgba(0xb53b2f14).into(),

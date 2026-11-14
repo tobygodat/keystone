@@ -1,18 +1,19 @@
 # Search and sidebar navigation
 
-Find local sessions by title, provider, account or worktree branch and recover the full list after clearing the search.
+Find local sessions by title, provider, account or worktree branch, and by the text of their messages, and recover the full list after clearing the search. Find inside one session is [find](find.md).
 
 ## Sub-features
 
-- `search-focus` reaches search through the field or Ctrl+F.
+- `search-focus` reaches search through the field or Ctrl+Shift+F (Ctrl+F is find in a session).
 - `search-match` filters the current project's sessions in every sidebar section (Needs action, Working and Settled) by a case-insensitive match on title, provider, account label or worktree branch, without changing stored records.
+- `search-messages` lists sessions whose saved messages hold the query under the title matches, under **In messages**: the title, then one muted line with the match marked. Each session shows its newest matching message; newest first. Settled sessions and sessions on other machines are included. Up and Down in the field move a ringed highlight over these rows; Enter or a click opens the session at the message with the find bar on the same words.
 - `search-empty` displays an empty result state.
 - `provider-filter` combines the provider choice with search over the window's project's sessions.
 - `sidebar-toggle` hides and restores the session sidebar.
 
 ## How to get to it (user POV)
 
-- Click **Search** in the sidebar, under the project switcher. Ctrl+F also opens the sidebar and focuses search. The top bar's panel button (`sidebar-toggle`) or Ctrl+B hides and shows the sidebar.
+- Click **Search** in the sidebar, under the project switcher. Ctrl+Shift+F also opens the sidebar and focuses search. The top bar's panel button (`sidebar-toggle`) or Ctrl+B hides and shows the sidebar.
 - Type a provider or title. Select all and delete to clear.
 - Use the filter and pencil beside Search. Filter offers All sessions, Claude Code, and Codex. The pencil opens New session. Projects are in [projects](projects.md).
 - Click the panel icon at the left of the main column's top bar to hide or restore the sidebar.
@@ -24,16 +25,18 @@ Preconditions:
 - At least one Claude session and one Codex session.
 - Open the Settled section if a settled session should match.
 
-- Call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","f"]},{"action":"type","text":"Codex"}]}`. Capture and require only Codex rows. Read `workspace` and require both providers still exist.
+- Call `input` with `{"actions":[{"action":"keypress","keys":["ctrl","shift","f"]},{"action":"type","text":"Codex"}]}`. Capture and require only Codex rows. Read `workspace` and require both providers still exist.
 - Send Ctrl+A while search has focus, then type `no-such-session`. Require **No matches** under **Working**.
 - Send Ctrl+A then BackSpace through `keypress`. Capture and require the full list to return.
-- `click` `{"id":"sidebar-toggle"}`. Call `wait_for` with `{"id":"search-field","present":false}`. Capture and require the whole left column to disappear, the main column to fill the window, and the composer to remain usable. Press Ctrl+F and require the sidebar and focused search to return.
+- `click` `{"id":"sidebar-toggle"}`. Call `wait_for` with `{"id":"search-field","present":false}`. Capture and require the whole left column to disappear, the main column to fill the window, and the composer to remain usable. Press Ctrl+Shift+F and require the sidebar and focused search to return.
+- Type a word only a message holds. Require `message-results` and a `message-result-<session>` row whose second line marks the word. Press Down and require a ring on the first result, then Enter: require that session selected, `find-bar` open with the same words, the count `1 of N` and the message on screen. Click another `message-result-<session>` and require the same.
 - `click` `{"id":"search-field"}`. Type `Claude` and require the Claude result. Clear it afterward. A click on the search icon focuses the field too; the icon has no name, so click it by coordinates from a fresh screenshot.
 
 ## Gotchas
 
 - A collapsed Settled section hides matching settled rows. Its header count still includes them.
 - Search text is view state and is not persisted in the workspace JSON.
+- Message results read the saved log, so a reply still streaming is found once it is saved.
 - Ctrl+A edits the currently focused field. Confirm focus before sending it.
 
 ## Project transitions

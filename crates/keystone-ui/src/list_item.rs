@@ -18,6 +18,7 @@ pub struct ListItem {
     on_click: Option<ClickHandler>,
     on_aux_click: Option<ClickHandler>,
     focus: Option<FocusHandle>,
+    ring: Option<bool>,
     debug_selector: Option<String>,
     children: SmallVec<[AnyElement; 2]>,
 }
@@ -31,9 +32,17 @@ impl ListItem {
             on_click: None,
             on_aux_click: None,
             focus: None,
+            ring: None,
             debug_selector: None,
             children: SmallVec::new(),
         }
+    }
+
+    /// Shows the focus ring while `on`, for a row that keys move to while focus stays
+    /// in a field, such as a search result. The ring's border is always there.
+    pub fn ring(mut self, on: bool) -> Self {
+        self.ring = Some(on);
+        self
     }
 
     pub fn selected(mut self, selected: bool) -> Self {
@@ -112,6 +121,10 @@ impl RenderOnce for ListItem {
                     .border_1()
                     .border_color(ring.opacity(0.))
                     .focus(move |s| s.border_color(ring))
+            })
+            .when_some(self.ring, |d, on| {
+                d.border_1()
+                    .border_color(if on { ring } else { ring.opacity(0.) })
             })
             .children(self.children);
         if let Some(selector) = self.debug_selector {

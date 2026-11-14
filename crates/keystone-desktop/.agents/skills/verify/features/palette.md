@@ -10,7 +10,7 @@ Open the palette, filter the app's commands by typing, and run one with Enter or
 - `palette-dismiss` closes it with Escape or a press outside the card. Focus returns to where it was and nothing else changes.
 - `palette-kbd` shows each row's shortcut. Rows and their bindings come from one table in `src/commands.rs`, so a hint cannot drift from its binding. The palette's own Ctrl+K and Ctrl+Shift+P are bound in `main.rs`.
 
-The palette lists every command in that table, about fifty, eight rows at a time; only drawn rows have `palette-row-N` ids. With an empty query it starts: New Codex session, New Claude session, Toggle sidebar, Toggle files, Toggle notes, Toggle changes, Toggle pull request, Copy pull request link, then Focus search and the rest.
+The palette lists every command in that table, about fifty, eight rows at a time; only drawn rows have `palette-row-N` ids. With an empty query it starts: New Codex session, New Claude session, Toggle sidebar, Toggle files, Toggle notes, Toggle changes, Toggle pull request, Copy pull request link, then Find in session, Close find, Focus search and the rest.
 
 ## How to get to it (user POV)
 

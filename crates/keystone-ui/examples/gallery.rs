@@ -276,7 +276,7 @@ impl Render for Gallery {
                     IconName::Search,
                 )
                 .size(size)
-                .tooltip(Tooltip::with_key("Search", "Ctrl+F"))
+                .tooltip(Tooltip::with_key("Search", "Ctrl+Shift+F"))
                 .on_click(|_, _, _| {})
                 .into_any_element(),
                 IconButton::new(

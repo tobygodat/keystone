@@ -27,6 +27,7 @@ mod prompt_tests;
 mod pull_request;
 mod save;
 mod schedule;
+pub mod search;
 mod session_context;
 mod tabs;
 #[cfg(any(test, feature = "test-support"))]

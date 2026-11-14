@@ -5,8 +5,8 @@ Fork from here starts a new session holding a conversation up to one of its mess
 ## Entry points
 
 - The Fork from here button (`fork-<row>`, a branch icon) beside Copy on a message the user sent (shown on hover or when the row is focused) and under a finished reply.
-- The keyboard: focus the transcript (Ctrl+Shift+T), move to a message, Tab to its Fork from here action and press Enter; or press Ctrl+Shift+F on the focused row.
-- The command palette: "Transcript: fork from row", also Ctrl+Shift+F with the transcript focused.
+- The keyboard: focus the transcript (Ctrl+Shift+T), move to a message, Tab to its Fork from here action and press Enter; or press Ctrl+Alt+Shift+F on the focused row.
+- The command palette: "Transcript: fork from row", also Ctrl+Alt+Shift+F with the transcript focused.
 
 ## Expected behaviour
 

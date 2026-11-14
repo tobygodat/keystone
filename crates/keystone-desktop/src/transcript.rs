@@ -12,6 +12,7 @@ use keystone_agent::recovery::{Limit, Outcome, RecoveryReport, TurnEvidence};
 use keystone_agent::{Item, ItemKind, ItemStatus, TurnStatus};
 use keystone_ui::markdown::Document;
 use keystone_ui::prelude::*;
+use keystone_ui::{Mark, MarkSlot, marked_text};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,6 +59,10 @@ pub struct RowControls {
     pub previews: Option<crate::preview::Previews>,
     /// For an edit's row, the folder its paths are shown from.
     pub edit_folder: Option<EditFolder>,
+    /// Find's matches in the row, by the row's texts as [`crate::find::row_texts`]
+    /// lists them, and where to record the current one as it is drawn.
+    pub marks: Vec<Mark>,
+    pub mark_slot: Option<MarkSlot>,
 }
 
 pub enum RestoreControl {
@@ -592,7 +597,10 @@ pub fn row(
         second_opinion,
         previews,
         edit_folder,
+        marks,
+        mark_slot,
     } = controls;
+    let marked = |text: String, n: usize| marked_text(text, n, &marks, mark_slot.as_ref(), cx);
     let colors = cx.theme().colors;
     let (code_size, code_line) = cx.theme().transcript_code_text();
     match row {
@@ -601,7 +609,16 @@ pub fn row(
                 if let Some((title, read)) =
                     result.zip(crate::app_state::delivery::parse(&item.text)) =>
             {
-                result_row(index, &title, &read, reply, &item.text, &action, cx)
+                result_row(
+                    index,
+                    &title,
+                    &read,
+                    reply,
+                    &item.text,
+                    &action,
+                    (marks.clone(), mark_slot.clone()),
+                    cx,
+                )
             }
             ItemKind::UserMessage => h_flex()
                 .group("user-message")
@@ -635,7 +652,7 @@ pub fn row(
                         .rounded(radius::ROW)
                         .bg(colors.element_filled)
                         .text_color(colors.text_strong)
-                        .child(item.text.clone()),
+                        .child(marked(item.text.clone(), 0)),
                 )
                 .into_any_element(),
             ItemKind::AgentMessage => {
@@ -644,6 +661,7 @@ pub fn row(
                 let markdown =
                     Markdown::new(SharedString::from(format!("reply-{index}")), document)
                         .managed_focus()
+                        .marks(marks.clone(), mark_slot.clone())
                         .when_some(selection_start, |markdown, start| {
                             markdown.on_selection_start(start)
                         })
@@ -748,7 +766,7 @@ pub fn row(
                                 .automation_id(body_selector)
                                 .text_size(TextSize::Ui.px())
                                 .text_color(colors.text_muted)
-                                .child(item.text.clone()),
+                                .child(marked(item.text.clone(), 0)),
                         )
                     })
                     .into_any_element()
@@ -786,7 +804,12 @@ pub fn row(
                             .text_size(code_size)
                             .line_height(code_line)
                             .text_color(colors.text_muted)
-                            .child(div().flex_1().min_w_0().child(format!("$ {command}")))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(marked(format!("$ {command}"), 0)),
+                            )
                             .child(Label::new(status).size(TextSize::Sm).color(color))
                             .child(
                                 copy.keyboard(
@@ -814,7 +837,7 @@ pub fn row(
                                 .text_size(code_size)
                                 .line_height(code_line)
                                 .text_color(colors.text)
-                                .child(output.to_owned()),
+                                .child(marked(output.to_owned(), 1)),
                         )
                     })
                     .into_any_element()
@@ -943,7 +966,7 @@ pub fn row(
                                 .text_size(TextSize::Ui.px())
                                 .text_color(colors.text_muted)
                                 .when(!item.text.is_empty(), |d| {
-                                    d.child(div().child(item.text.clone()))
+                                    d.child(div().child(marked(item.text.clone(), 0)))
                                 }),
                         )
                     })
@@ -1013,6 +1036,7 @@ pub fn row(
 /// A launched session's result that started this turn: who it came from, how its turn
 /// ended, and its reply. It came from an agent, so it sits with the agent's rows rather
 /// than in a user bubble.
+#[allow(clippy::too_many_arguments)]
 fn result_row(
     index: usize,
     title: &str,
@@ -1020,6 +1044,7 @@ fn result_row(
     reply: Option<Arc<Document>>,
     text: &str,
     action: &Option<(CopyTarget, FocusHandle)>,
+    (marks, mark_slot): (Vec<Mark>, Option<MarkSlot>),
     cx: &App,
 ) -> AnyElement {
     let colors = cx.theme().colors;
@@ -1088,10 +1113,13 @@ fn result_row(
                 .when_some(detail, |d, detail| {
                     d.child(Label::new(detail).size(TextSize::Ui).color(Color::Danger))
                 })
-                .child(Markdown::new(
-                    SharedString::from(format!("result-reply-{index}")),
-                    reply.unwrap_or_else(|| Arc::new(Document::parse(read.reply))),
-                )),
+                .child(
+                    Markdown::new(
+                        SharedString::from(format!("result-reply-{index}")),
+                        reply.unwrap_or_else(|| Arc::new(Document::parse(read.reply))),
+                    )
+                    .marks(marks, mark_slot),
+                ),
         )
         .into_any_element()
 }

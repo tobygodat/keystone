@@ -216,7 +216,10 @@ impl Layout {
     }
 }
 
-fn visit(block: &Block, visitor: &mut impl FnMut(&SharedString, &[(Range<usize>, SharedString)])) {
+pub(super) fn visit(
+    block: &Block,
+    visitor: &mut impl FnMut(&SharedString, &[(Range<usize>, SharedString)]),
+) {
     match block {
         Block::Paragraph(text) | Block::Heading { text, .. } => visitor(&text.text, &text.links),
         Block::Code { code, .. } => visitor(code, &[]),
