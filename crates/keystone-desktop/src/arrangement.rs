@@ -1129,8 +1129,12 @@ impl Keystone {
             0.
         };
         self.presentation.current.arrangement.min_height = required[1] + toolbar;
+        // The top bar and a shown terminal drawer, which keeps its minimum, take their
+        // share first; a layout that no longer fits the rest folds into tabs.
+        let top_bar = f32::from(cx.theme().density.control(crate::TOP_BAR));
+        let drawer = f32::from(self.drawer_min_height(cx));
         let fitted = f32::from(viewport.width) < required[0]
-            || f32::from(viewport.height) - 44. - toolbar < required[1];
+            || f32::from(viewport.height) - top_bar - toolbar - drawer < required[1];
         if fitted != self.presentation.current.arrangement.fitted
             || !c
                 .views()

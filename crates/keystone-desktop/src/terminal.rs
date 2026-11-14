@@ -6,6 +6,7 @@
 mod element;
 mod input;
 mod pane;
+mod text;
 
 use crate::Keystone;
 use crate::presentation::SessionPlace;
@@ -23,6 +24,7 @@ use gpui::{
     Render, ScrollDelta, ScrollWheelEvent, StyleRefinement, Task, Window, WindowId, div,
     prelude::*, px,
 };
+pub(crate) use input::option_types_text;
 use keystone_ui::prelude::*;
 use pane::{GRACE, Pane, Shell, Stopping};
 use std::collections::HashMap;
@@ -44,6 +46,9 @@ gpui::actions!(
 
 /// T3 Code's limit on terminals side by side.
 pub(crate) const MAX_PANES: usize = 4;
+/// The most IO events one turn of a terminal's pump applies before it lets the rest of
+/// the app run.
+const EVENTS_PER_TURN: usize = 256;
 const MIN_HEIGHT: Pixels = px(120.);
 const DEFAULT_HEIGHT: Pixels = px(300.);
 pub(crate) const CONTEXT: &str = "Terminal";
@@ -218,6 +223,9 @@ pub(crate) struct SessionTerminal {
     /// The pane a left press started selecting in.
     selecting: Option<u64>,
     error: Option<String>,
+    /// For each window and pane, what drops the pane's composition when it loses
+    /// focus there.
+    blurs: HashMap<(WindowId, u64), gpui::Subscription>,
     events: UnboundedSender<(u64, Event)>,
     _pump: Task<()>,
 }
@@ -241,11 +249,17 @@ impl SessionTerminal {
             let pump = cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
                 while let Some(first) = received.next().await {
                     let mut batch = vec![first];
-                    while let Ok(next) = received.try_recv() {
+                    while batch.len() < EVENTS_PER_TURN
+                        && let Ok(next) = received.try_recv()
+                    {
                         batch.push(next);
                     }
+                    let full = batch.len() == EVENTS_PER_TURN;
                     if this.update(cx, |this, cx| this.apply(batch, cx)).is_err() {
                         break;
+                    }
+                    if full {
+                        yield_now().await;
                     }
                 }
             });
@@ -260,6 +274,7 @@ impl SessionTerminal {
                 next_pane: 1,
                 selecting: None,
                 error: None,
+                blurs: HashMap::new(),
                 events,
                 _pump: pump,
             }
@@ -376,6 +391,7 @@ impl SessionTerminal {
         if self.selecting == Some(id) {
             self.selecting = None;
         }
+        self.blurs.retain(|(_, pane), _| *pane != id);
         if self.focused > index {
             self.focused -= 1;
         }
@@ -412,9 +428,15 @@ impl SessionTerminal {
                 continue;
             };
             match event {
-                Event::Wakeup => changed = true,
+                Event::Wakeup => {
+                    pane.wake();
+                    changed = true;
+                }
                 Event::PtyWrite(text) => pane.write(text.into_bytes()),
-                Event::ClipboardStore(_, text) => {
+                // Only the pane the user is typing in may set the clipboard, so output
+                // in a pane in the background, or while another app is in front,
+                // cannot replace what they copied.
+                Event::ClipboardStore(_, text) if typed_in_now(&pane.focus, cx) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
                 Event::ColorRequest(index, format) => {
@@ -436,19 +458,48 @@ impl SessionTerminal {
         }
     }
 
+    /// Sends a key's bytes. Text propagates, so the platform hands it to the pane's
+    /// input handler, through any input method or dead key composing it.
     fn key_down(&mut self, id: u64, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(pane) = self.pane(id) else { return };
         let mode = *pane.term.lock().mode();
-        let Some(bytes) = input::bytes(&event.keystroke, mode) else {
+        let Some(bytes) = input::bytes(&event.keystroke, mode, alt_is_meta(cx)) else {
             return;
         };
-        {
-            let mut term = pane.term.lock();
-            term.scroll_display(Scroll::Bottom);
-            term.selection = None;
-        }
-        pane.write(bytes);
+        pane.typed(bytes);
         cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Sends text the keyboard layout or an input method typed, ending any
+    /// composition.
+    fn commit_text(&mut self, id: u64, text: &str, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == id) else {
+            return;
+        };
+        pane.marked = None;
+        if !text.is_empty() {
+            pane.typed(text.as_bytes().to_vec());
+        }
+        cx.notify();
+    }
+
+    /// Drops what an input method was composing in a pane that lost focus, so its
+    /// underline cannot stay behind if the platform never says it ended.
+    fn unmark(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == id)
+            && pane.marked.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    /// Shows what an input method is composing at the cursor, sending nothing yet.
+    fn mark_text(&mut self, id: u64, text: &str, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == id) else {
+            return;
+        };
+        pane.marked = (!text.is_empty()).then(|| text.to_owned());
         cx.notify();
     }
 
@@ -656,6 +707,7 @@ impl SessionTerminal {
                 terminal: cx.weak_entity(),
                 pane: id,
                 focused,
+                focus: pane.focus.clone(),
             })
             .when(several, |d| {
                 d.child(
@@ -682,6 +734,17 @@ impl SessionTerminal {
 
 impl Render for SessionTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let shown_in = window.window_handle().window_id();
+        for pane in &self.panes {
+            let id = pane.id;
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.blurs.entry((shown_in, id))
+            {
+                entry.insert(
+                    cx.on_blur(&pane.focus, window, move |this, _, cx| this.unmark(id, cx)),
+                );
+            }
+        }
         let colors = cx.theme().colors;
         let entity = cx.entity();
         let panes: Vec<AnyElement> = (0..self.panes.len())
@@ -772,6 +835,46 @@ fn grid_point(
         GridPoint::new(Line(row as i32 - offset as i32), Column(column)),
         side,
     ))
+}
+
+/// Whether Alt, Option on macOS, sends Meta in a pane: always on Linux, and on macOS
+/// when the user chose Option as Meta in Settings.
+fn alt_is_meta(cx: &App) -> bool {
+    !input::option_types_text()
+        || cx.try_global::<crate::DesktopApp>().is_some_and(|app| {
+            app.state
+                .read(cx)
+                .store()
+                .workspace()
+                .preferences()
+                .option_as_meta()
+        })
+}
+
+/// Whether `focus` has focus in the active window, the one the user is typing in.
+/// While another app is in front, no window is active.
+fn typed_in_now(focus: &gpui::FocusHandle, cx: &mut App) -> bool {
+    cx.windows().into_iter().any(|window| {
+        window
+            .update(cx, |_, window, _| {
+                window.is_window_active() && focus.is_focused(window)
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Lets everything else queued on the thread run before the caller goes on.
+async fn yield_now() {
+    let mut yielded = false;
+    futures::future::poll_fn(|cx| {
+        if std::mem::replace(&mut yielded, true) {
+            std::task::Poll::Ready(())
+        } else {
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
 }
 
 /// A color a program asked for (OSC 4, 10, 11 or 12), from the theme.
@@ -936,6 +1039,15 @@ impl Keystone {
             terminal.update(cx, |_, cx| cx.notify());
         }
         cx.defer(refit);
+    }
+
+    /// The height a drawer shown in this window keeps at least, or none.
+    pub(crate) fn drawer_min_height(&self, cx: &App) -> Pixels {
+        if self.shown_terminal(cx).is_some() || self.terminal_elsewhere(cx).is_some() {
+            MIN_HEIGHT
+        } else {
+            px(0.)
+        }
     }
 
     fn main_min_height(&self) -> Pixels {

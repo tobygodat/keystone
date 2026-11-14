@@ -720,6 +720,10 @@ pub struct Preferences {
     notifications: Notifications,
     #[serde(skip_serializing_if = "Sounds::is_default")]
     sounds: Sounds,
+    /// On macOS, the terminal sends Option combinations as Meta (Esc, then the key)
+    /// rather than the character the keyboard layout types. Off unless chosen.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    option_as_meta: bool,
     sidebar_layout: SavedLayout,
     #[serde(skip_serializing_if = "ProjectLayouts::is_empty")]
     project_layouts: ProjectLayouts,
@@ -756,6 +760,10 @@ impl Preferences {
 
     pub fn sounds(&self) -> Sounds {
         self.sounds
+    }
+
+    pub fn option_as_meta(&self) -> bool {
+        self.option_as_meta
     }
 
     pub fn shortcuts(&self) -> &Value {
@@ -1564,6 +1572,10 @@ impl Store {
 
     pub fn set_sounds(&mut self, sounds: Sounds) -> StoreResult<Applied<()>> {
         self.update_preferences(|preferences| preferences.sounds = sounds)
+    }
+
+    pub fn set_option_as_meta(&mut self, on: bool) -> StoreResult<Applied<()>> {
+        self.update_preferences(|preferences| preferences.option_as_meta = on)
     }
 
     /// Saves `keys` as `command`'s shortcut, or removes its entry for `None`. Every
@@ -3647,6 +3659,20 @@ mod tests {
             Notifications::default(),
             "a new workspace notifies"
         );
+    }
+
+    #[test]
+    fn option_as_meta_loads_as_off_and_saves_only_when_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let mut store = Store::open(&path).unwrap();
+        assert!(!store.workspace().preferences().option_as_meta());
+        store.set_option_as_meta(true).unwrap();
+        assert!(json(&path).to_string().contains("\"option_as_meta\":true"));
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.workspace().preferences().option_as_meta(), "kept");
+        store.set_option_as_meta(false).unwrap();
+        assert!(!json(&path).to_string().contains("option_as_meta"));
     }
 
     #[test]

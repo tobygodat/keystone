@@ -431,19 +431,39 @@ pub(crate) fn wait_without_reaping(pid: u32) {
 /// Whether child `pid` has exited, leaving it unreaped. Also true once it is no child.
 #[cfg(target_os = "macos")]
 fn exited_unreaped(pid: u32) -> bool {
+    match peek(pid) {
+        Err(error) => error.raw_os_error() == Some(libc::ECHILD),
+        Ok(info) => {
+            info.si_pid != 0
+                && matches!(
+                    info.si_code,
+                    libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+                )
+        }
+    }
+}
+
+/// Asks `waitid` about child `pid` without blocking or reaping it: an error once it
+/// is reaped or was never a child, else what it reports, a zero `si_pid` while the
+/// child runs.
+#[cfg(unix)]
+fn peek(pid: u32) -> io::Result<libc::siginfo_t> {
     // SAFETY: waitid writes only into the zeroed siginfo it is given.
     unsafe {
         let mut info: libc::siginfo_t = std::mem::zeroed();
         let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
         if libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) < 0 {
-            return io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+            return Err(io::Error::last_os_error());
         }
-        info.si_pid != 0
-            && matches!(
-                info.si_code,
-                libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
-            )
+        Ok(info)
     }
+}
+
+/// Whether `pid`, a child of this process, has not been reaped yet, running or not,
+/// so its PID is still its own.
+#[cfg(unix)]
+pub fn unreaped(pid: u32) -> bool {
+    peek(pid).is_ok()
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -1319,6 +1339,27 @@ mod tests {
     use super::*;
     use std::sync::mpsc::channel;
     use std::time::Instant;
+
+    /// A child stays unreaped, its PID its own, until it is waited for, even after it
+    /// exits.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_is_unreaped_until_waited_for() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(unreaped(pid), "running");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(process_state(pid), Some('Z') | None) {
+            assert!(Instant::now() < deadline, "the child exits");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(unreaped(pid), "exited but not waited for");
+        child.wait().unwrap();
+        assert!(!unreaped(pid), "reaped");
+    }
 
     fn alive(pid: u32) -> bool {
         // Exited processes count as gone.

@@ -238,3 +238,211 @@ fn paste_sends_the_clipboard_bracketed_when_the_program_asks(cx: &mut TestAppCon
         assert_eq!(wait_for_file(&file), expected);
     }
 }
+
+/// Presses `key` as a platform reports it, with the text the layout gives it.
+fn press(cx: &mut VisualTestContext, key: &str, alt: bool, key_char: Option<&str>) {
+    let keystroke = Keystroke {
+        key: key.into(),
+        key_char: key_char.map(Into::into),
+        modifiers: Modifiers {
+            alt,
+            ..Modifiers::default()
+        },
+    };
+    cx.update(|window, cx| window.dispatch_keystroke(keystroke, cx));
+    cx.run_until_parked();
+}
+
+/// What the shell receives while `keys` are typed, as `cat -v` shows it: `^[` for
+/// Esc, so `^[l` is Meta+L.
+fn received(
+    cx: &mut VisualTestContext,
+    dir: &Path,
+    name: &str,
+    keys: impl FnOnce(&mut VisualTestContext),
+) -> String {
+    let file = dir.join(name);
+    run(cx, &format!("cat -v > {}", file.display()));
+    keys(cx);
+    cx.simulate_keystrokes("enter");
+    let text = wait_for_file(&file);
+    cx.simulate_keystrokes("ctrl-d");
+    cx.run_until_parked();
+    text.trim_end().to_owned()
+}
+
+fn mac_keyboard(mac: bool) {
+    crate::terminal::input::MAC_KEYBOARD.set(Some(mac));
+}
+
+fn option_as_meta(cx: &mut VisualTestContext) -> bool {
+    cx.update(|_, cx| {
+        cx.global::<crate::DesktopApp>()
+            .state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .option_as_meta()
+    })
+}
+
+/// On macOS, Option types the character the keyboard layout gives it, as on a German
+/// layout where Option+L is @ and Option+8 is {. Settings → Shortcuts turns Option
+/// into Meta, Esc and the key, for the shell's shortcuts.
+#[gpui::test]
+fn option_types_the_layout_character_on_macos_unless_it_is_meta(cx: &mut TestAppContext) {
+    mac_keyboard(true);
+    let (dir, path, _) = seeded();
+    let (_view, handle) = launch(&path, cx);
+    let cx = visual(handle, cx);
+    cx.simulate_keystrokes("secondary-j");
+    let typed = received(cx, dir.path(), "option.txt", |cx| {
+        press(cx, "l", true, Some("@"));
+        press(cx, "8", true, Some("{"));
+    });
+    assert_eq!(typed, "@{", "Option types the layout's characters");
+    assert!(!option_as_meta(cx), "Option as Meta is off unless chosen");
+
+    cx.simulate_keystrokes("secondary-,");
+    click(cx, "settings-section-shortcuts");
+    click(cx, "settings-option-as-meta");
+    assert!(option_as_meta(cx), "the switch saves the choice");
+    cx.simulate_keystrokes("secondary-j");
+    cx.run_until_parked();
+    assert!(pane_focused(cx));
+    let typed = received(cx, dir.path(), "meta.txt", |cx| {
+        press(cx, "l", true, Some("@"));
+    });
+    assert_eq!(typed, "^[l", "as Meta, Option sends Esc and the key");
+    mac_keyboard(false);
+}
+
+/// Linux keeps Alt as Meta, and Settings offers no choice there.
+#[gpui::test]
+fn alt_stays_meta_on_linux(cx: &mut TestAppContext) {
+    mac_keyboard(false);
+    let (dir, path, _) = seeded();
+    let (_view, handle) = launch(&path, cx);
+    let cx = visual(handle, cx);
+    cx.simulate_keystrokes("secondary-,");
+    click(cx, "settings-section-shortcuts");
+    assert!(
+        cx.debug_bounds("settings-option-as-meta").is_none(),
+        "no Option as Meta switch"
+    );
+    cx.simulate_keystrokes("secondary-j");
+    cx.run_until_parked();
+    let typed = received(cx, dir.path(), "alt.txt", |cx| {
+        press(cx, "b", true, None);
+        press(cx, "f", true, Some("f"));
+    });
+    assert_eq!(typed, "^[b^[f");
+}
+
+/// A dead key composes with the next key, and an input method's composition shows at
+/// the cursor without reaching the shell until the input method commits it. The
+/// platform calls the pane's input handler as these steps do: on Linux a dead key
+/// marks its accent, then the composed key types the character.
+#[gpui::test]
+fn dead_keys_and_input_methods_compose_in_a_pane(cx: &mut TestAppContext) {
+    use gpui::InputHandler;
+    let (dir, path, _) = seeded();
+    let (_view, handle) = launch(&path, cx);
+    let cx = visual(handle, cx);
+    cx.simulate_keystrokes("secondary-j");
+    cx.run_until_parked();
+    let terminal = terminal(cx).unwrap();
+    let id = cx.update(|_, cx| terminal.read(cx).panes[0].id);
+    let mut input = crate::terminal::text::PaneInput {
+        terminal: terminal.downgrade(),
+        pane: id,
+    };
+    let marked =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| terminal.read(cx).panes[0].marked.clone());
+    let file = dir.path().join("composed.txt");
+    run(cx, &format!("cat > {}", file.display()));
+
+    // As a key event only: the test platform's simulated input method would type the
+    // key's name, where a real one gives a dead key no text.
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: Keystroke::parse("dead_acute").unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            cx,
+        )
+    });
+    cx.update(|window, cx| input.replace_and_mark_text_in_range(None, "´", None, window, cx));
+    assert_eq!(
+        marked(cx).as_deref(),
+        Some("´"),
+        "the accent waits at the cursor"
+    );
+    press(cx, "eacute", false, Some("é"));
+    assert_eq!(marked(cx), None, "the composed key ends the composition");
+
+    for step in ["に", "日本"] {
+        cx.update(|window, cx| input.replace_and_mark_text_in_range(None, step, None, window, cx));
+    }
+    let (range, bounds, view) = cx.update(|window, cx| {
+        let view = terminal.read(cx).panes[0]
+            .view(window.window_handle().window_id())
+            .unwrap();
+        (
+            input.marked_text_range(window, cx),
+            input.bounds_for_range(0..1, window, cx).unwrap(),
+            view.bounds,
+        )
+    });
+    assert_eq!(
+        range,
+        Some(0..2),
+        "the composition is the input method's text"
+    );
+    assert!(
+        view.contains(&bounds.origin),
+        "its candidates open at the cursor, {bounds:?} in {view:?}"
+    );
+    cx.update(|window, cx| input.replace_text_in_range(None, "日本", window, cx));
+    cx.update(|window, cx| input.replace_and_mark_text_in_range(None, "한", None, window, cx));
+    cx.update(|window, cx| input.unmark_text(window, cx));
+    assert_eq!(marked(cx), None);
+    cx.simulate_keystrokes("enter");
+    assert_eq!(wait_for_file(&file).trim_end(), "é日本한");
+}
+
+/// A composition the pane loses focus in is dropped, so its underline cannot stay
+/// behind if the platform never ends it.
+#[gpui::test]
+fn a_composition_ends_when_the_pane_loses_focus(cx: &mut TestAppContext) {
+    use gpui::InputHandler;
+    let (_dir, path, _) = seeded();
+    let (view, handle) = launch(&path, cx);
+    let cx = visual(handle, cx);
+    // Focus moves within an active window; in an inactive one GPUI reports none.
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_keystrokes("secondary-j");
+    cx.run_until_parked();
+    let terminal = terminal(cx).unwrap();
+    let id = cx.update(|_, cx| terminal.read(cx).panes[0].id);
+    let mut input = crate::terminal::text::PaneInput {
+        terminal: terminal.downgrade(),
+        pane: id,
+    };
+    cx.update(|window, cx| input.replace_and_mark_text_in_range(None, "に", None, window, cx));
+    let marked =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| terminal.read(cx).panes[0].marked.clone());
+    assert_eq!(marked(cx).as_deref(), Some("に"));
+    cx.simulate_keystrokes("f6");
+    cx.simulate_keystrokes("secondary-l");
+    cx.run_until_parked();
+    assert!(composer_focused(&view, cx));
+    assert_eq!(
+        marked(cx),
+        None,
+        "the composition ended with the pane's focus"
+    );
+}

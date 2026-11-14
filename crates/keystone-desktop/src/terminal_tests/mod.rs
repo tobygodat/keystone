@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 mod drawer;
+mod flood;
 mod input;
 mod multi_window;
 mod teardown;

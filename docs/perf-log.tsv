@@ -58,3 +58,4 @@ date	commit	touch_desktop_s	touch_ui_s	desktop_debug_mb	sidebar_draw_ms	sidebar_
 2026-11-14T06:37:57Z	9d51b91cb	6.95	7.08	529	1.09	1.49	TOB-456 find bar and message search; --runs 1, 6 build jobs, no incremental	1.32	1.36	2.96	0.79	1.88	2.11
 2026-11-14T12:41:26Z	bef4ba148	6.40	10.75	530	1.34	1.57	TOB-462 full case folding, NFC and graphemes in search; edit rows searched; find bar fits the column; 3 build jobs, no incremental, shared host load	1.74	1.48	3.09	0.81	1.45	1.63
 2026-11-14T14:42:53Z	76b90e5ec	7.04	7.11	530	1.03	1.55	TOB-462 round 2: searched form from a per-character table, screens spliced for ASCII queries, Enter's open dropped on any key or click; 3 build jobs, no incremental, shared host load	1.78	1.51	3.28	0.79	1.55	1.63
+2026-11-14T19:33:19Z	a302e1117	6.69	7.35	532	0.99	1.10	TOB-331: terminal shapes outside the Term lock, composition overlay, input handler	1.49	1.38	3.17	0.78	1.47	1.52

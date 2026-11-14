@@ -261,6 +261,21 @@ fn a_window_that_stops_showing_the_session_gives_up_its_size(cx: &mut TestAppCon
     second.update(cx, |view, cx| view.select(1, cx));
     cx.run_until_parked();
     assert_eq!(grid(cx), small, "showing it again claims it back");
+    let painted = |handle: AnyWindowHandle, cx: &mut TestAppContext| {
+        let painted = cx.update(|cx| {
+            let terminal = session_terminal(1, cx).unwrap();
+            terminal.read(cx).panes[0]
+                .view(handle.window_id())
+                .unwrap()
+                .painted
+        });
+        (painted.columns, painted.lines)
+    };
+    assert_eq!(
+        painted(handle, cx),
+        small,
+        "the large window's drawer repainted at the size the small one claimed"
+    );
 
     let settings = |cx: &mut TestAppContext| {
         VisualTestContext::from_window(other, cx)

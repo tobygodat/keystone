@@ -14,6 +14,8 @@ The workspace lives in `~/Library/Application Support/Keystone/workspace.sqlite3
 
 **Shortcuts.** Every shortcut that uses Ctrl on Linux uses ⌘ on macOS. The bindings say `secondary-…`, which GPUI reads as Cmd on macOS and Ctrl elsewhere, and hints show `⌘N` where Linux shows `Ctrl+N`. Ctrl+Tab and Ctrl+Shift+Tab, which switch tabs, keep Ctrl, because ⌘Tab switches apps. Text fields also take ⌘← and ⌘→ for the start and end of a line and ⌘↑ and ⌘↓ for the start and end of the text, since Mac keyboards have no Home or End key. `bash scripts/check.sh` fails on a new `ctrl-` binding or a `Ctrl+` hint written out by hand.
 
+**Terminal Option key.** In the terminal, Option types the character the keyboard layout gives it, such as `@` with Option+L on a German layout. Settings → Shortcuts → **Use Option as Meta in the terminal** makes it send Esc and the key instead, which Linux's Alt always does. See [the terminal's input](design/terminal.md#input).
+
 **Window controls.** macOS draws the close, minimize and zoom buttons, the traffic lights, at the left end of Keystone's top bar, centred on it at every density. The bar starts its own controls to their right, and keeps that gap in full screen. Linux keeps Keystone's minimize, maximize and close buttons at the right end of the bar. The macOS smoke journey's screenshots come from GPUI's renderer, so they do not show the lights; `screencapture -l <window id>` does.
 
 **Menu bar.** The Keystone menu has Settings… (⌘,), Services, Hide Keystone (⌘H), Hide Others (⌥⌘H), Show All and Quit Keystone (⌘Q). Window has Minimize (⌘M) and Zoom. There is no Edit menu: text fields and the transcript bind ⌘C, ⌘X, ⌘V and ⌘A to their own actions, and a menu item can name only one of them. Linux has no menu bar.

@@ -367,3 +367,29 @@ fn closing_or_adding_a_pane_keeps_the_others_proportions(cx: &mut TestAppContext
         shares(cx)
     );
 }
+
+/// Down to the shortest window the layout supports with the drawer open, the
+/// composer's Send button stays on screen above the drawer: a window too short for
+/// the layout and the drawer's minimum folds into tabs.
+#[gpui::test]
+fn the_send_button_stays_above_the_drawer_in_short_windows(cx: &mut TestAppContext) {
+    let (_dir, path, _) = seeded();
+    let (_view, handle) = launch(&path, cx);
+    let cx = visual(handle, cx);
+    cx.simulate_keystrokes("secondary-j");
+    cx.run_until_parked();
+    let mut clipped = Vec::new();
+    // 280 px holds the top bar, the fitted tabs, the composer and the drawer's 120 px
+    // at Default density; nothing shorter can.
+    for height in (280..=800).rev().step_by(10) {
+        cx.simulate_resize(gpui::size(px(1100.), px(height as f32)));
+        cx.run_until_parked();
+        let drawer = cx.debug_bounds("terminal-drawer").unwrap();
+        let fitted = cx.debug_bounds("fitted-tabs").is_some();
+        match cx.debug_bounds("send") {
+            Some(send) if send.bottom() <= drawer.top() && send.top() >= px(0.) => {}
+            send => clipped.push((height, fitted, send.map(|s| s.bottom()), drawer.top())),
+        }
+    }
+    assert!(clipped.is_empty(), "{clipped:?}");
+}

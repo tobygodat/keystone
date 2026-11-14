@@ -1321,13 +1321,6 @@ fn a_live_resize_moves_a_side_panel_under_the_composer_and_back(cx: &mut TestApp
             )
         })
     };
-    let settle = |size: gpui::Size<Pixels>, cx: &mut VisualTestContext| {
-        cx.simulate_resize(size);
-        cx.run_until_parked();
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(400));
-        cx.run_until_parked();
-    };
     resize_and_settle(gpui::size(px(1440.), px(900.)), cx);
     cx.simulate_keystrokes("secondary-alt-p");
     cx.run_until_parked();

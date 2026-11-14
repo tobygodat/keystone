@@ -2264,12 +2264,14 @@ crates/keystone-desktop/src/settings_scheduled.rs
 crates/keystone-desktop/src/settings_shortcuts.rs
 	Also bound to {}
 	Not set
+	Option then sends Esc and the key. Off, it types the character your keyboard layout gives it, such as @ or {.
 	Press a shortcut…
 	Reset all
 	Reset to default
 	Select a shortcut, then press the keys to run it with.
 	Settings not saved. {error}
 	Skipped saved shortcuts
+	Use Option as Meta in the terminal
 	{} and {last}
 
 crates/keystone-desktop/src/setup.rs

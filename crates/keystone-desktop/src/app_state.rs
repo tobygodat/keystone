@@ -1168,6 +1168,20 @@ impl AppState {
         result
     }
 
+    pub(crate) fn set_option_as_meta(
+        &mut self,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, Box<dyn std::error::Error>> {
+        if self.phase == Phase::Exiting {
+            return Err(std::io::Error::other("Keystone is exiting.").into());
+        }
+
+        let result = self.store.set_option_as_meta(on);
+        self.publish(cx);
+        result
+    }
+
     pub(crate) fn set_shortcut(
         &mut self,
         command: &str,

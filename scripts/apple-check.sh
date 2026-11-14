@@ -37,9 +37,11 @@ mkdir -p "$dir"
 log="$dir/check.log"
 
 # gpui-pre-apple's build script compiles the shaders only on a macOS host. Give it
-# empty files where it would have written them, then check again.
+# empty files where it would have written them, then check again. Cargo 1.100 moved a
+# build script's output from build/<package>-<hash>/out to build/<package>/<hash>/out.
 placeholders() {
-  for out in "$dir/$target"/debug/build/gpui-pre-apple-*/out; do
+  for out in "$dir/$target"/debug/build/gpui-pre-apple-*/out \
+    "$dir/$target"/debug/build/gpui-pre-apple/*/out; do
     [[ -d "$out" ]] || continue
     [[ -e "$out/shaders.metallib" ]] || : >"$out/shaders.metallib"
     [[ -e "$out/stitched_shaders.metal" ]] || : >"$out/stitched_shaders.metal"

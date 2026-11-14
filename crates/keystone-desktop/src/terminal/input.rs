@@ -1,12 +1,21 @@
-//! What a keystroke sends to the shell, as xterm encodes it.
+//! What a keystroke sends to the shell, as xterm encodes it. Text, the characters a
+//! keyboard layout or an input method types, comes through the pane's input handler
+//! instead; see `docs/design/terminal.md`.
 
 use alacritty_terminal::term::TermMode;
 use gpui::Keystroke;
 use std::borrow::Cow;
 
-/// The bytes `keystroke` sends to a program running in `mode`, or `None` when the
-/// terminal does not take it, as for ⌘ shortcuts on macOS.
-pub(crate) fn bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Cow<'static, [u8]>> {
+/// The bytes `keystroke` sends to a program running in `mode` as a key, or `None` when
+/// it sends none as a key: ⌘ shortcuts on macOS, which stay with the app, and text,
+/// which the platform then hands to the pane's input handler. With `alt_is_meta`, Alt
+/// (Option on macOS) with a character key sends Esc and the key; without it the
+/// character the layout types with Option is text.
+pub(crate) fn bytes(
+    keystroke: &Keystroke,
+    mode: TermMode,
+    alt_is_meta: bool,
+) -> Option<Cow<'static, [u8]>> {
     let m = &keystroke.modifiers;
     if m.platform || m.function {
         return None;
@@ -83,6 +92,13 @@ pub(crate) fn bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Cow<'static
     }
     let mut chars = keystroke.key.chars();
     let (Some(key), None) = (chars.next(), chars.next()) else {
+        // A key named by its keysym, such as the keypad's `add` or a composed dead
+        // key's `eacute`. Alone it types text through the input handler. With Ctrl or
+        // Meta the platform hands the input handler nothing, so its character goes
+        // here, after ESC for Meta: Alt+KP_Add sends ESC +.
+        if !(m.control || m.alt && alt_is_meta) {
+            return None;
+        }
         return keystroke.key_char.as_ref().map(|text| alt(text.as_bytes()));
     };
     if m.control {
@@ -99,8 +115,9 @@ pub(crate) fn bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Cow<'static
         };
         return Some(alt(&[control]));
     }
-    // Alt sends ESC before the unmodified key, so readline's word motions work.
-    if m.alt {
+    // As Meta, Alt sends ESC before the unmodified key, so readline's word motions
+    // work.
+    if m.alt && alt_is_meta {
         let key = if m.shift {
             key.to_ascii_uppercase()
         } else {
@@ -108,10 +125,24 @@ pub(crate) fn bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Cow<'static
         };
         return Some(alt(key.to_string().as_bytes()));
     }
-    keystroke
-        .key_char
-        .as_ref()
-        .map(|text| Cow::Owned(text.as_bytes().to_vec()))
+    None
+}
+
+/// Whether Option types the character the keyboard layout gives it unless the user
+/// chose Option as Meta, as on macOS. Elsewhere Alt is always Meta.
+pub(crate) fn option_types_text() -> bool {
+    #[cfg(test)]
+    if let Some(mac) = MAC_KEYBOARD.get() {
+        return mac;
+    }
+    cfg!(target_os = "macos")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes this thread's panes treat Option as macOS does, or as Linux does.
+    pub(crate) static MAC_KEYBOARD: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// `text` as pasted: line breaks become Enter, and inside bracketed paste the program
@@ -131,26 +162,19 @@ mod tests {
     use super::*;
 
     fn sent(keys: &str, mode: TermMode) -> Option<String> {
-        let mut keystroke = Keystroke::parse(keys).unwrap();
-        if keystroke.key_char.is_none() && keystroke.key.chars().count() == 1 {
-            let m = &keystroke.modifiers;
-            if !m.control && !m.platform && !m.alt {
-                keystroke.key_char = Some(if m.shift {
-                    keystroke.key.to_uppercase()
-                } else {
-                    keystroke.key.clone()
-                });
-            }
-        }
-        bytes(&keystroke, mode).map(|bytes| String::from_utf8(bytes.into_owned()).unwrap())
+        sent_as(keys, mode, true)
+    }
+
+    fn sent_as(keys: &str, mode: TermMode, alt_is_meta: bool) -> Option<String> {
+        let keystroke = Keystroke::parse(keys).unwrap().with_simulated_ime();
+        bytes(&keystroke, mode, alt_is_meta)
+            .map(|bytes| String::from_utf8(bytes.into_owned()).unwrap())
     }
 
     #[test]
     fn keys_encode_as_xterm_does() {
         let normal = TermMode::empty();
         let table = [
-            ("a", "a"),
-            ("shift-a", "A"),
             ("enter", "\r"),
             ("backspace", "\x7f"),
             ("ctrl-backspace", "\x08"),
@@ -209,16 +233,83 @@ mod tests {
         assert_eq!(sent("cmd-j", TermMode::empty()), None);
     }
 
+    /// Characters arrive as text through the input handler, so input methods and
+    /// dead keys can compose them; as keys they send nothing.
     #[test]
-    fn typed_text_without_a_single_key_passes_through() {
-        let keystroke = Keystroke {
-            key: "dead".into(),
+    fn text_is_left_to_the_input_handler() {
+        for keys in ["a", "shift-a", "1", "shift-2", "/"] {
+            assert_eq!(sent(keys, TermMode::empty()), None, "{keys}");
+        }
+        let composed = Keystroke {
+            key: "eacute".into(),
             key_char: Some("é".into()),
             modifiers: Default::default(),
         };
+        assert_eq!(bytes(&composed, TermMode::empty(), true), None);
+    }
+
+    /// Keypad operators are named by keysym (`add` for KP_Add). With Alt as Meta they
+    /// send ESC and their character; alone they type it as text.
+    #[test]
+    fn alt_with_a_keypad_operator_sends_esc_and_its_character() {
+        let key = |key: &str, text: &str, alt: bool| Keystroke {
+            key: key.into(),
+            key_char: Some(text.into()),
+            modifiers: gpui::Modifiers {
+                alt,
+                ..Default::default()
+            },
+        };
+        let send = |keystroke: &Keystroke, meta: bool| {
+            bytes(keystroke, TermMode::empty(), meta)
+                .map(|bytes| String::from_utf8(bytes.into_owned()).unwrap())
+        };
+        for (name, text) in [
+            ("add", "+"),
+            ("subtract", "-"),
+            ("multiply", "*"),
+            ("divide", "/"),
+            ("decimal", "."),
+            ("separator", ","),
+            ("equal", "="),
+        ] {
+            assert_eq!(
+                send(&key(name, text, true), true).as_deref(),
+                Some(format!("\x1b{text}").as_str()),
+                "Alt+KP_{name}"
+            );
+            assert_eq!(
+                send(&key(name, text, false), true),
+                None,
+                "KP_{name} types text"
+            );
+            assert_eq!(
+                send(&key(name, text, true), false),
+                None,
+                "Option+KP_{name} types text on macOS"
+            );
+        }
+    }
+
+    /// Option without Meta leaves its character to the layout, as on a German Mac
+    /// where Option+L types @. Named keys keep xterm's Alt encoding either way.
+    #[test]
+    fn option_types_text_unless_it_is_meta() {
+        let normal = TermMode::empty();
+        assert_eq!(sent_as("alt-l", normal, false), None);
+        assert_eq!(sent_as("alt-shift-7", normal, false), None);
+        assert_eq!(sent_as("alt-l", normal, true).as_deref(), Some("\x1bl"));
         assert_eq!(
-            bytes(&keystroke, TermMode::empty()).as_deref(),
-            Some("é".as_bytes())
+            sent_as("alt-left", normal, false).as_deref(),
+            Some("\x1b[1;3D")
+        );
+        assert_eq!(
+            sent_as("alt-backspace", normal, false).as_deref(),
+            Some("\x1b\x7f")
+        );
+        assert_eq!(
+            sent_as("ctrl-alt-w", normal, false).as_deref(),
+            Some("\x1b\x17")
         );
     }
 

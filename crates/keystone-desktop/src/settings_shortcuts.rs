@@ -104,6 +104,9 @@ impl Keystone {
         v_flex()
             .automation_id("settings-shortcuts")
             .gap(spacing::MD)
+            .when(crate::terminal::option_types_text(), |d| {
+                d.child(self.option_as_meta_row(cx))
+            })
             .child(
                 h_flex()
                     .gap(spacing::MD)
@@ -143,6 +146,49 @@ impl Keystone {
             })
             .child(v_flex().children(rows))
             .into_any_element()
+    }
+
+    /// On macOS, whether Option in the terminal is Meta, for the shell's Esc
+    /// shortcuts, or types the character the keyboard layout gives it.
+    fn option_as_meta_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let on = self
+            .state
+            .read(cx)
+            .store()
+            .workspace()
+            .preferences()
+            .option_as_meta();
+        h_flex()
+            .gap(spacing::MD)
+            .pb(spacing::MD)
+            .hairline_b(cx)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Label::new("Use Option as Meta in the terminal"))
+                    .child(
+                        Label::new(
+                            "Option then sends Esc and the key. Off, it types the character \
+                             your keyboard layout gives it, such as @ or {.",
+                        )
+                        .size(TextSize::Sm)
+                        .color(Color::Muted),
+                    ),
+            )
+            .child(
+                Switch::new("settings-option-as-meta", on).on_change(self.scoped_listener(
+                    cx,
+                    |this, &on: &bool, _, cx| {
+                        this.error = this
+                            .state
+                            .update(cx, |state, cx| state.set_option_as_meta(on, cx))
+                            .err()
+                            .map(|error| format!("Settings not saved. {error}"));
+                        this.refresh(cx);
+                    },
+                )),
+            )
     }
 
     fn shortcut_row(

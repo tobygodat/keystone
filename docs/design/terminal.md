@@ -5,7 +5,8 @@ Each session can open shells in a drawer below the window's main area
 terminal behaves (`apps/server/src/terminal/Manager.ts` and
 `apps/web/src/terminalUiStateStore.ts` in T3 Code), not how it looks. The code is in
 `crates/keystone-desktop/src/terminal.rs` and `terminal/`. `pane.rs` owns one shell,
-`element.rs` paints it, and `input.rs` turns keys into bytes. Tests are in
+`element.rs` paints it, `input.rs` turns keys into bytes, and `text.rs` takes the
+text a keyboard layout or an input method types. Tests are in
 `terminal_tests/`, one file per concern. `scripts/terminal-journey.py` runs it in the
 real app on macOS. `scripts/terminal-journey-linux.py` runs it on Linux through the
 verify skill's private Sway, with real keyboard and pointer input and the Wayland
@@ -93,9 +94,29 @@ code, gains no entry. The key encodings follow xterm's documented control sequen
   another machine gets no shell here: the drawer says the terminal isn't available
   for sessions on that machine yet. Scrollback is
   10,000 lines.
-- The IO thread's events reach the UI over a channel. The UI drains everything queued
-  in one go and notifies only the `SessionTerminal`. It answers color and size queries
-  and stores OSC 52 copies on the clipboard. It never reads the clipboard for a program.
+- The IO thread's events reach the UI over a channel. Output arrives in reads of up
+  to 64 KiB, each followed by a wakeup, so under `yes` or `cat` of a large file the
+  channel would take one per read. Instead one queued wakeup stands for all output
+  until the UI applies it, and events Keystone shows nothing for (titles, the pointer
+  shape, cursor blinking, the bell, clipboard reads) are never queued. Replies a
+  program asked for and the shell's exit always are. A turn of the UI's pump applies
+  at most 256 events, then lets the rest of the app run before the next turn, and
+  notifies only the `SessionTerminal`. It answers color and size queries. It never
+  reads the clipboard for a program.
+- OSC 52 copies reach the clipboard only from the pane that has focus in the active
+  window, the one the user is typing in. Output in a pane in the background, in a
+  session no window shows, or anywhere in Keystone while another app is in front,
+  such as `cat` of an untrusted file or a program over SSH, cannot replace what the
+  user copied. Programs that copy, such as
+  `tmux` or `vim` over SSH, run in the pane the user is typing in.
+- Keystone ends a shell only when the user closes it (its pane's close button, Close
+  terminal, or `exit`) or when Keystone quits, as other terminal apps do. Deleting a
+  session would end its shells too, once Keystone can delete one. A session no window shows keeps its shells however many there
+  are: whether a shell is idle cannot be known from outside it, since a job handed to
+  init by `(cmd &)` or a daemon, a loop built into the shell, or a `read` waiting for
+  input all look idle, so any limit on hidden shells could end someone's work. Shells
+  exist only where the user pressed ⌘J or Ctrl+J. What bounds the memory a hidden
+  pane holds is its scrollback, capped at 10,000 lines.
 - A shell that exits closes its pane. When the last pane closes, the drawer hides and
   the session's entry goes, so the next toggle starts a fresh shell. Focus that was in
   a closed pane moves to the next pane, or to the composer. Focus left in a pane the
@@ -200,13 +221,33 @@ and xterm sends nothing distinct for them.
 
 ## Input
 
-`input::bytes` maps a keystroke to what xterm sends. Text is the key's character.
-Enter is `\r`, Backspace `\x7f`. Arrows, Home and End use `ESC O` in application
-cursor mode. PageUp, PageDown, Insert, Delete and F1 to F12 use xterm's codes, with
-xterm's modifier parameter for Shift, Alt and Ctrl. Ctrl+letter is a control byte, and
-Alt sends ESC before the key. ⌘ combinations return nothing, so they stay app
-shortcuts. Typing scrolls back to the bottom and clears the selection. A paste turns
-line breaks into Enter and is wrapped in bracketed-paste markers when the program asks.
+`input::bytes` maps a keystroke to what xterm sends. Enter is `\r`, Backspace `\x7f`.
+Arrows, Home and End use `ESC O` in application cursor mode. PageUp, PageDown, Insert,
+Delete and F1 to F12 use xterm's codes, with xterm's modifier parameter for Shift, Alt
+and Ctrl. Ctrl+letter is a control byte, and Alt as Meta sends ESC before the key. ⌘
+combinations return nothing, so they stay app shortcuts. Typing scrolls back to the
+bottom and clears the selection. A paste turns line breaks into Enter and is wrapped
+in bracketed-paste markers when the program asks.
+
+Text is not a key. A focused pane registers an input handler as it paints
+(`terminal/text.rs`), and the key handler passes on a key that types a character, so
+the platform hands the pane the text the keyboard layout or an input method produced.
+That is how dead keys (´ then e is é) and input methods that compose text, for
+Chinese, Japanese or Korean, work, on Linux through the compositor's input method
+(text-input-v3) or XKB compose and on macOS through AppKit's. While an input method
+composes, its text shows at the cursor, underlined over the grid, and nothing reaches
+the shell until it commits; its candidate window opens at the cursor. A pane that
+loses focus drops its composition, so the underline cannot stay behind if the platform
+never ends it. A held key
+repeats instead of offering macOS's accent menu.
+
+Alt is Meta on Linux. On macOS, Option types the character the layout gives it, as in
+Terminal.app, iTerm and T3 Code (xterm.js's `macOptionIsMeta` defaults to off), so on
+a German, French or Nordic layout `@ | { } [ ] \` type in a pane. Settings →
+Shortcuts → **Use Option as Meta in the terminal** makes Option send ESC and the key
+instead, for readline's word motions; it is off unless chosen and shows only on macOS.
+Option with a named key (arrows, Backspace, Enter) keeps xterm's Alt encoding either
+way, since the layout types nothing for it.
 
 The mouse wheel scrolls the scrollback. In the alternate screen with alternate scroll
 on, as in `less`, it sends arrow keys instead. A drag selects (double-click words,
@@ -234,7 +275,10 @@ covered windows the inbox draws. A window that switches session, opens Settings,
 closes, or is minimized or covered (macOS reports both as hidden) gives up its claim
 at once. `terminal::refit` fits every pane again and repaints the drawers whose size
 changed, since a cached drawer would otherwise wait for the shell's next output. A
-window shown again repaints its drawer to claim its size back. Each pane also keeps
+window shown again repaints its drawer to claim its size back. A window's own paint can
+change the size too, as when a small window shows the session again and claims its
+size back before `refit` runs, so a paint that changes it repaints the drawer in every
+window showing it. Each pane also keeps
 where each window painted it, so a click or a drag maps to a cell through that
 window's own layout.
 
@@ -242,12 +286,19 @@ The drawer's height is clamped as it renders and as it is dragged, to at least 1
 and at most what leaves the top bar and the main area's own minimum. That minimum is
 the one the arrangement uses to decide when a window is too small for its layout, so
 for the default layout it is the composer at full height, its toolbar and Send button
-included, and 120 px of transcript. In a window too short for both, the drawer keeps
-its 120 px and the main area gives: a terminal of fewer lines is no use, and ⌘J or
-Ctrl+J hides it.
+included, and 120 px of transcript. When the arrangement decides whether a window is
+too short for its layout, it takes the top bar and a shown drawer's 120 px off the
+window's height first, so a window too short for the layout and the drawer folds its
+views into tabs, with the composer whole under them, rather than clipping the Send
+button. With the drawer open that holds down to 280 px at Default density: the top
+bar, the tab row, the composer and the drawer's 120 px. Below that nothing fits, and
+the drawer keeps its 120 px while the main area gives: a terminal of fewer lines is no
+use, and ⌘J or Ctrl+J hides it.
 
-Prepaint then resizes the `Term` and the PTY when the shared size changes. It then walks only the visible rows (`renderable_content`),
-never the scrollback. Background cells merge into one quad per run of one color, and
+Prepaint then resizes the `Term` and the PTY when the shared size changes. It then
+copies the visible rows (`renderable_content`), never the scrollback, and lets go of
+the `Term` before it shapes any text, as Alacritty does, so the IO thread applies
+output while the frame is built. Background cells merge into one quad per run of one color, and
 the selection into one wash per row. Text is shaped one line per row, with a `TextRun`
 for each change of color, weight, slant, underline or strikethrough. Wide characters
 and characters outside ASCII, Latin-1, Latin Extended and box drawing get a segment
@@ -270,23 +321,46 @@ about 19 ms to 2 to 6 ms, and an output frame to 7 to 12 ms. That grid's color c
 at every cell, in a debug build. Committed numbers are in
 [the perf log](../perf-log.tsv) (`terminal_draw_ms`, `terminal_idle_ms`).
 
+Holding the `Term` while shaping held up the IO thread for the whole frame. The
+ignored benchmark `perf_terminal_flood` prints `cat` throughput of 40 MB of the same
+200-color rows into the 200×50 grid while a frame is drawn after every batch, and how
+long each frame held the `Term`. On the 24-core desktop (TOB-331, median of three):
+
+| Build | Held per frame, before | After | Frames, before | After | Throughput |
+| --- | --- | --- | --- | --- | --- |
+| Debug | 1.84 ms (max 2.66) | 0.39 ms (max 0.49) | 114 | 206 | 53 MB/s both |
+| Release | 0.68 ms (max 1.10) | 0.054 ms (max 0.18) | 179 | 198 | 122 MB/s both |
+
+Throughput is the parser's own speed either way. `scripts/terminal-flood.py` measures
+the real app on the verify skill's private Sway: `cat` of 100 MB, then `yes` for 30 s
+while a 216-character draft is typed into the composer at 10 ms a key and the session
+switched away and back. Release builds, median of three runs each:
+
+| | Before | After |
+| --- | --- | --- |
+| `cat` of 100 MB | 124.5 MB/s | 131.1 MB/s |
+| Draft saved after the last key, during `yes` | 0.25 s | 0.25 s |
+| New session, then back, during `yes` | 0.06 s, under 0.05 s | 0.06 s, under 0.05 s |
+| Resident memory over 30 s of `yes` | 196 to 202 MB, flat | 201 to 202 MB, flat |
+| CPU during `yes` (UI and IO threads) | 93% | 93% |
+
+The app saves a draft 250 ms after the last edit, so 0.25 s means no keys were
+waiting. A release build already kept up; the lock change matters most in the debug
+build `cargo run` makes.
+
 ## Limits and follow-ups
 
 - Scrollback lives only in memory. T3 Code keeps it across a restart. Keystone does
   not yet.
 - Mouse reporting to programs (clicks in `htop` or `vim` with `mouse=a`) is not sent.
   The wheel in the alternate screen sends arrows instead.
-- There is no IME. Text arrives through key events, so dead keys and input methods
-  that compose text are not supported.
-- Alt sends ESC before the key on every platform. On macOS keyboard layouts that type
-  characters with Option, such as `@` on a German layout, that character cannot be
-  typed. An "Option as Meta" setting would fix it.
+- Real macOS keyboard input, Option on a German layout and an input method composing
+  Japanese, has been checked only through GPUI tests that call the pane's input
+  handler as AppKit does. The macOS journeys enter keys through the automation inbox,
+  which skips AppKit's event translation and input methods.
 - A process that left the shell's tree before the pane closed, such as a daemon that
   called `setsid` or a job whose parent exited, is out of reach, as it is for
   provider teardown.
-- Option as Meta and IME on macOS, releasing the `Term` lock before text shaping,
-  bounding the IO thread's event channel, a cap on idle shells, and a policy for OSC 52
-  clipboard writes are follow-ups in Linear.
 - Bold text is drawn bold, not in the bright color.
 - Panes split side by side only. There are no tabs or groups, and no dragging output
   into the composer.

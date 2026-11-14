@@ -7,10 +7,10 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors as Overrides;
 use alacritty_terminal::vte::ansi::{Color as CellColor, CursorShape, NamedColor};
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId,
-    Hsla, IntoElement, LayoutId, Pixels, ShapedLine, SharedString, StrikethroughStyle, Style,
-    TextAlign, TextRun, UnderlineStyle, WeakEntity, Window, fill, outline, point, px, relative,
-    size,
+    App, Bounds, ContentMask, Element, ElementId, FocusHandle, Font, FontStyle, FontWeight,
+    GlobalElementId, Hsla, IntoElement, LayoutId, Pixels, ShapedLine, SharedString,
+    StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle, WeakEntity, Window, fill,
+    outline, point, px, relative, size,
 };
 use keystone_ui::{ActiveTheme, TerminalColors, TextSize};
 
@@ -50,6 +50,7 @@ pub(crate) struct Grid {
     pub terminal: WeakEntity<SessionTerminal>,
     pub pane: u64,
     pub focused: bool,
+    pub focus: FocusHandle,
 }
 
 impl IntoElement for Grid {
@@ -65,6 +66,9 @@ pub(crate) struct Frame {
     rects: Vec<(Bounds<Pixels>, Hsla)>,
     text: Vec<(gpui::Point<Pixels>, ShapedLine)>,
     cursor: Option<gpui::PaintQuad>,
+    /// What an input method is composing, drawn over the cells at the cursor on the
+    /// terminal's background.
+    composition: Option<(gpui::Point<Pixels>, ShapedLine, Hsla)>,
     line_height: Pixels,
 }
 
@@ -130,31 +134,48 @@ impl Element for Grid {
         window: &mut Window,
         cx: &mut App,
     ) -> Frame {
-        let Some(terminal) = self.terminal.upgrade() else {
+        let Some(entity) = self.terminal.upgrade() else {
             return Frame::default();
         };
-        let terminal = terminal.read(cx);
+        let terminal = entity.read(cx);
         let Some(pane) = terminal.pane(self.pane) else {
             return Frame::default();
         };
         let metrics = Metrics::new(window, cx);
-        if super::presented(window) {
+        let resized = super::presented(window) && {
             let showing = super::showing(terminal.session, cx);
             pane.paint_in(
                 window.window_handle().window_id(),
                 bounds,
                 metrics.grid(bounds),
                 &showing,
-            );
-        }
-        let term = pane.term.clone();
+            )
+        };
         let palette = cx.theme().colors.terminal;
-        let term = term.lock();
-        let content = term.renderable_content();
-        let offset = content.display_offset as i32;
-        let overrides = content.colors;
-        let selection = content.selection;
-        let cursor = content.cursor;
+        // The IO thread applies output only while it holds the screen, so take a copy
+        // of the visible cells and shape text after letting go, as Alacritty does.
+        let mut cells = pane.cells.take();
+        cells.clear();
+        let (offset, overrides, selection, cursor, screen_lines) = {
+            let term = pane.term.lock();
+            #[cfg(test)]
+            let _held = Held(std::time::Instant::now());
+            let content = term.renderable_content();
+            let copied = (
+                content.display_offset as i32,
+                *content.colors,
+                content.selection,
+                content.cursor,
+                term.screen_lines() as i32,
+            );
+            cells.extend(
+                content
+                    .display_iter
+                    .map(|indexed| (indexed.point, indexed.cell.clone())),
+            );
+            copied
+        };
+        let overrides = &overrides;
         let (cw, lh) = (metrics.cell.width, metrics.cell.height);
         let at =
             |column: usize, row: i32| bounds.origin + point(cw * column as f32, lh * row as f32);
@@ -219,8 +240,9 @@ impl Element for Grid {
                 frame.text.push((at(segment.column, row), line));
             }
         };
-        for indexed in content.display_iter {
-            let row = indexed.point.line.0 + offset;
+        for (at_point, cell) in &cells {
+            let at_point = *at_point;
+            let row = at_point.line.0 + offset;
             if current_row != Some(row) {
                 if let Some(previous) = current_row {
                     flush_row(
@@ -234,14 +256,13 @@ impl Element for Grid {
                 }
                 current_row = Some(row);
             }
-            let cell = indexed.cell;
             if cell
                 .flags
                 .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
             {
                 continue;
             }
-            let column = indexed.point.column.0;
+            let column = at_point.column.0;
             let width = if cell.flags.contains(Flags::WIDE_CHAR) {
                 2
             } else {
@@ -264,7 +285,7 @@ impl Element for Grid {
                     _ => row_backgrounds.push((column, column + width, bg)),
                 }
             }
-            if selection.is_some_and(|range| range.contains(indexed.point)) {
+            if selection.is_some_and(|range| range.contains(at_point)) {
                 match row_selection.last_mut() {
                     Some((_, end)) if *end == column => *end += width,
                     _ => row_selection.push((column, column + width)),
@@ -277,7 +298,7 @@ impl Element for Grid {
                 underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
                 strike: cell.flags.contains(Flags::STRIKEOUT),
             };
-            if indexed.point == cursor.point {
+            if at_point == cursor.point {
                 under_cursor = Some((cell.c, style.clone()));
             }
             let lone = width == 2 || !single_cell(cell.c);
@@ -317,7 +338,7 @@ impl Element for Grid {
         }
 
         let row = cursor.point.line.0 + offset;
-        if cursor.shape != CursorShape::Hidden && (0..term.screen_lines() as i32).contains(&row) {
+        if cursor.shape != CursorShape::Hidden && (0..screen_lines).contains(&row) {
             let origin = at(cursor.point.column.0, row);
             let block = Bounds::new(origin, metrics.cell);
             let color = palette.cursor;
@@ -343,6 +364,31 @@ impl Element for Grid {
                         .shape_line(text.into(), metrics.font_size, &[run], None);
                 frame.text.push((origin, line));
             }
+        }
+        if let Some(text) = &pane.marked
+            && (0..screen_lines).contains(&row)
+        {
+            let style = CellStyle {
+                color: palette.foreground,
+                bold: false,
+                italic: false,
+                underline: true,
+                strike: false,
+            };
+            let run = text_run(&metrics.font, text.len(), &style);
+            let line = window.text_system().shape_line(
+                SharedString::from(text.clone()),
+                metrics.font_size,
+                &[run],
+                None,
+            );
+            frame.composition = Some((at(cursor.point.column.0, row), line, palette.background));
+        }
+        pane.cells.replace(cells);
+        if resized {
+            // Every other window showing the pane drew it at the old size, and a
+            // drawer is cached, so it would keep that frame until the next output.
+            cx.defer(move |cx| entity.update(cx, |_, cx| cx.notify()));
         }
         frame
     }
@@ -382,6 +428,31 @@ impl Element for Grid {
                 }
             })
         });
+        // A layer of its own draws over the grid's text.
+        if let Some((origin, line, background)) = &frame.composition {
+            let cover = Bounds::new(*origin, size(line.width, frame.line_height));
+            window.paint_layer(cover, |window| {
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    window.paint_quad(fill(cover, *background));
+                    let _ = line.paint(
+                        *origin,
+                        frame.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                })
+            });
+        }
+        window.handle_input(
+            &self.focus,
+            super::text::PaneInput {
+                terminal: self.terminal.clone(),
+                pane: self.pane,
+            },
+            cx,
+        );
     }
 }
 
@@ -449,5 +520,20 @@ fn named(name: NamedColor, palette: &TerminalColors) -> Hsla {
             let normal = index - NamedColor::DimBlack as usize;
             TerminalColors::dim(palette.ansi[normal.min(7)])
         }
+    }
+}
+
+/// How long each prepaint held a pane's screen locked, for `perf_terminal_flood`.
+#[cfg(test)]
+pub(crate) static LOCK_HELD: std::sync::Mutex<Vec<std::time::Duration>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+struct Held(std::time::Instant);
+
+#[cfg(test)]
+impl Drop for Held {
+    fn drop(&mut self) {
+        LOCK_HELD.lock().unwrap().push(self.0.elapsed());
     }
 }

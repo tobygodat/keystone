@@ -4,11 +4,12 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::cell::Cell as GridCell;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Pty};
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{Bounds, FocusHandle, Pixels, WindowId};
-use keystone_agent::host::{Root, Tree};
+use keystone_agent::host::{Root, Tree, unreaped};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -123,15 +124,32 @@ impl Dimensions for GridSize {
     }
 }
 
-/// Forwards the IO thread's events to the UI thread, tagged with the pane.
+/// Forwards the IO thread's events to the UI thread, tagged with the pane. Output
+/// comes in reads of up to 64 KiB, each followed by a wakeup, so a flood would queue
+/// one per read: instead one queued wakeup stands for all output until the UI applies
+/// it. Events Keystone has no use for are never queued. Replies a program asked for and
+/// the shell's exit always are.
 #[derive(Clone)]
 pub(crate) struct Listener {
     pane: u64,
     events: UnboundedSender<(u64, Event)>,
+    woken: Arc<AtomicBool>,
 }
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
+        match event {
+            Event::Wakeup if self.woken.swap(true, Ordering::AcqRel) => return,
+            // No title, pointer shape, blink or bell is shown, and no program reads the
+            // clipboard.
+            Event::Title(_)
+            | Event::ResetTitle
+            | Event::MouseCursorDirty
+            | Event::CursorBlinkingChange
+            | Event::Bell
+            | Event::ClipboardLoad(..) => return,
+            _ => {}
+        }
         let _ = self.events.unbounded_send((self.pane, event));
     }
 }
@@ -141,6 +159,10 @@ impl EventListener for Listener {
 pub(crate) struct View {
     pub bounds: Bounds<Pixels>,
     pub fits: GridSize,
+    /// The screen's size when the window last painted it, so a test can tell a stale
+    /// frame.
+    #[cfg(test)]
+    pub painted: GridSize,
 }
 
 type Io = JoinHandle<(EventLoop<Pty, Listener>, State)>;
@@ -155,8 +177,16 @@ pub(crate) struct Pane {
     views: RefCell<HashMap<WindowId, View>>,
     /// Wheel movement short of a whole line, carried to the next event.
     pub scroll_remainder: Cell<f32>,
+    /// The visible cells, copied for each paint so the screen's lock is held only for
+    /// the copy. Kept between frames to reuse its allocation.
+    pub cells: Cell<Vec<(alacritty_terminal::index::Point, GridCell)>>,
+    /// What an input method is composing, shown at the cursor until it commits.
+    pub marked: Option<String>,
     /// The shell exited by itself, so it and its group are not signalled.
     pub exited: bool,
+    /// A wakeup is queued for the UI. Cleared as the UI applies it, so output after
+    /// that queues another.
+    woken: Arc<AtomicBool>,
     sender: EventLoopSender,
     size: Cell<GridSize>,
     /// The PTY's controller side, open until the IO thread is joined.
@@ -195,7 +225,12 @@ impl Pane {
                 "keystone: could not pin terminal shell {pid}, so closing its pane signals it and its group by PID"
             );
         }
-        let listener = Listener { pane: id, events };
+        let woken = Arc::new(AtomicBool::new(false));
+        let listener = Listener {
+            pane: id,
+            events,
+            woken: woken.clone(),
+        };
         let config = Config {
             scrolling_history: SCROLLBACK,
             ..Config::default()
@@ -211,7 +246,10 @@ impl Pane {
             focus,
             views: RefCell::default(),
             scroll_remainder: Cell::new(0.),
+            cells: Cell::default(),
+            marked: None,
             exited: false,
+            woken,
             sender,
             size: Cell::new(size),
             master,
@@ -220,23 +258,51 @@ impl Pane {
         })
     }
 
+    /// Takes the queued wakeup, so the next output queues another.
+    pub(crate) fn wake(&self) {
+        self.woken.store(false, Ordering::Release);
+    }
+
+    /// Sends what the user typed: the view returns to the bottom and the selection
+    /// clears, as in other terminals.
+    pub(crate) fn typed(&self, bytes: impl Into<Cow<'static, [u8]>>) {
+        {
+            let mut term = self.term.lock();
+            term.scroll_display(Scroll::Bottom);
+            term.selection = None;
+        }
+        self.write(bytes);
+    }
+
     pub(crate) fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         let _ = self.sender.send(Msg::Input(bytes.into()));
     }
 
     /// Records that `window` paints the pane in `bounds`, where `fits` would fill it,
     /// and fits the screen and the PTY to it and the other windows in `showing`.
+    /// Returns whether the size changed, so the other windows' frames are stale.
     pub(crate) fn paint_in(
         &self,
         window: WindowId,
         bounds: Bounds<Pixels>,
         fits: GridSize,
         showing: &[WindowId],
-    ) {
-        self.views
-            .borrow_mut()
-            .insert(window, View { bounds, fits });
-        self.fit(|id| id == window || showing.contains(&id));
+    ) -> bool {
+        self.views.borrow_mut().insert(
+            window,
+            View {
+                bounds,
+                fits,
+                #[cfg(test)]
+                painted: fits,
+            },
+        );
+        let resized = self.fit(|id| id == window || showing.contains(&id));
+        #[cfg(test)]
+        if let Some(view) = self.views.borrow_mut().get_mut(&window) {
+            view.painted = self.size.get();
+        }
+        resized
     }
 
     /// Forgets the windows `keep` rejects and fits the screen and the PTY to the ones
@@ -420,17 +486,6 @@ impl Targets {
     }
 }
 
-/// Whether `pid`, a child of Keystone, has not been reaped, so its PID is still its
-/// own.
-fn unreaped(pid: u32) -> bool {
-    // SAFETY: waitid writes only into the zeroed siginfo it is given.
-    unsafe {
-        let mut info: libc::siginfo_t = std::mem::zeroed();
-        let flags = libc::WEXITED | libc::WNOWAIT | libc::WNOHANG;
-        libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) == 0
-    }
-}
-
 impl Stopping {
     pub(crate) fn is_done(&self) -> bool {
         self.0.reaped.load(Ordering::SeqCst)
@@ -527,6 +582,43 @@ fn signalled(_pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flood queues one wakeup until the UI applies it, and nothing for events
+    /// Keystone ignores. Replies and the exit are always queued.
+    #[test]
+    fn wakeups_coalesce_and_replies_always_queue() {
+        let (events, mut received) = futures::channel::mpsc::unbounded();
+        let woken = Arc::new(AtomicBool::new(false));
+        let listener = Listener {
+            pane: 7,
+            events,
+            woken: woken.clone(),
+        };
+        let mut queued = || {
+            std::iter::from_fn(|| received.try_recv().ok())
+                .map(|(pane, event)| {
+                    assert_eq!(pane, 7);
+                    format!("{event:?}")
+                })
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..1000 {
+            listener.send_event(Event::Wakeup);
+            listener.send_event(Event::Title("busy".into()));
+            listener.send_event(Event::Bell);
+        }
+        listener.send_event(Event::PtyWrite("\x1b[0n".into()));
+        listener.send_event(Event::PtyWrite("\x1b[0n".into()));
+        assert_eq!(
+            queued(),
+            ["Wakeup", "PtyWrite(\u{1b}[0n)", "PtyWrite(\u{1b}[0n)"]
+        );
+        woken.store(false, Ordering::Release);
+        listener.send_event(Event::Wakeup);
+        listener.send_event(Event::Wakeup);
+        listener.send_event(Event::Exit);
+        assert_eq!(queued(), ["Wakeup", "Exit"]);
+    }
 
     #[test]
     fn a_closed_controller_reads_nothing_and_closes_on_exec() {
