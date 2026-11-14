@@ -4,10 +4,10 @@
 //! the app calls waits on the transport: frames go into a queue that one writer thread
 //! per transport empties.
 
-use super::Route;
 use super::frame::{self, Call, Frame, Op, Outcome, PROTOCOL, SessionState, Welcome};
+use super::{Place, Route};
 use crate::{Catalog, Event, Wake};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::io::{BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -115,8 +115,23 @@ struct State {
     closed: bool,
     /// Whether a host ever welcomed this link, after which `hello` carries `after`.
     linked: bool,
+    /// The journal `received`, `unsaved` and every number in an inbox count in: the one
+    /// the host last welcomed this link with. `None` until the first welcome.
+    journal: Option<std::sync::Arc<str>>,
     /// The highest place received. Anything at or below it is a repeat.
     received: u64,
+    /// Events a connection drained whose session hasn't reported them saved, as
+    /// `(place, session)`. The acknowledgement stays below the first of them.
+    unsaved: BTreeSet<(u64, u64)>,
+    /// Each session's saved cursor: every row its events up to this place added is
+    /// in the app's log. Given at launch from the log and raised by [`Link::saved`].
+    /// After a welcome it holds only places in that journal ([`State::adopt`]). A
+    /// replayed event at or below it is dropped, since its rows are saved already.
+    saved: HashMap<u64, Place>,
+    /// How many times a welcome named a journal other than the one this link's places
+    /// counted in, and whether the host's report of its sessions has followed the last.
+    journal_changes: u64,
+    journal_reported: bool,
     sent_ack: (u64, u64),
     next_call: u64,
     calls: BTreeMap<u64, Pending>,
@@ -142,6 +157,13 @@ impl Link {
     /// Starts linking through `argv`, a command whose stdin and stdout reach
     /// `keystone-host attach`. `client` is the workspace's own random ID.
     pub fn new(argv: Vec<OsString>, client: String) -> Self {
+        Self::with_cursors(argv, client, HashMap::new())
+    }
+
+    /// As [`Link::new`], for a machine whose sessions' saved cursors are `saved`, by
+    /// session, as the log holds them at launch. A cursor in a journal other than the
+    /// one the host welcomes the link with counts for nothing.
+    pub fn with_cursors(argv: Vec<OsString>, client: String, saved: HashMap<u64, Place>) -> Self {
         let shared = Arc::new(Shared {
             argv,
             client,
@@ -149,7 +171,12 @@ impl Link {
                 status: Status::Connecting,
                 closed: false,
                 linked: false,
+                journal: None,
                 received: 0,
+                unsaved: BTreeSet::new(),
+                saved,
+                journal_changes: 0,
+                journal_reported: true,
                 sent_ack: (0, 0),
                 next_call: 1,
                 calls: BTreeMap::new(),
@@ -187,7 +214,38 @@ impl Link {
         self.shared.changed.notify_all();
     }
 
-    /// Tells the host the app is quitting, after acknowledging everything drained. With
+    /// The app saved every row `session`'s events up to `place` added, with the
+    /// session's cursor. Only this moves the acknowledgement past a drained event. A
+    /// place the link handed out before it last took on a journal moves nothing: it is
+    /// the very `Arc` the link held then, so even the same journal taken on again
+    /// after it went back doesn't match it.
+    pub fn saved(&self, session: u64, place: &Place) {
+        let mut state = self.shared.state();
+        if !state
+            .journal
+            .as_ref()
+            .is_some_and(|journal| std::sync::Arc::ptr_eq(journal, &place.journal))
+        {
+            return;
+        }
+        let seq = place.seq;
+        let cursor = state.saved.entry(session).or_insert_with(|| place.clone());
+        cursor.seq = cursor.seq.max(seq);
+        state
+            .unsaved
+            .retain(|&(at, held)| held != session || at > seq);
+        state.ack(false);
+    }
+
+    /// How many times the host welcomed this link with a journal other than the one
+    /// its places counted in, and whether its report of every session has come since
+    /// the last. A turn that was running in the old journal has no end there to come.
+    pub fn journal_changes(&self) -> (u64, bool) {
+        let state = self.shared.state();
+        (state.journal_changes, state.journal_reported)
+    }
+
+    /// Tells the host the app is quitting, after acknowledging everything saved. With
     /// `keep_running`, the host keeps this workspace's provider processes.
     pub fn quit(&self, keep_running: bool) {
         let mut state = self.shared.state();
@@ -364,17 +422,24 @@ impl Shared {
                 let _ = tail_done.send(());
             });
         }
-        let after = {
+        let (after, journal, seen) = {
             let mut state = self.state();
             state.transport = Some(child.id());
             state.heard = Instant::now();
             state.silenced = false;
-            state.linked.then_some(state.received)
+            let journal = state.journal.as_deref().map(str::to_owned);
+            (
+                state.linked.then_some(state.received),
+                journal,
+                state.seen(),
+            )
         };
         let hello = Frame::Hello {
             protocol: PROTOCOL,
             client: self.client.clone(),
             after,
+            journal,
+            seen,
         };
         let (out, queue) = mpsc::channel();
         let _ = out.send(frame::encode(&hello).expect("hello fits a frame"));
@@ -489,12 +554,11 @@ impl Shared {
                         state.welcome = Some(welcome.clone());
                         state.trouble = None;
                     }
-                    self.resend(
-                        out.take().expect("the queue until welcomed"),
-                        welcome.latest,
-                    );
+                    self.resend(out.take().expect("the queue until welcomed"), &welcome);
                 }
-                Frame::Refused { reason } if !welcomed => return Ended::Failed(reason),
+                Frame::Refused { reason } if !welcomed => {
+                    return Ended::Failed(refusal(reason));
+                }
                 Frame::Event(routed) if welcomed => {
                     let route = Route {
                         provider: routed.provider,
@@ -540,23 +604,28 @@ impl Shared {
 
     /// Makes `out` the link's queue after queueing again, in order, every call that has
     /// no reply, then the current acknowledgement. Under the one lock that numbers
-    /// calls, so no newer call goes out before them.
-    fn resend(&self, out: Sender<Vec<u8>>, latest: u64) {
-        let mut state = self.state();
-        state.linked = true;
-        // A host whose journal is behind what was received lost it, and numbers its
-        // events from there again.
-        state.received = state.received.min(latest);
-        for call in state.calls.values() {
-            let _ = out.send(call.line.clone());
+    /// calls, so no newer call goes out before them. First puts the link's places in
+    /// the welcomed journal ([`State::adopt`]).
+    fn resend(&self, out: Sender<Vec<u8>>, welcome: &Welcome) {
+        let wakes = {
+            let mut state = self.state();
+            let changed = state.adopt(&welcome.journal, welcome.latest);
+            state.linked = true;
+            for call in state.calls.values() {
+                let _ = out.send(call.line.clone());
+            }
+            state.out = Some(out);
+            state.sent_ack = (0, 0);
+            state.ack(false);
+            if changed { state.wakes() } else { Vec::new() }
+        };
+        for wake in wakes {
+            wake();
         }
-        state.out = Some(out);
-        state.sent_ack = (0, 0);
-        state.ack(false);
     }
 
     /// Adds the events at place `seq` to the route's inbox, unless they were received
-    /// before.
+    /// before or their session saved them in an earlier run.
     fn route(&self, route: Route, seq: u64, events: Vec<(u64, Event)>) {
         let wake = {
             let mut state = self.state();
@@ -564,7 +633,8 @@ impl Shared {
                 return;
             }
             state.received = seq;
-            let target = state.routes.entry(route.clone()).or_default();
+            let State { saved, routes, .. } = &mut *state;
+            let target = routes.entry(route.clone()).or_default();
             let was_empty = target.inbox.is_empty();
             for (session, event) in events {
                 target
@@ -572,13 +642,18 @@ impl Shared {
                     .entry(session)
                     .or_insert_with(|| empty_session(&route, session))
                     .apply(&event);
+                // `saved` holds places in the welcomed journal only, as `seq` is.
+                if saved.get(&session).is_some_and(|cursor| seq <= cursor.seq) {
+                    continue;
+                }
                 target.inbox.push((Some(seq), session, event));
             }
             let wake = target.wake.as_ref().map(|(_, wake)| wake.clone());
-            if wake.is_none() {
+            let waiting = !target.inbox.is_empty();
+            if wake.is_none() || !waiting {
                 state.ack(false);
             }
-            wake.filter(|_| was_empty)
+            wake.filter(|_| was_empty && waiting)
         };
         if let Some(wake) = wake {
             wake();
@@ -597,6 +672,7 @@ impl Shared {
                 target.sessions.insert(session.session, session);
             }
             state.reports += 1;
+            state.journal_reported = true;
             state.wakes()
         };
         for wake in wakes {
@@ -662,19 +738,36 @@ impl Shared {
         }
     }
 
-    pub(crate) fn drain(&self, route: &Route) -> Vec<(u64, Event)> {
+    /// Hands over the route's events with their places. Each one with a place stays
+    /// unsaved, holding the acknowledgement back, until [`Link::saved`] covers it.
+    pub(crate) fn drain(&self, route: &Route) -> Vec<(Option<Place>, u64, Event)> {
         let mut state = self.state();
         let Some(target) = state.routes.get_mut(route) else {
             return Vec::new();
         };
         let drained = std::mem::take(&mut target.inbox);
-        if drained.iter().any(|(seq, _, _)| seq.is_some()) {
-            state.ack(false);
-        }
+        let places: Vec<_> = drained
+            .iter()
+            .filter_map(|(seq, session, _)| seq.map(|seq| (seq, *session)))
+            .collect();
+        state.unsaved.extend(places);
+        let journal = state.journal.clone();
         drained
             .into_iter()
-            .map(|(_, session, event)| (session, event))
+            .map(|(seq, session, event)| {
+                let place = seq
+                    .zip(journal.clone())
+                    .map(|(seq, journal)| Place { journal, seq });
+                (place, session, event)
+            })
             .collect()
+    }
+
+    pub(crate) fn has_events(&self, route: &Route) -> bool {
+        self.state()
+            .routes
+            .get(route)
+            .is_some_and(|target| !target.inbox.is_empty())
     }
 
     /// Makes `wake` the route's, replacing any earlier registration, and returns the
@@ -727,6 +820,65 @@ impl Shared {
 }
 
 impl State {
+    /// The highest place the link has in each journal: its saved cursors, and what
+    /// it received in the journal it took on. `hello` sends them, so a host whose
+    /// journal went back below one of them can tell, and take a new identity.
+    fn seen(&self) -> Vec<(String, u64)> {
+        let mut seen: BTreeMap<String, u64> = BTreeMap::new();
+        let received = self.journal.iter().map(|journal| (journal, self.received));
+        let saved = self.saved.values().map(|place| (&place.journal, place.seq));
+        for (journal, seq) in received.chain(saved) {
+            let highest = seen.entry(journal.to_string()).or_default();
+            *highest = (*highest).max(seq);
+        }
+        seen.into_iter().collect()
+    }
+
+    /// The one rule for places: a number counts only in the journal that numbered it.
+    /// Run on every welcome, at launch, on a reconnect, and when the daemon was
+    /// replaced while the app ran. Welcomed by another journal than the one this
+    /// link's places count in, it forgets them all: what was received, what waits to be
+    /// saved, each session's saved cursor from that journal, the inbox's numbers (those
+    /// events still reach their sessions, with no place) and what the host said of each
+    /// session. It returns whether it did. A host whose journal went back below a place
+    /// the link has takes a new identity when `hello` shows it one ([`State::seen`]),
+    /// so that is another journal too. Were the same journal ever to answer behind a
+    /// place anyway, it is taken as another all the same, with no saved cursor kept:
+    /// Keystone can't tell which of its numbers it already has.
+    fn adopt(&mut self, journal: &str, latest: u64) -> bool {
+        let same = self.journal.as_deref() == Some(journal);
+        let behind = (same && self.received > latest)
+            || self
+                .saved
+                .values()
+                .any(|place| &*place.journal == journal && place.seq > latest);
+        if same && !behind {
+            return false;
+        }
+        let stale = behind
+            || self.journal.is_some()
+            || self.saved.values().any(|place| &*place.journal != journal);
+        let journal: std::sync::Arc<str> = journal.into();
+        if behind {
+            self.saved.clear();
+        }
+        self.saved.retain(|_, place| place.journal == journal);
+        self.journal = Some(journal);
+        self.received = 0;
+        self.unsaved.clear();
+        for route in self.routes.values_mut() {
+            for (seq, _, _) in &mut route.inbox {
+                *seq = None;
+            }
+            route.sessions.clear();
+        }
+        if stale {
+            self.journal_changes += 1;
+            self.journal_reported = false;
+        }
+        stale
+    }
+
     /// Every registered connection's wake.
     fn wakes(&self) -> Vec<Wake> {
         self.routes
@@ -749,18 +901,22 @@ impl State {
     }
 
     /// Queues an acknowledgement when it moved, or with `force`. The event cursor is the
-    /// highest place below which every event of a route with a connection was drained.
-    /// A route with no connection holds nothing back: its events wait here for one to
+    /// highest place at or below which every event of a route with a connection is
+    /// saved: drained, and covered by its session's saved cursor ([`Link::saved`]). A
+    /// route with no connection holds nothing back: its events wait here for one to
     /// register, and a route nobody drains can't stop the host trimming its journal.
     fn ack(&mut self, force: bool) {
         if self.out.is_none() {
             return;
         }
-        let seq = self
+        let undrained = self
             .routes
             .values()
             .filter(|route| route.wake.is_some())
-            .flat_map(|route| route.inbox.iter().filter_map(|(seq, _, _)| *seq))
+            .flat_map(|route| route.inbox.iter().filter_map(|(seq, _, _)| *seq));
+        let unsaved = self.unsaved.first().map(|(seq, _)| *seq);
+        let seq = undrained
+            .chain(unsaved)
             .min()
             .map_or(self.received, |first| self.received.min(first - 1));
         let calls = self
@@ -852,6 +1008,18 @@ fn finish(child: &Mutex<Child>) -> Option<ExitStatus> {
     }
     let _ = child.kill();
     child.wait().ok()
+}
+
+/// What a host's refusal says, with the install command added when the host refused
+/// for its protocol: a host that speaks another protocol refuses `hello` before it
+/// welcomes anything, so the welcome path never gets to give the command, and an older
+/// host's refusal can't carry it itself.
+fn refusal(reason: String) -> String {
+    if reason.starts_with("protocol ") {
+        format!("{reason}. Install the matching version there: {INSTALL}")
+    } else {
+        reason
+    }
 }
 
 /// A transport exit that retrying won't fix, as the reason to show.

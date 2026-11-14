@@ -11,6 +11,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
+/// How the journal commits. `FULL` syncs the write-ahead log on every commit: on
+/// Linux with `fsync`, and on macOS with `F_FULLFSYNC`, which SQLite uses only with
+/// `fullfsync` on ([`Journal::open`] sets it and `checkpoint_fullfsync`, since a plain
+/// `fsync()` there can leave the data in the drive's cache). So an event survives a
+/// power loss or a kernel crash once the commit that numbers it returns, as far as the
+/// disk keeps what a sync says it keeps, and the daemon sends an event only after that
+/// ([`Journal::append`] commits, then the daemon delivers its frames). So a number the
+/// host has sent is never given to another event, which every place the app saves
+/// relies on. `NORMAL` lets a power loss take the last commits back, and the daemon that
+/// starts after it would number its own restart events over events the app already
+/// has. On Linux a commit costs about 0.4 ms at the median and 3 ms at the 99th
+/// percentile, a turn at a provider's pace takes no longer, and the daemon writes about
+/// six times as many bytes to disk; `docs/design/remote.md` has the numbers. macOS
+/// hasn't been measured.
+pub const SYNCHRONOUS: &str = "FULL";
+
 /// Unacknowledged bytes kept per client before item events are dropped.
 pub(crate) const CAP: u64 = 64 * 1024 * 1024;
 
@@ -39,6 +55,10 @@ CREATE TABLE IF NOT EXISTS calls (
     reply TEXT,
     PRIMARY KEY (client, id)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS identity (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    id TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sessions (
     client TEXT NOT NULL,
     session INTEGER NOT NULL,
@@ -91,6 +111,8 @@ fn class(event: &Event) -> i64 {
 pub(crate) struct Journal {
     db: Connection,
     cap: u64,
+    /// The journal's identity, made once with the file and kept in it.
+    id: String,
 }
 
 /// What the journal knew of a call when it arrived.
@@ -171,7 +193,11 @@ impl Journal {
             ));
         }
         sql(db.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())))?;
-        sql(db.execute_batch("PRAGMA synchronous = NORMAL;"))?;
+        // On macOS a plain fsync() can leave a commit in the drive's cache, and SQLite
+        // asks for F_FULLFSYNC only with these on. Elsewhere they change nothing.
+        sql(db.execute_batch(&format!(
+            "PRAGMA synchronous = {SYNCHRONOUS}; PRAGMA fullfsync = ON; PRAGMA checkpoint_fullfsync = ON;"
+        )))?;
         let tx = sql(db.transaction())?;
         if version > 0 {
             for upgrade in &UPGRADES[version as usize - 1..] {
@@ -179,9 +205,30 @@ impl Journal {
             }
         }
         sql(tx.execute_batch(SCHEMA))?;
+        sql(tx.execute(
+            "INSERT OR IGNORE INTO identity (singleton, id) VALUES (1, ?1)",
+            [super::new_client_id()],
+        ))?;
+        let id = sql(tx.query_row("SELECT id FROM identity", [], |row| row.get(0)))?;
         sql(tx.pragma_update(None, "user_version", VERSION))?;
         sql(tx.commit())?;
-        Ok(Self { db, cap })
+        Ok(Self { db, cap, id })
+    }
+
+    /// The journal's identity, which `welcome` reports so the app knows which journal
+    /// a place counts in.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Gives the journal a new identity, for one that went back: its numbers past the
+    /// point it went back to may now name other events, so no place counted in it
+    /// before may count after.
+    pub fn rotate(&mut self) -> Result<(), String> {
+        let id = super::new_client_id();
+        sql(self.db.execute("UPDATE identity SET id = ?1", [&id]))?;
+        self.id = id;
+        Ok(())
     }
 
     /// Numbers and stores `events` for `client`, updating each session's row in the same
@@ -791,6 +838,27 @@ mod tests {
         drop(journal);
         let journal = Journal::open(&path, CAP).unwrap();
         assert_eq!(journal.interrupted(None).unwrap().len(), 1, "opening again");
+    }
+
+    /// A commit survives a power loss before the daemon sends what it numbered, so no
+    /// number the app has seen is ever given to another event (TOB-319).
+    #[test]
+    fn the_journal_syncs_every_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(&dir.path().join("journal.sqlite3"), CAP).unwrap();
+        let pragma = |name: &str| -> i64 {
+            journal
+                .db
+                .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            (SYNCHRONOUS, pragma("synchronous")),
+            ("FULL", 2),
+            "2 is FULL"
+        );
+        assert_eq!(pragma("fullfsync"), 1, "macOS syncs through to the disk");
+        assert_eq!(pragma("checkpoint_fullfsync"), 1, "and so do checkpoints");
     }
 
     #[test]

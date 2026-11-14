@@ -13,7 +13,7 @@ use keystone_core::{
     WindowView, WorkingDirectory,
 };
 use keystone_core::{MachineId, RemoteFolder};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[cfg(all(test, feature = "ui-tests"))]
 #[path = "app_state_tests.rs"]
@@ -75,6 +75,15 @@ pub(crate) struct Route {
     pub machine: Option<MachineId>,
     pub provider: Provider,
     pub account: Option<AccountId>,
+}
+
+/// An event drained from a connection, with its place in its machine's sequence when
+/// it came from another machine's host. `event` is `None` for one the pump used up
+/// itself, which still takes its place in order.
+struct Placed {
+    place: Option<remote::Place>,
+    session: u64,
+    event: Option<Event>,
 }
 
 /// A connection on another machine: the machine, provider and account it serves.
@@ -155,6 +164,19 @@ pub(crate) struct AppState {
     /// closes. It leaves every remote session running, whatever its machine's setting.
     idle_quit: bool,
     conversations: HashMap<u64, Conversation>,
+    /// For each session on another machine, the place in its machine's sequence of the
+    /// last event this run handed to it, and the sessions whose log hasn't been given
+    /// that place since. A commit saves the place with the rows its events added.
+    handed: HashMap<u64, remote::Place>,
+    through_due: BTreeSet<u64>,
+    /// Each remote session's saved cursor as the log held it at launch, which each
+    /// machine's link starts from.
+    launch_cursors: HashMap<u64, remote::Place>,
+    /// How many times each machine's link found its host's journal replaced, as the
+    /// app last saw, and the sessions on such a machine whose turn may have been
+    /// running in the journal that is gone ([`AppState::end_lost_turns`]).
+    shown_journals: BTreeMap<MachineId, u64>,
+    lost_turns: BTreeSet<u64>,
     /// Each session's checkpoints, as last read from its repository.
     checkpoints: HashMap<u64, checkpoints::State>,
     /// The tree each session's next or running turn starts from.
@@ -1707,6 +1729,21 @@ impl AppState {
         wake();
         store.set_wake(wake.clone());
         let logs = Logs::with_database(store.database(), wake.clone());
+        // Without them a replay after a crash shows rows the log has saved again,
+        // which is worse than nothing only in being noisy, so a failed read goes on.
+        let launch_cursors = store
+            .database()
+            .remote_cursors()
+            .unwrap_or_else(|error| {
+                eprintln!("Keystone could not read where remote sessions were saved: {error}");
+                Vec::new()
+            })
+            .into_iter()
+            .map(|(session, journal, seq)| {
+                let journal = journal.into();
+                (session, remote::Place { journal, seq })
+            })
+            .collect();
         let data_dir = store.path().parent().unwrap_or(std::path::Path::new("."));
         let attachments = keystone_core::attachment::Attachments::in_data_dir(data_dir);
         crate::sounds::SoundPlayer::install(data_dir, cx);
@@ -1741,6 +1778,11 @@ impl AppState {
             linking: None,
             idle_quit: false,
             conversations: HashMap::new(),
+            handed: HashMap::new(),
+            through_due: BTreeSet::new(),
+            launch_cursors,
+            shown_journals: BTreeMap::new(),
+            lost_turns: BTreeSet::new(),
             checkpoints: HashMap::new(),
             turn_starts: checkpoints::Starts::default(),
             checkpoint_store: checkpoints::StoreName::new(store.database()),
@@ -2074,9 +2116,17 @@ impl AppState {
         let Some(conversation) = self.conversations.get_mut(&session) else {
             return false;
         };
+        // A loading conversation holds its events back until its history is restored,
+        // so their rows come with the commit after that, and so does their place.
+        let through = if conversation.is_loading() {
+            None
+        } else {
+            self.through_due.remove(&session);
+            self.handed.get(&session).cloned()
+        };
         let rejected = self
             .logs
-            .append(session, conversation.take_writes())
+            .append_through(session, conversation.take_writes(), through)
             .is_err();
         let changed = conversation.take_changes();
         let replies = changed
@@ -2116,7 +2166,7 @@ impl AppState {
             self.offer_idle(session, candidate);
         }
         let reports = self.logs.drain();
-        let mut events = Vec::new();
+        let mut events: Vec<Placed> = Vec::new();
         // A catalog belongs to the connection it came from, whatever provider or
         // account the asking session has since moved to.
         let local = |provider, account: &Option<AccountId>| Route {
@@ -2124,14 +2174,20 @@ impl AppState {
             provider,
             account: account.clone(),
         };
+        let unplaced = |events: Vec<(u64, Event)>| {
+            events
+                .into_iter()
+                .map(|(session, event)| (None, session, event))
+                .collect::<Vec<_>>()
+        };
         let drained: Vec<_> = self
             .codex
             .iter()
-            .map(|(account, c)| (local(Provider::Codex, account), c.drain()))
+            .map(|(account, c)| (local(Provider::Codex, account), unplaced(c.drain())))
             .chain(
                 self.claude
                     .iter()
-                    .map(|(account, c)| (local(Provider::Claude, account), c.drain())),
+                    .map(|(account, c)| (local(Provider::Claude, account), unplaced(c.drain()))),
             )
             .chain(self.remote.iter().map(|((machine, provider, account), c)| {
                 let route = Route {
@@ -2139,7 +2195,7 @@ impl AppState {
                     provider: *provider,
                     account: account.clone(),
                 };
-                (route, c.drain())
+                (route, c.drain_placed())
             }))
             .collect();
         for (route, batch) in drained {
@@ -2149,7 +2205,14 @@ impl AppState {
                 ..
             } = route;
             let remote = route.machine.is_some();
-            for (session, event) in batch {
+            for (place, session, event) in batch {
+                // An event that applies no row still takes its place in order, so a
+                // commit never saves a place past an event not yet handed over.
+                let placed = |event| Placed {
+                    place,
+                    session,
+                    event,
+                };
                 match event {
                     // What a provider on another machine reports about its account is
                     // that machine's, and Keystone keeps catalogs, usage and MCP
@@ -2159,7 +2222,10 @@ impl AppState {
                     | Event::Commands(_)
                     | Event::Usage(_)
                     | Event::McpStatus(_)
-                        if remote => {}
+                        if remote =>
+                    {
+                        events.push(placed(None))
+                    }
                     Event::Catalog(catalog) => {
                         self.catalogs
                             .apply(provider, account.clone(), session, catalog);
@@ -2175,19 +2241,22 @@ impl AppState {
                         self.record_mcp_status(provider, account.as_ref(), session, servers, cx)
                     }
                     Event::ProviderNotice { .. }
-                        if self.route(session).as_ref() != Some(&route) => {}
+                        if self.route(session).as_ref() != Some(&route) =>
+                    {
+                        events.push(placed(None))
+                    }
                     Event::ThreadsListed { ticket, result } => {
                         answer(&self.native, ticket, Native::Listed(result));
                     }
                     Event::HistoryRead { ticket, result } if self.import_reads.remove(&ticket) => {
                         answer(&self.native, ticket, Native::Read(result));
                     }
-                    event => events.push((session, event)),
+                    event => events.push(placed(Some(event))),
                 }
             }
         }
         self.watch_links();
-        self.receive(reports, events, cx);
+        self.receive_placed(reports, events, cx);
         self.pump_setups(cx);
         self.pump_orchestrator(cx);
         let reads = std::mem::take(&mut *self.recovery_reads.lock().unwrap());
@@ -2197,12 +2266,85 @@ impl AppState {
         self.start_reads();
         self.save_results();
         self.deliver_results(cx);
+        self.end_lost_turns(cx);
+    }
+
+    /// Ends, once, each turn that was running in a host journal that is gone. The new
+    /// journal has no record of it, so its events will never come, and the session
+    /// would otherwise show it running for good. It is ended as failed with a note
+    /// saying how it ended there isn't known, not with anything made up. A session
+    /// waits here until its host has reported every session after the replay, and
+    /// until the replay's events are all applied, so a turn whose end did come is left
+    /// alone.
+    fn end_lost_turns(&mut self, cx: &mut Context<Self>) {
+        if self.lost_turns.is_empty() || self.phase != Phase::Running {
+            return;
+        }
+        let mut ends = Vec::new();
+        for session in std::mem::take(&mut self.lost_turns) {
+            let Some(machine) = self.session(session).and_then(|s| s.machine()).cloned() else {
+                continue;
+            };
+            let (Some(link), Some(connection)) = (
+                self.links.get(&machine),
+                self.remote.get(&(machine.clone(), Provider::Claude, None)),
+            ) else {
+                continue;
+            };
+            if !link.journal_changes().1 || connection.has_events() {
+                self.lost_turns.insert(session);
+                continue;
+            }
+            let running = self.conversations.get(&session).is_some_and(|c| c.running)
+                || self
+                    .session(session)
+                    .is_some_and(|s| s.last_turn() == Some(keystone_core::LastTurn::Running));
+            let host = connection.is_running(session) || !connection.waiting(session).is_empty();
+            if running && !host {
+                let label = self
+                    .store
+                    .workspace()
+                    .machine(&machine)
+                    .map_or_else(|| machine.to_string(), |m| m.label().to_owned());
+                let error = Some(format!(
+                    "keystone-host on {label} lost its record of this session, so how this turn ended there isn't known"
+                ));
+                ends.push((
+                    session,
+                    Event::TurnCompleted {
+                        status: keystone_agent::TurnStatus::Failed,
+                        error,
+                        stopped: false,
+                    },
+                ));
+            }
+        }
+        if !ends.is_empty() {
+            self.receive(Vec::new(), ends, cx);
+        }
     }
 
     pub(crate) fn receive(
         &mut self,
         reports: Vec<Report>,
         events: Vec<(u64, Event)>,
+        cx: &mut Context<Self>,
+    ) {
+        let events = events
+            .into_iter()
+            .map(|(session, event)| Placed {
+                place: None,
+                session,
+                event: Some(event),
+            })
+            .collect();
+        self.receive_placed(reports, events, cx);
+    }
+
+    fn receive_placed(
+        &mut self,
+        reports: Vec<Report>,
+        events: Vec<Placed>,
         cx: &mut Context<Self>,
     ) {
         if self.phase == Phase::Exiting {
@@ -2277,6 +2419,12 @@ impl AppState {
                     sidebar_changed = true;
                     session
                 }
+                Report::Through { session, place } => {
+                    for link in self.links.values() {
+                        link.saved(session, &place);
+                    }
+                    continue;
+                }
                 Report::Saved {
                     session,
                     error,
@@ -2293,7 +2441,19 @@ impl AppState {
             };
             self.commit(session);
         }
-        for (session, event) in events {
+        for Placed {
+            place,
+            session,
+            event,
+        } in events
+        {
+            if let Some(place) = place {
+                self.handed.insert(session, place);
+                self.through_due.insert(session);
+            }
+            let Some(event) = event else {
+                continue;
+            };
             match event {
                 Event::HistoryRead { ticket, result } => {
                     self.finish_recovery(session, ticket, result, cx);
@@ -2392,6 +2552,14 @@ impl AppState {
             }
         }
 
+        // Events that added no row still move their sessions' saved places.
+        for session in std::mem::take(&mut self.through_due) {
+            if self.conversations.contains_key(&session) {
+                self.commit(session);
+            } else if let Some(through) = self.handed.get(&session).cloned() {
+                let _ = self.logs.append_through(session, Vec::new(), Some(through));
+            }
+        }
         self.save_results();
         // After the batch: an exit's turn end is applied before its check starts.
         for session in recover {
@@ -2624,8 +2792,20 @@ impl AppState {
         &self,
         destination: &str,
         client: &str,
+        machine: Option<&MachineId>,
     ) -> Result<(Link, RemoteConnection), String> {
-        let link = Link::new(self.transport(destination)?, client.to_owned());
+        let saved = self
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .filter(|session| machine.is_some() && session.machine() == machine)
+            .filter_map(|session| {
+                let cursor = self.launch_cursors.get(&session.id())?;
+                Some((session.id(), cursor.clone()))
+            })
+            .collect();
+        let link = Link::with_cursors(self.transport(destination)?, client.to_owned(), saved);
         let connection = RemoteConnection::new(&link, Provider::Claude, None, self.wake.clone());
         Ok((link, connection))
     }
@@ -2647,7 +2827,7 @@ impl AppState {
             .collect();
         if let Some(client) = workspace.remote_client().map(str::to_owned) {
             for (id, destination) in missing {
-                match self.open_link(&destination, &client) {
+                match self.open_link(&destination, &client, Some(&id)) {
                     Ok((link, connection)) => {
                         self.links.insert(id.clone(), link);
                         self.remote.insert((id, Provider::Claude, None), connection);
@@ -2655,6 +2835,24 @@ impl AppState {
                     Err(error) => eprintln!("Keystone could not link {destination}: {error}"),
                 }
             }
+        }
+        let replaced: Vec<(MachineId, u64)> = self
+            .links
+            .iter()
+            .map(|(id, link)| (id.clone(), link.journal_changes().0))
+            .filter(|(id, changes)| self.shown_journals.get(id).copied().unwrap_or(0) != *changes)
+            .collect();
+        for (id, changes) in replaced {
+            self.shown_journals.insert(id.clone(), changes);
+            let sessions: Vec<u64> = self
+                .store
+                .workspace()
+                .sessions()
+                .iter()
+                .filter(|s| s.machine() == Some(&id))
+                .map(|s| s.id())
+                .collect();
+            self.lost_turns.extend(sessions);
         }
         let changed: Vec<(MachineId, LinkStatus, u64)> = self
             .links
@@ -2825,7 +3023,7 @@ impl AppState {
             });
         let (link, failed) = match refused {
             Some(reason) => (None, Some(reason)),
-            None => match self.open_link(&destination, &client) {
+            None => match self.open_link(&destination, &client, None) {
                 Ok(link) => (Some(link), None),
                 Err(error) => (None, Some(error)),
             },
@@ -4341,7 +4539,7 @@ impl AppState {
     /// Leave to read this machine's files for `session`, which only a session working
     /// here has. See [`crate::local_files`].
     pub(crate) fn local_files(&self, session: u64) -> Option<crate::local_files::LocalFiles> {
-        crate::local_files::LocalFiles::of(self.session(session)?.context())
+        crate::local_files::LocalFiles::of(self.session(session)?)
     }
 
     /// The label of `machine`, or its ID once it is no longer linked.

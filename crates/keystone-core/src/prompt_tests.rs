@@ -202,7 +202,9 @@ fn schema_2_and_projects_schema_3_databases_gain_an_empty_prompt_list() {
         let database = path.with_extension("sqlite3");
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
-            .execute_batch(&format!("{removed} PRAGMA user_version={version};"))
+            .execute_batch(&format!(
+                "DROP TABLE remote_cursors; {removed} PRAGMA user_version={version};"
+            ))
             .unwrap();
         if version == 3 {
             connection

@@ -1,9 +1,9 @@
 //! [`RemoteConnection`]: the [`Connection`] for one machine, provider and account,
 //! which sends each call to that machine's `keystone-host` over the shared [`Link`].
 
-use super::Route;
 use super::frame::Op;
 use super::link::{Kind, Link, Shared, Then};
+use super::{Place, Route};
 use crate::connection::command_session;
 use crate::idle::IdleCandidate;
 use crate::{Approval, ApprovalState, Command, Connection, Event, Image, Wake};
@@ -39,6 +39,18 @@ impl RemoteConnection {
             .session(&self.route, session)
             .map(|state| state.approvals)
             .unwrap_or_default()
+    }
+
+    /// The events that arrived, each with its place in the machine's sequence, or
+    /// `None` for one the app made itself, such as a call's error. The acknowledgement
+    /// stays below each placed event until [`Link::saved`] says its session saved it.
+    pub fn drain_placed(&self) -> Vec<(Option<Place>, u64, Event)> {
+        self.link.drain(&self.route)
+    }
+
+    /// Whether events wait to be drained.
+    pub fn has_events(&self) -> bool {
+        self.link.has_events(&self.route)
     }
 
     /// Sends `op` now or once the link reconnects. An error reply shows in the session.
@@ -158,7 +170,12 @@ impl Connection for RemoteConnection {
         self.report(session, op, Kind::Other);
     }
 
+    /// The events without their places. Each stays unsaved until [`Link::saved`]
+    /// covers it, so the host keeps it; the app drains with [`Self::drain_placed`].
     fn drain(&self) -> Vec<(u64, Event)> {
-        self.link.drain(&self.route)
+        self.drain_placed()
+            .into_iter()
+            .map(|(_, session, event)| (session, event))
+            .collect()
     }
 }

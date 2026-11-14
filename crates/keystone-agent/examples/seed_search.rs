@@ -92,7 +92,7 @@ fn main() {
         entries.push(item(format!("la-{turn}"), ItemKind::AgentMessage, reply));
         entries.push(turn_end());
     }
-    database.append_logs(long, &records(entries)).unwrap();
+    database.append_logs(long, &records(entries), None).unwrap();
 
     const TOPICS: [&str; 6] = [
         "sidebar polish",
@@ -138,7 +138,7 @@ fn main() {
             entries.push(item(format!("a{n}-{turn}"), ItemKind::AgentMessage, reply));
             entries.push(turn_end());
         }
-        database.append_logs(id, &records(entries)).unwrap();
+        database.append_logs(id, &records(entries), None).unwrap();
     }
     store.flush().unwrap();
     println!("seeded {} sessions; long session {long}", count + 1);

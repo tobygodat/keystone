@@ -16,6 +16,7 @@ mod serve;
 pub use attach::attach;
 pub use connection::RemoteConnection;
 pub use frame::{Found, PROTOCOL, Welcome};
+pub use journal::SYNCHRONOUS as JOURNAL_SYNCHRONOUS;
 pub use link::{Link, NOT_CONNECTED, Status, ssh};
 pub use reap::reap;
 pub use serve::serve;
@@ -27,6 +28,15 @@ pub fn new_client_id() -> String {
     let mut bytes = [0u8; 16];
     getrandom::getrandom(&mut bytes).expect("the system's random source");
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// An event's place: its number in the sequence of the host journal `journal` names.
+/// A number from one journal says nothing about another, so a place is never compared
+/// without its journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub journal: std::sync::Arc<str>,
+    pub seq: u64,
 }
 
 /// Which connection on a machine an event or call belongs to.

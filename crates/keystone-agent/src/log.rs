@@ -10,6 +10,7 @@
 
 use crate::connection::Wake;
 use crate::item::{Item, ItemKind, ItemStatus, TurnStatus};
+use crate::remote::Place;
 use crate::worker::Worker;
 use keystone_core::{Database, Durability};
 use serde::{Deserialize, Serialize};
@@ -172,7 +173,7 @@ impl SessionLog {
     }
 
     pub fn append(&mut self, entry: &Entry) -> io::Result<()> {
-        match self.append_records(&[(event_key(), serde_json::to_string(entry)?)])? {
+        match self.append_records(&[(event_key(), serde_json::to_string(entry)?)], None)? {
             Durability::Synced => Ok(()),
             Durability::DirectorySyncPending(error) => Err(io::Error::other(error)),
         }
@@ -193,7 +194,14 @@ impl SessionLog {
         self.database.sync_directory()
     }
 
-    fn append_records(&mut self, records: &[(String, String)]) -> io::Result<Durability> {
+    /// Appends `records` in one transaction, which moves the session's remote cursor
+    /// to `through` when it has one.
+    fn append_records(
+        &mut self,
+        records: &[(String, String)],
+        through: Option<&Place>,
+    ) -> io::Result<Durability> {
+        let through = through.map(|place| (&*place.journal, place.seq));
         #[cfg(test)]
         if matches!(self.faults.front(), Some(Fault::Transaction)) {
             self.faults.pop_front();
@@ -201,13 +209,13 @@ impl SessionLog {
             invalid.push((event_key(), "{".into()));
             let error = self
                 .database
-                .append_logs(self.session, &invalid)
+                .append_logs(self.session, &invalid, through)
                 .expect_err("SQLite must reject malformed JSON and roll back the batch");
             return Err(io::Error::other(format!(
                 "injected transaction failure: {error}"
             )));
         }
-        let durability = self.database.append_logs(self.session, records)?;
+        let durability = self.database.append_logs(self.session, records, through)?;
         #[cfg(test)]
         if matches!(self.faults.front(), Some(Fault::CommittedThenFailed)) {
             self.faults.pop_front();
@@ -280,6 +288,9 @@ pub enum Report {
         error: Option<String>,
         lost: u64,
     },
+    /// Every row `session`'s events added up to `place`, in its machine's journal, is
+    /// saved, with the session's cursor at `place` when any were rows.
+    Through { session: u64, place: Place },
 }
 
 /// Reads a session's saved entries. [`read`], unless a test needs a slower disk.
@@ -533,6 +544,10 @@ struct PendingSession {
     log: Option<SessionLog>,
     writes: VecDeque<PendingWrite>,
     committed: usize,
+    /// For a session on another machine: the place its queued writes reach, not yet
+    /// reported as [`Report::Through`]. The transaction that saves the last of them
+    /// saves it as the session's cursor.
+    through: Option<Place>,
 }
 
 struct LimitedLine {
@@ -665,7 +680,21 @@ impl Logs {
     /// left is rejected: the session's log gets a marker in its place, and this
     /// returns an error. Later entries are admitted whenever they fit.
     pub fn append(&self, session: u64, writes: Vec<Write>) -> Result<(), String> {
-        if writes.is_empty() {
+        self.append_through(session, writes, None)
+    }
+
+    /// As [`Logs::append`], for a session on another machine whose `writes` hold every
+    /// row its events up to `through` added. Once those writes and every earlier one
+    /// are saved, it reports [`Report::Through`]; the transaction that saves them moves
+    /// the session's cursor there. With no writes, nothing more needs saving for
+    /// those events, so the report follows the session's earlier writes.
+    pub fn append_through(
+        &self,
+        session: u64,
+        writes: Vec<Write>,
+        through: Option<Place>,
+    ) -> Result<(), String> {
+        if writes.is_empty() && through.is_none() {
             return Ok(());
         }
         let mut admission = self.budget.lock().unwrap();
@@ -771,6 +800,10 @@ impl Logs {
             for queued in queued {
                 pending.queue(queued);
             }
+            // The session's places come in the order its events were applied.
+            if through.is_some() {
+                pending.through = through;
+            }
             let report = files.retry(session, &budget).or_else(|| {
                 // The loss is news even while an earlier failure is unchanged.
                 (rejected > 0).then(|| {
@@ -789,9 +822,13 @@ impl Logs {
                     }
                 })
             });
+            let through = files.through(session);
             drop(files);
-            if let Some(report) = report {
-                reports.lock().unwrap().push(report);
+            if report.is_some() || through.is_some() {
+                reports
+                    .lock()
+                    .unwrap()
+                    .extend(report.into_iter().chain(through));
                 wake();
             }
         });
@@ -834,9 +871,8 @@ impl Logs {
             let sessions: Vec<_> = files.sessions.keys().copied().collect();
             let mut recovered = Vec::new();
             for session in sessions {
-                if let Some(report) = files.retry(session, &budget) {
-                    recovered.push(report);
-                }
+                recovered.extend(files.retry(session, &budget));
+                recovered.extend(files.through(session));
             }
             let mut errors: BTreeMap<_, _> = files
                 .failing
@@ -886,11 +922,12 @@ impl Logs {
         );
         self.writer.run(move || {
             let mut files = files.lock().unwrap();
-            let saved = files
-                .sessions
-                .contains_key(&session)
-                .then(|| files.retry(session, &budget))
-                .flatten();
+            let saved: Vec<_> = if files.sessions.contains_key(&session) {
+                let retried = files.retry(session, &budget);
+                retried.into_iter().chain(files.through(session)).collect()
+            } else {
+                Vec::new()
+            };
             let error = files
                 .failing
                 .get(&session)
@@ -918,6 +955,17 @@ impl Logs {
 }
 
 impl Files {
+    /// [`Report::Through`] for the place the session's writes reached, once they are
+    /// all saved.
+    fn through(&mut self, session: u64) -> Option<Report> {
+        let pending = self.sessions.get_mut(&session)?;
+        if !pending.writes.is_empty() {
+            return None;
+        }
+        let place = pending.through.take()?;
+        Some(Report::Through { session, place })
+    }
+
     fn retry(&mut self, session: u64, budget: &Mutex<Budget>) -> Option<Report> {
         let pending = self.sessions.get_mut(&session).expect("queued above");
         let result: io::Result<()> = (|| {
@@ -1145,7 +1193,7 @@ impl PendingSession {
                     .skip(self.committed)
                     .map(|write| write.record.clone())
                     .collect();
-                let durability = match log.append_records(&records) {
+                let durability = match log.append_records(&records, self.through.as_ref()) {
                     Ok(durability) => durability,
                     // An append can commit and still fail. Rows the store has are not
                     // sent again, so a collapse never counts them as lost. When the
@@ -1641,6 +1689,69 @@ mod tests {
         pending.log = Some(log);
     }
 
+    fn throughs(logs: &Logs) -> Vec<(u64, u64)> {
+        logs.drain()
+            .into_iter()
+            .filter_map(|report| match report {
+                Report::Through { session, place } => Some((session, place.seq)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn at(seq: u64) -> Option<Place> {
+        Some(Place {
+            journal: "journal".into(),
+            seq,
+        })
+    }
+
+    /// A remote session's place is reported only once every write queued with or
+    /// before it is saved, and the log's cursor moves only in the transaction that
+    /// saves rows, so a failed save holds both back.
+    #[test]
+    fn a_remote_place_waits_for_its_writes_and_saves_with_them() {
+        let (logs, _, dir) = logs();
+        let sessions = dir.path().join("sessions");
+        let cursors = || {
+            Database::open_read_only(path(&sessions, 1))
+                .unwrap()
+                .remote_cursors()
+                .unwrap()
+                .into_iter()
+                .map(|(session, journal, seq)| {
+                    assert_eq!(journal, "journal");
+                    (session, seq)
+                })
+                .collect::<Vec<_>>()
+        };
+        logs.append_through(1, vec![entry(0)], at(5)).unwrap();
+        logs.writer.flush();
+        assert_eq!(throughs(&logs), [(1, 5)]);
+        assert_eq!(cursors(), [(1, 5)]);
+
+        inject(&logs, 1, VecDeque::from([Fault::Transaction]));
+        logs.append_through(1, vec![entry(1)], at(8)).unwrap();
+        logs.writer.flush();
+        assert_eq!(throughs(&logs), [], "the rows of 8 are not saved");
+        logs.append_through(1, Vec::new(), at(9)).unwrap();
+        logs.writer.flush();
+        assert_eq!(
+            throughs(&logs),
+            [(1, 9)],
+            "9 added no row and follows the retried rows of 8"
+        );
+        assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0, 1]);
+        assert_eq!(cursors(), [(1, 9)], "saved with the rows it covers");
+        logs.append_through(1, Vec::new(), at(12)).unwrap();
+        logs.writer.flush();
+        assert_eq!(throughs(&logs), [(1, 12)]);
+        assert_eq!(cursors(), [(1, 9)], "a place with no rows needs no write");
+        logs.append(2, vec![entry(2)]).unwrap();
+        logs.writer.flush();
+        assert_eq!(throughs(&logs), [], "a local session has no place");
+    }
+
     #[test]
     fn failed_transactions_block_later_entries_until_atomic_retry() {
         let (logs, _, dir) = logs();
@@ -1910,6 +2021,7 @@ mod tests {
                     ),
                     (event_key(), serde_json::to_string(&entry(1).entry).unwrap()),
                 ],
+                None,
             )
             .unwrap();
         assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0, 1]);

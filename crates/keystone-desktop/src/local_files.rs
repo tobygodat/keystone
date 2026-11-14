@@ -9,7 +9,7 @@
 //! function that reads or opens such a file takes the [`LocalPath`] it makes. Neither
 //! type has a public constructor that takes a bare path.
 
-use keystone_core::{Attachment, SessionContext};
+use keystone_core::{Attachment, Session, SessionContext};
 use std::path::{Path, PathBuf};
 
 /// Leave to read this machine's files for one session. [`LocalFiles::of`] makes it,
@@ -22,10 +22,11 @@ pub(crate) struct LocalFiles {
 }
 
 impl LocalFiles {
-    /// The files of a session working in `context`, or `None` when it works on another
-    /// machine or in a folder this version can't read.
-    pub(crate) fn of(context: SessionContext<'_>) -> Option<Self> {
-        match context {
+    /// The files of `session`, or `None` when it works on another machine or in a
+    /// folder this version can't read. It takes the session itself, not a context a
+    /// caller could make up, so only a session saved as working here gets a handle.
+    pub(crate) fn of(session: &Session) -> Option<Self> {
+        match session.context() {
             SessionContext::Recorded { directory, .. } => Some(Self {
                 root: Some(directory.path().to_owned()),
             }),
@@ -99,24 +100,47 @@ pub(crate) mod tests {
 
     #[test]
     fn only_a_session_on_this_machine_has_files() {
-        let folder = keystone_core::WorkingDirectory::new(&std::env::temp_dir()).unwrap();
-        let recorded = LocalFiles::of(SessionContext::Recorded {
-            directory: &folder,
-            origin: keystone_core::ContextOrigin::Created,
-        })
-        .unwrap();
-        assert_eq!(recorded.root(), Some(folder.path()));
-        let machine = keystone_core::MachineId::new("desk");
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = keystone_core::Store::open(dir.path().join("workspace.json")).unwrap();
+        let folder = keystone_core::WorkingDirectory::new(dir.path()).unwrap();
+        let here = store
+            .create(keystone_core::Provider::Claude, &folder, 1)
+            .unwrap()
+            .value;
+        let desk = store.link_machine("desk", "client".into()).unwrap().value;
         let remote = keystone_core::RemoteFolder::new("/srv/app").unwrap();
-        assert_eq!(
-            LocalFiles::of(SessionContext::Remote {
-                machine: &machine,
-                folder: &remote,
-            }),
-            None
-        );
-        assert_eq!(LocalFiles::of(SessionContext::Unsupported), None);
-        let legacy = LocalFiles::of(SessionContext::LegacyMissing).unwrap();
+        let there = store
+            .create_remote_showing(&desk, &remote, 2, keystone_core::WindowId::FIRST, None)
+            .unwrap()
+            .value;
+        let session = |id| {
+            store
+                .workspace()
+                .sessions()
+                .iter()
+                .find(|session| session.id() == id)
+                .unwrap()
+                .clone()
+        };
+        let recorded = LocalFiles::of(&session(here)).unwrap();
+        assert_eq!(recorded.root(), Some(folder.path()));
+        assert_eq!(LocalFiles::of(&session(there)), None);
+
+        // Saved by an older build, or by a newer one, as a launch reads them.
+        let saved = |context: Option<serde_json::Value>| -> Session {
+            let mut value = serde_json::to_value(session(here)).unwrap();
+            match context {
+                Some(context) => value["execution_context"] = context,
+                None => drop(value.as_object_mut().unwrap().remove("execution_context")),
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let unsupported = saved(Some(serde_json::json!({ "version": 99 })));
+        assert!(matches!(unsupported.context(), SessionContext::Unsupported));
+        assert_eq!(LocalFiles::of(&unsupported), None);
+        let legacy = saved(None);
+        assert!(matches!(legacy.context(), SessionContext::LegacyMissing));
+        let legacy = LocalFiles::of(&legacy).unwrap();
         assert_eq!(legacy.resolve(Path::new("shot.png")), None);
         assert_eq!(
             legacy

@@ -135,7 +135,7 @@ fn perf_search_across_sessions() {
             records.push((format!("perf-{n}"), payload));
         }
         entries += rows;
-        database.append_logs(session, &records).unwrap();
+        database.append_logs(session, &records, None).unwrap();
     }
     drop(database);
     let database = Database::open(&path).unwrap();

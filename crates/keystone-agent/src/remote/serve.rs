@@ -210,6 +210,7 @@ fn welcome() -> Welcome {
             .collect(),
         oldest: 0,
         latest: 0,
+        journal: String::new(),
     }
 }
 
@@ -833,9 +834,17 @@ impl Daemon {
                     protocol,
                     client,
                     after,
+                    journal,
+                    seen,
                 },
                 None,
-            ) => self.hello(id, protocol, client, after),
+            ) => {
+                let places = after.zip(journal.clone()).into_iter();
+                self.went_back(&client, places.chain(seen.into_iter().map(|(j, s)| (s, j))));
+                // A place in another journal is no place in this one.
+                let after = after.filter(|_| journal.as_deref() == Some(self.journal.id()));
+                self.hello(id, protocol, client, after)
+            }
             (Frame::Call(call), Some(client)) => self.call(id, &client, call),
             (Frame::Ack { seq, calls }, Some(client)) => {
                 if let Err(error) = self.journal.ack(&client, seq, calls) {
@@ -852,6 +861,34 @@ impl Daemon {
             (frame, _) => {
                 log!("closing a link that sent an unexpected frame: {frame:?}");
                 self.disconnect(id);
+            }
+        }
+    }
+
+    /// Takes a new journal identity when the app has a place in this journal past its
+    /// latest event for `client`: the journal went back, as a restored backup or a
+    /// damaged file would, so its numbers past that point may name other events. With
+    /// a new identity, every place the app had counts for nothing, as after any other
+    /// journal replacement, and that lasts, since the old identity is gone.
+    fn went_back(&mut self, client: &str, places: impl Iterator<Item = (u64, String)>) {
+        let places: Vec<(u64, String)> = places.collect();
+        let latest = match self.journal.cursor(client) {
+            Ok(cursor) => cursor.latest,
+            Err(error) => {
+                log!("{error}");
+                return;
+            }
+        };
+        let own = self.journal.id().to_owned();
+        if places
+            .iter()
+            .any(|(seq, journal)| *journal == own && *seq > latest)
+        {
+            match self.journal.rotate() {
+                Ok(()) => {
+                    log!("the journal went back past what the app saw, so it has a new identity")
+                }
+                Err(error) => log!("{error}"),
             }
         }
     }
@@ -898,6 +935,7 @@ impl Daemon {
             &Frame::Welcome(Welcome {
                 oldest: cursor.oldest,
                 latest: cursor.latest,
+                journal: self.journal.id().to_owned(),
                 ..self.welcome.clone()
             }),
         );

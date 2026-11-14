@@ -756,7 +756,7 @@ fn a_schema_6_database_gains_an_empty_machine_list_and_keeps_its_sessions() {
     drop(store);
     Connection::open(&path)
         .unwrap()
-        .execute_batch("DROP TABLE machines; PRAGMA user_version=6;")
+        .execute_batch("DROP TABLE remote_cursors; DROP TABLE machines; PRAGMA user_version=6;")
         .unwrap();
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.workspace().sessions().len(), 1);
@@ -767,6 +767,49 @@ fn a_schema_6_database_gains_an_empty_machine_list_and_keeps_its_sessions() {
         .unwrap()
         .query_one("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 7);
+    assert_eq!(schema, 8);
     assert_eq!(Store::open(&path).unwrap().workspace().machines().len(), 1);
+}
+
+#[test]
+fn a_schema_7_database_gains_remote_cursors_and_keeps_its_logs() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("workspace.sqlite3");
+    let folder = WorkingDirectory::new(dir.path()).unwrap();
+    let mut store = Store::open(&path).unwrap();
+    store.create(Provider::Claude, &folder, 1).unwrap();
+    store.flush().unwrap();
+    store
+        .database()
+        .append_logs(
+            1,
+            &[("kept".into(), r#"{"entry":"turn_started"}"#.into())],
+            None,
+        )
+        .unwrap();
+    drop(store);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE remote_cursors; PRAGMA user_version=7;")
+        .unwrap();
+    let store = Store::open(&path).unwrap();
+    let database = store.database();
+    assert_eq!(database.read_logs(1).unwrap().len(), 1);
+    assert!(database.remote_cursors().unwrap().is_empty());
+    database
+        .append_logs(
+            1,
+            &[("next".into(), r#"{"entry":"turn_started"}"#.into())],
+            Some(("journal", 4)),
+        )
+        .unwrap();
+    assert_eq!(
+        database.remote_cursors().unwrap(),
+        [(1, "journal".to_owned(), 4)]
+    );
+    let schema: u32 = Connection::open(&path)
+        .unwrap()
+        .query_one("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 8);
 }

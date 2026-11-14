@@ -21,7 +21,7 @@ fn copy_key(pair: &crate::integrations::copy::Pair) -> io::Result<String> {
     ))
 }
 
-pub(crate) const SCHEMA_VERSION: u32 = 7;
+pub(crate) const SCHEMA_VERSION: u32 = 8;
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
@@ -68,7 +68,7 @@ CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 /// Forward migrations, one per schema version after 1, each run in the opening
 /// IMMEDIATE transaction that also records the new `user_version`. A build that
 /// knows fewer versions refuses a newer database.
-const MIGRATIONS: [&str; 6] = [
+const MIGRATIONS: [&str; 7] = [
     "
 CREATE TABLE accounts (
     id TEXT PRIMARY KEY,
@@ -109,6 +109,13 @@ CREATE TABLE machines (
     id TEXT PRIMARY KEY,
     position INTEGER NOT NULL,
     payload TEXT NOT NULL CHECK(json_valid(payload))
+);
+",
+    "
+CREATE TABLE remote_cursors (
+    session_id TEXT PRIMARY KEY,
+    journal TEXT NOT NULL,
+    seq INTEGER NOT NULL
 );
 ",
 ];
@@ -597,12 +604,20 @@ impl Database {
         })
     }
 
+    /// Appends a session's log records in one transaction. With `through`, the
+    /// session is on another machine and the records hold every row its events up to
+    /// that place added: the journal ID and the number in it. Its cursor becomes that
+    /// place in the same transaction, never ahead of the rows. Places come in the order
+    /// the session's events were applied, so the newest replaces the last, including
+    /// one in another journal after the machine's journal was replaced.
     pub fn append_logs(
         &self,
         session: u64,
         records: &[(String, String)],
+        through: Option<(&str, u64)>,
     ) -> io::Result<Durability> {
         let records = records.to_vec();
+        let through = through.map(|(journal, seq)| (journal.to_owned(), seq));
         self.write(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql_error)?;
             let session = session.to_string();
@@ -616,6 +631,14 @@ impl Database {
                 }
                 tx.execute("INSERT INTO events(kind, entity_id, payload, event_key) VALUES ('log.appended', ?1, ?2, ?3)", params![session, payload, key]).map_err(sql_error)?;
                 tx.execute("INSERT INTO log_entries(sequence, session_id, payload) VALUES (?1, ?2, ?3)", params![tx.last_insert_rowid(), session, payload]).map_err(sql_error)?;
+            }
+            if let Some((journal, seq)) = &through {
+                tx.execute(
+                    "INSERT INTO remote_cursors(session_id, journal, seq) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(session_id) DO UPDATE SET journal = excluded.journal, seq = excluded.seq",
+                    params![session, journal, (*seq).min(i64::MAX as u64) as i64],
+                )
+                .map_err(sql_error)?;
             }
             tx.commit().map_err(sql_error)
         })?;
@@ -637,6 +660,34 @@ impl Database {
                 }
             }
             Ok(true)
+        })
+    }
+
+    /// Each session on another machine with its saved cursor: the host journal it
+    /// counts in and the place there through which every row its events added is
+    /// saved.
+    pub fn remote_cursors(&self) -> io::Result<Vec<(u64, String, u64)>> {
+        self.read(|connection| {
+            let mut statement = connection
+                .prepare("SELECT session_id, journal, seq FROM remote_cursors")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(sql_error)?;
+            let mut cursors = Vec::new();
+            for row in rows {
+                let (session, journal, seq) = row.map_err(sql_error)?;
+                if let Ok(session) = session.parse() {
+                    cursors.push((session, journal, seq.max(0) as u64));
+                }
+            }
+            Ok(cursors)
         })
     }
 
@@ -1431,6 +1482,7 @@ mod tests {
             .append_logs(
                 1,
                 &[("entry-1".into(), r#"{"entry":"turn_started"}"#.into())],
+                None,
             )
             .unwrap();
         store.set_draft(1, "keep exactly".into()).unwrap();
@@ -1621,7 +1673,7 @@ mod tests {
         let path = dir.path().join("workspace.sqlite3");
         let database = Database::open(&path).unwrap();
         database
-            .append_logs(1, &[("saved".into(), "{}".into())])
+            .append_logs(1, &[("saved".into(), "{}".into())], None)
             .unwrap();
         let lock = Connection::open(&path).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -1629,7 +1681,7 @@ mod tests {
         assert_eq!(reader.read_logs(1).unwrap(), vec!["{}"]);
         assert!(
             reader
-                .append_logs(1, &[("forbidden".into(), "{}".into())])
+                .append_logs(1, &[("forbidden".into(), "{}".into())], None)
                 .is_err()
         );
         lock.execute_batch("ROLLBACK").unwrap();
@@ -1782,20 +1834,54 @@ mod tests {
             r#"{"entry":"turn_started"}"#.to_string(),
         );
         database
-            .append_logs(1, std::slice::from_ref(&record))
+            .append_logs(1, std::slice::from_ref(&record), None)
             .unwrap();
         database
-            .append_logs(1, &[record.clone(), record.clone()])
+            .append_logs(1, &[record.clone(), record.clone()], None)
             .unwrap();
         assert_eq!(database.read_logs(1).unwrap(), [record.1.clone()]);
         let changed = (
             "same-key".to_string(),
             r#"{"entry":"turn_ended"}"#.to_string(),
         );
-        assert!(database.append_logs(1, &[changed]).is_err());
-        assert!(database.append_logs(2, &[record.clone()]).is_err());
+        assert!(database.append_logs(1, &[changed], None).is_err());
+        assert!(database.append_logs(2, &[record.clone()], None).is_err());
         assert_eq!(database.read_logs(1).unwrap(), [record.1]);
         assert!(database.read_logs(2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_remote_sessions_cursor_moves_only_with_its_rows_and_names_its_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Database::open(dir.path().join("workspace.sqlite3")).unwrap();
+        let row = |key: &str| (key.to_string(), r#"{"entry":"turn_started"}"#.to_string());
+        let cursors = || database.remote_cursors().unwrap();
+        database
+            .append_logs(7, &[row("a")], Some(("old", 12)))
+            .unwrap();
+        assert_eq!(cursors(), [(7, "old".to_owned(), 12)]);
+        let torn = (String::from("b"), String::from("{"));
+        assert!(
+            database
+                .append_logs(7, &[row("c"), torn], Some(("old", 20)))
+                .is_err()
+        );
+        assert_eq!(
+            cursors(),
+            [(7, "old".to_owned(), 12)],
+            "a transaction that fails leaves the cursor with the rows it had"
+        );
+        assert_eq!(database.read_logs(7).unwrap().len(), 1);
+        database
+            .append_logs(7, &[row("d")], Some(("new", 3)))
+            .unwrap();
+        assert_eq!(
+            cursors(),
+            [(7, "new".to_owned(), 3)],
+            "a place in the machine's new journal replaces one in its old journal"
+        );
+        database.append_logs(8, &[row("e")], None).unwrap();
+        assert_eq!(cursors(), [(7, "new".to_owned(), 3)]);
     }
 
     #[test]
@@ -1839,7 +1925,7 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(reopened.workspace().sessions()[0].draft(), "draft 19");
         let logs = Database::open(&path).unwrap();
-        logs.append_logs(1, &[("after".into(), "{}".into())])
+        logs.append_logs(1, &[("after".into(), "{}".into())], None)
             .unwrap();
         assert_eq!(reopened.database().read_logs(1).unwrap(), ["{}"]);
         writer.join().unwrap();
@@ -1865,13 +1951,17 @@ mod tests {
         };
         wait.recv().unwrap();
         let error = database
-            .append_logs(1, &[("withdrawn".into(), r#"{"n":"withdrawn"}"#.into())])
+            .append_logs(
+                1,
+                &[("withdrawn".into(), r#"{"n":"withdrawn"}"#.into())],
+                None,
+            )
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         release.send(()).unwrap();
         blocker.join().unwrap();
         database
-            .append_logs(1, &[("after".into(), r#"{"n":"after"}"#.into())])
+            .append_logs(1, &[("after".into(), r#"{"n":"after"}"#.into())], None)
             .unwrap();
         assert_eq!(database.read_logs(1).unwrap(), [r#"{"n":"after"}"#]);
     }
@@ -1885,7 +1975,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.to_string(), "SQLite write stopped unexpectedly");
         database
-            .append_logs(1, &[("after".into(), r#"{"n":"after"}"#.into())])
+            .append_logs(1, &[("after".into(), r#"{"n":"after"}"#.into())], None)
             .unwrap();
         assert_eq!(database.read_logs(1).unwrap(), [r#"{"n":"after"}"#]);
     }
@@ -1914,7 +2004,7 @@ mod tests {
             for index in 0..300 {
                 assert_eq!(
                     database
-                        .append_logs(1, &[(format!("concurrent-{index}"), "{}".into())])
+                        .append_logs(1, &[(format!("concurrent-{index}"), "{}".into())], None)
                         .unwrap(),
                     Durability::Synced
                 );
@@ -1968,18 +2058,18 @@ mod tests {
         let path = dir.path().join("workspace.sqlite3");
         let database = Database::open(&path).unwrap();
         database
-            .append_logs(1, &[("old".into(), r#"{"origin":"old"}"#.into())])
+            .append_logs(1, &[("old".into(), r#"{"origin":"old"}"#.into())], None)
             .unwrap();
         let other = dir.path().join("replacement.sqlite3");
         let replacement = Database::open(&other).unwrap();
         replacement
-            .append_logs(1, &[("new".into(), r#"{"origin":"new"}"#.into())])
+            .append_logs(1, &[("new".into(), r#"{"origin":"new"}"#.into())], None)
             .unwrap();
         drop(replacement);
         fs::rename(&other, &path).unwrap();
         assert_eq!(database.read_logs(1).unwrap(), [r#"{"origin":"new"}"#]);
         database
-            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())])
+            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())], None)
             .unwrap();
         drop(database);
         assert_eq!(
@@ -1998,7 +2088,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.sqlite3");
         let database = Database::open(&path).unwrap();
-        let append = |key: &str| database.append_logs(1, &[(key.into(), "{}".into())]);
+        let append = |key: &str| database.append_logs(1, &[(key.into(), "{}".into())], None);
         append("first").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o460)).unwrap();
         assert_eq!(
@@ -2017,7 +2107,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.sqlite3");
         let database = Database::open(&path).unwrap();
-        let append = |key: &str| database.append_logs(1, &[(key.into(), "{}".into())]);
+        let append = |key: &str| database.append_logs(1, &[(key.into(), "{}".into())], None);
         append("first").unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
         let denied = append("denied");
@@ -2033,14 +2123,14 @@ mod tests {
         let other = dir.path().join("replacement.sqlite3");
         let replacement = Database::open(&other).unwrap();
         replacement
-            .append_logs(1, &[("new".into(), r#"{"origin":"new"}"#.into())])
+            .append_logs(1, &[("new".into(), r#"{"origin":"new"}"#.into())], None)
             .unwrap();
         drop(replacement);
         let path = dir.path().join("workspace.sqlite3");
         let database = Database::open(&path).unwrap();
         fs::rename(&other, &path).unwrap();
         database
-            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())])
+            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())], None)
             .unwrap();
         drop(database);
         assert_eq!(
@@ -2084,7 +2174,7 @@ mod tests {
         let path = dir.path().join("workspace.sqlite3");
         let database = Database::open(&path).unwrap();
         database
-            .append_logs(1, &[("seed".into(), r#"{"origin":"seed"}"#.into())])
+            .append_logs(1, &[("seed".into(), r#"{"origin":"seed"}"#.into())], None)
             .unwrap();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -2098,7 +2188,7 @@ mod tests {
         assert!(child.status.success(), "{child:?}");
         let committed = fs::read_to_string(path.with_extension("outcome")).unwrap() == "committed";
         database
-            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())])
+            .append_logs(1, &[("after".into(), r#"{"origin":"after"}"#.into())], None)
             .unwrap();
         drop(database);
         let mut expected = vec![r#"{"origin":"seed"}"#];

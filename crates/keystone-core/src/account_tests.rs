@@ -212,7 +212,7 @@ fn a_schema_1_database_migrates_once_and_keeps_its_workspace() {
     {
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
-            .execute_batch("DROP TABLE accounts; DROP TABLE projects; DROP TABLE prompts; DROP TABLE deliveries; DROP TABLE machines; DROP TABLE notes; PRAGMA user_version=1;")
+            .execute_batch("DROP TABLE remote_cursors; DROP TABLE accounts; DROP TABLE projects; DROP TABLE prompts; DROP TABLE deliveries; DROP TABLE machines; DROP TABLE notes; PRAGMA user_version=1;")
             .unwrap();
     }
     assert!(Database::open_read_only(&path).is_err());

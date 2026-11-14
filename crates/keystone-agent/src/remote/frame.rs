@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Read};
 
 /// The protocol both sides must speak. A host that speaks another refuses the link.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// The largest frame, newline excluded.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
@@ -16,12 +16,21 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Frame {
-    /// Opens the link. `after` is the last event the app received, or `None` on the
-    /// first link of an app's run, which also starts call ids again from 1.
+    /// Opens the link. `after` is the last event the app received, in the journal
+    /// `journal` names, or `None` on the first link of an app's run, which also starts
+    /// call ids again from 1. A host whose journal isn't `journal` treats `after` as
+    /// `None`: that number counts in a journal it doesn't have. `seen` is the highest
+    /// place the app saved in each journal it has places in. A host that finds its own
+    /// journal named there, or in `journal`, past its latest event went back, as a
+    /// restored backup would, and takes a new identity before it answers.
     Hello {
         protocol: u32,
         client: String,
         after: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        journal: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        seen: Vec<(String, u64)>,
     },
     Welcome(Welcome),
     Refused {
@@ -82,6 +91,13 @@ pub struct Welcome {
     pub providers: Vec<Found>,
     pub oldest: u64,
     pub latest: u64,
+    /// The journal the host's sequence numbers count in: a random ID made with the
+    /// journal file, so a journal deleted, reinstalled or on another machine has
+    /// another one, and an event's place means nothing without it. A host before
+    /// protocol 2 sends none, and parses here as empty so that its protocol, not a
+    /// parse error, is what the app reports.
+    #[serde(default)]
+    pub journal: String,
 }
 
 /// A provider CLI the host looked for: its `--version` output, or why there is none.

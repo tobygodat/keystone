@@ -4,7 +4,7 @@
 //! the link alone use a shell script as the host.
 
 use keystone_agent::remote::frame::{self, Call, Frame, Op, Outcome, Routed, Welcome};
-use keystone_agent::remote::{Link, RemoteConnection, Status};
+use keystone_agent::remote::{Link, Place, RemoteConnection, Status};
 use keystone_agent::{ApprovalState, Command, Connection, Event, ItemKind, TurnStatus};
 use keystone_core::{ModelChoice, Provider};
 use std::collections::HashMap;
@@ -207,6 +207,7 @@ impl Machine {
             child,
             stdin,
             frames,
+            dir: self.dir.path().to_owned(),
         }
     }
 }
@@ -294,8 +295,9 @@ impl Client {
         )
     }
 
+    /// Drains as an app that saves each event at once.
     fn drain(&mut self) {
-        self.events.extend(self.conn.drain());
+        self.events.extend(saving(&self.link, &self.conn));
     }
 
     /// Drains on every wake until `done` holds for the events so far and the status.
@@ -395,6 +397,19 @@ struct Raw {
     child: Child,
     stdin: Arc<Mutex<ChildStdin>>,
     frames: Receiver<Frame>,
+    /// The machine's host folder, whose journal `after` counts in.
+    dir: std::path::PathBuf,
+}
+
+/// The identity of the journal in the host folder `dir`, once it exists.
+fn journal_id(dir: &Path) -> Option<String> {
+    let db = rusqlite::Connection::open_with_flags(
+        dir.join("journal.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    db.query_row("SELECT id FROM identity", [], |row| row.get(0))
+        .ok()
 }
 
 impl Raw {
@@ -411,10 +426,13 @@ impl Raw {
     }
 
     fn hello(&mut self, client: &str, after: Option<u64>) -> Welcome {
+        let journal = after.and_then(|_| journal_id(&self.dir));
         self.send(&Frame::Hello {
             protocol: frame::PROTOCOL,
             client: client.into(),
             after,
+            journal,
+            seen: Vec::new(),
         });
         match self.next() {
             Frame::Welcome(welcome) => welcome,
@@ -789,6 +807,8 @@ fn a_reader_that_hangs_up_mid_replay_is_sent_nothing_more() {
                 protocol: frame::PROTOCOL,
                 client: "app-1".into(),
                 after: Some(0),
+                journal: journal_id(machine.dir.path()),
+                seen: Vec::new(),
             })
             .unwrap(),
         )
@@ -1454,11 +1474,16 @@ fn a_host_speaking_another_protocol_is_refused_with_the_reason() {
         protocol: 99,
         client: "app-1".into(),
         after: None,
+        journal: None,
+        seen: Vec::new(),
     });
     match raw.next() {
         Frame::Refused { reason } => {
             assert!(
-                reason.contains("protocol 99 is needed, this host speaks 1"),
+                reason.contains(&format!(
+                    "protocol 99 is needed, this host speaks {}",
+                    frame::PROTOCOL
+                )),
                 "{reason}"
             )
         }
@@ -1849,7 +1874,18 @@ fn welcome(latest: u64) -> Frame {
         providers: Vec::new(),
         oldest: 1,
         latest,
+        journal: SCRIPTED.into(),
     })
+}
+
+/// The journal a scripted host welcomes with.
+const SCRIPTED: &str = "scripted-journal";
+
+fn scripted(seq: u64) -> Place {
+    Place {
+        journal: SCRIPTED.into(),
+        seq,
+    }
 }
 
 fn note(seq: u64, provider: Provider) -> Frame {
@@ -1881,11 +1917,24 @@ fn connection(link: &Link, provider: Provider) -> (RemoteConnection, Receiver<()
     (RemoteConnection::new(link, provider, None, wake_up), wake)
 }
 
-/// Drains `conn` until it has handed over `count` events.
-fn drain_all(conn: &RemoteConnection, count: usize) -> Vec<(u64, Event)> {
+/// What `conn` has, as an app that saves each event at once and says so.
+fn saving(link: &Link, conn: &RemoteConnection) -> Vec<(u64, Event)> {
+    conn.drain_placed()
+        .into_iter()
+        .map(|(place, session, event)| {
+            if let Some(place) = place {
+                link.saved(session, &place);
+            }
+            (session, event)
+        })
+        .collect()
+}
+
+/// Drains `conn` until it has handed over `count` events, saving each.
+fn drain_all(link: &Link, conn: &RemoteConnection, count: usize) -> Vec<(u64, Event)> {
     let mut events = Vec::new();
     wait_for("the connection's events", || {
-        events.extend(conn.drain());
+        events.extend(saving(link, conn));
         events.len() >= count
     });
     events
@@ -1951,7 +2000,7 @@ fn a_call_the_host_refuses_shows_in_its_session_later() {
         Vec::new(),
     );
     assert_eq!(sent, Ok(()), "send returns once the call is queued");
-    let events = drain_all(&codex, 1);
+    let events = drain_all(&client.link, &codex, 1);
     assert!(
         matches!(&events[..], [(SESSION, Event::Failed { message })] if message.contains("Codex")),
         "{events:?}"
@@ -1971,7 +2020,7 @@ fn the_acknowledgement_is_the_prefix_every_connection_drained() {
     let (claude, _) = connection(&link, Provider::Claude);
     let (codex, _) = connection(&link, Provider::Codex);
     host.go();
-    assert_eq!(drain_all(&claude, 2), notes(&[1, 3]));
+    assert_eq!(drain_all(&link, &claude, 2), notes(&[1, 3]));
     wait_for("the acknowledgement of 1", || {
         host.acks().last() == Some(&1)
     });
@@ -1981,7 +2030,7 @@ fn the_acknowledgement_is_the_prefix_every_connection_drained() {
         Some(&1),
         "2 waits in the Codex connection"
     );
-    assert_eq!(drain_all(&codex, 1), notes(&[2]));
+    assert_eq!(drain_all(&link, &codex, 1), notes(&[2]));
     wait_for("the acknowledgement of 3", || {
         host.acks().last() == Some(&3)
     });
@@ -1999,7 +2048,7 @@ fn events_for_a_route_with_no_connection_wait_without_holding_the_ack() {
     let link = Link::new(host.argv(), "app-1".into());
     let (claude, _) = connection(&link, Provider::Claude);
     host.go();
-    assert_eq!(drain_all(&claude, 2), notes(&[1, 3]));
+    assert_eq!(drain_all(&link, &claude, 2), notes(&[1, 3]));
     wait_for("the acknowledgement of 3", || {
         host.acks().last() == Some(&3)
     });
@@ -2022,7 +2071,7 @@ fn a_replaced_connection_leaves_its_successor_registered() {
     drop(old);
     host.go();
     wake.recv_timeout(WAIT).expect("the successor is woken");
-    assert_eq!(drain_all(&new, 1), notes(&[1]));
+    assert_eq!(drain_all(&link, &new, 1), notes(&[1]));
 }
 
 #[test]
@@ -2141,6 +2190,446 @@ fn a_real_host_keeps_received_events_until_drained_across_reconnect() {
     assert_eq!(lines(dir.path(), "messages").len(), 1);
 }
 
+/// The host's acknowledged cursor and how many events it still holds for `session`.
+fn journal(machine: &Machine, client: &str, session: u64) -> (u64, u64) {
+    let db = rusqlite::Connection::open_with_flags(
+        machine.dir.path().join("journal.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let acked: i64 = db
+        .query_row(
+            "SELECT acked FROM clients WHERE client = ?1",
+            [client],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let held: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE client = ?1 AND session = ?2",
+            rusqlite::params![client, session as i64],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (acked as u64, held as u64)
+}
+
+/// Two sessions on one machine, one saving at once and one slowly: the host trims
+/// only what both have saved, and keeps every event of the slow one until it says so.
+#[test]
+fn the_host_trims_only_up_to_what_every_session_saved() {
+    const QUICK: u64 = 13;
+    let machine = Machine::new();
+    let slow_dir = folder(&[("delay-ms", "2")]);
+    let quick_dir = folder(&[("delay-ms", "2")]);
+    let client = machine.client("slow-save-app");
+    wait_for("the link to connect", || {
+        client.link.status() == Status::Connected
+    });
+    send_to(&client, SESSION, slow_dir.path(), "hello long");
+    send_to(&client, QUICK, quick_dir.path(), "hello long");
+    let mut slow: Vec<(Place, Event)> = Vec::new();
+    let mut quick = Vec::new();
+    fn ended<T>(events: &[(T, Event)]) -> bool {
+        events
+            .iter()
+            .any(|(_, event)| matches!(event, Event::TurnCompleted { .. }))
+    }
+    wait_for("both turns to be drained", || {
+        for (place, session, event) in client.conn.drain_placed() {
+            let place = place.expect("the host's events have places");
+            if session == QUICK {
+                client.link.saved(QUICK, &place);
+                quick.push((session, event));
+            } else {
+                slow.push((place, event));
+            }
+        }
+        ended(&quick) && ended(&slow)
+    });
+    let first_slow = slow[0].0.seq;
+    std::thread::sleep(Duration::from_millis(500));
+    let (acked, held) = journal(&machine, "slow-save-app", SESSION);
+    assert!(
+        acked < first_slow,
+        "acknowledged {acked}, past the slow session's first unsaved event {first_slow}"
+    );
+    assert_eq!(
+        held,
+        slow.len() as u64,
+        "the host keeps every event the slow session has not saved"
+    );
+    let quick_held_before = journal(&machine, "slow-save-app", QUICK).1;
+    assert!(
+        quick_held_before > 0,
+        "the quick session's events after the slow one's first are kept too"
+    );
+
+    let last = slow.last().unwrap().0.clone();
+    let half = slow[slow.len() / 2].0.clone();
+    client.link.saved(SESSION, &half);
+    let half = half.seq;
+    wait_for(
+        "the acknowledgement to follow the slow session's save",
+        || journal(&machine, "slow-save-app", SESSION).0 >= half,
+    );
+    let (acked, held) = journal(&machine, "slow-save-app", SESSION);
+    let next = slow
+        .iter()
+        .find(|(place, _)| place.seq > half)
+        .unwrap()
+        .0
+        .seq;
+    assert!(acked < next, "acknowledged {acked}, past unsaved {next}");
+    assert_eq!(
+        held,
+        slow.iter().filter(|(place, _)| place.seq > half).count() as u64
+    );
+    client.link.saved(SESSION, &last);
+    wait_for("everything to be acknowledged", || {
+        journal(&machine, "slow-save-app", SESSION).1 == 0
+            && journal(&machine, "slow-save-app", QUICK).1 == 0
+    });
+    let events: Vec<_> = slow
+        .into_iter()
+        .map(|(_, event)| (SESSION, event))
+        .collect();
+    assert_whole_turn(&events);
+    assert_whole_turn(&quick);
+}
+
+/// A host that is a script with one turn per connection: the `n`th time the link
+/// connects it writes `turns[n]`, then keeps what the link sends, every connection's
+/// after the last's, in `sent`. Every connection but the last ends after the link's
+/// `hello`, and the last stays open: the shell keeps its standard output.
+fn scripted_turns(turns: &[Vec<Frame>]) -> (tempfile::TempDir, Vec<OsString>) {
+    let dir = tempfile::tempdir().unwrap();
+    for (n, frames) in turns.iter().enumerate() {
+        let text: Vec<u8> = frames
+            .iter()
+            .flat_map(|frame| frame::encode(frame).unwrap())
+            .collect();
+        std::fs::write(dir.path().join(format!("frames-{n}")), text).unwrap();
+    }
+    let last = turns.len() - 1;
+    let script = format!(
+        r#"n=$(cat "$0/count" 2>/dev/null || echo 0); echo $((n + 1)) > "$0/count"
+cat "$0/frames-$n"
+if [ "$n" -lt {last} ]; then head -n 1 >> "$0/sent"; exit 0; fi
+cat >> "$0/sent""#
+    );
+    let argv = vec!["sh".into(), "-c".into(), script.into(), dir.path().into()];
+    (dir, argv)
+}
+
+fn welcome_in(latest: u64, journal: &str) -> Frame {
+    let Frame::Welcome(mut welcome) = welcome(latest) else {
+        unreachable!()
+    };
+    welcome.journal = journal.into();
+    Frame::Welcome(welcome)
+}
+
+/// A host that speaks another protocol refuses before any `welcome`; the link shows
+/// its reason with the command that installs the matching host.
+#[test]
+fn a_host_refusing_for_its_protocol_shows_the_install_command() {
+    let (_dir, argv) = scripted_turns(&[vec![Frame::Refused {
+        reason: "protocol 3 is needed, this host speaks 2 (keystone-host 9.0.0)".into(),
+    }]]);
+    let link = Link::new(argv, "app-1".into());
+    wait_for("the link to fail", || {
+        matches!(link.status(), Status::Failed(_))
+    });
+    let Status::Failed(reason) = link.status() else {
+        unreachable!()
+    };
+    assert!(
+        reason.starts_with("protocol 3 is needed, this host speaks 2"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("cargo install --locked --path crates/keystone-agent --bin keystone-host"),
+        "{reason}"
+    );
+}
+
+/// A journal replaced while the link is up, which has numbered past what the link had
+/// received before it reconnects: nothing is behind the link's place, so only the
+/// journal's identity says these are new events. Every one of them reaches the app;
+/// counted in the old journal, 1 and 2 would be dropped as repeats.
+#[test]
+fn a_journal_replaced_while_linked_that_grew_past_received_hands_over_everything() {
+    let (_dir, argv) = scripted_turns(&[
+        vec![
+            welcome_in(2, "first-journal"),
+            note(1, Provider::Claude),
+            note(2, Provider::Claude),
+            Frame::Synced { seq: 2 },
+        ],
+        vec![
+            welcome_in(4, "second-journal"),
+            note(1, Provider::Claude),
+            note(2, Provider::Claude),
+            note(3, Provider::Claude),
+            note(4, Provider::Claude),
+            Frame::Synced { seq: 4 },
+            Frame::Sessions {
+                sessions: Vec::new(),
+            },
+        ],
+    ]);
+    let link = Link::new(argv, "app-1".into());
+    let (claude, _) = connection(&link, Provider::Claude);
+    let mut events = Vec::new();
+    wait_for("both journals' events", || {
+        events.extend(saving(&link, &claude));
+        link.journal_changes() == (1, true) && link.status() == Status::Connected
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    events.extend(saving(&link, &claude));
+    let mut expected = notes(&[1, 2]);
+    expected.extend(notes(&[1, 2, 3, 4]));
+    assert_eq!(events, expected);
+}
+
+/// A place the link handed out before it took on another journal names a number in a
+/// journal it no longer counts in. The app's report that it saved that place, arriving
+/// after the change, must move nothing: here it would otherwise mark the new journal's
+/// events 1 and 2 saved, and the host would trim them unsaved.
+#[test]
+fn a_save_reported_for_a_place_from_the_old_journal_moves_nothing() {
+    let (dir, argv) = scripted_turns(&[
+        vec![
+            welcome_in(2, "first-journal"),
+            note(1, Provider::Claude),
+            note(2, Provider::Claude),
+            Frame::Synced { seq: 2 },
+        ],
+        vec![
+            welcome_in(3, "second-journal"),
+            note(1, Provider::Claude),
+            note(2, Provider::Claude),
+            note(3, Provider::Claude),
+            Frame::Synced { seq: 3 },
+            Frame::Sessions {
+                sessions: Vec::new(),
+            },
+        ],
+    ]);
+    let link = Link::new(argv, "app-1".into());
+    let (claude, _) = connection(&link, Provider::Claude);
+    let mut old = Vec::new();
+    wait_for("the first journal's events", || {
+        old.extend(claude.drain_placed());
+        old.len() >= 2
+    });
+    let mut new = Vec::new();
+    wait_for("the second journal's events", || {
+        new.extend(claude.drain_placed());
+        new.len() >= 3 && link.journal_changes() == (1, true)
+    });
+    let acks = || {
+        std::fs::read_to_string(dir.path().join("sent"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| match frame::parse(line.as_bytes()) {
+                Ok(Frame::Ack { seq, .. }) => Some(seq),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let old_place = old[1].0.clone().expect("a placed event");
+    link.saved(SESSION, &old_place);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        acks().iter().all(|seq| *seq == 0),
+        "the old journal's place moved the new journal's acknowledgement: {:?}",
+        acks()
+    );
+    link.saved(SESSION, new[2].0.as_ref().unwrap());
+    wait_for("the new journal's save to be acknowledged", || {
+        acks().last() == Some(&3)
+    });
+}
+
+/// A saved cursor counts only in its own journal: welcomed by another, the link
+/// forgets it and hands over every event the new journal sends, and says the journal
+/// changed so the app can end a turn that was running in the old one.
+#[test]
+fn a_saved_cursor_from_another_journal_drops_nothing() {
+    let mut frames = vec![welcome(3)];
+    frames.extend([1, 2, 3].map(|seq| note(seq, Provider::Claude)));
+    frames.extend([
+        Frame::Synced { seq: 3 },
+        Frame::Sessions {
+            sessions: Vec::new(),
+        },
+    ]);
+    let host = Scripted::new(&frames);
+    let old = Place {
+        journal: "a-journal-that-is-gone".into(),
+        seq: 2,
+    };
+    let link = Link::with_cursors(host.argv(), "app-1".into(), HashMap::from([(SESSION, old)]));
+    let (claude, _) = connection(&link, Provider::Claude);
+    host.go();
+    assert_eq!(drain_all(&link, &claude, 3), notes(&[1, 2, 3]));
+    wait_for("the host's report to follow the replay", || {
+        link.journal_changes() == (1, true)
+    });
+    wait_for("the saves to be acknowledged", || {
+        host.acks().last() == Some(&3)
+    });
+}
+
+/// The same journal behind a place the app saved from it went back, as a restored
+/// backup would. Were a host to answer so, the link takes it as another journal: it
+/// keeps no saved cursor, hands over every event, and says the journal changed.
+#[test]
+fn a_journal_that_went_back_counts_as_another() {
+    let mut frames = vec![welcome(2)];
+    frames.extend([1, 2].map(|seq| note(seq, Provider::Claude)));
+    frames.extend([
+        Frame::Synced { seq: 2 },
+        Frame::Sessions {
+            sessions: Vec::new(),
+        },
+    ]);
+    let host = Scripted::new(&frames);
+    let link = Link::with_cursors(
+        host.argv(),
+        "app-1".into(),
+        HashMap::from([(SESSION, scripted(5))]),
+    );
+    let (claude, _) = connection(&link, Provider::Claude);
+    host.go();
+    assert_eq!(drain_all(&link, &claude, 2), notes(&[1, 2]));
+    wait_for("the change to be reported", || {
+        link.journal_changes() == (1, true)
+    });
+}
+
+/// A real host whose journal went back, as one restored from a backup: the app's
+/// `hello` shows a place past its latest event, so it takes a new identity before it
+/// answers, and keeps it.
+#[test]
+fn a_host_whose_journal_went_back_takes_a_new_identity() {
+    let machine = Machine::new();
+    let mut raw = machine.raw();
+    let first = raw.hello("app-1", None).journal;
+    drop(raw);
+    let mut raw = machine.raw();
+    raw.send(&Frame::Hello {
+        protocol: frame::PROTOCOL,
+        client: "app-1".into(),
+        after: None,
+        journal: None,
+        seen: vec![(first.clone(), 40)],
+    });
+    let Frame::Welcome(welcome) = raw.next() else {
+        panic!("expected welcome")
+    };
+    assert_ne!(
+        welcome.journal, first,
+        "a journal that went back is another"
+    );
+    assert_eq!(
+        journal_id(machine.dir.path()),
+        Some(welcome.journal.clone())
+    );
+    drop(raw);
+    let mut raw = machine.raw();
+    raw.send(&Frame::Hello {
+        protocol: frame::PROTOCOL,
+        client: "app-1".into(),
+        after: None,
+        journal: None,
+        seen: vec![(welcome.journal.clone(), 0)],
+    });
+    let Frame::Welcome(again) = raw.next() else {
+        panic!("expected welcome")
+    };
+    assert_eq!(
+        again.journal, welcome.journal,
+        "a journal not behind keeps its identity"
+    );
+}
+
+/// A journal deleted on the machine comes back with a new identity, and a `hello`
+/// that names the old one gets every event of the new one, its sessions, and no
+/// skipped numbers.
+#[test]
+fn a_new_journal_has_a_new_identity_and_ignores_another_journals_place() {
+    let machine = Machine::new();
+    let mut raw = machine.raw();
+    let first = raw.hello("app-1", None).journal;
+    assert!(!first.is_empty());
+    drop(raw);
+    machine.kill_daemon();
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(machine.dir.path().join(format!("journal.sqlite3{suffix}")));
+    }
+    let mut raw = machine.raw();
+    raw.send(&Frame::Hello {
+        protocol: frame::PROTOCOL,
+        client: "app-1".into(),
+        after: Some(40),
+        journal: Some(first.clone()),
+        seen: Vec::new(),
+    });
+    let Frame::Welcome(welcome) = raw.next() else {
+        panic!("expected welcome")
+    };
+    assert_ne!(welcome.journal, first, "a new file is a new journal");
+    let rest = raw.until(|frame| matches!(frame, Frame::Sessions { .. }));
+    assert!(
+        matches!(rest.last(), Some(Frame::Sessions { .. })),
+        "a place in another journal is answered as a first link: {rest:?}"
+    );
+}
+
+/// A relaunched app drops the replayed events its log saved before the kill, and
+/// acknowledges them at once.
+#[test]
+fn a_replayed_event_at_or_below_its_sessions_saved_cursor_is_dropped() {
+    let host = Scripted::new(&[
+        welcome(3),
+        note(1, Provider::Claude),
+        note(2, Provider::Claude),
+        note(3, Provider::Claude),
+        Frame::Synced { seq: 3 },
+    ]);
+    let link = Link::with_cursors(
+        host.argv(),
+        "app-1".into(),
+        HashMap::from([(SESSION, scripted(2))]),
+    );
+    let (claude, _) = connection(&link, Provider::Claude);
+    host.go();
+    wait_for("the replay to be received", || {
+        link.status() == Status::Connected
+    });
+    wait_for("the saved prefix to be acknowledged", || {
+        host.acks().last() == Some(&2)
+    });
+    let drained = claude.drain_placed();
+    assert_eq!(
+        drained,
+        [(Some(scripted(3)), SESSION, notes(&[3])[0].1.clone())]
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        host.acks().iter().max(),
+        Some(&2),
+        "3 is drained, not saved"
+    );
+    link.saved(SESSION, drained[0].0.as_ref().unwrap());
+    wait_for("the save to be acknowledged", || {
+        host.acks().last() == Some(&3)
+    });
+}
+
 #[test]
 fn every_four_event_route_assignment_acknowledges_only_the_drained_prefix() {
     for mask in 0..16 {
@@ -2180,7 +2669,7 @@ fn every_four_event_route_assignment_acknowledges_only_the_drained_prefix() {
                 .enumerate()
                 .filter_map(|(index, provider)| (*provider == first).then_some(index as u64 + 1))
                 .collect();
-            assert_eq!(drain_all(drained, expected.len()), notes(&expected));
+            assert_eq!(drain_all(&link, drained, expected.len()), notes(&expected));
             let prefix = routes
                 .iter()
                 .position(|provider| *provider != first)
@@ -2197,7 +2686,7 @@ fn every_four_event_route_assignment_acknowledges_only_the_drained_prefix() {
                 .enumerate()
                 .filter_map(|(index, provider)| (*provider != first).then_some(index as u64 + 1))
                 .collect();
-            assert_eq!(drain_all(held, remaining.len()), notes(&remaining));
+            assert_eq!(drain_all(&link, held, remaining.len()), notes(&remaining));
             wait_for("all generated events to be acknowledged", || {
                 host.acks().last() == Some(&4)
             });

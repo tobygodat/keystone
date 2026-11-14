@@ -299,6 +299,10 @@ fn no_row_of_a_remote_session_reads_this_machines_files(cx: &mut TestAppContext)
         true,
         cx,
     );
+    // Tall enough that every row is drawn even when a wrongly given handle draws
+    // thumbnails, so a leak fails the media check below, not the count of rows.
+    cx.simulate_resize(gpui::size(gpui::px(1280.), gpui::px(4000.)));
+    cx.run_until_parked();
     let (local, remote) = (1, 2);
     assert_eq!(
         view.read_with(cx, |view, cx| view.selected(cx)),

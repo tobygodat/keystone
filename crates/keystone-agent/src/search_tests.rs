@@ -28,7 +28,7 @@ fn log(database: &Database, session: u64, entries: &[Entry]) {
             )
         })
         .collect();
-    database.append_logs(session, &records).unwrap();
+    database.append_logs(session, &records, None).unwrap();
 }
 
 fn rand_key() -> u64 {

@@ -218,7 +218,7 @@ mod tests {
             .unwrap();
         rusqlite::Connection::open(path.with_extension("sqlite3"))
             .unwrap()
-            .execute_batch("DROP TABLE machines; DROP TABLE notes; PRAGMA user_version=5;")
+            .execute_batch("DROP TABLE remote_cursors; DROP TABLE machines; DROP TABLE notes; PRAGMA user_version=5;")
             .unwrap();
         let mut store = Store::open(&path).unwrap();
         assert_eq!(store.workspace().sessions().len(), 1);
@@ -236,7 +236,7 @@ mod tests {
             .query_one("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(schema, crate::database::SCHEMA_VERSION);
-        assert_eq!(schema, 7);
+        assert_eq!(schema, 8);
     }
 
     #[test]

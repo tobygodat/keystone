@@ -634,6 +634,7 @@ crates/keystone-agent/src/remote/link.rs
 	cargo install --locked --path crates/keystone-agent --bin keystone-host
 	keystone-host isn't installed on that machine. Install it there from a Keystone checkout: {INSTALL}
 	sh -lc "exec keystone-host attach"
+	{reason}. Install the matching version there: {INSTALL}
 
 crates/keystone-agent/src/remote/paths.rs
 	Could not create {}: {e}
@@ -697,6 +698,7 @@ crates/keystone-agent/src/remote/serve.rs
 	session {session}'s last watcher stopped before provider {pid}'s processes were gone; they may still run
 	session {} waits for the last run's processes to end
 	the journal took the events that waited
+	the journal went back past what the app saw, so it has a new identity
 	{BACKLOGGED} ({error})
 	{UNSAVED} ({error})
 	{bytes} bytes of events wait for the journal, so no turn starts until it takes them ({error})
@@ -1020,6 +1022,7 @@ crates/keystone-desktop/src/app_state.rs
 	it did not load during the shutdown attempt; restart to retry history loading
 	its conversation ID is not saved yet
 	its conversation is loading, running or not being saved
+	keystone-host on {label} lost its record of this session, so how this turn ended there isn't known
 	the provider did not answer in time
 	the workspace could not be saved
 	this conversation has no saved folder to check against
