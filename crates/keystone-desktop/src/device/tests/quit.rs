@@ -82,7 +82,7 @@ fn quit_shuts_down_a_device_keystone_booted_while_a_start_holds_its_lane(cx: &mu
 }
 
 #[gpui::test]
-fn quit_leaves_a_shutdown_already_running_to_itself(cx: &mut TestAppContext) {
+fn quit_waits_for_a_shutdown_already_running_and_never_starts_a_second(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
     let host = FakeHost::new();
     let state = setup(directory.path(), ApprovalMode::Ask, &host, cx);
@@ -92,7 +92,46 @@ fn quit_leaves_a_shutdown_already_running_to_itself(cx: &mut TestAppContext) {
     wait_until(&state, cx, "the shutdown runs", |_, _| {
         host.calls("shutdown") == 1
     });
+    let releasing = host.clone();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        releasing.let_go("shutdown");
+    });
+    let started = Instant::now();
     state.update(cx, |state, cx| state.teardown(cx));
-    host.let_go("shutdown");
+    assert_eq!(
+        host.power(&id(PHONE)),
+        Some(Power::Shutdown),
+        "Quit waited for the shutdown on the lane"
+    );
+    assert!(started.elapsed() < QUIT_LIMIT, "no longer than it took");
+    release.join().unwrap();
     assert_eq!(host.calls("shutdown"), 1, "no second shutdown at once");
+    assert_eq!(host.log().last().map(String::as_str), Some("stop"));
+}
+
+#[gpui::test]
+fn quit_waits_for_a_shutdown_on_the_lane_no_longer_than_its_budget(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let host = FakeHost::new();
+    let state = setup(directory.path(), ApprovalMode::Ask, &host, cx);
+    open_for_user(&state, &[1], PHONE, cx);
+    host.hold("shutdown");
+    state.update(cx, |state, cx| state.close_device(1, cx));
+    wait_until(&state, cx, "the shutdown runs", |_, _| {
+        host.calls("shutdown") == 1
+    });
+    let started = Instant::now();
+    state.update(cx, |state, cx| state.teardown(cx));
+    let took = started.elapsed();
+    assert!(
+        took >= QUIT_LIMIT - Duration::from_millis(100) && took < QUIT_LIMIT * 2,
+        "{took:?}"
+    );
+    assert_eq!(
+        host.log().last().map(String::as_str),
+        Some("stop"),
+        "the host's stop ends what the shutdown left running"
+    );
+    host.let_go("shutdown");
 }

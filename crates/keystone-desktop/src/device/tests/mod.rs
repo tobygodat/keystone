@@ -35,6 +35,9 @@ struct FakeHost {
     broken_listing: AtomicBool,
     /// Makes every start panic while set.
     broken_start: AtomicBool,
+    /// Makes the next boot wait answer that another start runs the device, as when
+    /// the user launches the same emulator at the same moment.
+    taken: AtomicBool,
     /// Calls that wait, once logged, until they are let go.
     holding: Mutex<HashSet<&'static str>>,
 }
@@ -59,6 +62,7 @@ impl FakeHost {
             refuse_shutdown: AtomicBool::new(false),
             broken_listing: AtomicBool::new(false),
             broken_start: AtomicBool::new(false),
+            taken: AtomicBool::new(false),
             holding: Mutex::default(),
         })
     }
@@ -156,6 +160,9 @@ impl DeviceHost for FakeHost {
 
     fn wait(&self, device: &DeviceId, until: Deadline) -> Result<BootState, DeviceError> {
         self.log.lock().unwrap().push(format!("wait {device}"));
+        if self.taken.swap(false, Ordering::AcqRel) {
+            return Ok(BootState::Elsewhere);
+        }
         match device.to_string().as_str() {
             STUCK => return Ok(BootState::Booting),
             SLOW => {

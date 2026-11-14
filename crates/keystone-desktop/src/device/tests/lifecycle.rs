@@ -74,6 +74,34 @@ fn close_shuts_down_only_what_keystone_booted_and_no_one_else_has_open(cx: &mut 
 }
 
 #[gpui::test]
+fn a_boot_another_start_took_over_is_followed_but_never_shut_down(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let host = FakeHost::new();
+    let state = setup(directory.path(), ApprovalMode::Ask, &host, cx);
+    host.taken.store(true, Ordering::Release);
+    open_for_user(&state, &[1], PHONE, cx);
+    assert_eq!(
+        host.calls(&format!("wait {PHONE}")),
+        2,
+        "a second wait followed the boot"
+    );
+    assert!(
+        state.read_with(cx, |state, _| !lifecycle(state, PHONE).unwrap().owned()),
+        "the device is not Keystone's"
+    );
+    state.update(cx, |state, cx| state.close_device(1, cx));
+    wait_until(&state, cx, "it closes", |state, _| {
+        beside(state, 1).is_none()
+    });
+    state.update(cx, |state, cx| state.teardown(cx));
+    assert_eq!(
+        host.calls("shutdown"),
+        0,
+        "neither Close nor Quit shuts down another's"
+    );
+}
+
+#[gpui::test]
 fn two_closes_at_once_still_shut_down_what_keystone_booted(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
     let host = FakeHost::new();

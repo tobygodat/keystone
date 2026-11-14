@@ -127,6 +127,9 @@ pub(crate) struct Record {
     /// Taken by whichever of the shutdown job and Quit shuts the device down first, so
     /// the other doesn't.
     shutting: Arc<AtomicBool>,
+    /// Hangs up once the shutdown job's call to the host returns, so Quit can wait for
+    /// a shutdown the job took.
+    shut: Option<mpsc::Receiver<()>>,
     capture: Capture,
     waiting: Vec<Waiter>,
     /// The latest frame and error, in an entity of its own so that a new frame redraws
@@ -167,7 +170,8 @@ enum Wants {
     Close,
 }
 
-/// What a host call answered, with what it was asked.
+/// What a host call answered, with what it was asked. Each device call's variant
+/// takes the device and the result, so it is the constructor its job is queued with.
 enum Done {
     Listed(Result<Inventory, String>),
     Started {
@@ -176,23 +180,11 @@ enum Done {
         result: Result<Start, DeviceError>,
     },
     /// A frame for the panel.
-    Captured {
-        device: DeviceId,
-        result: Result<Option<Picture>, DeviceError>,
-    },
+    Captured(DeviceId, Result<Option<Picture>, DeviceError>),
     /// A screenshot an agent asked for, which the panel shows too.
-    Shot {
-        device: DeviceId,
-        result: Result<(Option<Picture>, ModelShot), DeviceError>,
-    },
-    Acted {
-        device: DeviceId,
-        result: Result<(), DeviceError>,
-    },
-    ShutDown {
-        device: DeviceId,
-        result: Result<(), DeviceError>,
-    },
+    Shot(DeviceId, Result<(Option<Picture>, ModelShot), DeviceError>),
+    Acted(DeviceId, Result<(), DeviceError>),
+    ShutDown(DeviceId, Result<(), DeviceError>),
 }
 
 /// Where a host call runs.
@@ -254,21 +246,21 @@ impl Devices {
         self.next
     }
 
-    /// Runs `job` on `lane`. A job that panics answers what `on_panic` makes of the
-    /// failure, and its lane runs on.
-    fn run(
+    /// Runs `job` on `lane` and makes the answer from what it returned with `done`. A
+    /// job that panics returns a failed call, and its lane runs on.
+    fn run<T>(
         &mut self,
         lane: Lane,
-        on_panic: impl FnOnce(DeviceError) -> Done + Send + 'static,
-        job: impl FnOnce(&dyn DeviceHost) -> Done + Send + 'static,
+        done: impl FnOnce(Result<T, DeviceError>) -> Done + Send + 'static,
+        job: impl FnOnce(&dyn DeviceHost) -> Result<T, DeviceError> + Send + 'static,
     ) -> oneshot::Receiver<Done> {
         let (sender, receiver) = oneshot::channel();
         let (host, stopped) = (self.host.clone(), self.stopped.clone());
         let job = move || {
             if !stopped.load(Ordering::Acquire) {
-                let done = std::panic::catch_unwind(AssertUnwindSafe(|| job(&*host)))
-                    .unwrap_or_else(|_| on_panic(DeviceError::Failed(PANICKED.into())));
-                let _ = sender.send(done);
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| job(&*host)))
+                    .unwrap_or_else(|_| Err(DeviceError::Failed(PANICKED.into())));
+                let _ = sender.send(done(result));
             }
         };
         match lane {
@@ -286,21 +278,23 @@ impl Devices {
     }
 
     /// Stops capturing and shuts down the devices Keystone booted, waiting for them at
-    /// most [`QUIT_LIMIT`] in all, whatever their lanes are doing. A device whose start
-    /// is still to answer is shut down once that start ends, if it booted the device.
-    /// Jobs still queued return without calling the host.
+    /// most [`QUIT_LIMIT`] in all, whatever their lanes are doing. A shutdown a lane
+    /// already runs is waited for, never started twice. A device whose start is still
+    /// to answer is shut down once that start ends, if it booted the device. Jobs still
+    /// queued return without calling the host.
     pub(crate) fn stop(&mut self) {
         self.stopped.store(true, Ordering::Release);
         let until = Deadline::after(QUIT_LIMIT);
         let mut quitting = Vec::new();
         for (device, record) in self.records.drain() {
             let lifecycle = &record.lifecycle;
-            let shut_down = lifecycle.owned()
-                && !(matches!(lifecycle.life, Life::ShuttingDown { .. })
-                    && record.shutting.swap(true, Ordering::AcqRel));
+            let running = matches!(lifecycle.life, Life::ShuttingDown { .. })
+                && record.shutting.swap(true, Ordering::AcqRel);
+            let shut_down = lifecycle.owned() && !running;
+            let running = record.shut.filter(|_| running);
             let start = record.start.filter(|_| lifecycle.asked.is_some());
-            if shut_down || start.is_some() {
-                quitting.push((device, shut_down, start));
+            if shut_down || running.is_some() || start.is_some() {
+                quitting.push((device, shut_down, running, start));
             }
         }
         self.beside.clear();
@@ -314,10 +308,14 @@ impl Devices {
         }
         let host = &*self.host;
         std::thread::scope(|scope| {
-            for (device, shut_down, start) in quitting {
+            for (device, shut_down, running, start) in quitting {
                 scope.spawn(move || {
                     if shut_down {
                         let _ = host.shutdown(&device, until);
+                    }
+                    // It hangs up when the lane's shutdown returns.
+                    if let Some(running) = running {
+                        let _ = running.recv_timeout(until.remaining());
                     }
                     if start.is_some_and(|start| start.recv_timeout(until.remaining()) == Ok(true))
                     {
@@ -373,15 +371,32 @@ impl AppState {
         }
     }
 
-    fn queue(
+    /// Runs `job` on `device`'s lane. `done` makes what the UI thread applies from the
+    /// device and what `job` returned, or the failure when it panicked.
+    fn queue<T>(
         &mut self,
-        lane: Lane,
+        device: &DeviceId,
         request: Option<Box<Request>>,
         cx: &mut Context<Self>,
-        on_panic: impl FnOnce(DeviceError) -> Done + Send + 'static,
-        job: impl FnOnce(&dyn DeviceHost) -> Done + Send + 'static,
+        done: impl FnOnce(DeviceId, Result<T, DeviceError>) -> Done + Send + 'static,
+        job: impl FnOnce(&dyn DeviceHost, &DeviceId) -> Result<T, DeviceError> + Send + 'static,
     ) {
-        let receiver = self.devices.run(lane, on_panic, job);
+        let (asked, answered) = (device.clone(), device.clone());
+        let receiver = self.devices.run(
+            Lane::Device(device),
+            move |result| done(answered, result),
+            move |host| job(host, &asked),
+        );
+        self.deliver(receiver, request, cx);
+    }
+
+    /// Applies what a job answers on the UI thread.
+    fn deliver(
+        &mut self,
+        receiver: oneshot::Receiver<Done>,
+        request: Option<Box<Request>>,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             let Ok(done) = receiver.await else {
                 return;
@@ -411,15 +426,13 @@ impl AppState {
                 self.start_answered(&device, ask, result, cx);
                 None
             }
-            Done::Captured { device, result } => {
+            Done::Captured(device, result) => {
                 self.captured(&device, result, cx);
                 None
             }
-            Done::Shot { device, result } => {
-                Some(self.shot(&device, result, request.as_deref(), cx))
-            }
-            Done::Acted { device, result } => Some(self.acted(&device, result, cx)),
-            Done::ShutDown { device, result } => {
+            Done::Shot(device, result) => Some(self.shot(&device, result, request.as_deref(), cx)),
+            Done::Acted(device, result) => Some(self.acted(&device, result, cx)),
+            Done::ShutDown(device, result) => {
                 self.shut_down(&device, result, cx);
                 None
             }
@@ -477,6 +490,7 @@ impl AppState {
                 lifecycle: Lifecycle::default(),
                 start: None,
                 shutting: Arc::default(),
+                shut: None,
                 capture: Capture::Idle,
                 waiting: Vec::new(),
                 screen: cx.new(|_| Screen::default()),
@@ -514,20 +528,15 @@ impl AppState {
         }
         let (started, start) = mpsc::channel();
         record.start = Some(start);
-        let (asked, failed) = (device.clone(), device.clone());
-        let on_panic = move |error| Done::Started {
-            device: failed,
+        let done = move |device, result| Done::Started {
+            device,
             ask,
-            result: Err(error),
+            result,
         };
-        self.queue(Lane::Device(device), None, cx, on_panic, move |host| {
-            let result = host.start(&asked, Deadline::after(START_LIMIT));
+        self.queue(device, None, cx, done, move |host, device| {
+            let result = host.start(device, Deadline::after(START_LIMIT));
             let _ = started.send(result == Ok(Start::Started));
-            Done::Started {
-                result,
-                device: asked,
-                ask,
-            }
+            result
         });
     }
 
@@ -593,9 +602,19 @@ impl AppState {
         result: Result<BootState, DeviceError>,
         cx: &mut Context<Self>,
     ) {
+        let elsewhere = result == Ok(BootState::Elsewhere);
         if let Some(record) = self.devices.records.get_mut(device)
             && record.lifecycle.waited(watch, result)
         {
+            // Another start runs it now, so its boot is followed without claiming it.
+            if elsewhere
+                && let Err(reason) = self.watch_boot(device, watch, cx)
+                && let Some(record) = self.devices.records.get_mut(device)
+            {
+                record
+                    .lifecycle
+                    .waited(watch, Err(DeviceError::Failed(reason)));
+            }
             self.changed(device, cx);
         }
     }
@@ -772,22 +791,16 @@ impl AppState {
                 record.screen.update(cx, |_, cx| cx.notify());
                 let shutting = Arc::new(AtomicBool::new(false));
                 record.shutting = shutting.clone();
-                let (asked, failed) = (device.clone(), device.clone());
-                let on_panic = |error| Done::ShutDown {
-                    device: failed,
-                    result: Err(error),
-                };
-                self.queue(Lane::Device(device), None, cx, on_panic, move |host| {
+                let (hang_up, shut) = mpsc::channel::<()>();
+                record.shut = Some(shut);
+                self.queue(device, None, cx, Done::ShutDown, move |host, device| {
                     // Quit took it, and shuts the device down itself.
-                    let result = if shutting.swap(true, Ordering::AcqRel) {
-                        Ok(())
-                    } else {
-                        host.shutdown(&asked, Deadline::after(SHUTDOWN_LIMIT))
-                    };
-                    Done::ShutDown {
-                        result,
-                        device: asked,
+                    if shutting.swap(true, Ordering::AcqRel) {
+                        return Ok(());
                     }
+                    let result = host.shutdown(device, Deadline::after(SHUTDOWN_LIMIT));
+                    drop(hang_up);
+                    result
                 });
                 return;
             }
@@ -875,10 +888,12 @@ impl AppState {
     fn list(&mut self, request: Option<Box<Request>>, until: Deadline, cx: &mut Context<Self>) {
         let again = self.devices.list == Fetch::Running { again: true };
         self.devices.list = Fetch::Running { again };
-        let on_panic = |error: DeviceError| Done::Listed(Err(error.to_string()));
-        self.queue(Lane::List, request, cx, on_panic, move |host| {
-            Done::Listed(Ok(host.inventory(until)))
-        });
+        let listed =
+            |result: Result<_, DeviceError>| Done::Listed(result.map_err(|e| e.to_string()));
+        let receiver = self
+            .devices
+            .run(Lane::List, listed, move |host| Ok(host.inventory(until)));
+        self.deliver(receiver, request, cx);
         cx.notify();
     }
 

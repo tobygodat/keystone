@@ -9,7 +9,7 @@ use super::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,8 @@ pub(crate) struct Launch {
     child: Arc<Mutex<Child>>,
     /// Why the emulator exited, once it has.
     exit: Arc<OnceLock<String>>,
+    /// Set once a shutdown has asked it to exit, so the host's stop kills it.
+    stopping: Arc<AtomicBool>,
 }
 
 /// The running emulators adb lists, by the AVD each runs.
@@ -124,6 +126,28 @@ fn running(host: &LocalHost, until: Deadline) -> Result<Running, DeviceError> {
         }
     }
     Ok(found)
+}
+
+impl Launch {
+    /// Sends `signal` to the emulator and what it started, unless it has exited.
+    fn signal(&self, signal: libc::c_int) {
+        let mut child = self.child.lock().unwrap();
+        if matches!(child.try_wait(), Ok(None)) {
+            // The emulator leads its own process group, so qemu goes with it.
+            // SAFETY: kill has no memory effects, and the child is not reaped yet.
+            unsafe { libc::kill(-(child.id() as libc::pid_t), signal) };
+        }
+    }
+}
+
+/// Kills each emulator this host launched that a shutdown has asked to exit, for the
+/// host's stop: the shutdown's own kill in its last second dies with the app.
+pub(super) fn kill_stopping(host: &LocalHost) {
+    for launch in host.launched.lock().unwrap().values() {
+        if launch.stopping.load(Ordering::Acquire) {
+            launch.signal(libc::SIGKILL);
+        }
+    }
 }
 
 /// What the emulator at a serial did with a command guarded by its AVD.
@@ -286,7 +310,7 @@ fn launching(host: &LocalHost, avd: &str) -> bool {
 }
 
 /// Why the emulator this host started for `avd` exited, if it has.
-fn exited(host: &LocalHost, avd: &str) -> Option<String> {
+pub(super) fn exited(host: &LocalHost, avd: &str) -> Option<String> {
     let launched = host.launched.lock().unwrap();
     launched.get(avd)?.exit.get().cloned()
 }
@@ -389,6 +413,7 @@ fn launch(host: &LocalHost, avd: &str) -> Result<(), DeviceError> {
         at: Instant::now(),
         child: Arc::new(Mutex::new(child)),
         exit: Arc::new(OnceLock::new()),
+        stopping: Arc::default(),
     };
     host.launched
         .lock()
@@ -448,6 +473,12 @@ pub(super) fn wait(host: &LocalHost, avd: &str, until: Deadline) -> Result<BootS
             running => running?,
         };
         match running.find(avd) {
+            // The emulator this host launched exited, so the one running `avd` is
+            // another's: the user's own launch of it took the AVD's lock first.
+            Ok(Some(_)) if exited(host, avd).is_some() => {
+                host.launched.lock().unwrap().remove(avd);
+                return Ok(BootState::Elsewhere);
+            }
             Ok(Some((serial, true))) if booted(host, avd, &serial, until)? => {
                 host.launched.lock().unwrap().remove(avd);
                 return Ok(BootState::Booted);
@@ -564,6 +595,11 @@ pub(super) fn shutdown(host: &LocalHost, avd: &str, until: Deadline) -> Result<(
     // The lookup asks each emulator's console, so one that took a freed serial and port
     // answers with its own AVD and is never shut down for `avd`.
     match (lookup(host, avd, until), launched) {
+        // The emulator this host launched exited, so the one running `avd` is another's.
+        (Ok(_), Some(launch)) if launch.exit.get().is_some() => {
+            host.launched.lock().unwrap().remove(avd);
+            Ok(())
+        }
         (Ok(serial), _) => {
             run(
                 &host.children,
@@ -588,14 +624,8 @@ pub(super) fn shutdown(host: &LocalHost, avd: &str, until: Deadline) -> Result<(
 /// Stops the emulator `launch` started, with whatever it started, and returns once it
 /// has exited: asked first, then killed when a second is left.
 fn stop(launch: &Launch, until: Deadline) -> Result<(), DeviceError> {
-    let signal = |signal| {
-        let mut child = launch.child.lock().unwrap();
-        if matches!(child.try_wait(), Ok(None)) {
-            // The emulator leads its own process group, so qemu goes with it.
-            // SAFETY: kill has no memory effects, and the child is not reaped yet.
-            unsafe { libc::kill(-(child.id() as libc::pid_t), signal) };
-        }
-    };
+    let signal = |signal| launch.signal(signal);
+    launch.stopping.store(true, Ordering::Release);
     signal(libc::SIGTERM);
     let mut killed = false;
     loop {

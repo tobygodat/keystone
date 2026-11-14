@@ -225,6 +225,10 @@ pub enum BootState {
     Booted,
     /// The deadline came first; the boot carries on without the caller.
     Booting,
+    /// What the caller's start launched exited, and something else runs the device now,
+    /// such as the user's own launch of it at the same moment. It is not the caller's to
+    /// shut down, and a new wait follows its boot.
+    Elsewhere,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

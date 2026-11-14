@@ -73,7 +73,7 @@ pub(super) fn tools() -> Vec<Value> {
         ),
         tool(
             "device_close",
-            "Remove the device from beside this session. Keystone shuts it down only if Keystone booted it and no other session has it open.",
+            "Remove the device from beside this session. Keystone shuts it down only if Keystone booted it and no other session has it open, and answers shut_down once done. If that outlasts this call, it answers state closing while the device is still starting, or shutting_down while Keystone is still shutting it down, which can still fail. Either way the close finishes on its own: call device_close again to wait for it and hear whether the shutdown failed, or device_list to see whether the device is still open.",
             json!({}),
             json!([]),
         ),

@@ -3,7 +3,7 @@
 //! showing that device.
 
 use super::frames::{self, Picture};
-use super::{Done, Fetch, Lane, Life, Record};
+use super::{Done, Fetch, Life, Record};
 use crate::app_state::AppState;
 use gpui::{Context, Task};
 use keystone_agent::device::{Deadline, DeviceError, DeviceId};
@@ -141,18 +141,9 @@ impl AppState {
         {
             self.devices.captures += 1;
         }
-        let (asked, failed) = (device.clone(), device.clone());
-        let on_panic = |error| Done::Captured {
-            device: failed,
-            result: Err(error),
-        };
-        self.queue(Lane::Device(device), None, cx, on_panic, move |host| {
-            Done::Captured {
-                result: host
-                    .screenshot(&asked, Deadline::after(CAPTURE_LIMIT))
-                    .map(|frame| frames::for_panel(&frame)),
-                device: asked,
-            }
+        self.queue(device, None, cx, Done::Captured, |host, device| {
+            host.screenshot(device, Deadline::after(CAPTURE_LIMIT))
+                .map(|frame| frames::for_panel(&frame))
         });
     }
 

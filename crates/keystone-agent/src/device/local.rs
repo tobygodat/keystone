@@ -194,5 +194,6 @@ impl DeviceHost for LocalHost {
 
     fn stop(&self) {
         self.children.stop();
+        android::kill_stopping(self);
     }
 }

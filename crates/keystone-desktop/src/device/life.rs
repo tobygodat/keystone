@@ -131,7 +131,8 @@ impl Lifecycle {
     }
 
     /// Boot watch `watch` ended, maybe while Keystone was shutting the device down.
-    /// Returns whether that changed anything.
+    /// Returns whether that changed anything. A device another start runs now is no
+    /// longer Keystone's, and stays booting while a new watch `watch` follows it.
     pub(crate) fn waited(&mut self, watch: u64, result: Result<BootState, DeviceError>) -> bool {
         let life = match &mut self.life {
             Life::ShuttingDown { was } => was.as_mut(),
@@ -141,6 +142,10 @@ impl Lifecycle {
             return false;
         }
         *life = match result {
+            Ok(BootState::Elsewhere) => {
+                self.origin = Origin::Elsewhere;
+                return true;
+            }
             Ok(BootState::Booted) => Life::Booted,
             Ok(BootState::Booting) => Life::Stalled,
             Err(DeviceError::NotBooted) => Life::Off,
@@ -384,6 +389,22 @@ mod tests {
             (Life::Off, Origin::Elsewhere)
         );
         assert!(!device.owned());
+    }
+
+    #[test]
+    fn a_boot_another_start_took_over_is_never_keystones_to_shut_down() {
+        let mut device = Lifecycle::default();
+        device.open(1);
+        device.started(1, Ok(Start::Started), 2);
+        assert!(device.waited(2, Ok(BootState::Elsewhere)));
+        assert_eq!(
+            (device.life.clone(), device.origin),
+            (Life::Booting { watch: 2 }, Origin::Elsewhere),
+            "still booting, followed by the same watch"
+        );
+        assert!(!device.owned());
+        assert!(device.waited(2, Ok(BootState::Booted)));
+        assert_eq!(device.settle(false), Settle::LetGo { forget: true });
     }
 
     #[test]

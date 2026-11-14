@@ -519,7 +519,7 @@ impl Panel {
         if let Some(refused) = refused {
             notes.push(
                 div()
-                    .debug_selector(|| "device-refused".into())
+                    .automation_id("device-refused")
                     .child(note_owned(refused, Color::Danger))
                     .into_any_element(),
             );

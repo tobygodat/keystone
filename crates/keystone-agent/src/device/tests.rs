@@ -135,11 +135,13 @@ eval "$*""#,
     }
 
     /// Lists two AVDs. Launching one fails at once, or runs until stopped once
-    /// `emulator-runs` exists, writing its pid to `emulator.pid`.
+    /// `emulator-runs` exists, writing its pid to `emulator.pid`, or runs until killed,
+    /// asking nothing to SIGTERM, once `emulator-stubborn` exists.
     fn emulator(&self) -> PathBuf {
         self.script(
             "emulator",
             r#"if [ "$1" = -list-avds ]; then printf 'Pixel_8\nTablet_API_35\n'; exit 0; fi
+if [ -f "$D/emulator-stubborn" ]; then echo $$ > "$D/emulator.pid"; trap '' TERM; while :; do sleep 0.05; done; fi
 if [ -f "$D/emulator-runs" ]; then echo $$ > "$D/emulator.pid"; exec sleep 30; fi
 echo "ERROR   | Unknown AVD name [$2], use -list-avds to see valid list."; exit 1"#,
         )
@@ -891,6 +893,77 @@ fn closing_an_emulator_adb_does_not_list_yet_stops_the_one_keystone_started() {
         "nothing counts as booting it any more"
     );
     host.shutdown(&tablet, soon()).unwrap();
+}
+
+/// A host whose launch of Tablet_API_35 exited as another emulator took that AVD, as
+/// when the user launches it at the same moment.
+fn taken_over(fakes: &Fakes) -> LocalHost {
+    let host = LocalHost::new(Tools {
+        adb: Some(fakes.adb()),
+        emulator: Some(fakes.emulator()),
+        ..Tools::default()
+    });
+    let tablet = "android:Tablet_API_35".parse::<DeviceId>().unwrap();
+    assert_eq!(host.start(&tablet, soon()), Ok(Start::Started));
+    eventually("Keystone's emulator exits", || {
+        android::exited(&host, "Tablet_API_35").is_some()
+    });
+    std::fs::write(fakes.path("swapped"), "").unwrap();
+    host
+}
+
+#[test]
+fn a_boot_wait_never_takes_an_emulator_that_another_launch_runs() {
+    let fakes = Fakes::new();
+    let tablet = "android:Tablet_API_35".parse::<DeviceId>().unwrap();
+    let host = taken_over(&fakes);
+    assert_eq!(host.wait(&tablet, soon()), Ok(BootState::Elsewhere));
+    assert_eq!(
+        host.wait(&tablet, soon()),
+        Ok(BootState::Booted),
+        "the next wait follows its boot"
+    );
+
+    let fakes = Fakes::new();
+    let host = taken_over(&fakes);
+    host.shutdown(&tablet, soon()).unwrap();
+    assert!(
+        !fakes.device_log().contains("killed"),
+        "a shutdown of what Keystone launched leaves another's: {}",
+        fakes.device_log()
+    );
+}
+
+#[test]
+fn the_hosts_stop_kills_an_emulator_a_shutdown_asked_to_exit() {
+    let fakes = Fakes::new();
+    std::fs::write(fakes.path("emulator-stubborn"), "").unwrap();
+    let host = std::sync::Arc::new(LocalHost::new(Tools {
+        adb: Some(fakes.adb()),
+        emulator: Some(fakes.emulator()),
+        ..Tools::default()
+    }));
+    let tablet = "android:Tablet_API_35".parse::<DeviceId>().unwrap();
+    assert_eq!(host.start(&tablet, soon()), Ok(Start::Started));
+    eventually("the emulator runs", || fakes.path("emulator.pid").exists());
+    let pid: libc::pid_t = std::fs::read_to_string(fakes.path("emulator.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let shutting = host.clone();
+    let shutdown = std::thread::spawn(move || {
+        shutting.shutdown(&tablet, Deadline::after(Duration::from_secs(20)))
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    // SAFETY: signal 0 only asks whether the process exists.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "it shrugged off SIGTERM");
+    host.stop();
+    let started = Instant::now();
+    assert_eq!(shutdown.join().unwrap(), Ok(()));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // SAFETY: as above.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "killed and reaped");
 }
 
 #[test]

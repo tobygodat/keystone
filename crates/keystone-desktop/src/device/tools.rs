@@ -2,7 +2,7 @@
 //! JSON they answer with.
 
 use super::frames::{self, ModelShot, Picture};
-use super::{Beside, Done, Lane, Life, REPLY_MARGIN};
+use super::{Beside, Done, Life, REPLY_MARGIN};
 use crate::app_state::AppState;
 use crate::app_state::orchestrator::Request;
 use gpui::Context;
@@ -187,18 +187,9 @@ impl AppState {
                 self.list_devices(cx);
             }
             Call::Screenshot(device) => {
-                let (asked, failed) = (device.clone(), device.clone());
-                let on_panic = |error| Done::Shot {
-                    device: failed,
-                    result: Err(error),
-                };
-                self.queue(Lane::Device(&device), request, cx, on_panic, move |host| {
-                    Done::Shot {
-                        result: host
-                            .screenshot(&asked, until)
-                            .map(|frame| frames::for_both(&frame)),
-                        device: asked,
-                    }
+                self.queue(&device, request, cx, Done::Shot, move |host, device| {
+                    host.screenshot(device, until)
+                        .map(|frame| frames::for_both(&frame))
                 });
             }
             Call::Act(device, action) => self.act(device, action, until, request, cx),
@@ -241,16 +232,8 @@ impl AppState {
         request: Option<Box<Request>>,
         cx: &mut Context<Self>,
     ) {
-        let (asked, failed) = (device.clone(), device.clone());
-        let on_panic = |error| Done::Acted {
-            device: failed,
-            result: Err(error),
-        };
-        self.queue(Lane::Device(&device), request, cx, on_panic, move |host| {
-            Done::Acted {
-                result: host.act(&asked, &action, until),
-                device: asked,
-            }
+        self.queue(&device, request, cx, Done::Acted, move |host, device| {
+            host.act(device, &action, until)
         });
     }
 
