@@ -84,8 +84,9 @@ pub struct Applied<T> {
 }
 
 /// A position in one [`Store`]'s save order, issued by it and meaningful only to it.
-/// Ask that store with [`Store::is_durable`] whether the save is on disk.
-#[derive(Clone, Copy, Debug)]
+/// Ask that store with [`Store::is_durable`] whether the save is on disk. Two equal
+/// revisions of one store name the same workspace state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Revision(u64);
 
 #[derive(Debug, Eq, PartialEq)]

@@ -164,22 +164,52 @@ impl DeliveredResults {
 }
 
 impl AppState {
-    /// A snapshot of the delivered results, for a search on a background thread.
-    pub(crate) fn delivered_results(&self) -> DeliveredResults {
+    /// A snapshot of the delivered results, for a search on a background thread. It is
+    /// read again only when the workspace changed since the last one.
+    pub(crate) fn delivered_results(&self) -> Arc<DeliveredResults> {
+        let revision = self.store.revision();
+        if let Some((read, results)) = self.delivered.borrow().as_ref()
+            && *read == revision
+        {
+            return results.clone();
+        }
+        let results = Arc::new(self.read_delivered_results());
+        *self.delivered.borrow_mut() = Some((revision, results.clone()));
+        results
+    }
+
+    /// The delivered results, each with the sessions that continue its parent: the
+    /// parent and, through the handoff links read forward once, every session whose
+    /// chain of handoffs leads back to it, as [`AppState::continues`] tells it.
+    fn read_delivered_results(&self) -> DeliveredResults {
         let workspace = self.store.workspace();
+        let sessions: std::collections::HashSet<u64> =
+            workspace.sessions().iter().map(|s| s.id()).collect();
+        let mut continuations: HashMap<u64, Vec<u64>> = HashMap::new();
+        for session in workspace.sessions() {
+            if let Some(from) = session.handed_off_from() {
+                continuations.entry(from).or_default().push(session.id());
+            }
+        }
         DeliveredResults(
             workspace
                 .deliveries()
                 .iter()
-                .filter(|d| self.session(d.child()).is_some())
+                .filter(|d| sessions.contains(&d.child()))
                 .filter_map(|d| match d.state() {
                     DeliveryState::Delivered { message } => {
-                        let parents = workspace
-                            .sessions()
-                            .iter()
-                            .map(|s| s.id())
-                            .filter(|&s| self.continues(s, d.parent()))
-                            .collect();
+                        let mut parents = std::collections::HashSet::new();
+                        if sessions.contains(&d.parent()) {
+                            parents.insert(d.parent());
+                        }
+                        let mut next = vec![d.parent()];
+                        while let Some(id) = next.pop() {
+                            for &later in continuations.get(&id).into_iter().flatten() {
+                                if parents.insert(later) {
+                                    next.push(later);
+                                }
+                            }
+                        }
                         Some((d.child(), (message.clone(), parents)))
                     }
                     _ => None,

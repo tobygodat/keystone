@@ -4,7 +4,11 @@
 //! `japanese` last, the short sessions' messages are in that language instead, a third
 //! of them mentioning "crème brûlée" or "検索".
 //!
-//! cargo run -p keystone-agent --example seed_search --locked -- STATE FOLDER COUNT TURNS [LANGUAGE]
+//! With a count of delivered results after the language (`english` for the default
+//! text), that many launched sessions' results are saved as delivered to the first
+//! short sessions.
+//!
+//! cargo run -p keystone-agent --example seed_search --locked -- STATE FOLDER COUNT TURNS [LANGUAGE [DELIVERED]]
 
 use keystone_agent::log::Entry;
 use keystone_agent::{Item, ItemKind, ItemStatus, TurnStatus};
@@ -37,12 +41,19 @@ fn turn_end() -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (state, folder, count, turns, language) = match args.as_slice() {
-        [state, folder, count, turns] => (state, folder, count, turns, None),
-        [state, folder, count, turns, language] => {
-            (state, folder, count, turns, Some(language.as_str()))
-        }
-        _ => panic!("usage: seed_search STATE FOLDER COUNT TURNS [french|japanese]"),
+    let (state, folder, count, turns, language, delivered) = match args.as_slice() {
+        [state, folder, count, turns] => (state, folder, count, turns, None, 0),
+        [state, folder, count, turns, language, rest @ ..] if rest.len() <= 1 => (
+            state,
+            folder,
+            count,
+            turns,
+            (language != "english").then_some(language.as_str()),
+            rest.first().map_or(0, |n| n.parse().unwrap()),
+        ),
+        _ => panic!(
+            "usage: seed_search STATE FOLDER COUNT TURNS [english|french|japanese [DELIVERED]]"
+        ),
     };
     // Words of a language, and the needle a third of its sessions mention.
     let (words, needle, space): (&[&str], &str, &str) = match language {
@@ -226,6 +237,25 @@ fn main() {
         }
         database.append_logs(id, &records(entries), None).unwrap();
     }
+    // Launched sessions whose results were delivered to the first sessions seeded, so
+    // the sidebar's search has delivered results to tell apart.
+    for n in 0..delivered {
+        let child = store
+            .create_unselected(Provider::Codex, &directory, 1, long + 1 + n)
+            .unwrap()
+            .value;
+        store
+            .set_delivery(
+                child,
+                keystone_core::DeliveryState::Delivered {
+                    message: format!("Result from session {child}, seeded.\n\nSeeded reply."),
+                },
+            )
+            .unwrap();
+    }
     store.flush().unwrap();
-    println!("seeded {} sessions; long session {long}", count + 1);
+    println!(
+        "seeded {} sessions and {delivered} delivered results; long session {long}",
+        count + 1
+    );
 }

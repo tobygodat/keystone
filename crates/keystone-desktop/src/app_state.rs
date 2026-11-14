@@ -249,6 +249,10 @@ pub(crate) struct AppState {
     finished: HashMap<u64, delivery::Outcome>,
     /// Something changed that may let a ready result start its parent's turn.
     deliveries_due: bool,
+    /// The delivered results as the sidebar's search last asked for them, and the
+    /// store revision they were read at.
+    delivered:
+        std::cell::RefCell<Option<(keystone_core::Revision, Arc<delivery::DeliveredResults>)>>,
     /// Set while ready results are being sent, so a send's own pump does not send
     /// them again.
     delivering: bool,
@@ -1859,6 +1863,7 @@ impl AppState {
             finished: delivery::unsaved_results(store.workspace()),
             // Results saved before a restart may be ready for their parents.
             deliveries_due: true,
+            delivered: Default::default(),
             delivering: false,
             unsent: Vec::new(),
             pressing: Default::default(),

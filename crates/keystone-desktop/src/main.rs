@@ -4166,10 +4166,27 @@ impl Render for Keystone {
             .text_size(TextSize::Base.px())
             .line_height(TextSize::Base.line_height())
             .track_focus(&self.focus)
-            // A press anywhere means the user moved on from an Enter pressed mid-scan.
+            // A press anywhere means the user moved on from an Enter pressed mid-scan, and
+            // so does the wheel: scrolling is looking around. Lists take the wheel before
+            // it bubbles here, so it is heard as the window dispatches it.
             .capture_any_mouse_down(
                 cx.listener(|this, _: &MouseDownEvent, _, _| this.messages.forget_open()),
             )
+            .child({
+                let this = cx.weak_entity();
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |_: &gpui::ScrollWheelEvent, phase, _, cx| {
+                            if phase == gpui::DispatchPhase::Capture {
+                                let _ = this.update(cx, |this, _| this.messages.forget_open());
+                            }
+                        })
+                    },
+                )
+                .absolute()
+                .size_0()
+            })
             .key_context(if customizing {
                 "Keystone Customize"
             } else {

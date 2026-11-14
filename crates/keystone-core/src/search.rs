@@ -695,10 +695,41 @@ pub struct Snippet {
     pub marked: Range<usize>,
 }
 
-/// Columns a snippet keeps before its match, a wide character such as a CJK one taking
-/// two. A row shows what fits after them, so the match is in view at the sidebar's
-/// narrowest width.
+/// Columns a snippet keeps before its match, measured per grapheme cluster by
+/// [`columns`]. A row shows what fits after them, so the match's first character is in
+/// view at the sidebar's narrowest width.
 pub const SNIPPET_LEAD: usize = 24;
+
+/// Columns an emoji is counted as. Emoji draw wider than two columns of interface text,
+/// about two and a half, so this leaves slack for the match.
+const EMOJI_COLUMNS: usize = 3;
+
+/// The columns `cluster` takes in a row: its display width, two for a wide character
+/// such as a CJK one, and for an emoji [`EMOJI_COLUMNS`] for each pictograph in it. A
+/// font without a glyph for a sequence, such as a family joined by zero-width joiners
+/// or a flag, draws each of its pictographs.
+fn columns(cluster: &str) -> usize {
+    let emoji = cluster
+        .chars()
+        .any(|c| matches!(c, '\u{FE0F}' | '\u{200D}' | '\u{1F000}'..='\u{1FAFF}'));
+    if !emoji {
+        return unicode_width::UnicodeWidthStr::width(cluster);
+    }
+    let pictographs = cluster
+        .chars()
+        .filter(|c| {
+            // Joiners, selectors and combining marks such as a keycap's are not drawn
+            // on their own.
+            let joins = matches!(c, '\u{200B}'..='\u{200F}' | '\u{20D0}'..='\u{20FF}');
+            !joins
+                && matches!(c, '\u{1F000}'..='\u{1FAFF}' | '\u{2000}'..='\u{2BFF}' | '\u{3000}'..='\u{33FF}')
+                || c.is_ascii_alphanumeric()
+                || matches!(c, '#' | '*' | '\u{A9}' | '\u{AE}')
+        })
+        .count();
+    EMOJI_COLUMNS * pictographs.max(1)
+}
+
 /// Characters a snippet keeps after its match. The row cuts the rest to its width.
 const SNIPPET_TAIL: usize = 160;
 
@@ -710,29 +741,32 @@ pub fn snippet(text: &str, range: Range<usize>) -> Snippet {
     let line_end = text[range.end..]
         .find('\n')
         .map_or(text.len(), |at| range.end + at);
-    let before: Vec<char> = text[line_start..range.start].chars().collect();
-    // The first character kept: the earliest whose columns to the match fit the lead.
-    let mut columns = 0;
+    let before = &text[line_start..range.start];
+    // The first cluster kept: the earliest whose columns to the match fit the lead.
+    let mut columns_kept = 0;
     let mut lead = before.len();
-    while lead > 0 {
-        columns += unicode_width::UnicodeWidthChar::width(before[lead - 1]).unwrap_or(0);
-        if columns > SNIPPET_LEAD {
+    for (at, cluster) in before.grapheme_indices(true).rev() {
+        columns_kept += columns(cluster);
+        if columns_kept > SNIPPET_LEAD {
             break;
         }
-        lead -= 1;
+        lead = at;
     }
     let cut = lead > 0;
     if cut {
         // Start at the next word, unless that leaves nothing before the match.
-        if let Some(space) = before[lead..].iter().position(|c| c.is_whitespace()) {
-            lead += space + 1;
+        if let Some((space, c)) = before[lead..]
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace())
+        {
+            lead += space + c.len_utf8();
         }
     }
     let mut out = String::new();
     if cut {
         out.push('…');
     }
-    push_spaced(&mut out, before[lead..].iter().copied());
+    push_spaced(&mut out, before[lead..].chars());
     let start = out.len();
     push_spaced(&mut out, text[range.clone()].chars());
     let end = out.len();

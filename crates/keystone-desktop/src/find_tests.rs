@@ -650,6 +650,22 @@ fn a_click_after_enter_mid_scan_opens_nothing_old(cx: &mut gpui::TestAppContext)
 }
 
 #[gpui::test]
+fn the_wheel_after_enter_mid_scan_opens_nothing(cx: &mut gpui::TestAppContext) {
+    let (_dir, view, cx) = enter_then_move_on(cx, |cx| {
+        let position = cx.debug_bounds("message-results").unwrap().center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0., -3.)),
+            ..Default::default()
+        });
+    });
+    view.read_with(cx, |v, cx| {
+        assert_eq!(v.selected(cx), Some(2), "the selection is where it was");
+        assert!(v.finds.bars.is_empty());
+    });
+}
+
+#[gpui::test]
 fn escape_after_enter_mid_scan_opens_nothing(cx: &mut gpui::TestAppContext) {
     let (_dir, view, cx) = enter_then_move_on(cx, |cx| cx.simulate_keystrokes("escape"));
     view.read_with(cx, |v, cx| {

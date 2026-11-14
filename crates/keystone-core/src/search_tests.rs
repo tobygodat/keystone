@@ -1,4 +1,5 @@
 use super::{Query, SNIPPET_LEAD, snippet};
+use unicode_segmentation::UnicodeSegmentation;
 
 fn found<'a>(query: &str, text: &'a str) -> Vec<&'a str> {
     Query::new(query)
@@ -114,6 +115,31 @@ fn a_snippet_s_lead_counts_wide_characters_twice() {
     assert!(lead.starts_with('…'));
     assert_eq!(lead.chars().count(), 1 + SNIPPET_LEAD / 2, "{lead}");
     assert_eq!(&line.text[line.marked], "検索");
+}
+
+#[test]
+fn an_emoji_lead_leaves_the_match_in_view() {
+    // A heart is a text character with an emoji selector; a smiley is an emoji itself.
+    // Each draws as one emoji, counted as three columns. A family joined by zero-width
+    // joiners counts each of its three people, as a font without its glyph draws them.
+    for (lead, kept) in [
+        ("❤\u{FE0F}".repeat(30), 8),
+        ("🙂".repeat(20), 8),
+        ("👩\u{200D}👧\u{200D}👦".repeat(10), 2),
+        ("1\u{FE0F}\u{20E3}".repeat(20), 8),
+    ] {
+        let text = format!("{lead}検索 here");
+        let range = Query::new("検索").unwrap().find(&text)[0].clone();
+        let line = snippet(&text, range);
+        let before = &line.text[..line.marked.start];
+        assert!(before.starts_with('…'), "{before}");
+        assert_eq!(
+            before['…'.len_utf8()..].graphemes(true).count(),
+            kept,
+            "{before}"
+        );
+        assert_eq!(&line.text[line.marked], "検索");
+    }
 }
 
 #[test]

@@ -1159,3 +1159,112 @@ fn a_result_whose_parent_is_handed_off_while_it_saves_goes_to_the_continuation(
     });
     state.update(cx, |state, cx| state.teardown(cx));
 }
+
+/// A workspace of `sessions` sessions, every tenth continuing the one before it through a
+/// handoff, and 20 launched sessions whose results were delivered to sessions 1 to 20.
+fn delivered_workspace(dir: &Path, sessions: u64) -> Store {
+    let mut store = Store::open(dir.join("workspace.json")).unwrap();
+    let directory = WorkingDirectory::new(dir).unwrap();
+    let mut last = 0;
+    for n in 1..=sessions {
+        last = if n % 10 == 0 {
+            store
+                .hand_off(
+                    last,
+                    Provider::Claude,
+                    String::new(),
+                    n,
+                    WindowId::FIRST,
+                    None,
+                )
+                .unwrap()
+                .value
+        } else {
+            store.create(Provider::Codex, &directory, n).unwrap().value
+        };
+    }
+    for parent in 1..=20 {
+        let child = store
+            .create_unselected(Provider::Codex, &directory, sessions + parent, parent)
+            .unwrap()
+            .value;
+        let text = message(child, "Child", &Outcome::Finished, Some("Found it."));
+        store
+            .set_delivery(child, DeliveryState::Delivered { message: text })
+            .unwrap();
+    }
+    store
+}
+
+#[gpui::test]
+fn the_search_snapshot_tells_delivered_results_as_the_transcript_does(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = cx.new(|cx| AppState::new(delivered_workspace(dir.path(), 300), cx));
+    state.read_with(cx, |state, _| {
+        let results = state.delivered_results();
+        let deliveries = state.store.workspace().deliveries().to_vec();
+        let mut found = 0;
+        for session in state.store.workspace().sessions() {
+            for delivery in &deliveries {
+                let DeliveryState::Delivered { message } = delivery.state() else {
+                    continue;
+                };
+                let wanted = state.result_source(session.id(), message);
+                assert_eq!(results.source(session.id(), message), wanted);
+                found += usize::from(wanted.is_some());
+            }
+        }
+        assert!(found > 20, "handoffs continue some parents: {found}");
+    });
+    // A delivery made since is in the next snapshot.
+    let text = state.update(cx, |state, _| {
+        let directory = WorkingDirectory::new(dir.path()).unwrap();
+        let child = state
+            .store
+            .create_unselected(Provider::Codex, &directory, 999, 30)
+            .unwrap()
+            .value;
+        let text = message(child, "Late", &Outcome::Finished, Some("Late."));
+        assert_eq!(state.delivered_results().source(30, &text), None);
+        state
+            .store
+            .set_delivery(
+                child,
+                DeliveryState::Delivered {
+                    message: text.clone(),
+                },
+            )
+            .unwrap();
+        text
+    });
+    state.read_with(cx, |state, _| {
+        assert!(state.delivered_results().source(30, &text).is_some());
+    });
+}
+
+/// What building the delivered-results snapshot costs a keystroke in the sidebar's
+/// search, with 2,400 sessions and 20 delivered results: built afresh, and asked for
+/// again with nothing changed.
+#[gpui::test]
+#[ignore]
+fn bench_delivered_results_snapshot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = cx.new(|cx| AppState::new(delivered_workspace(dir.path(), 2400), cx));
+    let mut samples = Vec::new();
+    for _ in 0..6 {
+        state.read_with(cx, |state, _| {
+            let start = std::time::Instant::now();
+            let results = state.delivered_results();
+            samples.push(start.elapsed().as_secs_f64() * 1000.);
+            drop(results);
+        });
+    }
+    let first = samples.remove(0);
+    samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "PERF delivered_results_first_ms={first:.3} again_ms={:.3} range {:.3}..{:.3}",
+        samples[1], samples[0], samples[3]
+    );
+}

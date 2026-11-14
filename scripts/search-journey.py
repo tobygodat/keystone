@@ -117,7 +117,7 @@ class Search:
             e['id'].startswith('machine-state-') for e in j.elements()), 30)
         j.settle()
         j.keys('Escape')
-        self.palette('New Claude session on a machine')
+        self.palette('New session on a machine')
         j.keys('Return')
         j.settle()
         j.type(str(folder))
