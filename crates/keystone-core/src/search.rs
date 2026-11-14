@@ -709,9 +709,18 @@ const EMOJI_COLUMNS: usize = 3;
 /// font without a glyph for a sequence, such as a family joined by zero-width joiners
 /// or a flag, draws each of its pictographs.
 fn columns(cluster: &str) -> usize {
-    let emoji = cluster
-        .chars()
-        .any(|c| matches!(c, '\u{FE0F}' | '\u{200D}' | '\u{1F000}'..='\u{1FAFF}'));
+    // Symbols such as ✅, ✨, ⭐ and ☺ are emoji too, drawn from an emoji font even
+    // without a selector. Counting a plain symbol such as ★ as one only shortens the lead.
+    let emoji = cluster.chars().any(|c| {
+        matches!(
+            c,
+            '\u{FE0F}'
+                | '\u{200D}'
+                | '\u{2300}'..='\u{27BF}'
+                | '\u{2B00}'..='\u{2BFF}'
+                | '\u{1F000}'..='\u{1FAFF}'
+        )
+    });
     if !emoji {
         return unicode_width::UnicodeWidthStr::width(cluster);
     }

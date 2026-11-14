@@ -12,7 +12,7 @@ The loops run inside `aho-corasick` and `memchr`. Workspace crates build unoptim
 
 Building a text's searched form cluster by cluster through normalization costs three normalizations and several allocations per cluster, which made non-ASCII search 3 to 18 times slower than lowercasing. `Folded::new` builds the same bytes from a per-character table instead: each character's form, whether it always ends its grapheme cluster when its neighbour does too, and whether its form and its decomposed fold are itself. Runs of ASCII fold in bulk, such characters one at a time, and only clusters holding marks, joiners or changing characters go to the segmenter and the full computation. A test checks the table's form against the cluster-by-cluster one on 20,000 generated texts. The tables are built once, on the first query, on the background task: about 40 ms in a release build and 230 ms in a debug one.
 
-`search::snippet` cuts the line around a match to one row: at most 24 columns before it, measured per grapheme cluster: a wide character such as a CJK one counts two, and an emoji, which draws wider than that, three for each pictograph in it, since a font without a glyph for a sequence such as a family draws each person. It is cut at a word, runs of whitespace as one space.
+`search::snippet` cuts the line around a match to one row: at most 24 columns before it, measured per grapheme cluster: a wide character such as a CJK one counts two, and an emoji, which draws wider than that, three for each pictograph in it (symbols such as ✅, ✨ and ☺ count as emoji, with or without a selector), since a font without a glyph for a sequence such as a family draws each person. It is cut at a word, runs of whitespace as one space.
 
 ## Find in a session
 

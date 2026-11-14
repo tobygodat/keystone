@@ -127,6 +127,11 @@ fn an_emoji_lead_leaves_the_match_in_view() {
         ("🙂".repeat(20), 8),
         ("👩\u{200D}👧\u{200D}👦".repeat(10), 2),
         ("1\u{FE0F}\u{20E3}".repeat(20), 8),
+        // Symbols drawn as emoji without a selector.
+        ("✅".repeat(30), 8),
+        ("✨".repeat(30), 8),
+        ("⭐".repeat(30), 8),
+        ("☺".repeat(40), 8),
     ] {
         let text = format!("{lead}検索 here");
         let range = Query::new("検索").unwrap().find(&text)[0].clone();
