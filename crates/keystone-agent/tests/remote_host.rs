@@ -3,7 +3,7 @@
 //! scripted Claude as the provider. Each test has its own host folder. A few tests of
 //! the link alone use a shell script as the host.
 
-use keystone_agent::remote::frame::{self, Call, Frame, Op, Outcome, Routed, Welcome};
+use keystone_agent::remote::frame::{self, Call, Frame, Login, Op, Outcome, Routed, Welcome};
 use keystone_agent::remote::{Link, Place, RemoteConnection, Status};
 use keystone_agent::{ApprovalState, Command, Connection, Event, ItemKind, TurnStatus};
 use keystone_core::{ModelChoice, Provider};
@@ -161,12 +161,24 @@ impl Machine {
     }
 
     fn client(&self, id: &str) -> Client {
-        let link = Link::new(self.argv(), id.into());
+        self.client_on(id, self.argv(), Provider::Claude, None)
+    }
+
+    /// A client whose transport is `argv`, with the connection for `provider` and
+    /// `account` on it.
+    fn client_on(
+        &self,
+        id: &str,
+        argv: Vec<OsString>,
+        provider: Provider,
+        account: Option<(String, Login)>,
+    ) -> Client {
+        let link = Link::new(argv, id.into());
         let (tx, wake) = channel();
         let conn = RemoteConnection::new(
             &link,
-            Provider::Claude,
-            None,
+            provider,
+            account,
             Arc::new(move || {
                 let _ = tx.send(());
             }),
@@ -493,6 +505,7 @@ fn send_call_to(id: u64, session: u64, dir: &Path, text: &str) -> Frame {
         id,
         provider: Provider::Claude,
         account: None,
+        login: None,
         op: Op::Send {
             session,
             cwd: dir.to_string_lossy().into_owned(),
@@ -500,6 +513,7 @@ fn send_call_to(id: u64, session: u64, dir: &Path, text: &str) -> Frame {
             choice: ModelChoice::default(),
             approval: ApprovalState::default(),
             text: text.into(),
+            images: Vec::new(),
         },
     })
 }
@@ -1088,6 +1102,7 @@ fn a_session_whose_last_run_wont_stop_is_held_and_says_why() {
             id,
             provider: Provider::Claude,
             account: None,
+            login: None,
             op: Op::Command(command),
         }));
         let frames =
@@ -1989,8 +2004,20 @@ fn a_call_the_host_refuses_shows_in_its_session_later() {
     let dir = folder(&[]);
     let mut client = machine.client("app-1");
     client.connected();
-    let (codex, _wake) = connection(&client.link, Provider::Codex);
-    let sent = codex.send(
+    let (tx, _wake) = channel();
+    let refused = Login {
+        label: "Relative".into(),
+        home: "claude-relative".into(),
+    };
+    let stranger = RemoteConnection::new(
+        &client.link,
+        Provider::Claude,
+        Some(("claude-relative".into(), refused)),
+        Arc::new(move || {
+            let _ = tx.send(());
+        }),
+    );
+    let sent = stranger.send(
         SESSION,
         &dir.path().to_string_lossy(),
         None,
@@ -2000,9 +2027,9 @@ fn a_call_the_host_refuses_shows_in_its_session_later() {
         Vec::new(),
     );
     assert_eq!(sent, Ok(()), "send returns once the call is queued");
-    let events = drain_all(&client.link, &codex, 1);
+    let events = drain_all(&client.link, &stranger, 1);
     assert!(
-        matches!(&events[..], [(SESSION, Event::Failed { message })] if message.contains("Codex")),
+        matches!(&events[..], [(SESSION, Event::Failed { message })] if message.contains("needs a full path")),
         "{events:?}"
     );
 }
@@ -2792,4 +2819,273 @@ fn a_refusal_whose_stderr_stays_open_still_says_why_at_once() {
         unreachable!()
     };
     assert!(reason.contains("speaks protocol 99"), "{reason}");
+}
+
+/// The transport `argv` with every line the app sends copied to `copy` on the way.
+fn teed(argv: &[OsString], copy: &Path) -> Vec<OsString> {
+    let quoted: Vec<String> = argv
+        .iter()
+        .map(|arg| format!("'{}'", arg.to_string_lossy().replace('\'', "'\\''")))
+        .collect();
+    vec![
+        "sh".into(),
+        "-c".into(),
+        format!("tee -a '{}' | {}", copy.display(), quoted.join(" ")).into(),
+    ]
+}
+
+/// A Codex session runs on the host like a Claude one: its turn streams, and a link
+/// dropped mid-turn loses and repeats nothing.
+#[test]
+fn a_codex_turn_runs_on_the_host_and_survives_a_dropped_link() {
+    let machine = Machine::new().with("KEYSTONE_FAKE_CODEX_DELAY_MS", "15");
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = machine.client_on("app-1", machine.argv(), Provider::Codex, None);
+    client.connected();
+    client.send(dir.path(), "hello from far away").unwrap();
+    client.wait("the reply to stream", |events, _| {
+        count(events, |e| matches!(e, Event::ItemDelta { .. })) >= 3
+    });
+    let daemon = machine.daemon().expect("a daemon runs");
+    assert!(
+        !children(daemon, "keystone-host reap").is_empty(),
+        "the app-server has a watcher"
+    );
+    client.kill_transport();
+    assert_eq!(client.turn_ended(), TurnStatus::Completed);
+    assert_whole_turn(&client.events);
+    let reply = client
+        .events
+        .iter()
+        .find_map(|(_, event)| match event {
+            Event::ItemCompleted(item) if item.kind == ItemKind::AgentMessage => {
+                Some(item.text.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        reply.starts_with("Scripted Codex reply") && reply.contains("hello from far away"),
+        "{reply}"
+    );
+}
+
+/// Codex's history and import calls run on the host's app-server, and their answers
+/// come back through the journal like any event.
+#[test]
+fn codex_history_and_import_calls_answer_through_the_host() {
+    let machine = Machine::new();
+    let threads = machine.dir.path().join(".codex/keystone-fake-threads");
+    std::fs::create_dir_all(&threads).unwrap();
+    let stored = serde_json::json!({
+        "thread": {"name": "Far thread", "preview": "ask", "cwd": "/srv/app",
+            "createdAt": 1_700_000_000, "updatedAt": 1_700_000_000},
+        "turns": [{"id": "turn-1", "status": "completed", "itemsView": "full", "items": [
+            {"type": "userMessage", "id": "u1", "content": [{"type": "text", "text": "ask"}]},
+            {"type": "agentMessage", "id": "a1", "text": "answer"}
+        ]}]
+    });
+    std::fs::write(threads.join("thread-1.json"), stored.to_string()).unwrap();
+    let mut client = machine.client_on("app-1", machine.argv(), Provider::Codex, None);
+    client.connected();
+    client.conn.list_threads("/srv/app", 9);
+    client.conn.read_import("thread-1".into(), 10);
+    client.conn.read_history(SESSION, "thread-1".into(), 11);
+    client.wait("three answers", |events, _| {
+        count(events, |e| {
+            matches!(e, Event::ThreadsListed { .. } | Event::HistoryRead { .. })
+        }) == 3
+    });
+    let mut listed = None;
+    let mut read = Vec::new();
+    for (session, event) in &client.events {
+        match event {
+            Event::ThreadsListed { ticket, result } => {
+                assert_eq!((*session, *ticket), (0, 9));
+                listed = Some(result.clone().unwrap());
+            }
+            Event::HistoryRead { ticket, result } => {
+                let snapshot = result.as_ref().unwrap();
+                read.push((
+                    *session,
+                    *ticket,
+                    format!("{snapshot:?}").contains("answer"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let listed = listed.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "thread-1");
+    read.sort();
+    assert_eq!(read, [(0, 10, true), (SESSION, 11, true)]);
+}
+
+/// A login on the machine runs its CLI with its own config home there, which the
+/// host makes when it is missing, and one that overlaps the machine's default home is
+/// refused before anything runs.
+#[test]
+fn an_account_on_the_machine_runs_with_its_own_home_there() {
+    let receipt = tempfile::tempdir().unwrap();
+    let env = receipt.path().join("env");
+    let machine = Machine::new().with("KEYSTONE_FAKE_ENV_RECEIPT", &env.to_string_lossy());
+    let dir = folder(&[]);
+    let home = machine.dir.path().join("accounts/work-claude");
+    let login = Login {
+        label: "Work".into(),
+        home: home.to_string_lossy().into_owned(),
+    };
+    let mut client = machine.client_on(
+        "app-1",
+        machine.argv(),
+        Provider::Claude,
+        Some(("claude-work".into(), login)),
+    );
+    client.connected();
+    client.send(dir.path(), "hi").unwrap();
+    assert_eq!(client.turn_ended(), TurnStatus::Completed);
+    assert!(home.is_dir(), "the host made the account's home");
+    let receipts = std::fs::read_to_string(&env).unwrap();
+    // The host's own version check in its welcome runs as the default login.
+    let seen: Vec<serde_json::Value> = receipts
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|process| process["argv"] != serde_json::json!(["--version"]))
+        .collect();
+    assert!(!seen.is_empty());
+    for process in &seen {
+        assert_eq!(
+            process["CLAUDE_CONFIG_DIR"].as_str(),
+            Some(home.to_str().unwrap()),
+            "{process}"
+        );
+    }
+
+    let codex_home = machine.dir.path().join("accounts/work-codex");
+    let mut codex = machine.client_on(
+        "app-2",
+        machine.argv(),
+        Provider::Codex,
+        Some((
+            "codex-work".into(),
+            Login {
+                label: "Work".into(),
+                home: codex_home.to_string_lossy().into_owned(),
+            },
+        )),
+    );
+    codex.connected();
+    codex.send(dir.path(), "hi").unwrap();
+    assert_eq!(codex.turn_ended(), TurnStatus::Completed);
+    let receipts = std::fs::read_to_string(&env).unwrap();
+    assert!(
+        receipts.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["CODEX_HOME"].as_str()
+                == codex_home.to_str()
+        }),
+        "{receipts}"
+    );
+
+    let default = machine.dir.path().join(".claude/inside");
+    let mut overlapping = machine.client_on(
+        "app-3",
+        machine.argv(),
+        Provider::Claude,
+        Some((
+            "claude-mine".into(),
+            Login {
+                label: "Mine".into(),
+                home: default.to_string_lossy().into_owned(),
+            },
+        )),
+    );
+    overlapping.connected();
+    overlapping.send(dir.path(), "hi").unwrap();
+    overlapping.wait("the refusal", |events, _| {
+        events.iter().any(|(_, event)| {
+            matches!(event, Event::Failed { message } if message.contains("overlaps this machine's default home"))
+        })
+    });
+    assert!(!default.exists(), "nothing was made for a refused account");
+}
+
+/// An attached image goes to the host by its hash: its bytes once, into the host's
+/// cache, and a later message that carries it again names it without sending it.
+/// The provider reads the very bytes.
+#[test]
+fn an_image_is_uploaded_once_and_sent_by_its_hash() {
+    let receipts = tempfile::tempdir().unwrap();
+    let images = receipts.path().join("images");
+    let sent = receipts.path().join("sent");
+    let machine = Machine::new().with("KEYSTONE_FAKE_IMAGE_RECEIPT", &images.to_string_lossy());
+    let dir = folder(&[]);
+    let png = receipts.path().join("picture.png");
+    // More than one part, so the host joins them.
+    let bytes: Vec<u8> = (0..frame::CHUNK + 1000).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&png, &bytes).unwrap();
+    let hash = {
+        use sha2::Digest;
+        sha2::Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let mut client = machine.client_on(
+        "app-1",
+        teed(&machine.argv(), &sent),
+        Provider::Claude,
+        None,
+    );
+    client.connected();
+    let image = || keystone_agent::Image {
+        path: png.clone(),
+        media_type: "image/png".into(),
+        base64: None,
+    };
+    for text in ["first", "again"] {
+        client
+            .conn
+            .send(
+                SESSION,
+                &dir.path().to_string_lossy(),
+                None,
+                &ModelChoice::default(),
+                ApprovalState::default(),
+                text.into(),
+                vec![image()],
+            )
+            .unwrap();
+        client.turn_ended();
+        client.events.clear();
+    }
+    let kept = machine.dir.path().join(format!("attachments/{hash}.png"));
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        bytes,
+        "the cache holds the bytes"
+    );
+    let lines = std::fs::read_to_string(&sent).unwrap();
+    let parts = lines
+        .lines()
+        .filter(|line| line.contains(r#""op":"put_attachment""#))
+        .count();
+    assert_eq!(parts, 2, "one upload, in two parts");
+    let sends: Vec<&str> = lines
+        .lines()
+        .filter(|line| line.contains(r#""op":"send""#))
+        .collect();
+    assert_eq!(sends.len(), 2);
+    for send in sends {
+        assert!(
+            send.contains(&hash) && send.len() < 4096,
+            "named by hash: {send}"
+        );
+    }
+    let received = std::fs::read_to_string(&images).unwrap();
+    assert_eq!(
+        received.lines().filter(|line| line.contains(&hash)).count(),
+        2,
+        "Claude read the same bytes both times: {received}"
+    );
 }

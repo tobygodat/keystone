@@ -871,6 +871,7 @@ impl Keystone {
                 provider,
                 account: None,
                 accounts: &[],
+                machine: None,
                 model: None,
                 effort: None,
                 speed: None,

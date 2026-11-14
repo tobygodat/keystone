@@ -758,6 +758,7 @@ impl Keystone {
             s.provider(),
             s.account(),
             workspace.accounts(),
+            s.machine(),
         ));
         let query = self.search.read(cx).value().to_lowercase();
         format!(

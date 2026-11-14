@@ -8,7 +8,7 @@ use gpui::{
     SharedString, Size, Stateful, Styled, Window, div, point, prelude::*, px,
 };
 use keystone_agent::{Catalog, Commands, ModelInfo};
-use keystone_core::{Account, AccountId, ModelChoice, Provider, WorkingDirectory};
+use keystone_core::{Account, AccountId, MachineId, ModelChoice, Provider, WorkingDirectory};
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -201,6 +201,9 @@ pub struct Selection<'a> {
     pub account: Option<&'a AccountId>,
     /// Every account the user added, of either provider.
     pub accounts: &'a [Account],
+    /// The machine the session runs on and its label, `None` for this one. Only that
+    /// machine's logins are offered, each named with the machine.
+    pub machine: Option<(&'a MachineId, &'a str)>,
     /// The provider-native model the session asked for; `None` is the provider's default.
     pub model: Option<&'a str>,
     /// The effort and speed the session asked for, from the model's catalog entry.
@@ -501,14 +504,19 @@ pub fn provider_icon_color(provider: Provider, cx: &App) -> Color {
     }
 }
 
-/// How a session on `provider` names its account: `None` while the user has added no
-/// account for that provider, so a single account is never mentioned.
+/// How a session on `provider` and `machine` names its account: `None` while the user
+/// has added no account for that provider there, so a single account is never
+/// mentioned.
 pub fn account_label(
     provider: Provider,
     account: Option<&AccountId>,
     accounts: &[Account],
+    machine: Option<&MachineId>,
 ) -> Option<String> {
-    if !accounts.iter().any(|a| a.provider() == provider) {
+    if !accounts
+        .iter()
+        .any(|a| a.provider() == provider && a.machine() == machine)
+    {
         return None;
     }
     Some(match account {
@@ -520,12 +528,16 @@ pub fn account_label(
     })
 }
 
-/// `provider`'s accounts after its default, or none when the user added none, so a
-/// single-account provider shows no account at all.
-fn accounts_of(provider: Provider, accounts: &[Account]) -> Vec<(Option<&AccountId>, &str)> {
+/// `provider`'s accounts on `machine` after its default, or none when the user added
+/// none there, so a single-account provider shows no account at all.
+fn accounts_of<'a>(
+    provider: Provider,
+    accounts: &'a [Account],
+    machine: Option<&MachineId>,
+) -> Vec<(Option<&'a AccountId>, &'a str)> {
     let added: Vec<_> = accounts
         .iter()
-        .filter(|account| account.provider() == provider)
+        .filter(|account| account.provider() == provider && account.machine() == machine)
         .map(|account| (Some(account.id()), account.label()))
         .collect();
     if added.is_empty() {
@@ -550,6 +562,7 @@ pub fn render(
         provider,
         account,
         accounts,
+        machine,
         started,
         ..
     } = selection;
@@ -570,7 +583,7 @@ pub fn render(
                         // The provider and account are fixed once the session sent.
                         .when(!started, |d| {
                             d.child(provider_column(
-                                provider, account, accounts, &on, viewport, cx,
+                                provider, account, accounts, machine, &on, viewport, cx,
                             ))
                             .child(separator())
                         })
@@ -615,8 +628,13 @@ pub fn trigger(selection: Selection, open: bool, cx: &App) -> (Stateful<Div>, St
         ..
     } = selection;
     let colors = cx.theme().colors;
-    let name = match account_label(provider, account, accounts) {
-        Some(label) => format!("{} · {label}", provider_name(provider)),
+    let (machine, machine_label) = selection.machine.unzip();
+    let name = match account_label(provider, account, accounts, machine) {
+        Some(label) => format!(
+            "{} · {}",
+            provider_name(provider),
+            crate::settings_accounts::account_title(&label, machine_label)
+        ),
         None => provider_name(provider).to_owned(),
     };
     let requested = requested_model(model, default_model, choices);
@@ -691,11 +709,19 @@ fn provider_column(
     current: Provider,
     account: Option<&AccountId>,
     accounts: &[Account],
+    machine: Option<(&MachineId, &str)>,
     on: &Handlers,
     viewport: Size<Pixels>,
     cx: &App,
 ) -> impl IntoElement {
-    v_flex().flex_none().w(px(152.)).child(
+    let (machine, machine_label) = machine.unzip();
+    // Room for "Default on desk", since each login there names its machine.
+    let width = if machine.is_some() {
+        px(204.)
+    } else {
+        px(152.)
+    };
+    v_flex().flex_none().w(width).child(
         v_flex()
             .id("provider-list")
             .debug_selector(|| "provider-list".into())
@@ -720,8 +746,11 @@ fn provider_column(
                     cx.stop_propagation();
                     choose(&provider, window, cx)
                 });
-                let rows = accounts_of(provider, accounts).into_iter().enumerate().map(
-                    |(at, (id, label))| {
+                let rows = accounts_of(provider, accounts, machine)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(at, (id, label))| {
+                        let label = crate::settings_accounts::account_title(label, machine_label);
                         let choose = on.choose_account.clone();
                         let chosen = (provider, id.cloned());
                         let selector = match id {
@@ -733,7 +762,7 @@ fn provider_column(
                                 ("account", provider as usize * 1000 + at),
                                 selector,
                                 None,
-                                label.to_owned(),
+                                label,
                                 provider == current && id == account,
                                 false,
                                 cx,
@@ -743,8 +772,7 @@ fn provider_column(
                                 choose(&chosen, window, cx)
                             }),
                         )
-                    },
-                );
+                    });
                 v_flex().child(row).children(rows)
             })),
     )
@@ -1115,6 +1143,7 @@ mod tests {
             provider,
             account: None,
             accounts: &[],
+            machine: None,
             model: Some(from),
             effort: Some(effort),
             speed: Some(speed),
@@ -1197,6 +1226,7 @@ mod tests {
                 provider: Provider::Claude,
                 account: None,
                 accounts: &[],
+                machine: None,
                 model: Some(model),
                 effort: Some(effort),
                 speed: Some(speed),

@@ -126,6 +126,16 @@ pub fn sign_in_command(provider: Provider, home: Option<&Path>) -> String {
     }
 }
 
+/// The command a user runs in a terminal on another machine to sign in the login
+/// whose home there is `home`, which names nothing here.
+pub fn remote_sign_in_command(provider: Provider, home: &keystone_core::RemoteFolder) -> String {
+    let (variable, command) = match provider {
+        Provider::Claude => ("CLAUDE_CONFIG_DIR", "claude auth login"),
+        Provider::Codex => ("CODEX_HOME", "codex login"),
+    };
+    format!("{variable}={} {command}", shell_quote(home.wire()))
+}
+
 /// The sign-in command for the default account, naming its home when Keystone
 /// inherited `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, so a fresh terminal signs in the
 /// same folder.

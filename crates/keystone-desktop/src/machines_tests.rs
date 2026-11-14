@@ -279,8 +279,9 @@ fn resolved_under(folder: &Path) -> Vec<std::path::PathBuf> {
 
 /// A session on another machine names paths there. Each path here holds a different
 /// file, which must never be shown, opened or read as the agent's: no row draws a
-/// thumbnail or video card, clicking every row opens nothing, attaching and mentioning
-/// refuse before anything is read, and no transcript path resolves to a file here. The
+/// thumbnail or video card, clicking every row opens nothing, mentioning and attaching
+/// anything but an image picked here by its full path refuse before anything is read,
+/// and no transcript path resolves to a file here. The
 /// same rows on a session working in that folder here still preview.
 #[gpui::test]
 fn no_row_of_a_remote_session_reads_this_machines_files(cx: &mut TestAppContext) {
@@ -359,21 +360,57 @@ fn no_row_of_a_remote_session_reads_this_machines_files(cx: &mut TestAppContext)
     });
     assert_eq!(media(cx), Vec::<String>::new());
 
+    // A path the transcript could name is no file of the session's, so a relative
+    // one is refused unread, and a file that isn't an image isn't mentioned there.
+    view.update_in(cx, |view, window, cx| {
+        view.attach_paths(
+            vec!["shot.png".into(), folder.join("notes.txt")],
+            window,
+            cx,
+        );
+    });
+    settle(cx);
+    view.read_with(cx, |view, cx| {
+        let notice = view
+            .attach
+            .notice
+            .as_ref()
+            .map(|(_, n)| n.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("shot.png isn't a full path on this machine")
+                && notice.contains("notes.txt isn't an image. Only images go to sessions on desk"),
+            "{notice}"
+        );
+        assert!(view.draft_attachments(cx).is_empty());
+        let draft = view
+            .state
+            .read(cx)
+            .session(remote)
+            .unwrap()
+            .draft()
+            .to_owned();
+        assert!(!draft.contains("notes.txt"), "nothing mentioned: {draft}");
+    });
+    assert_eq!(resolved_under(&folder), Vec::<std::path::PathBuf>::new());
+    // An image the user picks here by its full path goes by its bytes.
     view.update_in(cx, |view, window, cx| {
         view.attach_paths(vec![folder.join("shot.png")], window, cx);
     });
     settle(cx);
     view.read_with(cx, |view, cx| {
-        assert!(
-            view.attach
-                .notice
-                .as_ref()
-                .is_some_and(|(_, notice)| notice.contains("can't be attached to sessions on desk")),
-            "attaching refuses before reading: {:?}",
+        assert_eq!(
+            view.draft_attachments(cx).len(),
+            1,
+            "{:?}",
             view.attach.notice
         );
-        assert!(view.draft_attachments(cx).is_empty());
     });
+    let sha = view.read_with(cx, |view, cx| view.draft_attachments(cx)[0].sha256.clone());
+    view.update_in(cx, |view, window, cx| {
+        view.remove_attachment(remote, &sha, window, cx)
+    });
+    settle(cx);
 
     view.update_in(cx, |view, window, cx| view.focus_composer(window, cx));
     cx.simulate_input("@not");
@@ -526,4 +563,91 @@ fn the_device_panel_says_it_isnt_available_for_a_session_on_another_machine(
         refused.as_deref().is_some_and(|why| why.contains("desk")),
         "a device tool refuses the caller by its machine: {refused:?}"
     );
+}
+
+fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} rendered"));
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+}
+
+/// A login on another machine is offered only to that machine's sessions, and names
+/// which machine, so the choice reads as one login in one place. A session here never
+/// sees it, and it never counts as an account of this machine's.
+#[gpui::test]
+fn a_login_on_a_machine_is_offered_only_to_that_machines_sessions(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().canonicalize().unwrap().join("app");
+    std::fs::create_dir(&folder).unwrap();
+    let (view, cx) = remote_window_in(
+        &dir.path().join("workspace.json"),
+        dir.path(),
+        folder.to_str().unwrap(),
+        true,
+        cx,
+    );
+    let (local, remote) = (1, 2);
+    let work = view.update(cx, |view, cx| {
+        view.state.update(cx, |state, cx| {
+            let desk = state.store().workspace().machines()[0].id().clone();
+            state
+                .add_remote_account(
+                    keystone_core::Provider::Claude,
+                    "Work",
+                    "/home/dev/.claude-work",
+                    &desk,
+                    cx,
+                )
+                .unwrap()
+                .value
+        })
+    });
+    click(cx, "model-selector");
+    assert!(shown(cx, "account-claude-default"));
+    assert!(shown(cx, "account-claude-work"));
+    click(cx, "account-claude-work");
+    view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        assert_eq!(state.session(remote).unwrap().account(), Some(&work));
+        let selection = state.model_selection(remote, keystone_core::Provider::Claude);
+        let (trigger, tooltip) = crate::model_selector::trigger(selection, false, cx);
+        drop(trigger);
+        assert!(
+            tooltip.starts_with("Claude Code · Work on desk"),
+            "{tooltip}"
+        );
+    });
+
+    view.update(cx, |view, cx| view.select(local, cx));
+    cx.run_until_parked();
+    click(cx, "model-selector");
+    assert!(
+        !shown(cx, "account-claude-default") && !shown(cx, "account-claude-work"),
+        "a session here has no account but its default"
+    );
+    view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        let refused = state
+            .store()
+            .workspace()
+            .account(&work)
+            .map(|account| account.home());
+        assert_eq!(refused, Some(None), "the login's home has no path here");
+    });
+    let wrong = view.update(cx, |view, cx| {
+        view.state.update(cx, |state, cx| {
+            state
+                .set_provider_account(
+                    local,
+                    keystone_core::Provider::Claude,
+                    Some(work.clone()),
+                    cx,
+                )
+                .unwrap_err()
+                .to_string()
+        })
+    });
+    assert!(wrong.contains("another machine"), "{wrong}");
 }

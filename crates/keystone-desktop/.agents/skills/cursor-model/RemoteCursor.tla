@@ -32,7 +32,7 @@ CONSTANTS
     Mutation    \* a deliberate break of the code, or "none"
 
 Mutations == {"none", "ack-on-drain", "no-skip", "cursor-apart", "cross-journal",
-              "no-rotate", "lossy-crash"}
+              "no-rotate", "lossy-crash", "late-route"}
 ASSUME Mutation \in Mutations
 
 Sessions == {"a", "b"}
@@ -123,8 +123,14 @@ Placed == {i \in DOMAIN inbox : inbox[i].placed}
 (* The acknowledgement the link sends (link.rs `State::ack`): everything     *)
 (* received, short of the first event still undrained or drained and not   *)
 (* reported saved. Numbers in `ljournal`.                                   *)
+(* An inbox counts only while its route's connection is registered (`ack`   *)
+(* skips a route with no wake). "late-route" leaves session b's route        *)
+(* unregistered until each event is drained, as an app that made a route's  *)
+(* connection only when it next sent, rather than when it made the link,    *)
+(* would at a launch that replays that route's turn.                        *)
 AckValue ==
-    LET pending == {inbox[i].e[3] : i \in Placed} \cup unsaved
+    LET counted == {i \in Placed : Mutation /= "late-route" \/ of[Slot(inbox[i].e)] /= "b"}
+        pending == {inbox[i].e[3] : i \in counted} \cup unsaved
     IN IF pending = {} THEN received ELSE
        IF received < Min(pending) - 1 THEN received ELSE Min(pending) - 1
 
@@ -163,26 +169,31 @@ Receive ==
                    ljournal, acks, sentAck, unsaved, savedMem, queue, late, reports,
                    log, cursor, kills, drops, resets, era, born, rewinds, fresh, crashes, sentTo>>
 
-(* One pump: the connection hands over its inbox in order                    *)
+(* One connection drains: it hands over its own route's events in order     *)
 (* (connection.rs `RemoteConnection::drain_placed`, link.rs `Shared::drain`), *)
 (* each event is applied and its session committed with its place, if it   *)
 (* still has one (app_state.rs `pump`, `receive_placed`, `commit`), which    *)
 (* queues the rows and the place on the log writer (log.rs                  *)
-(* `Logs::append_through`).                                                 *)
-Drain ==
-    /\ up /\ inbox /= <<>>
-    /\ queue' = [s \in Sessions |->
-                  LET mine == SelectSeq(inbox, LAMBDA x : of[Slot(x.e)] = s)
-                      withRows == SelectSeq(mine, LAMBDA x : row[Slot(x.e)])
-                      rows == [i \in 1..Len(withRows) |-> withRows[i].e]
-                      placed == SelectSeq(mine, LAMBDA x : x.placed)
-                  IN [rows |-> queue[s].rows \o rows,
-                      through |-> IF placed = <<>> THEN queue[s].through
-                                  ELSE Slot(placed[Len(placed)].e)]]
-    /\ inbox' = <<>>
-    \* "ack-on-drain": the link acknowledges what it handed over, as before TOB-319.
-    /\ unsaved' = IF Mutation = "ack-on-drain" THEN unsaved
-                  ELSE unsaved \cup {inbox[i].e[3] : i \in Placed}
+(* `Logs::append_through`). Each session runs on a route of its own, as a    *)
+(* Claude and a Codex session, or two logins, on one machine do, so `pump`   *)
+(* drains one route while the link thread still receives into the other's  *)
+(* inbox. Every route is registered before the link reads a frame          *)
+(* (app_state.rs `open_link`, `remote_connection`), so each event has a    *)
+(* connection to drain it. Draining both at once is one route's case.      *)
+Drain(s) ==
+    /\ up /\ \E i \in DOMAIN inbox : of[Slot(inbox[i].e)] = s
+    /\ LET mine == SelectSeq(inbox, LAMBDA x : of[Slot(x.e)] = s)
+           withRows == SelectSeq(mine, LAMBDA x : row[Slot(x.e)])
+           rows == [i \in 1..Len(withRows) |-> withRows[i].e]
+           placed == SelectSeq(mine, LAMBDA x : x.placed)
+       IN /\ queue' = [queue EXCEPT ![s] =
+                         [rows |-> queue[s].rows \o rows,
+                          through |-> IF placed = <<>> THEN queue[s].through
+                                      ELSE Slot(placed[Len(placed)].e)]]
+          \* "ack-on-drain": the link acknowledges what it handed over, as before TOB-319.
+          /\ unsaved' = IF Mutation = "ack-on-drain" THEN unsaved
+                        ELSE unsaved \cup {placed[i].e[3] : i \in DOMAIN placed}
+    /\ inbox' = SelectSeq(inbox, LAMBDA x : of[Slot(x.e)] /= s)
     /\ UNCHANGED <<of, row, jid, latest, journal, acked, trimmed, up, link, linked,
                    ljournal, wire, acks, sentAck, received, savedMem, late, reports,
                    log, cursor, kills, drops, resets, era, born, rewinds, fresh, crashes, sentTo>>
@@ -403,7 +414,7 @@ Launch ==
                    log, cursor, kills, drops, resets, era, born, rewinds, fresh, crashes, sentTo>>
 
 Next ==
-    \/ HostAppends \/ Receive \/ Drain \/ SendAck \/ HostAck
+    \/ HostAppends \/ Receive \/ (\E s \in Sessions : Drain(s)) \/ SendAck \/ HostAck
     \/ \E s \in Sessions : Save(s) \/ SaveLate(s)
     \/ \E r \in reports : Report(r)
     \/ Drop \/ Reset \/ Rewind \/ Crash \/ Connect \/ Kill \/ Launch

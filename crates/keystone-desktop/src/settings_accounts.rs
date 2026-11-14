@@ -9,8 +9,10 @@ use gpui::{
     AnyElement, App, AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     FontWeight, KeyDownEvent, Window, div, prelude::*, px,
 };
-use keystone_agent::{default_home, default_sign_in_command, sign_in_command};
-use keystone_core::{Account, AccountId, Provider};
+use keystone_agent::{
+    default_home, default_sign_in_command, remote_sign_in_command, sign_in_command,
+};
+use keystone_core::{Account, AccountId, MachineId, Provider};
 use keystone_ui::prelude::*;
 use keystone_ui::text_input::{InputMode, SelectAll, TextInput};
 use std::cell::RefCell;
@@ -22,6 +24,9 @@ const PROVIDERS: [Provider; 2] = [Provider::Claude, Provider::Codex];
 pub(crate) struct AccountsPage {
     provider: Provider,
     provider_focus: FocusHandle,
+    /// The machine a new account is a login on, `None` for this one.
+    machine: Option<MachineId>,
+    machine_focus: FocusHandle,
     name: Entity<TextInput>,
     folder: Entity<TextInput>,
     add: FocusHandle,
@@ -45,6 +50,8 @@ impl AccountsPage {
         Self {
             provider: Provider::Claude,
             provider_focus: cx.focus_handle().tab_stop(true),
+            machine: None,
+            machine_focus: cx.focus_handle().tab_stop(true),
             name: field("Name", cx),
             folder: field("Folder", cx),
             add: cx.focus_handle().tab_stop(true),
@@ -71,11 +78,22 @@ fn provider_slug(provider: Provider) -> &'static str {
     }
 }
 
-/// One row: the default account (`account` is `None`) or an added one.
+/// One row: the default account (`account` is `None`) or an added one, with the
+/// label of the machine it is a login on.
 struct Row<'a> {
     provider: Provider,
     account: Option<&'a Account>,
+    machine: Option<String>,
     sessions: usize,
+}
+
+/// How a row names an account: its label, and for a login on another machine, which
+/// machine, so each row reads as one login in one place.
+pub(crate) fn account_title(label: &str, machine: Option<&str>) -> String {
+    match machine {
+        Some(machine) => format!("{label} on {machine}"),
+        None => label.to_owned(),
+    }
 }
 
 impl Keystone {
@@ -90,7 +108,7 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let workspace = self.state.read(cx).store().workspace();
-        let added: Vec<(Account, usize)> = workspace
+        let added: Vec<(Account, usize, Option<String>)> = workspace
             .accounts()
             .iter()
             .map(|account| {
@@ -99,7 +117,12 @@ impl Keystone {
                     .iter()
                     .filter(|s| s.account() == Some(account.id()))
                     .count();
-                (account.clone(), sessions)
+                let machine = account.machine().map(|id| {
+                    workspace
+                        .machine(id)
+                        .map_or_else(|| id.to_string(), |m| m.label().to_owned())
+                });
+                (account.clone(), sessions, machine)
             })
             .collect();
         let groups: Vec<_> = PROVIDERS
@@ -108,12 +131,14 @@ impl Keystone {
                 let rows = std::iter::once(Row {
                     provider,
                     account: None,
+                    machine: None,
                     sessions: 0,
                 })
-                .chain(added.iter().filter(|(a, _)| a.provider() == provider).map(
-                    |(account, sessions)| Row {
+                .chain(added.iter().filter(|(a, ..)| a.provider() == provider).map(
+                    |(account, sessions, machine)| Row {
                         provider,
                         account: Some(account),
+                        machine: machine.clone(),
                         sessions: *sessions,
                     },
                 ))
@@ -146,16 +171,21 @@ impl Keystone {
         let Row {
             provider,
             account,
+            machine,
             sessions,
         } = row;
         let key = account.map_or_else(
             || format!("{}-default", provider_slug(provider)),
             |account| account.id().to_string(),
         );
-        let command = account.map_or_else(
-            || default_sign_in_command(provider),
-            |account| sign_in_command(provider, Some(account.home())),
-        );
+        let command = match account {
+            None => default_sign_in_command(provider),
+            Some(account) => match (account.home(), account.remote_home()) {
+                (Some(home), _) => sign_in_command(provider, Some(home)),
+                (None, Some((_, home))) => remote_sign_in_command(provider, &home),
+                (None, None) => String::new(),
+            },
+        };
         let detail = match (account, default_home(provider)) {
             (None, Some(home)) => home.display().to_string(),
             _ => command.clone(),
@@ -176,10 +206,10 @@ impl Keystone {
             .track_focus(&page.stop(&format!("copy-{key}"), cx))
             .debug_selector(|| format!("account-copy-{key}"))
             .aria_label("Copy sign-in command")
-            .tooltip(Tooltip::text(if copied {
-                "Copied"
-            } else {
-                "Copy sign-in command"
+            .tooltip(Tooltip::text(match (copied, &machine) {
+                (true, _) => "Copied".to_owned(),
+                (false, Some(machine)) => format!("Copy the sign-in command to run on {machine}"),
+                (false, None) => "Copy sign-in command".to_owned(),
             }))
             .on_click(self.scoped_listener(cx, move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
@@ -212,7 +242,13 @@ impl Keystone {
         } else {
             h_flex()
                 .gap_2()
-                .child(Label::new(account.map_or("Default", Account::label).to_owned()).truncate())
+                .child(
+                    Label::new(account_title(
+                        account.map_or("Default", Account::label),
+                        machine.as_deref(),
+                    ))
+                    .truncate(),
+                )
                 .when(sessions > 0, |d| {
                     d.child(
                         Label::new(format!(
@@ -306,6 +342,19 @@ impl Keystone {
                 cx.stop_propagation();
             }
         });
+        // Which machine the login is on, offered once another machine is linked.
+        let linked = self.state.read(cx).store().workspace().machines();
+        let machines = (!linked.is_empty()).then(|| {
+            let at = page
+                .machine
+                .as_ref()
+                .and_then(|id| linked.iter().position(|m| m.id() == id))
+                .map_or(0, |at| at + 1);
+            let labels: Vec<String> = std::iter::once("This machine".to_owned())
+                .chain(linked.iter().map(|m| m.label().to_owned()))
+                .collect();
+            (labels, at)
+        });
         v_flex()
             .pt(spacing::LG)
             .gap(spacing::SM)
@@ -342,6 +391,34 @@ impl Keystone {
                                     ),
                                 ),
                             )
+                            .when_some(machines, |d, (labels, at)| {
+                                d.child(
+                                    div().flex_none().child(
+                                        Select::new("account-machine", labels, Some(at))
+                                            .width(px(160.))
+                                            .track_focus(&page.machine_focus)
+                                            .on_change(self.scoped_listener(
+                                                cx,
+                                                move |this, &at: &usize, _, cx| {
+                                                    let machine =
+                                                        at.checked_sub(1).and_then(|at| {
+                                                            this.state
+                                                                .read(cx)
+                                                                .store()
+                                                                .workspace()
+                                                                .machines()
+                                                                .get(at)
+                                                                .map(|m| m.id().clone())
+                                                        });
+                                                    if let Some(page) = this.accounts_page() {
+                                                        page.machine = machine;
+                                                    }
+                                                    cx.notify();
+                                                },
+                                            )),
+                                    ),
+                                )
+                            })
                             .child(input(&page.name, "account-name")),
                     )
                     .child(
@@ -370,11 +447,13 @@ impl Keystone {
         let Some(page) = &self.settings else { return };
         let page = &page.accounts;
         let provider = page.provider;
+        let machine = page.machine.clone();
         let name = page.name.read(cx).value().to_owned();
         let folder = page.folder.read(cx).value().to_owned();
         let (name_input, folder_input) = (page.name.clone(), page.folder.clone());
-        match self.state.update(cx, |state, cx| {
-            state.add_account(provider, &name, &folder, cx)
+        match self.state.update(cx, |state, cx| match &machine {
+            Some(machine) => state.add_remote_account(provider, &name, &folder, machine, cx),
+            None => state.add_account(provider, &name, &folder, cx),
         }) {
             Ok(_) => {
                 self.error = None;

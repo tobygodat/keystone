@@ -5,6 +5,7 @@
 //! reads it with its own tools. See [`keystone_core::attachment`] for the size limit
 //! and how long copies are kept.
 
+use crate::local_files::LocalPath;
 use crate::{Keystone, mentions, screenshot};
 use gpui::{
     Anchor, AnyElement, App, ClipboardEntry, Context, ElementId, Entity, ExternalPaths, Focusable,
@@ -99,26 +100,18 @@ impl Keystone {
         self.state.read(cx).attachments.dir().to_owned()
     }
 
-    /// Says why nothing can be attached to `session` when it works on another machine,
-    /// before anything is picked, captured or read, and returns whether it does.
-    fn attach_elsewhere(&mut self, session: u64, cx: &mut Context<Self>) -> bool {
-        let machine = match self.session_place(session, cx) {
-            Some(crate::presentation::SessionPlace::Remote(machine)) => machine,
+    /// The machine `session` works on, when it is another: an image picked, pasted or
+    /// captured here goes to it by its bytes, and any other file is refused, since a
+    /// mention would name a path there.
+    fn elsewhere(&self, session: u64, cx: &App) -> Option<String> {
+        match self.session_place(session, cx) {
+            Some(crate::presentation::SessionPlace::Remote(machine)) => Some(machine),
             Some(
                 crate::presentation::SessionPlace::Local(_)
                 | crate::presentation::SessionPlace::Unusable,
             )
-            | None => return false,
-        };
-        self.attach.menu = false;
-        self.show_attach_notice(
-            session,
-            Some(format!(
-                "Files and images can't be attached to sessions on {machine} yet."
-            )),
-            cx,
-        );
-        true
+            | None => None,
+        }
     }
 
     fn show_attach_notice(&mut self, session: u64, notice: Option<String>, cx: &mut Context<Self>) {
@@ -206,23 +199,40 @@ impl Keystone {
         let Some(session) = self.selected(cx) else {
             return;
         };
-        if self.attach_elsewhere(session, cx) {
+        // A session on another machine has no files here, so only a file the user
+        // picked here by its full path is read, and only an image goes.
+        let elsewhere = self.elsewhere(session, cx);
+        let files = self.local_files(session, cx);
+        if files.is_none() && elsewhere.is_none() {
             return;
         }
-        let Some(files) = self.local_files(session, cx) else {
-            return;
-        };
         let attachments = self.state.read(cx).attachments.clone();
         self.start_import(session, cx);
         let task = cx.background_spawn(async move {
             paths
                 .into_iter()
                 .map(|path| {
-                    let path = files.picked(path);
-                    match attachments.import_file(path.as_path()) {
-                        Ok(Some(image)) => Attached::Image(image),
-                        Ok(None) => Attached::Mention(path.as_path().to_owned()),
-                        Err(reason) => Attached::Refused(reason),
+                    let path = match (&files, &elsewhere) {
+                        (Some(files), _) => files.picked(path),
+                        (None, Some(machine)) => match LocalPath::picked_here(path) {
+                            Ok(path) => path,
+                            Err(path) => {
+                                return Attached::Refused(format!(
+                                    "{} isn't a full path on this machine, so it can't go to a session on {machine}.",
+                                    path.display()
+                                ));
+                            }
+                        },
+                        (None, None) => unreachable!("checked above"),
+                    };
+                    match (attachments.import_file(path.as_path()), &elsewhere) {
+                        (Ok(Some(image)), _) => Attached::Image(image),
+                        (Ok(None), None) => Attached::Mention(path.as_path().to_owned()),
+                        (Ok(None), Some(machine)) => Attached::Refused(format!(
+                            "{} isn't an image. Only images go to sessions on {machine}; mention files there by their path on that machine.",
+                            path.as_path().display()
+                        )),
+                        (Err(reason), _) => Attached::Refused(reason),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -316,9 +326,6 @@ impl Keystone {
         }) else {
             return false;
         };
-        if self.attach_elsewhere(session, cx) {
-            return true;
-        }
         let attachments = self.state.read(cx).attachments.clone();
         let name = format!(
             "Image.{}",
@@ -349,7 +356,7 @@ impl Keystone {
         let Some(session) = self.selected(cx) else {
             return;
         };
-        if self.attach.capturing || self.attach_elsewhere(session, cx) {
+        if self.attach.capturing {
             return;
         }
         self.attach.capturing = true;
@@ -382,9 +389,6 @@ impl Keystone {
         let Some(session) = self.selected(cx) else {
             return;
         };
-        if self.attach_elsewhere(session, cx) {
-            return;
-        }
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -413,10 +417,7 @@ impl Keystone {
 
     /// Shows the typed-path field.
     pub(crate) fn open_attach_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected(cx) else {
-            return;
-        };
-        if self.attach_elsewhere(session, cx) {
+        if self.selected(cx).is_none() {
             return;
         }
         self.attach.path_open = true;

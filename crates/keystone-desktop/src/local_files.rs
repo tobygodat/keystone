@@ -68,6 +68,17 @@ impl LocalFiles {
 pub(crate) struct LocalPath(PathBuf);
 
 impl LocalPath {
+    /// `path`, a file the user picked on this machine by its full path, for a session
+    /// that has no files here: one on another machine, to which an image picked here
+    /// goes by its bytes. A relative path names nothing here for it, so it comes back.
+    pub(crate) fn picked_here(path: PathBuf) -> Result<Self, PathBuf> {
+        if path.is_absolute() {
+            Ok(Self(path))
+        } else {
+            Err(path)
+        }
+    }
+
     /// Keystone's own copy of an attached image, under `dir`, the attachments folder.
     pub(crate) fn kept(attachment: &Attachment, dir: &Path) -> Self {
         Self(attachment.path(dir))

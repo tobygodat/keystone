@@ -2,13 +2,16 @@
 //! to this machine. One writer thread owns the journal, the attachments and the
 //! connections, so nothing is appended between the steps of a replay.
 
-use super::frame::{self, Call, Found, Frame, Op, Outcome, PROTOCOL, SessionState, Welcome};
+use super::cache::Cache;
+use super::frame::{
+    self, Attached, Call, Found, Frame, Login, Op, Outcome, PROTOCOL, SessionState, Welcome,
+};
 use super::journal::{self, Accepted, Journal};
 use super::paths::{Paths, private_dir};
 use super::reap::{self, Watching};
 use super::{Route, fault};
 use crate::connection::command_session;
-use crate::{ClaudeConnection, Command, Connection, Event};
+use crate::{ClaudeConnection, CodexConnection, Command, Connection, Event, LaunchProfile};
 use keystone_core::Provider;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::File;
@@ -39,9 +42,8 @@ const QUEUE_FLOOR: u64 = 64 * 1024;
 /// How long a session may stay held for its last run's processes before it says so.
 const HOLD: Duration = Duration::from_secs(60);
 
-const NO_CODEX: &str = "Codex sessions can't run on another machine yet";
-const NO_ACCOUNTS: &str = "Sessions on another machine run as its default login; other accounts aren't supported there yet";
-const NO_IMAGES: &str = "Images can't be sent to a session on another machine yet";
+const NO_LOGIN: &str = "The app didn't say where this account keeps its files on this machine";
+const NO_IMAGES: &str = "An image went with this message as a file here, so it wasn't sent";
 const UNSAVED: &str = "The machine couldn't save this session's latest events, so they wait there and arrive once it can";
 const UNANSWERED: &str =
     "The machine lost track of this call when keystone-host stopped, so it may or may not have run";
@@ -77,6 +79,7 @@ pub fn serve() -> Result<(), String> {
     let hold =
         setting("KEYSTONE_HOST_HOLD_MS", HOLD.as_millis() as u64).map(Duration::from_millis)?;
     let journal = Journal::open(&paths.journal(), cap)?;
+    let cache = Cache::open(paths.attachments())?;
     let program = watcher_program()?;
     // Listening first: an `attach` that started this daemon waits only so long for the
     // socket, and the last daemon's watchers may take longer.
@@ -97,6 +100,8 @@ pub fn serve() -> Result<(), String> {
         tx,
         welcome: welcome(),
         claude: std::env::var_os("KEYSTONE_CLAUDE_PATH").map(PathBuf::from),
+        codex: std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
+        cache,
         program,
         run: paths.run.clone(),
         backlog_bound: usize::try_from(cap).unwrap_or(usize::MAX),
@@ -245,7 +250,7 @@ type Key = (String, Route);
 
 enum Msg {
     Opened(u64, UnixStream),
-    Frame(u64, Frame),
+    Frame(u64, Box<Frame>),
     Closed(u64),
     Wake(Key),
 }
@@ -272,7 +277,7 @@ fn read(id: u64, stream: UnixStream, tx: Sender<Msg>) {
     loop {
         match frame::read(&mut reader, &mut line) {
             Ok(Some(frame)) => {
-                if tx.send(Msg::Frame(id, frame)).is_err() {
+                if tx.send(Msg::Frame(id, Box::new(frame))).is_err() {
                     return;
                 }
             }
@@ -335,17 +340,114 @@ fn release(conn: Option<Conn>) {
     }
 }
 
+/// One provider's connection: a Claude process per session, or one Codex app-server
+/// for every session of the account.
+enum Runner {
+    Claude(ClaudeConnection),
+    Codex(CodexConnection),
+}
+
+impl Runner {
+    fn connection(&self) -> &dyn Connection {
+        match self {
+            Runner::Claude(claude) => claude,
+            Runner::Codex(codex) => codex,
+        }
+    }
+}
+
 struct Conn {
-    claude: ClaudeConnection,
+    runner: Runner,
     /// Every session this connection served, for ending idle processes.
     sessions: BTreeSet<u64>,
 }
 
+impl Conn {
+    /// Whether a process of this connection still has work for a session: a turn, an
+    /// approval or a message waiting.
+    fn is_busy(&self) -> bool {
+        match &self.runner {
+            Runner::Claude(claude) => claude.is_busy(),
+            Runner::Codex(codex) => self.sessions.iter().any(|s| codex.has_work(*s)),
+        }
+    }
+
+    /// Ends the session's process once it is idle. Codex's one app-server serves every
+    /// session, so it ends only with the connection, once no session is busy.
+    fn end_idle(&self, session: u64) {
+        if let Runner::Claude(claude) = &self.runner {
+            claude.end_idle(session);
+        }
+    }
+}
+
+/// The CLI's name, for what the host says about its processes.
+fn cli_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => "Claude Code",
+        Provider::Codex => "Codex",
+    }
+}
+
+/// How the host runs `login`'s CLI: with its config home, which must be an absolute
+/// path that overlaps neither provider's default home on this machine. A home that
+/// doesn't exist yet is made, private to this user, as the app makes a local one.
+fn login_profile(provider: Provider, login: &Login) -> Result<LaunchProfile, String> {
+    let home = Path::new(&login.home);
+    if !home.is_absolute() || keystone_core::lexical(home).parent().is_none() {
+        return Err(format!(
+            "The account \u{201c}{}\u{201d} needs a full path on this machine, not {}",
+            login.label, login.home
+        ));
+    }
+    let real = resolved(home);
+    let defaults = [Provider::Claude, Provider::Codex].map(crate::default_home);
+    if let Some(default) = defaults
+        .iter()
+        .flatten()
+        .find(|default| keystone_core::homes_overlap(&resolved(default), &real))
+    {
+        return Err(format!(
+            "The account \u{201c}{}\u{201d} uses {}, which overlaps this machine's default home {}. Give it a folder of its own",
+            login.label,
+            login.home,
+            default.display()
+        ));
+    }
+    if !home.exists() {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home)
+            .map_err(|e| format!("Could not make {}: {e}", login.home))?;
+    }
+    if !home.is_dir() {
+        return Err(format!("{} isn't a folder on this machine", login.home));
+    }
+    Ok(LaunchProfile::account(provider, &login.label, home))
+}
+
+/// `path` with its deepest existing folder resolved through its symlinks, and the
+/// rest as written, so a home that doesn't exist yet compares as it will.
+fn resolved(path: &Path) -> PathBuf {
+    let path = keystone_core::lexical(path);
+    for base in path.ancestors() {
+        if let Ok(real) = base.canonicalize() {
+            let rest = path.strip_prefix(base).unwrap_or(Path::new(""));
+            return real.join(rest);
+        }
+    }
+    path
+}
+
 /// A session of the last daemon whose watchers still end its processes. It starts no
-/// turn until they are gone.
+/// turn until they are gone. A Codex app-server serves every session of its account,
+/// so its watchers hold all of them: `others` are the ones whose turns end with it.
 struct Held {
     route: Route,
     left: Vec<reap::Left>,
+    others: BTreeSet<u64>,
     /// Set once the session was told the processes haven't stopped.
     warned: bool,
     /// The app quit asking to end its sessions, so the turn ends as Quit ends it.
@@ -501,6 +603,9 @@ struct Daemon {
     tx: Sender<Msg>,
     welcome: Welcome,
     claude: Option<PathBuf>,
+    codex: Option<PathBuf>,
+    /// The images the app sent, by hash.
+    cache: Cache,
     /// The binary each watcher runs.
     program: PathBuf,
     /// The folder each watcher's lock file goes in.
@@ -573,7 +678,7 @@ impl Daemon {
                     },
                 );
             }
-            Msg::Frame(id, frame) => self.frame(id, frame),
+            Msg::Frame(id, frame) => self.frame(id, *frame),
             Msg::Closed(id) => self.disconnect(id),
             Msg::Wake(key) => self.pump(&key),
         }
@@ -594,6 +699,7 @@ impl Daemon {
                 .or_insert_with(|| Held {
                     route: left.watching.route(),
                     left: Vec::new(),
+                    others: BTreeSet::new(),
                     warned: false,
                     quit: false,
                 })
@@ -601,10 +707,20 @@ impl Daemon {
                 .push(left);
         }
         for lost in self.journal.interrupted(None)? {
-            if !self.held.contains_key(&(lost.client.clone(), lost.session)) {
-                let events = journal::restarted(&lost.approvals);
-                self.enqueue(&(lost.client, lost.route), lost.session, events);
+            if self.held.contains_key(&(lost.client.clone(), lost.session)) {
+                continue;
             }
+            let shared = self.held.iter_mut().find(|((client, _), held)| {
+                *client == lost.client
+                    && held.route == lost.route
+                    && lost.route.provider == Provider::Codex
+            });
+            if let Some((_, held)) = shared {
+                held.others.insert(lost.session);
+                continue;
+            }
+            let events = journal::restarted(&lost.approvals);
+            self.enqueue(&(lost.client, lost.route), lost.session, events);
         }
         self.release();
         Ok(())
@@ -643,7 +759,8 @@ impl Daemon {
                 "session {session}'s last watcher stopped before provider {pid}'s processes were gone; they may still run"
             );
             let message = format!(
-                "The watcher of this session's last run stopped unexpectedly, so processes its Claude Code (process {pid}) started may still be running"
+                "The watcher of this session's last run stopped unexpectedly, so processes its {} (process {pid}) started may still be running",
+                cli_name(route.provider)
             );
             self.enqueue(&(client, route), session, vec![Event::Warning { message }]);
         }
@@ -661,8 +778,8 @@ impl Daemon {
             self.enqueue(&(client, route), session, vec![Event::Warning { message }]);
         }
         for (client, session) in released {
-            let state = match self.states(&client) {
-                Ok(mut states) => states.remove(&session),
+            let mut states = match self.states(&client) {
+                Ok(states) => states,
                 // Still held, so the next tick tries again.
                 Err(error) => {
                     log!("{error}");
@@ -673,13 +790,19 @@ impl Daemon {
                 continue;
             };
             log!("session {session}'s last run has ended");
-            if let Some(state) = state.filter(|s| s.running || !s.approvals.is_empty()) {
+            for session in std::iter::once(session).chain(held.others.iter().copied()) {
+                let Some(state) = states
+                    .remove(&session)
+                    .filter(|s| s.running || !s.approvals.is_empty())
+                else {
+                    continue;
+                };
                 let events = if held.quit {
                     journal::quit(&state.approvals)
                 } else {
                     journal::restarted(&state.approvals)
                 };
-                self.enqueue(&(client, held.route), session, events);
+                self.enqueue(&(client.clone(), held.route.clone()), session, events);
             }
         }
     }
@@ -743,9 +866,7 @@ impl Daemon {
         let unneeded: Vec<Key> = self
             .conns
             .iter()
-            .filter(|((client, _), conn)| {
-                !self.attached.contains_key(client) && !conn.claude.is_busy()
-            })
+            .filter(|((client, _), conn)| !self.attached.contains_key(client) && !conn.is_busy())
             .map(|(key, _)| key.clone())
             .collect();
         for key in unneeded {
@@ -1004,20 +1125,30 @@ impl Daemon {
     }
 
     fn perform(&mut self, client: &str, call: Call) -> Result<(), String> {
-        if call.provider != Provider::Claude {
-            return Err(NO_CODEX.into());
+        let Call {
+            provider,
+            account,
+            login,
+            op,
+            ..
+        } = call;
+        if let Op::PutAttachment {
+            sha256,
+            media_type,
+            size,
+            offset,
+            data,
+        } = &op
+        {
+            let attached = Attached {
+                media_type: media_type.clone(),
+                sha256: sha256.clone(),
+            };
+            return self.cache.put(&attached, *size, *offset, data);
         }
-        if call.account.is_some() {
-            return Err(NO_ACCOUNTS.into());
-        }
-        let key = (
-            client.to_owned(),
-            Route {
-                provider: call.provider,
-                account: call.account,
-            },
-        );
-        let session = match &call.op {
+        let route = Route { provider, account };
+        let key = (client.to_owned(), route);
+        let session = match &op {
             Op::Send { session, .. }
             | Op::RequestCatalog { session, .. }
             | Op::SetChoice { session, .. }
@@ -1025,27 +1156,39 @@ impl Daemon {
             | Op::HoldFollowUps { session }
             | Op::ReleaseFollowUps { session }
             | Op::EvictIdle { session, .. }
-            | Op::DeclineIdle { session, .. } => *session,
+            | Op::DeclineIdle { session, .. }
+            | Op::ReadHistory { session, .. } => *session,
+            Op::ListThreads { .. } | Op::ReadImport { .. } | Op::PutAttachment { .. } => 0,
             Op::Command(command) => command_session(command),
         };
         let starts = matches!(
-            call.op,
+            op,
             Op::Send { .. } | Op::Command(Command::Send { .. } | Command::Open { .. })
         );
         let reaches = matches!(
-            call.op,
+            op,
             Op::Command(Command::Answer { .. } | Command::Act { .. } | Command::Interrupt { .. })
         );
-        if (starts || reaches) && self.held.contains_key(&(client.to_owned(), session)) {
+        if (starts || reaches) && self.holds(&key, session) {
             return Err(STOPPING.into());
         }
         if starts && let Some(error) = self.backlogged() {
             return Err(format!("{BACKLOGGED} ({error})"));
         }
-        let conn = self.connection(&key);
-        conn.sessions.insert(session);
-        let claude = &conn.claude;
-        match call.op {
+        let images = match &op {
+            Op::Send { images, .. } => images
+                .iter()
+                .map(|image| self.cache.image(image))
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => Vec::new(),
+        };
+        let conn = self.connection(&key, login.as_ref())?;
+        if session != 0 {
+            conn.sessions.insert(session);
+        }
+        let runner = &conn.runner;
+        let connection = runner.connection();
+        match op {
             Op::Send {
                 session,
                 cwd,
@@ -1053,14 +1196,24 @@ impl Daemon {
                 choice,
                 approval,
                 text,
+                ..
             } => {
                 if !std::path::Path::new(&cwd).is_dir() {
                     return Err(format!("{cwd} isn't a folder on this machine"));
                 }
-                claude
-                    .send(session, &cwd, resume.as_deref(), &choice, approval, text)
+                connection
+                    .send(
+                        session,
+                        &cwd,
+                        resume.as_deref(),
+                        &choice,
+                        approval,
+                        text,
+                        images,
+                    )
                     .map_err(str::to_owned)?
             }
+            // An image here is a path on the app's machine.
             Op::Command(Command::Send { images, .. }) if !images.is_empty() => {
                 return Err(NO_IMAGES.into());
             }
@@ -1069,26 +1222,45 @@ impl Daemon {
                     Command::Answer { request, .. } => Some(request.clone()),
                     _ => None,
                 };
-                claude.command(command);
+                connection.command(command);
                 if let Some(request) = answered
                     && let Err(error) = self.journal.answered(client, session, &request)
                 {
                     log!("{error}");
                 }
             }
-            Op::RequestCatalog { session, cwd } => claude.request_catalog(session, &cwd),
-            Op::SetChoice { session, choice } => claude.set_choice(session, choice),
-            Op::SetApproval { session, approval } => claude.set_approval(session, approval),
-            Op::HoldFollowUps { session } => claude.hold_follow_ups(session),
-            Op::ReleaseFollowUps { session } => claude.release_follow_ups(session),
-            Op::EvictIdle { session, candidate } => claude.evict_idle(session, candidate),
+            Op::RequestCatalog { session, cwd } => connection.request_catalog(session, &cwd),
+            Op::SetChoice { session, choice } => connection.set_choice(session, choice),
+            Op::SetApproval { session, approval } => connection.set_approval(session, approval),
+            Op::HoldFollowUps { session } => connection.hold_follow_ups(session),
+            Op::ReleaseFollowUps { session } => connection.release_follow_ups(session),
+            Op::EvictIdle { session, candidate } => connection.evict_idle(session, candidate),
             Op::DeclineIdle {
                 session,
                 candidate,
                 reason,
-            } => claude.decline_idle(session, candidate, reason),
+            } => connection.decline_idle(session, candidate, reason),
+            Op::ReadHistory {
+                session,
+                thread,
+                ticket,
+            } => codex(runner)?.read_history(session, thread, ticket),
+            Op::ListThreads { cwd, ticket } => codex(runner)?.list_threads(&cwd, ticket),
+            Op::ReadImport { thread, ticket } => codex(runner)?.read_import(thread, ticket),
+            Op::PutAttachment { .. } => unreachable!("handled above"),
         }
         Ok(())
+    }
+
+    /// Whether the session waits for the last daemon's watchers: its own, or for
+    /// Codex, those of its account's app-server, which ran every session of it.
+    fn holds(&self, (client, route): &Key, session: u64) -> bool {
+        self.held.iter().any(|((owner, held_session), held)| {
+            owner == client
+                && (*held_session == session
+                    || held.others.contains(&session)
+                    || (route.provider == Provider::Codex && held.route == *route))
+        })
     }
 
     /// Why the journal last failed, while every backlog together holds more than
@@ -1114,41 +1286,67 @@ impl Daemon {
         Some(error)
     }
 
-    fn connection(&mut self, key: &Key) -> &mut Conn {
+    /// The connection for `key`, made on its first call. One for an account other
+    /// than the default login runs with `login`'s profile.
+    fn connection(&mut self, key: &Key, login: Option<&Login>) -> Result<&mut Conn, String> {
+        if self.conns.contains_key(key) {
+            return Ok(self.conns.get_mut(key).expect("checked above"));
+        }
+        let (client, route) = key.clone();
+        let profile = match (&route.account, login) {
+            (None, _) => LaunchProfile::inherited(),
+            (Some(_), Some(login)) => login_profile(route.provider, login)?,
+            (Some(_), None) => return Err(NO_LOGIN.into()),
+        };
         let tx = self.tx.clone();
-        let program = self.claude.clone();
-        let watcher = self.program.clone();
-        let run = self.run.clone();
-        self.conns.entry(key.clone()).or_insert_with(|| {
-            let woken = key.clone();
-            let wake = Arc::new(move || {
-                let _ = tx.send(Msg::Wake(woken.clone()));
-            });
-            let claude = ClaudeConnection::new(program, wake);
-            let (client, route) = key.clone();
-            claude.on_spawn(Arc::new(move |session, pid| {
-                let watching = Watching {
-                    client: client.clone(),
-                    session,
-                    provider: route.provider,
-                    account: route.account.clone(),
-                };
-                reap::watch(&watcher, &run, &watching, pid).map_err(|e| {
-                    format!("keystone-host couldn't watch Claude Code, so it stopped it: {e}")
-                })
-            }));
-            Conn {
-                claude,
-                sessions: BTreeSet::new(),
+        let woken = key.clone();
+        let wake = Arc::new(move || {
+            let _ = tx.send(Msg::Wake(woken.clone()));
+        });
+        let (watcher, run) = (self.program.clone(), self.run.clone());
+        let provider = route.provider;
+        let hook: crate::SpawnHook = Arc::new(move |session, pid| {
+            let watching = Watching {
+                client: client.clone(),
+                session,
+                provider: route.provider,
+                account: route.account.clone(),
+            };
+            reap::watch(&watcher, &run, &watching, pid).map_err(|e| {
+                format!(
+                    "keystone-host couldn't watch {}, so it stopped it: {e}",
+                    cli_name(route.provider)
+                )
+            })
+        });
+        let runner = match provider {
+            Provider::Claude => {
+                let claude = ClaudeConnection::with_profile(self.claude.clone(), profile, wake);
+                claude.on_spawn(hook);
+                Runner::Claude(claude)
             }
-        })
+            Provider::Codex => {
+                let codex = CodexConnection::with_profile(
+                    self.codex.clone(),
+                    env!("CARGO_PKG_VERSION"),
+                    profile,
+                    wake,
+                );
+                codex.on_spawn(hook);
+                Runner::Codex(codex)
+            }
+        };
+        Ok(self.conns.entry(key.clone()).or_insert(Conn {
+            runner,
+            sessions: BTreeSet::new(),
+        }))
     }
 
     /// Journals what the connection reported, after anything of it still waiting for
     /// the journal.
     fn pump(&mut self, key: &Key) {
         let fresh = match self.conns.get(key) {
-            Some(conn) => conn.claude.drain(),
+            Some(conn) => conn.runner.connection().drain(),
             None => Vec::new(),
         };
         self.journal_events(key, fresh);
@@ -1227,7 +1425,7 @@ impl Daemon {
             None => {
                 if let Some(conn) = self.conns.get(key) {
                     for session in sessions {
-                        conn.claude.end_idle(session);
+                        conn.end_idle(session);
                     }
                 }
             }
@@ -1260,7 +1458,7 @@ impl Daemon {
         for ((owner, _), conn) in &self.conns {
             if owner == client {
                 for session in &conn.sessions {
-                    conn.claude.end_idle(*session);
+                    conn.end_idle(*session);
                 }
             }
         }
@@ -1285,7 +1483,10 @@ impl Daemon {
             Err(error) => return log!("{error}"),
         };
         for state in states.into_values() {
-            if let Some(held) = self.held.get_mut(&(client.to_owned(), state.session)) {
+            if let Some((_, held)) = self.held.iter_mut().find(|((owner, session), held)| {
+                owner == client
+                    && (*session == state.session || held.others.contains(&state.session))
+            }) {
                 held.quit = true;
                 continue;
             }
@@ -1409,5 +1610,15 @@ mod tests {
         assert_eq!(first.len(), 1);
         backlog.taken(1);
         assert!(matches!(backlog.batch(), Some(Batch::Gap(_))));
+    }
+}
+
+/// The Codex connection a history or import call needs.
+fn codex(runner: &Runner) -> Result<&CodexConnection, String> {
+    match runner {
+        Runner::Codex(codex) => Ok(codex),
+        Runner::Claude(_) => {
+            Err("Claude Code's history is read from its files, not asked of the host".into())
+        }
     }
 }

@@ -1,4 +1,4 @@
-use crate::Provider;
+use crate::{MachineId, Provider, RemoteFolder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fmt;
@@ -32,7 +32,9 @@ impl fmt::Display for AccountId {
 /// A provider account the user added: the CLI runs with `home` as its own config
 /// home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), so its sign-in, settings, skills and
 /// transcripts stay apart from every other account's. Keystone never reads or writes
-/// the credentials inside it.
+/// the credentials inside it. An account on another machine is a login there: its
+/// `home` is a folder on that machine, which its host makes and reads, so it has no
+/// `Path` form here.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Account {
     id: AccountId,
@@ -41,6 +43,10 @@ pub struct Account {
     /// Absolute, with `~` already expanded. Fixed once the account exists, so a
     /// session's transcripts never move to another home.
     home: PathBuf,
+    /// The machine the account is a login on, `None` for this one. Fixed once the
+    /// account exists, like its home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    machine: Option<MachineId>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
 }
@@ -52,6 +58,24 @@ impl Account {
             provider,
             label,
             home,
+            machine: None,
+            unknown: Map::new(),
+        }
+    }
+
+    pub(crate) fn remote(
+        id: AccountId,
+        provider: Provider,
+        label: String,
+        machine: MachineId,
+        home: &RemoteFolder,
+    ) -> Self {
+        Self {
+            id,
+            provider,
+            label,
+            home: PathBuf::from(home.wire()),
+            machine: Some(machine),
             unknown: Map::new(),
         }
     }
@@ -68,8 +92,22 @@ impl Account {
         &self.label
     }
 
-    pub fn home(&self) -> &Path {
-        &self.home
+    /// The account's config home on this machine, or `None` for a login on another,
+    /// whose home names nothing here.
+    pub fn home(&self) -> Option<&Path> {
+        self.machine.is_none().then_some(self.home.as_path())
+    }
+
+    /// The machine the account is a login on, `None` for this one.
+    pub fn machine(&self) -> Option<&MachineId> {
+        self.machine.as_ref()
+    }
+
+    /// For a login on another machine, that machine and its home there.
+    pub fn remote_home(&self) -> Option<(&MachineId, RemoteFolder)> {
+        let machine = self.machine.as_ref()?;
+        let home = RemoteFolder::new(&self.home.to_string_lossy()).ok()?;
+        Some((machine, home))
     }
 
     pub(crate) fn set_label(&mut self, label: String) {
@@ -122,6 +160,19 @@ pub fn lexical(path: &Path) -> PathBuf {
 /// Whether two homes would share files: the same folder, or one inside the other.
 pub fn homes_overlap(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
+}
+
+/// [`homes_overlap`] for two folders on another machine, by their text alone, since
+/// only that machine can resolve them.
+pub fn remote_homes_overlap(a: &RemoteFolder, b: &RemoteFolder) -> bool {
+    let within = |inner: &str, outer: &str| {
+        inner == outer
+            || outer == "/"
+            || inner
+                .strip_prefix(outer)
+                .is_some_and(|r| r.starts_with('/'))
+    };
+    within(a.wire(), b.wire()) || within(b.wire(), a.wire())
 }
 
 /// A slug for `label` that no account in `taken` uses and that is never

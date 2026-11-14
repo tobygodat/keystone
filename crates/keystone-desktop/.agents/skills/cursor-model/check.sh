@@ -15,7 +15,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(git -C "$here" rev-parse --show-toplevel)
 
 # The commit at which the model was last confirmed to describe the code below.
-SYNC=b5942e54f
+SYNC=6d9fe748a
 COVERED=(
   crates/keystone-agent/src/remote/link.rs
   crates/keystone-agent/src/remote/connection.rs
@@ -135,6 +135,7 @@ EXPECT=(
   "NothingLost    cross-journal  reset   breaks    can fail: round one's cursors across journals"
   "NothingLost    no-rotate      rewind  breaks    can fail: a journal that went back keeps its identity"
   "NothingLost    lossy-crash    crash   breaks    can fail: a host crash takes back commits it had sent"
+  "NothingLost    late-route     kills   breaks    can fail: a route whose connection registers only after its events arrive"
 )
 
 config() {  # rule mutation bounds

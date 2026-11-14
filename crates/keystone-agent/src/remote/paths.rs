@@ -60,6 +60,11 @@ impl Paths {
     pub fn log(&self) -> PathBuf {
         self.state.join("host.log")
     }
+
+    /// The images the app sent, by hash.
+    pub fn attachments(&self) -> PathBuf {
+        self.state.join("attachments")
+    }
 }
 
 /// Creates `dir` with mode 0700 if it is missing, then refuses it unless it is a real

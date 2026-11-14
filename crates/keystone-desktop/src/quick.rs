@@ -465,6 +465,7 @@ impl QuickComposer {
             provider: self.provider,
             account: self.account.as_ref(),
             accounts: state.store().workspace().accounts(),
+            machine: None,
             model: self.model.as_deref(),
             effort: None,
             speed: None,

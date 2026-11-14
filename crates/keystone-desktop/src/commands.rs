@@ -502,7 +502,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         id: "new-remote-session",
-        label: "New Claude session on a machine",
+        label: "New session on a machine",
         keys: &[],
         context: Some(APP),
         action: || Box::new(NewRemoteSession),

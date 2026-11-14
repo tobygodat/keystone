@@ -28,6 +28,17 @@ impl Host {
         host_argv(self.0.path())
     }
 
+    /// [`Host::argv`] with `extra` variables in the host's environment, which its
+    /// providers inherit.
+    fn argv_with(&self, extra: &[(&str, &Path)]) -> Vec<std::ffi::OsString> {
+        let mut argv = self.argv();
+        let at = argv.len() - 2;
+        for (name, value) in extra {
+            argv.insert(at, format!("{name}={}", value.display()).into());
+        }
+        argv
+    }
+
     /// The daemon's process, while it holds its lock.
     fn daemon(&self) -> Option<i32> {
         let lock = self.0.path().join("run").join("host.lock");
@@ -45,6 +56,11 @@ fn host_argv(dir: &Path) -> Vec<std::ffi::OsString> {
         format!(
             "KEYSTONE_CLAUDE_PATH={}",
             binary("keystone-fake-claude").display()
+        )
+        .into(),
+        format!(
+            "KEYSTONE_CODEX_PATH={}",
+            binary("keystone-fake-codex").display()
         )
         .into(),
         binary("keystone-host").into(),
@@ -204,7 +220,7 @@ fn linking_saves_a_machine_only_once_its_host_answers(cx: &mut gpui::TestAppCont
             shell(
                 "read hello; echo '{\"t\":\"welcome\",\"protocol\":99,\"version\":\"9.0.0\",\"os\":\"linux\",\"arch\":\"x86_64\",\"hostname\":\"desk\",\"providers\":[],\"oldest\":0,\"latest\":0}'; sleep 5",
             ),
-            "speaks protocol 99, and Keystone needs 2",
+            "speaks protocol 99, and Keystone needs 3",
         ),
         (
             shell(
@@ -1485,4 +1501,188 @@ fn a_power_loss_that_would_take_two_commits_loses_no_turn_end(cx: &mut gpui::Tes
 #[gpui::test]
 fn a_power_loss_that_would_take_three_commits_loses_no_turn_end(cx: &mut gpui::TestAppContext) {
     a_power_loss_on_the_machine_loses_no_turn_end(3, cx);
+}
+
+/// `argv` with every line the app sends copied to `copy` on the way to the host.
+fn teed(argv: &[std::ffi::OsString], copy: &Path) -> Vec<std::ffi::OsString> {
+    let quoted: Vec<String> = argv
+        .iter()
+        .map(|arg| format!("'{}'", arg.to_string_lossy().replace('\'', "'\\''")))
+        .collect();
+    shell(&format!(
+        "tee -a '{}' | {}",
+        copy.display(),
+        quoted.join(" ")
+    ))
+}
+
+fn send_images(
+    state: &Entity<AppState>,
+    session: u64,
+    text: &str,
+    attachments: Vec<keystone_core::Attachment>,
+    cx: &mut gpui::TestAppContext,
+) -> bool {
+    state.update(cx, |state, cx| {
+        state.send_message(
+            ComposerDraft {
+                session,
+                text: text.into(),
+                attachments,
+            },
+            cx,
+        )
+    })
+}
+
+/// A Codex session on a login on the machine looks and behaves like a local one: its
+/// reply streams and ends, the host runs Codex there with that login's own home, and
+/// nothing runs here. An image it sends twice goes to the host once, by its hash, and
+/// Codex reads the same bytes both times.
+#[gpui::test]
+fn a_codex_session_on_a_login_there_sends_an_image_once(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let receipts = tempfile::tempdir().unwrap();
+    let (env, images, sent) = (
+        receipts.path().join("env"),
+        receipts.path().join("images"),
+        receipts.path().join("sent"),
+    );
+    let argv = teed(
+        &host.argv_with(&[
+            ("KEYSTONE_FAKE_ENV_RECEIPT", &env),
+            ("KEYSTONE_FAKE_IMAGE_RECEIPT", &images),
+            ("KEYSTONE_FAKE_CODEX_DELAY_MS", Path::new("1")),
+        ]),
+        &sent,
+    );
+    let state = runtime(dir.path(), cx);
+    assert_eq!(link(&state, argv, "desk", cx), None);
+    let work = tempfile::tempdir().unwrap();
+    let session = new_remote(&state, work.path(), cx);
+    let home = host.0.path().join("logins/codex-work");
+    let login = state.update(cx, |state, cx| {
+        let machine = desk(state);
+        let login = state
+            .add_remote_account(
+                Provider::Codex,
+                "Work",
+                home.to_str().unwrap(),
+                &machine,
+                cx,
+            )
+            .unwrap()
+            .value;
+        state
+            .set_provider_account(session, Provider::Codex, Some(login.clone()), cx)
+            .unwrap();
+        login
+    });
+    assert!(!home.exists(), "nothing here made the login's home");
+    let picture = state.read_with(cx, |state, _| {
+        state
+            .attachments
+            .import_bytes(b"\x89PNG\r\n\x1a\nremote picture", "picture.png".into())
+            .unwrap()
+    });
+    for (n, text) in [(1, "look at this"), (2, "and again")] {
+        assert!(send_images(
+            &state,
+            session,
+            text,
+            vec![picture.clone()],
+            cx
+        ));
+        wait_until(cx, &state, "the Codex reply to end", move |state| {
+            agent_text(state, session)
+                .matches("Scripted Codex reply")
+                .count()
+                == n
+                && !state.conversations[&session].running
+        });
+    }
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert_eq!(saved.provider(), Provider::Codex);
+        assert_eq!(saved.account(), Some(&login));
+        assert!(
+            state.codex.is_empty() && state.claude.is_empty(),
+            "nothing ran here"
+        );
+        let text = agent_text(state, session);
+        assert!(
+            text.contains("look at this") && text.contains("and again"),
+            "{text}"
+        );
+    });
+    assert!(home.is_dir(), "the host made the login's home there");
+    let launched: Vec<serde_json::Value> = std::fs::read_to_string(&env)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|process| {
+            process["provider"] == "codex" && process["argv"] != serde_json::json!(["--version"])
+        })
+        .collect();
+    assert!(!launched.is_empty());
+    for process in &launched {
+        assert_eq!(process["CODEX_HOME"].as_str(), home.to_str(), "{process}");
+    }
+    let lines = std::fs::read_to_string(&sent).unwrap();
+    assert_eq!(
+        lines
+            .lines()
+            .filter(|line| line.contains(r#""op":"put_attachment""#))
+            .count(),
+        1,
+        "the image went once"
+    );
+    let received = std::fs::read_to_string(&images).unwrap();
+    assert_eq!(
+        received
+            .lines()
+            .filter(|line| line.contains(&picture.sha256))
+            .count(),
+        2,
+        "Codex read the image's bytes both times: {received}"
+    );
+}
+
+/// A launch makes a connection for every provider and login the machine's sessions
+/// run on before the link reads a frame, so a Codex turn that went on while Keystone
+/// was closed is held for its session rather than waiting unclaimed.
+#[gpui::test]
+fn the_next_launch_catches_up_a_codex_turn_on_the_machine(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let argv = host.argv_with(&[("KEYSTONE_FAKE_CODEX_DELAY_MS", Path::new("15"))]);
+    let state = runtime(dir.path(), cx);
+    assert_eq!(link(&state, argv.clone(), "desk", cx), None);
+    let work = tempfile::tempdir().unwrap();
+    let session = new_remote(&state, work.path(), cx);
+    state.update(cx, |state, cx| {
+        state.set_provider(session, Provider::Codex, cx).unwrap();
+    });
+    assert!(send(&state, session, "hello", cx));
+    wait_until(cx, &state, "the reply to stream", |state| {
+        agent_text(state, session).contains("Scripted")
+    });
+    quit(state, false, cx);
+
+    let state = launch_linked(dir.path(), argv, session, cx);
+    state.read_with(cx, |state, _| {
+        let machine = desk(state);
+        assert!(
+            state.remote.contains_key(&(machine, Provider::Codex, None)),
+            "the Codex route was registered at launch"
+        );
+    });
+    wait_until(cx, &state, "the caught-up Codex turn to end", |state| {
+        ended(state, session) && agent_text(state, session).contains("stopping can be checked")
+    });
+    state.read_with(cx, |state, _| {
+        let text = agent_text(state, session);
+        assert_eq!(text.matches("Scripted Codex reply").count(), 1, "{text}");
+    });
 }

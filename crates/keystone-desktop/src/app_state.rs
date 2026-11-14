@@ -89,6 +89,9 @@ struct Placed {
 /// A connection on another machine: the machine, provider and account it serves.
 type RemoteKey = (MachineId, Provider, Option<AccountId>);
 
+const REMOTE_LOGIN: &str =
+    "Not sent. This session's account isn't a login on its machine any more. Start a new session.";
+
 /// Where a message goes: a folder on this machine, checked here, or one on another
 /// machine, which only its host checks.
 enum Place {
@@ -102,7 +105,7 @@ pub(crate) struct Linking {
     pub(crate) destination: String,
     /// The workspace's client ID, new when it has none yet.
     client: String,
-    link: Option<(Link, RemoteConnection)>,
+    link: Option<(Link, Vec<(Route, RemoteConnection)>)>,
     /// Why linking failed, which the form shows until the next try.
     pub(crate) failed: Option<String>,
 }
@@ -368,10 +371,6 @@ const UNREAD: &str = "Keystone could not read this conversation's history";
 
 /// How long Quit waits for every machine to hear that Keystone is quitting.
 const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
-const REMOTE_CODEX: &str = "Not sent. Only Claude runs on other machines so far.";
-const REMOTE_ACCOUNTS: &str =
-    "Not sent. Sessions on other machines use that machine's default login so far.";
-const REMOTE_IMAGES: &str = "Not sent. Images can't be sent to a session on another machine yet.";
 const REMOTE_UNLINKED: &str =
     "Not sent. This session's machine isn't linked any more. Link it again in Settings → Machines.";
 /// Where a restart left a remote session's turn open. The turn's own rows after it say
@@ -379,7 +378,8 @@ const REMOTE_UNLINKED: &str =
 const REMOTE_CLOSED: &str = "Keystone was closed during this turn on";
 
 /// The model menu of a session on another machine, whose catalog isn't asked yet.
-const REMOTE_MODELS: &str = "Models on other machines aren't listed yet. Claude uses its default.";
+const REMOTE_MODELS: &str =
+    "Models on other machines aren't listed yet, so the session uses its default.";
 /// Never shown: a session on another machine never asks for a folder here.
 const REMOTE_LOCAL_FOLDER: &str = "Not sent. This conversation's folder is on another machine.";
 
@@ -930,7 +930,7 @@ impl AppState {
                     .workspace()
                     .accounts()
                     .iter()
-                    .map(|account| account.home().to_owned()),
+                    .filter_map(|account| account.home().map(std::path::Path::to_path_buf)),
             )
             .flat_map(|home| [real_path(&home), home])
             .collect();
@@ -979,6 +979,33 @@ impl AppState {
             remove_created(first);
         }
         // The store forgot any readings left under a reused ID; so does this run.
+        if let Ok(added) = &result {
+            self.usage.remove(&usage_key(provider, Some(&added.value)));
+        }
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Adds a login on `machine` whose CLI uses `folder` there as its config home.
+    /// Nothing here reads `folder`: the machine's host makes it on first use and
+    /// refuses one that overlaps its default home.
+    pub(crate) fn add_remote_account(
+        &mut self,
+        provider: Provider,
+        label: &str,
+        folder: &str,
+        machine: &MachineId,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<AccountId>, String> {
+        if self.phase == Phase::Exiting {
+            return Err("Keystone is exiting.".into());
+        }
+        let home = RemoteFolder::new(folder)?;
+        let result = self
+            .store
+            .add_remote_account(provider, label, machine, &home)
+            .map_err(|error| error.to_string());
         if let Ok(added) = &result {
             self.usage.remove(&usage_key(provider, Some(&added.value)));
         }
@@ -1993,6 +2020,10 @@ impl AppState {
                 .filter(|s| s.provider() == provider)
                 .and_then(|s| s.account()),
             accounts: self.store.workspace().accounts(),
+            machine: saved.and_then(|s| s.machine()).and_then(|id| {
+                let machine = self.store.workspace().machine(id)?;
+                Some((machine.id(), machine.label()))
+            }),
             model: saved.and_then(|s| s.model()),
             effort: saved.and_then(|s| s.effort()),
             speed: saved.and_then(|s| s.speed()),
@@ -2245,11 +2276,15 @@ impl AppState {
                     {
                         events.push(placed(None))
                     }
+                    // An answer saves no row, but one from another machine still
+                    // takes its place, so the host may trim it.
                     Event::ThreadsListed { ticket, result } => {
                         answer(&self.native, ticket, Native::Listed(result));
+                        events.push(placed(None));
                     }
                     Event::HistoryRead { ticket, result } if self.import_reads.remove(&ticket) => {
                         answer(&self.native, ticket, Native::Read(result));
+                        events.push(placed(None));
                     }
                     event => events.push(placed(Some(event))),
                 }
@@ -2285,10 +2320,9 @@ impl AppState {
             let Some(machine) = self.session(session).and_then(|s| s.machine()).cloned() else {
                 continue;
             };
-            let (Some(link), Some(connection)) = (
-                self.links.get(&machine),
-                self.remote.get(&(machine.clone(), Provider::Claude, None)),
-            ) else {
+            let (Some(link), Some(connection)) =
+                (self.links.get(&machine), self.session_remote(session))
+            else {
                 continue;
             };
             if !link.journal_changes().1 || connection.has_events() {
@@ -2786,28 +2820,102 @@ impl AppState {
         Ok(ssh)
     }
 
-    /// A link to `destination` with its Claude connection, which wakes the pump on
-    /// every event and state change.
+    /// A link to `destination` with a connection for each provider and account the
+    /// machine's sessions run on, Claude on its default login included, each of which
+    /// wakes the pump on every event and state change. Each is registered before the
+    /// link can receive a frame, so no event of theirs waits unclaimed.
     fn open_link(
         &self,
         destination: &str,
         client: &str,
         machine: Option<&MachineId>,
-    ) -> Result<(Link, RemoteConnection), String> {
-        let saved = self
+    ) -> Result<(Link, Vec<(Route, RemoteConnection)>), String> {
+        let sessions = self
             .store
             .workspace()
             .sessions()
             .iter()
-            .filter(|session| machine.is_some() && session.machine() == machine)
+            .filter(|session| machine.is_some() && session.machine() == machine);
+        let saved = sessions
+            .clone()
             .filter_map(|session| {
                 let cursor = self.launch_cursors.get(&session.id())?;
                 Some((session.id(), cursor.clone()))
             })
             .collect();
+        let mut routes = vec![(Provider::Claude, None)];
+        for session in sessions {
+            let route = (session.provider(), session.account().cloned());
+            if !routes.contains(&route) {
+                routes.push(route);
+            }
+        }
         let link = Link::with_cursors(self.transport(destination)?, client.to_owned(), saved);
-        let connection = RemoteConnection::new(&link, Provider::Claude, None, self.wake.clone());
-        Ok((link, connection))
+        let connections = routes
+            .into_iter()
+            .filter_map(|(provider, account)| {
+                let route = Route {
+                    machine: machine.cloned(),
+                    provider,
+                    account,
+                };
+                match self.remote_on(&link, &route) {
+                    Ok(connection) => Some((route, connection)),
+                    Err(error) => {
+                        eprintln!("Keystone could not reach {provider} on {destination}: {error}");
+                        None
+                    }
+                }
+            })
+            .collect();
+        Ok((link, connections))
+    }
+
+    /// A connection on `link` for `route`'s provider and account. An account other
+    /// than the machine's default login must be one of that machine's logins, and
+    /// carries its home there for the host to run it with.
+    fn remote_on(&self, link: &Link, route: &Route) -> Result<RemoteConnection, String> {
+        let login = match &route.account {
+            None => None,
+            Some(id) => {
+                let account = self
+                    .store
+                    .workspace()
+                    .account(id)
+                    .filter(|account| account.provider() == route.provider)
+                    .ok_or(REMOTE_LOGIN)?;
+                let (on, home) = account.remote_home().ok_or(REMOTE_LOGIN)?;
+                if route.machine.as_ref() != Some(on) {
+                    return Err(REMOTE_LOGIN.into());
+                }
+                let login = remote::frame::Login {
+                    label: account.label().to_owned(),
+                    home: home.wire().to_owned(),
+                };
+                Some((id.to_string(), login))
+            }
+        };
+        Ok(RemoteConnection::new(
+            link,
+            route.provider,
+            login,
+            self.wake.clone(),
+        ))
+    }
+
+    /// Keeps `connections`, made for `machine`'s link, as that machine's.
+    fn keep_remote(&mut self, machine: &MachineId, connections: Vec<(Route, RemoteConnection)>) {
+        for (route, connection) in connections {
+            self.remote
+                .insert((machine.clone(), route.provider, route.account), connection);
+        }
+    }
+
+    /// The connection a session on another machine runs on, once its link is made.
+    fn session_remote(&self, session: u64) -> Option<&RemoteConnection> {
+        let route = self.route(session)?;
+        self.remote
+            .get(&(route.machine?, route.provider, route.account))
     }
 
     /// Makes the link of each linked machine that has none, then notes each link's
@@ -2828,9 +2936,9 @@ impl AppState {
         if let Some(client) = workspace.remote_client().map(str::to_owned) {
             for (id, destination) in missing {
                 match self.open_link(&destination, &client, Some(&id)) {
-                    Ok((link, connection)) => {
+                    Ok((link, connections)) => {
                         self.links.insert(id.clone(), link);
-                        self.remote.insert((id, Provider::Claude, None), connection);
+                        self.keep_remote(&id, connections);
                     }
                     Err(error) => eprintln!("Keystone could not link {destination}: {error}"),
                 }
@@ -2931,7 +3039,7 @@ impl AppState {
         {
             return;
         }
-        let Some(connection) = self.remote.get(&(machine.clone(), Provider::Claude, None)) else {
+        let Some(connection) = self.session_remote(session) else {
             return;
         };
         let (running, waiting) = (connection.is_running(session), connection.waiting(session));
@@ -2976,7 +3084,7 @@ impl AppState {
         let Some(Linking {
             destination,
             client,
-            link: Some((link, connection)),
+            link: Some((link, connections)),
             ..
         }) = self.linking.take()
         else {
@@ -2985,8 +3093,7 @@ impl AppState {
         match self.store.link_machine(&destination, client) {
             Ok(applied) => {
                 self.links.insert(applied.value.clone(), link);
-                self.remote
-                    .insert((applied.value, Provider::Claude, None), connection);
+                self.keep_remote(&applied.value, connections);
             }
             Err(error) => {
                 self.linking = Some(Linking {
@@ -3099,28 +3206,31 @@ impl AppState {
         created
     }
 
-    /// The connection on `machine` for `provider`'s `account`. Only Claude on the
-    /// machine's default login runs there so far.
+    /// The connection on `machine` for `provider`'s `account`, made on its link the
+    /// first time a session needs it, before its first call, so the link holds every
+    /// event of it for the pump.
     fn remote_connection(
         &mut self,
         machine: &MachineId,
         provider: Provider,
         account: Option<&AccountId>,
     ) -> Result<&dyn Connection, String> {
-        if provider != Provider::Claude {
-            return Err(REMOTE_CODEX.into());
-        }
-        if account.is_some() {
-            return Err(REMOTE_ACCOUNTS.into());
-        }
         if self.store.workspace().machine(machine).is_none() {
             return Err(REMOTE_UNLINKED.into());
         }
         self.watch_links();
-        self.remote
-            .get(&(machine.clone(), provider, None))
-            .map(|c| c as &dyn Connection)
-            .ok_or_else(|| REMOTE_UNLINKED.into())
+        let key = (machine.clone(), provider, account.cloned());
+        if !self.remote.contains_key(&key) {
+            let link = self.links.get(machine).ok_or(REMOTE_UNLINKED)?;
+            let route = Route {
+                machine: Some(machine.clone()),
+                provider,
+                account: account.cloned(),
+            };
+            let connection = self.remote_on(link, &route)?;
+            self.remote.insert(key.clone(), connection);
+        }
+        Ok(&self.remote[&key] as &dyn Connection)
     }
 
     /// How `provider`'s CLI is launched for `account`. An account this workspace no
@@ -3135,15 +3245,24 @@ impl AppState {
             return Ok(LaunchProfile::inherited());
         };
         match self.store.workspace().account(id) {
+            Some(account) if account.provider() == provider && account.home().is_none() => {
+                Err(format!(
+                    "Not sent. The account \u{201c}{}\u{201d} is a login on another machine.",
+                    account.label()
+                ))
+            }
             Some(account) if account.provider() == provider => {
-                let home = real_path(account.home());
+                let local = account.home().expect("checked above");
+                let home = real_path(local);
                 if let Some(other) = self
                     .store
                     .workspace()
                     .accounts()
                     .iter()
                     .filter(|other| other.id() != account.id())
-                    .find(|other| keystone_core::homes_overlap(&real_path(other.home()), &home))
+                    .filter_map(|other| Some((other, other.home()?)))
+                    .find(|(_, other)| keystone_core::homes_overlap(&real_path(other), &home))
+                    .map(|(other, _)| other)
                 {
                     return Err(format!(
                         "Not sent. The account \u{201c}{}\u{201d} now resolves to {}, which overlaps the account \u{201c}{}\u{201d}. Give each account a folder of its own.",
@@ -3160,15 +3279,11 @@ impl AppState {
                     return Err(format!(
                         "Not sent. The account \u{201c}{}\u{201d} uses {}, which overlaps a default home Keystone was started with ({}). Start Keystone without that setting, or start a new session.",
                         account.label(),
-                        account.home().display(),
+                        local.display(),
                         default.display()
                     ));
                 }
-                Ok(LaunchProfile::account(
-                    provider,
-                    account.label(),
-                    account.home(),
-                ))
+                Ok(LaunchProfile::account(provider, account.label(), local))
             }
             _ => Err(format!(
                 "Not sent. This session's {provider} account \u{201c}{id}\u{201d} is not set up. Add it again in Settings \u{2192} Accounts, or start a new session."
@@ -3569,7 +3684,7 @@ impl AppState {
                 .store
                 .workspace()
                 .account(id)
-                .map(|account| account.home().to_owned())
+                .and_then(|account| account.home().map(std::path::Path::to_path_buf))
                 .ok_or_else(|| "this session's account is not set up".into()),
             None => {
                 #[cfg(test)]
@@ -4158,12 +4273,6 @@ impl AppState {
         };
         let text = draft.text.trim().to_owned();
         if text.is_empty() && draft.attachments.is_empty() {
-            return Sent::No;
-        }
-        if session.machine().is_some() && !draft.attachments.is_empty() {
-            self.conversation(id).error = Some(REMOTE_IMAGES.into());
-            self.commit(id);
-            self.publish(cx);
             return Sent::No;
         }
         // An image whose copy is gone or cannot be opened keeps the draft, with a reason,

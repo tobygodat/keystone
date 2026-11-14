@@ -191,19 +191,25 @@ impl Keystone {
                 let detail = match &status {
                     LinkStatus::Failed(reason) => Some(reason.clone()),
                     _ => state.machine_welcome(machine.id()).map(|welcome| {
-                        let claude = welcome
-                            .providers
-                            .iter()
-                            .find(|found| found.provider == Provider::Claude)
-                            .map_or_else(
-                                || "Claude not found".to_owned(),
-                                |found| match (&found.version, &found.missing) {
-                                    (Some(version), _) => format!("Claude {version}"),
-                                    (None, Some(missing)) => format!("Claude {missing}"),
-                                    _ => "Claude not found".to_owned(),
-                                },
-                            );
-                        format!("{claude} · {} {}", welcome.os, welcome.arch)
+                        // The CLIs' own version lines say "(Claude Code)" and
+                        // "codex-cli", so the short names don't repeat them.
+                        let found = [(Provider::Claude, "Claude"), (Provider::Codex, "Codex")].map(
+                            |(provider, name)| {
+                                welcome
+                                    .providers
+                                    .iter()
+                                    .find(|found| found.provider == provider)
+                                    .map_or_else(
+                                        || format!("{name} not found"),
+                                        |found| match (&found.version, &found.missing) {
+                                            (Some(version), _) => format!("{name} {version}"),
+                                            (None, Some(missing)) => format!("{name} {missing}"),
+                                            _ => format!("{name} not found"),
+                                        },
+                                    )
+                            },
+                        );
+                        format!("{} · {} {}", found.join(" · "), welcome.os, welcome.arch)
                     }),
                 };
                 (machine.clone(), sessions, status, detail)
@@ -223,7 +229,7 @@ impl Keystone {
             .when(rows.is_empty(), |d| {
                 d.child(
                     Label::new(
-                        "Run Claude on another machine you reach over SSH. Its sessions keep running when Keystone quits.",
+                        "Run Claude and Codex on another machine you reach over SSH. Its sessions keep running when Keystone quits.",
                     )
                     .size(TextSize::Ui)
                     .color(Color::Muted),
@@ -311,8 +317,8 @@ impl Keystone {
                     .size(ButtonSize::Compact)
                     .track_focus(&page.stop(&format!("new-{key}"), cx))
                     .debug_selector(|| format!("machine-new-session-{key}"))
-                    .aria_label("New Claude session on this machine")
-                    .tooltip(Tooltip::text("New Claude session here"))
+                    .aria_label("New session on this machine")
+                    .tooltip(Tooltip::text("New session here"))
                     .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
                         this.open_remote_folder(&start, window, cx)
                     })),
@@ -516,7 +522,8 @@ impl Keystone {
         self.open_palette(items, crate::commands::Listing::Machines, window, cx);
     }
 
-    /// Asks for the folder on `machine` a new Claude session starts in.
+    /// Asks for the folder on `machine` a new session starts in. It starts on Claude,
+    /// and its model menu moves it to Codex or another login there until it sends.
     pub(crate) fn open_remote_folder(
         &mut self,
         machine: &MachineId,
@@ -549,7 +556,7 @@ impl Keystone {
                         Some(
                             PaletteItem::new(
                                 format!("{FOLDER_ROW}{}", folder.wire()),
-                                format!("Start Claude in {}", folder.wire()),
+                                format!("New session in {}", folder.wire()),
                             )
                             .detail(label.clone()),
                         )

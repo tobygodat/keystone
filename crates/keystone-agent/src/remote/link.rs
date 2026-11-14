@@ -4,7 +4,9 @@
 //! the app calls waits on the transport: frames go into a queue that one writer thread
 //! per transport empties.
 
-use super::frame::{self, Call, Frame, Op, Outcome, PROTOCOL, SessionState, Welcome};
+use super::frame::{
+    self, Attached, CHUNK, Call, Frame, Login, Op, Outcome, PROTOCOL, SessionState, Welcome,
+};
 use super::{Place, Route};
 use crate::{Catalog, Event, Wake};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -92,6 +94,9 @@ pub(crate) enum Kind {
     Send,
     /// As a failed catalog.
     Catalog,
+    /// Part of the image with this hash: as a warning, and the image is uploaded
+    /// again with the next message that carries it.
+    Upload(String),
     /// As a warning.
     Other,
 }
@@ -151,6 +156,9 @@ struct State {
     silenced: bool,
     /// How many `sessions` reports the host has sent this link.
     reports: u64,
+    /// The images, by hash, this link has sent to the host it was welcomed by, so a
+    /// message that carries one again names it without sending its bytes again.
+    uploaded: BTreeSet<String>,
 }
 
 impl Link {
@@ -191,6 +199,7 @@ impl Link {
                 trouble: None,
                 silenced: false,
                 reports: 0,
+                uploaded: BTreeSet::new(),
             }),
             changed: Condvar::new(),
         });
@@ -701,30 +710,77 @@ impl Shared {
     /// Numbers a call and queues it, to go out now if the link is up, else when it
     /// reconnects. With `connected`, refuses at once while the machine isn't connected.
     /// A call too large to send shows in its session as an error reply would.
-    pub(crate) fn call(&self, op: Op, then: Then, connected: bool) -> Result<(), &'static str> {
+    pub(crate) fn call(
+        &self,
+        op: Op,
+        then: Then,
+        login: Option<&Login>,
+        connected: bool,
+    ) -> Result<(), &'static str> {
         let wake = {
             let mut state = self.state();
             if connected && state.status != Status::Connected {
                 return Err(NOT_CONNECTED);
             }
-            let id = state.next_call;
-            let call = Frame::Call(Call {
-                id,
-                provider: then.route.provider,
-                account: then.route.account.clone(),
-                op,
-            });
-            match frame::encode(&call) {
-                Ok(line) => {
-                    state.next_call += 1;
-                    state.write_line(line.clone());
-                    state.calls.insert(id, Pending { line, then });
-                    None
-                }
-                Err(message) => state.failed(then, message),
-            }
+            state.queue(op, then, login)
         };
         if let Some(wake) = wake {
+            wake();
+        }
+        Ok(())
+    }
+
+    /// Queues `send` behind the bytes of each of `images` the host hasn't been sent,
+    /// in parts of at most [`CHUNK`], all at once, so nothing goes while the machine
+    /// isn't connected. The host takes calls in order, so it has every image before
+    /// the send that names it.
+    pub(crate) fn send_images(
+        &self,
+        images: Vec<(Attached, Vec<u8>)>,
+        send: Op,
+        then: Then,
+        login: Option<&Login>,
+    ) -> Result<(), &'static str> {
+        let wakes = {
+            let mut state = self.state();
+            if state.status != Status::Connected {
+                return Err(NOT_CONNECTED);
+            }
+            let mut wakes = Vec::new();
+            for (attached, bytes) in images {
+                if !state.uploaded.insert(attached.sha256.clone()) {
+                    continue;
+                }
+                let size = bytes.len() as u64;
+                let parts = bytes.chunks(CHUNK).map(Some).collect::<Vec<_>>();
+                // An empty image is still one part.
+                let parts = if parts.is_empty() { vec![None] } else { parts };
+                let mut offset = 0;
+                for part in parts {
+                    let part = part.unwrap_or_default();
+                    let op = Op::PutAttachment {
+                        sha256: attached.sha256.clone(),
+                        media_type: attached.media_type.clone(),
+                        size,
+                        offset,
+                        data: base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            part,
+                        ),
+                    };
+                    offset += part.len() as u64;
+                    let then = Then {
+                        route: then.route.clone(),
+                        session: then.session,
+                        kind: Kind::Upload(attached.sha256.clone()),
+                    };
+                    wakes.extend(state.queue(op, then, login));
+                }
+            }
+            wakes.extend(state.queue(send, then, login));
+            wakes
+        };
+        for wake in wakes {
             wake();
         }
         Ok(())
@@ -862,6 +918,8 @@ impl State {
         if behind {
             self.saved.clear();
         }
+        // Another journal is another host folder, whose cache may not hold them.
+        self.uploaded.clear();
         self.saved.retain(|_, place| place.journal == journal);
         self.journal = Some(journal);
         self.received = 0;
@@ -939,7 +997,32 @@ impl State {
     }
 
     /// Shows a call's error in its session, and returns the wake to run.
+    /// Numbers a call and queues it. One too large to send shows in its session as an
+    /// error reply would.
+    fn queue(&mut self, op: Op, then: Then, login: Option<&Login>) -> Option<Wake> {
+        let id = self.next_call;
+        let call = Frame::Call(Call {
+            id,
+            provider: then.route.provider,
+            account: then.route.account.clone(),
+            login: login.cloned(),
+            op,
+        });
+        match frame::encode(&call) {
+            Ok(line) => {
+                self.next_call += 1;
+                self.write_line(line.clone());
+                self.calls.insert(id, Pending { line, then });
+                None
+            }
+            Err(message) => self.failed(then, message),
+        }
+    }
+
     fn failed(&mut self, then: Then, message: String) -> Option<Wake> {
+        if let Kind::Upload(sha256) = &then.kind {
+            self.uploaded.remove(sha256);
+        }
         let running = self
             .routes
             .get(&then.route)
@@ -948,7 +1031,7 @@ impl State {
         let event = match then.kind {
             Kind::Catalog => Event::Catalog(Catalog::Failed(message)),
             Kind::Send if !running => Event::Failed { message },
-            Kind::Send | Kind::Other => Event::Warning { message },
+            Kind::Send | Kind::Upload(_) | Kind::Other => Event::Warning { message },
         };
         self.push(then.route, then.session, event)
     }

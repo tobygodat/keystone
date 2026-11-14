@@ -87,7 +87,7 @@ fn accounts_persist_in_their_own_projection_with_events() {
             account.label(),
             account.home()
         ),
-        (&id, Provider::Claude, "Personal Max", home.as_path())
+        (&id, Provider::Claude, "Personal Max", Some(home.as_path()))
     );
 
     let removed = last_sequence(&store);
@@ -430,4 +430,82 @@ fn removing_or_adding_an_account_forgets_usage_saved_under_its_id() {
         .value;
     assert_eq!(again, id);
     assert_eq!(keys(&Store::open(&path).unwrap()), ["claude/default"]);
+}
+
+/// A login on another machine keeps its home as typed, never as a path here, and only
+/// a session on that machine can use it. Unlinking the machine forgets its logins.
+#[test]
+fn a_login_on_another_machine_serves_only_that_machines_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let mut store = Store::open(&path).unwrap();
+    let desk = store.link_machine("desk", "client".into()).unwrap().value;
+    let home = RemoteFolder::new("/home/dev/.claude-work").unwrap();
+    let work = store
+        .add_remote_account(Provider::Claude, "Work", &desk, &home)
+        .unwrap()
+        .value;
+    let nested = RemoteFolder::new("/home/dev/.claude-work/inner").unwrap();
+    let refused = store
+        .add_remote_account(Provider::Codex, "Inner", &desk, &nested)
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("already used by the account"), "{refused}");
+    let root = RemoteFolder::new("/").unwrap();
+    assert!(
+        store
+            .add_remote_account(Provider::Claude, "Root", &desk, &root)
+            .is_err()
+    );
+    let elsewhere = MachineId::new("nowhere");
+    assert!(
+        store
+            .add_remote_account(Provider::Claude, "Lost", &elsewhere, &home)
+            .is_err()
+    );
+
+    let reopened = Store::open(&path).unwrap();
+    let account = reopened.workspace().account(&work).unwrap();
+    assert_eq!(account.home(), None, "no path here");
+    assert_eq!(account.machine(), Some(&desk));
+    assert_eq!(account.remote_home(), Some((&desk, home.clone())));
+
+    let folder = RemoteFolder::new("/srv/app").unwrap();
+    let remote = store
+        .create_remote_showing(&desk, &folder, 1, WindowId::FIRST, None)
+        .unwrap()
+        .value;
+    let local = store
+        .create(Provider::Claude, &working_directory(), 2)
+        .unwrap()
+        .value;
+    store.set_account(remote, Some(work.clone())).unwrap();
+    let saved = store
+        .workspace()
+        .sessions()
+        .iter()
+        .find(|s| s.id() == remote)
+        .unwrap();
+    assert_eq!(saved.account(), Some(&work));
+    let wrong = store
+        .set_account(local, Some(work.clone()))
+        .unwrap_err()
+        .to_string();
+    assert!(wrong.contains("another machine"), "{wrong}");
+
+    let lab = store.link_machine("lab", "client".into()).unwrap().value;
+    store
+        .add_remote_account(Provider::Codex, "Lab", &lab, &home)
+        .unwrap();
+    assert_eq!(
+        store.workspace().accounts().len(),
+        2,
+        "homes on two machines never overlap"
+    );
+    store.remove_machine(&lab).unwrap();
+    assert_eq!(
+        store.workspace().accounts().len(),
+        1,
+        "unlinking forgets the machine's logins"
+    );
 }

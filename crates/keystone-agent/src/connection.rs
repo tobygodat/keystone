@@ -251,6 +251,7 @@ struct Shared {
     /// Set when the connection is dropped, so queued commands start nothing.
     closed: bool,
     before_start: Option<StartHook>,
+    after_spawn: Option<SpawnHook>,
     /// Sessions given [`Connection::hold_follow_ups`], for every driver.
     holds: HashSet<u64>,
 }
@@ -603,6 +604,14 @@ impl CodexConnection {
         self.shared.lock().unwrap().before_start = Some(hook);
     }
 
+    /// Runs `hook` once each app-server has started, before it gets any input, with
+    /// the session whose command started it and its PID. An error ends the process
+    /// and fails the start with it.
+    #[doc(hidden)]
+    pub fn on_spawn(&self, hook: SpawnHook) {
+        self.shared.lock().unwrap().after_spawn = Some(hook);
+    }
+
     fn starter(&self) -> Starter {
         Starter {
             client_version: self.client_version.clone(),
@@ -799,7 +808,7 @@ impl Starter {
                 wake();
             }
         };
-        Process::spawn(
+        let process = Process::spawn(
             &program,
             &["app-server"],
             &cwd,
@@ -807,7 +816,12 @@ impl Starter {
             on_line,
             on_exit,
         )
-        .map_err(|e| format!("Could not start Codex at {}. {e}", program.display()))
+        .map_err(|e| format!("Could not start Codex at {}. {e}", program.display()))?;
+        let hook = self.shared.lock().unwrap().after_spawn.clone();
+        if let Some(hook) = hook {
+            hook(session, process.pid())?;
+        }
+        Ok(process)
     }
 }
 

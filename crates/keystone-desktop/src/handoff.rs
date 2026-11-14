@@ -294,7 +294,12 @@ pub(crate) fn provider_label(
     session: &keystone_core::Session,
     accounts: &[keystone_core::Account],
 ) -> String {
-    match account_label(session.provider(), session.account(), accounts) {
+    match account_label(
+        session.provider(),
+        session.account(),
+        accounts,
+        session.machine(),
+    ) {
         Some(account) => format!("{} · {account}", provider_name(session.provider())),
         None => provider_name(session.provider()).to_owned(),
     }

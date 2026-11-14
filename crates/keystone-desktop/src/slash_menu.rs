@@ -368,7 +368,7 @@ impl Keystone {
                 .accounts()
                 .iter()
                 .find(|a| a.id() == id)
-                .map(|a| a.home().to_path_buf())
+                .and_then(|a| a.home().map(std::path::Path::to_path_buf))
         });
         let folder = match state.place(notice.session) {
             Some(presentation::SessionPlace::Local(directory)) => directory.path().to_path_buf(),

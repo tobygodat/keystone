@@ -97,10 +97,11 @@ impl Keystone {
             .iter()
             .enumerate()
             .map(|(n, (provider, account))| {
-                let label = match account_label(*provider, account.as_ref(), workspace.accounts()) {
-                    Some(account) => format!("{} · {account}", provider_name(*provider)),
-                    None => provider_name(*provider).to_owned(),
-                };
+                let label =
+                    match account_label(*provider, account.as_ref(), workspace.accounts(), None) {
+                        Some(account) => format!("{} · {account}", provider_name(*provider)),
+                        None => provider_name(*provider).to_owned(),
+                    };
                 PaletteItem::new(format!("{ACCOUNT}{n}"), label)
             })
             .collect();

@@ -1030,7 +1030,11 @@ fn a_symlinked_or_refused_folder_is_checked_before_anything_is_created(
         let account = state.store().workspace().account(&added).unwrap();
         assert_eq!(
             account.home(),
-            std::fs::canonicalize(dir.path().join("elsewhere")).unwrap(),
+            Some(
+                std::fs::canonicalize(dir.path().join("elsewhere"))
+                    .unwrap()
+                    .as_path()
+            ),
             "the real folder is saved"
         );
     });
@@ -1099,7 +1103,7 @@ fn a_parent_step_after_a_symlink_follows_the_filesystem(cx: &mut gpui::TestAppCo
     state.read_with(cx, |state, _| {
         assert_eq!(
             state.store().workspace().account(&added).unwrap().home(),
-            base.join("real/work"),
+            Some(base.join("real/work").as_path()),
             "the folder the filesystem reaches, not the text"
         );
     });

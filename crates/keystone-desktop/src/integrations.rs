@@ -443,13 +443,14 @@ impl Keystone {
                     .accounts()
                     .iter()
                     .filter(|a| a.provider() == provider)
-                    .map(|a| {
-                        (
+                    // A login on another machine keeps its setup there.
+                    .filter_map(|a| {
+                        Some((
                             provider,
                             Some(a.id().clone()),
                             a.label().to_owned(),
-                            Some(a.home().to_owned()),
-                        )
+                            Some(a.home()?.to_owned()),
+                        ))
                     }),
             );
         }

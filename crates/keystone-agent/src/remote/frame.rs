@@ -8,7 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Read};
 
 /// The protocol both sides must speak. A host that speaks another refuses the link.
-pub const PROTOCOL: u32 = 2;
+/// 3 added Codex, accounts and images: a call's `login`, `send`'s `images`, and the
+/// `put_attachment`, `read_history`, `list_threads` and `read_import` ops.
+pub const PROTOCOL: u32 = 3;
+
+/// The most of an image one `put_attachment` call carries, before base64, so a frame
+/// stays well within [`MAX_FRAME`].
+pub const CHUNK: usize = 8 * 1024 * 1024;
 
 /// The largest frame, newline excluded.
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
@@ -111,13 +117,33 @@ pub struct Found {
 }
 
 /// One `Connection` method call, for the connection of `provider` and `account`.
+/// A call for an account other than the machine's default login carries `login`,
+/// from which the host builds the account's launch profile.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Call {
     pub id: u64,
     pub provider: Provider,
     pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<Login>,
     #[serde(flatten)]
     pub op: Op,
+}
+
+/// An account on the host's machine: its name, and its config home there, an
+/// absolute path on that machine that the app never resolves.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Login {
+    pub label: String,
+    pub home: String,
+}
+
+/// An image a `send` carries, by the hash of its bytes, which an earlier
+/// `put_attachment` put in the host's cache.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attached {
+    pub media_type: String,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -130,8 +156,37 @@ pub enum Op {
         choice: ModelChoice,
         approval: ApprovalState,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Attached>,
     },
     Command(Command),
+    /// Part of an image's bytes, in base64, from `offset` of its `size`. The host
+    /// keeps the image by its hash once the last part arrives and the bytes match it.
+    PutAttachment {
+        sha256: String,
+        media_type: String,
+        size: u64,
+        offset: u64,
+        data: String,
+    },
+    /// Codex's stored history of `thread`, answered as `HistoryRead` with `ticket`.
+    ReadHistory {
+        session: u64,
+        thread: String,
+        ticket: u64,
+    },
+    /// The Codex conversations that ran in `cwd`, answered as `ThreadsListed` with
+    /// `ticket`, for session 0.
+    ListThreads {
+        cwd: String,
+        ticket: u64,
+    },
+    /// The newest turns of `thread` for an import, answered as `HistoryRead` with
+    /// `ticket`, for session 0.
+    ReadImport {
+        thread: String,
+        ticket: u64,
+    },
     RequestCatalog {
         session: u64,
         cwd: String,
@@ -281,6 +336,7 @@ mod tests {
             id: 7,
             provider: Provider::Claude,
             account: None,
+            login: None,
             op: Op::Send {
                 session: 12,
                 cwd: "/home/dev/src/app".into(),
@@ -291,6 +347,7 @@ mod tests {
                     overridden: false,
                 },
                 text: "hello".into(),
+                images: Vec::new(),
             },
         }));
         assert!(call.starts_with(r#"{"t":"call","id":7,"provider":"Claude","account":null,"op":"send","args":{"session":12,"#));
@@ -318,6 +375,7 @@ mod tests {
             id: 9,
             provider: Provider::Claude,
             account: None,
+            login: None,
             op: Op::Command(Command::Answer {
                 session: 12,
                 request: RequestId("\"r1\"".into()),
@@ -355,6 +413,61 @@ mod tests {
                 }],
             }],
         });
+    }
+
+    #[test]
+    fn a_login_and_images_cross_the_wire_only_when_there_are_some() {
+        let send = |login, images| {
+            round_trip(Frame::Call(Call {
+                id: 3,
+                provider: Provider::Codex,
+                account: Some("codex-work".into()),
+                login,
+                op: Op::Send {
+                    session: 4,
+                    cwd: "/srv/app".into(),
+                    resume: None,
+                    choice: ModelChoice::default(),
+                    approval: ApprovalState {
+                        mode: ApprovalMode::Ask,
+                        overridden: false,
+                    },
+                    text: "look".into(),
+                    images,
+                },
+            }))
+        };
+        let plain = send(None, Vec::new());
+        assert!(
+            !plain.contains("login") && !plain.contains("images"),
+            "{plain}"
+        );
+        let full = send(
+            Some(Login {
+                label: "Work".into(),
+                home: "/home/dev/.codex-work".into(),
+            }),
+            vec![Attached {
+                media_type: "image/png".into(),
+                sha256: "ab".repeat(32),
+            }],
+        );
+        let value: serde_json::Value = serde_json::from_str(&full).unwrap();
+        assert_eq!(value["login"]["home"], "/home/dev/.codex-work");
+        assert_eq!(value["args"]["images"][0]["media_type"], "image/png");
+        round_trip(Frame::Call(Call {
+            id: 4,
+            provider: Provider::Claude,
+            account: None,
+            login: None,
+            op: Op::PutAttachment {
+                sha256: "ab".repeat(32),
+                media_type: "image/png".into(),
+                size: 3,
+                offset: 0,
+                data: "AAEC".into(),
+            },
+        }));
     }
 
     #[test]
@@ -408,6 +521,7 @@ mod tests {
                 id: 10,
                 provider: Provider::Codex,
                 account: None,
+                login: None,
                 op: Op::Command(Command::Reply {
                     session: 12,
                     request: RequestId("\"q1\"".into()),

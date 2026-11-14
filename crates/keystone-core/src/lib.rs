@@ -1159,7 +1159,7 @@ impl Store {
         directory: &WorkingDirectory,
         now: u64,
     ) -> StoreResult<Applied<u64>> {
-        let account = self.provider_account(provider, account)?;
+        let account = self.provider_account(provider, account, None)?;
         self.add_session(
             |id| Session {
                 account,
@@ -1368,7 +1368,7 @@ impl Store {
         now: u64,
         window: WindowId,
     ) -> StoreResult<Applied<u64>> {
-        let account = self.provider_account(provider, account)?;
+        let account = self.provider_account(provider, account, None)?;
         if self.workspace.imported(provider, &thread).is_some() {
             return Err(invalid("this conversation is already in Keystone").into());
         }
@@ -1717,7 +1717,13 @@ impl Store {
         account: Option<AccountId>,
     ) -> StoreResult<Applied<()>> {
         self.session_provider(id)?;
-        let account = self.provider_account(provider, account)?;
+        let machine = self
+            .workspace
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .and_then(|session| session.machine().cloned());
+        let account = self.provider_account(provider, account, machine.as_ref())?;
         self.update_unstarted(id, |session| {
             if session.provider != provider {
                 session.provider = provider;
@@ -1733,16 +1739,23 @@ impl Store {
         })
     }
 
-    /// `account` as a session on `provider` saves it: `None` for the default, else one
-    /// of `provider`'s accounts.
+    /// `account` as a session on `provider` and `machine` saves it: `None` for the
+    /// default, else one of `provider`'s accounts on that machine.
     fn provider_account(
         &self,
         provider: Provider,
         account: Option<AccountId>,
+        machine: Option<&MachineId>,
     ) -> StoreResult<Option<AccountId>> {
         let account = account.filter(|account| account.as_str() != AccountId::DEFAULT);
         if let Some(account) = &account {
             match self.workspace.account(account) {
+                Some(found) if found.provider() == provider && found.machine() != machine => {
+                    return Err(invalid(format!(
+                        "account {account} is a login on another machine than this session's"
+                    ))
+                    .into());
+                }
                 Some(found) if found.provider() == provider => {}
                 Some(_) => {
                     return Err(
@@ -1787,6 +1800,58 @@ impl Store {
         let mut next = self.workspace.clone();
         next.accounts
             .push(Account::new(id.clone(), provider, label, home));
+        let applied = self.commit(next, self.next_id);
+        Ok(Applied {
+            value: id,
+            revision: applied.revision,
+        })
+    }
+
+    /// Adds a login on `machine` for `provider`, whose CLI runs there with `home`, a
+    /// folder on that machine, as its config home. Nothing here reads `home`: the
+    /// machine's host makes it when missing and refuses one that overlaps its default
+    /// home. It must not overlap another login's home on the same machine.
+    pub fn add_remote_account(
+        &mut self,
+        provider: Provider,
+        label: &str,
+        machine: &MachineId,
+        home: &RemoteFolder,
+    ) -> StoreResult<Applied<AccountId>> {
+        if self.workspace.machine(machine).is_none() {
+            return Err(invalid(format!("unknown machine {machine}")).into());
+        }
+        if home.wire() == "/" {
+            return Err(invalid("The account folder cannot be the filesystem root.").into());
+        }
+        let label = self.account_label(provider, label, None)?;
+        if let Some(other) = self.workspace.accounts.iter().find(|account| {
+            account.remote_home().is_some_and(|(on, other)| {
+                on == machine && account::remote_homes_overlap(&other, home)
+            })
+        }) {
+            return Err(invalid(format!(
+                "{} is already used by the account \u{201c}{}\u{201d}; each account needs a folder of its own",
+                home.wire(),
+                other.label()
+            ))
+            .into());
+        }
+        let taken: Vec<AccountId> = self
+            .workspace
+            .accounts
+            .iter()
+            .map(|a| a.id().clone())
+            .collect();
+        let id = account::slug(provider, &label, &taken);
+        let mut next = self.workspace.clone();
+        next.accounts.push(Account::remote(
+            id.clone(),
+            provider,
+            label,
+            machine.clone(),
+            home,
+        ));
         let applied = self.commit(next, self.next_id);
         Ok(Applied {
             value: id,
@@ -1870,6 +1935,9 @@ impl Store {
         }
         let mut next = self.workspace.clone();
         next.machines.retain(|machine| machine.id() != id);
+        // Its logins name folders there, which no other machine has.
+        next.accounts
+            .retain(|account| account.machine() != Some(id));
         Ok(self.commit(next, self.next_id))
     }
 
@@ -1894,7 +1962,8 @@ impl Store {
 
     /// Creates a Claude session in `folder` on `machine` and selects it in `window`,
     /// saving `show` with it as [`Store::create_showing`] does. Its machine is fixed
-    /// from now on. Only Claude runs on other machines so far.
+    /// from now on. It starts on Claude, and like a local session it can move to Codex
+    /// or another of that machine's logins until its first message.
     pub fn create_remote_showing(
         &mut self,
         machine: &MachineId,
@@ -1958,12 +2027,11 @@ impl Store {
                 invalid("an account home must be an absolute path without `.` or `..`").into(),
             );
         }
-        if let Some(other) = self
-            .workspace
-            .accounts
-            .iter()
-            .find(|account| homes_overlap(account.home(), home))
-        {
+        if let Some(other) = self.workspace.accounts.iter().find(|account| {
+            account
+                .home()
+                .is_some_and(|other| homes_overlap(other, home))
+        }) {
             return Err(invalid(format!(
                 "{} is already used by the account \u{201c}{}\u{201d}; each account needs a folder of its own",
                 home.display(),

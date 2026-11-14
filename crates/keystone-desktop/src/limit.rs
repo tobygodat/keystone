@@ -115,7 +115,7 @@ impl Keystone {
                     .is_none_or(|usage| usage.full_until(now).is_none())
             })
             .map(|(provider, account)| {
-                let name = match account_label(provider, account.as_ref(), accounts) {
+                let name = match account_label(provider, account.as_ref(), accounts, None) {
                     Some(label) => format!("{} · {label}", provider_name(provider)),
                     None => provider_name(provider).to_owned(),
                 };

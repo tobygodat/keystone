@@ -59,7 +59,7 @@ pub use item::{
     TurnStatus, cap_output,
 };
 pub use profile::{
-    ConfigEnv, LaunchProfile, default_home, default_sign_in_command, run_config_cli,
-    sign_in_command, terminal_command,
+    ConfigEnv, LaunchProfile, default_home, default_sign_in_command, remote_sign_in_command,
+    run_config_cli, sign_in_command, terminal_command,
 };
 pub use question::{Answer, Bounds, Choice, Field, Input, Question};

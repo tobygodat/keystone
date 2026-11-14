@@ -1105,7 +1105,7 @@ mod tests {
                 (
                     a.id().to_string(),
                     a.label().to_owned(),
-                    a.home().to_owned(),
+                    a.home().unwrap().to_owned(),
                 )
             })
             .collect()

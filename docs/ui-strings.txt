@@ -592,8 +592,21 @@ crates/keystone-agent/src/remote/attach.rs
 	Could not start keystone-host serve: {e}
 	keystone-host serve did not start within 5 s ({error}). Its log is {}
 
+crates/keystone-agent/src/remote/cache.rs
+	A {size} byte image is over the machine's limit
+	An image in this message isn't in the machine's cache any more, so the message wasn't sent. Send it again
+	An image part doesn't fit its image
+	An image part isn't base64: {e}
+	An image's bytes don't match its hash, so it wasn't kept
+	An image's upload was cut off. Send the message again to send it whole
+	Could not keep an image: {e}
+	Could not save an image: {e}
+	{sha256:?} isn't a SHA-256
+	{} isn't an image type Keystone sends
+
 crates/keystone-agent/src/remote/connection.rs
-	Images can't be sent to a session on another machine yet
+	An attached image couldn't be read from Keystone's data folder, so the message wasn't sent
+	An image can go to a session on another machine only with a message
 
 crates/keystone-agent/src/remote/frame.rs
 	a frame is over 16 MiB
@@ -667,20 +680,25 @@ crates/keystone-agent/src/remote/reap.rs
 crates/keystone-agent/src/remote/serve.rs
 	--version did not answer
 	--version failed with {}
-	Codex sessions can't run on another machine yet
+	An image went with this message as a file here, so it wasn't sent
+	Claude Code
+	Claude Code's history is read from its files, not asked of the host
+	Codex
 	Could not find keystone-host itself: {e}
 	Could not listen on {}: {e}
+	Could not make {}: {e}
 	Could not open {}: {e}
-	Images can't be sent to a session on another machine yet
 	KEYSTONE_HOST_QUEUE_LIMIT must be at least {QUEUE_FLOOR} bytes, not {queue_limit}
-	Sessions on another machine run as its default login; other accounts aren't supported there yet
+	The account “{}” needs a full path on this machine, not {}
+	The account “{}” uses {}, which overlaps this machine's default home {}. Give it a folder of its own
+	The app didn't say where this account keeps its files on this machine
 	The machine can't save events, and so many wait to be saved that it starts no more turns until it can
 	The machine can't stop processes {} of this session's last run, so the session can't go on until they exit
 	The machine can't stop the processes of this session's last run, so the session can't go on until they exit
 	The machine couldn't save this session's latest events, so they wait there and arrive once it can
 	The machine is still stopping the processes of this session's last run, so it can't start another turn yet
 	The machine lost track of this call when keystone-host stopped, so it may or may not have run
-	The watcher of this session's last run stopped unexpectedly, so processes its Claude Code (process {pid}) started may still be running
+	The watcher of this session's last run stopped unexpectedly, so processes its {} (process {pid}) started may still be running
 	a client id must be 1 to 256 bytes
 	closing a link that sent an unexpected frame: {frame:?}
 	closing a link that went silent
@@ -690,7 +708,7 @@ crates/keystone-agent/src/remote/serve.rs
 	exiting idle with {unsaved} events the journal never took; the next daemon ends any turn they leave running
 	journal: appends fail (test fault)
 	keystone-host couldn't record this call, so it didn't run it: {error}
-	keystone-host couldn't watch Claude Code, so it stopped it: {e}
+	keystone-host couldn't watch {}, so it stopped it: {e}
 	not on PATH
 	protocol {protocol} is needed, this host speaks {PROTOCOL} (keystone-host {})
 	session {session} still waits for processes {pids:?} of its last run
@@ -705,6 +723,7 @@ crates/keystone-agent/src/remote/serve.rs
 	{cwd} isn't a folder on this machine
 	{error}; events wait for the journal
 	{name} must be a whole number, not {value:?}
+	{} isn't a folder on this machine
 
 crates/keystone-agent/src/version.rs
 	 (Claude Code)
@@ -848,10 +867,12 @@ crates/keystone-core/src/lib.rs
 	Reads files; asks before any change
 	Second opinion on session {source}
 	Second opinion: {}
+	The account folder cannot be the filesystem root.
 	Use your own Codex or Claude Code configuration
 	a session on another machine can't be forked yet
 	a session on another machine can't be handed off yet
 	a title cannot be blank
+	account {account} is a login on another machine than this session's
 	account {account} is not a {provider} account
 	an account home must be an absolute path without `.` or `..`
 	an account name cannot be blank
@@ -982,22 +1003,21 @@ crates/keystone-desktop/src/app_state.rs
 	Keystone kept it: the conversation could not be saved: {error}
 	Keystone kept it: {reason}
 	Keystone was closed during this turn on
-	Models on other machines aren't listed yet. Claude uses its default.
+	Models on other machines aren't listed yet, so the session uses its default.
 	Not imported. {error}
 	Not kept: {error}.
 	Not quit. {reason}
 	Not saved. {error}
 	Not sent. Choose a conversation folder using the folder button beside the model.
 	Not sent. Could not finish saving changes. {error}
-	Not sent. Images can't be sent to a session on another machine yet.
-	Not sent. Only Claude runs on other machines so far.
-	Not sent. Sessions on other machines use that machine's default login so far.
+	Not sent. The account “{}” is a login on another machine.
 	Not sent. The account “{}” now resolves to {}, which overlaps the account “{}”. Give each account a folder of its own.
 	Not sent. The account “{}” uses {}, which overlaps a default home Keystone was started with ({}). Start Keystone without that setting, or start a new session.
 	Not sent. This conversation has saved folder data that this version cannot use.
 	Not sent. This conversation's folder is on another machine.
 	Not sent. This conversation's saved folder is unavailable.
 	Not sent. This folder's worktree is being removed.
+	Not sent. This session's account isn't a login on its machine any more. Start a new session.
 	Not sent. This session's machine isn't linked any more. Link it again in Settings → Machines.
 	Not sent. This session's worktree folder is missing or is no longer its worktree: {}. Its branch {} may still exist.
 	Not sent. This session's {provider} account “{id}” is not set up. Add it again in Settings → Accounts, or start a new session.
@@ -1056,13 +1076,14 @@ crates/keystone-desktop/src/attachments.rs
 	Attach files…
 	Attachment not saved. {error}
 	Capture screenshot
-	Files and images can't be attached to sessions on {machine} yet.
 	Image.{}
 	Path to a file
 	Remove
 	Remove {}
 	{draft} {text}
 	{} can't be mentioned: quote or line break in its path.
+	{} isn't a full path on this machine, so it can't go to a session on {machine}.
+	{} isn't an image. Only images go to sessions on {machine}; mention files there by their path on that machine.
 	{} not added to the draft. {error}
 
 crates/keystone-desktop/src/browser.rs
@@ -1203,9 +1224,9 @@ crates/keystone-desktop/src/commands.rs
 	Machine
 	Move tab to window…
 	New Claude session
-	New Claude session on a machine
 	New Codex session
 	New session in worktree…
+	New session on a machine
 	New tab
 	New window
 	Next effort level
@@ -1727,9 +1748,8 @@ crates/keystone-desktop/src/machines.rs
 	A Host from ~/.ssh/config, user@host, or a tailnet name. Keystone signs in with your SSH keys and runs keystone-host there.
 	Can't connect
 	Can't connect to {label}
-	Claude not found
-	Claude {missing}
-	Claude {version}
+	Claude
+	Codex
 	Connected
 	Connecting
 	Connecting to {label}
@@ -1740,20 +1760,22 @@ crates/keystone-desktop/src/machines.rs
 	Link a machine
 	Link a machine…
 	Machine not removed. {error}
-	New Claude session here
-	New Claude session on this machine
+	New session here
+	New session in {}
+	New session on this machine
 	Not saved. {error}
 	Reconnecting
 	Reconnecting to {label}
 	Remove
 	Remove machine
 	Retry
-	Run Claude on another machine you reach over SSH. Its sessions keep running when Keystone quits.
+	Run Claude and Codex on another machine you reach over SSH. Its sessions keep running when Keystone quits.
 	SSH destination
 	Send
-	Start Claude in {}
 	Steer
-	{claude} · {} {}
+	{name} not found
+	{name} {missing}
+	{name} {version}
 	{sessions} session{}
 	· {detail}
 
@@ -1863,7 +1885,6 @@ crates/keystone-desktop/src/model_selector.rs
 	{name} · {label} · provider and account fixed after the first message
 	{name} · {label}{options}
 	{name} · {label}{options} · effort and speed as asked for the next turns · provider and account fixed after the first message
-	{} · {label}
 
 crates/keystone-desktop/src/notes.rs
 	Add to draft
@@ -2117,6 +2138,7 @@ crates/keystone-desktop/src/settings_accounts.rs
 	Add an account
 	Copied
 	Copy sign-in command
+	Copy the sign-in command to run on {machine}
 	Default
 	Folder
 	In use
@@ -2125,6 +2147,8 @@ crates/keystone-desktop/src/settings_accounts.rs
 	Remove account
 	Rename
 	Rename account
+	This machine
+	{label} on {machine}
 	{sessions} session{}
 
 crates/keystone-desktop/src/settings_page.rs

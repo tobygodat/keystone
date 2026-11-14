@@ -1,36 +1,75 @@
 //! [`RemoteConnection`]: the [`Connection`] for one machine, provider and account,
 //! which sends each call to that machine's `keystone-host` over the shared [`Link`].
 
-use super::frame::Op;
+use super::frame::{Attached, Login, Op};
 use super::link::{Kind, Link, Shared, Then};
 use super::{Place, Route};
 use crate::connection::command_session;
 use crate::idle::IdleCandidate;
 use crate::{Approval, ApprovalState, Command, Connection, Event, Image, Wake};
 use keystone_core::{ForkPoint, ModelChoice, Provider};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-const NO_IMAGES: &str = "Images can't be sent to a session on another machine yet";
+const NO_IMAGES: &str = "An image can go to a session on another machine only with a message";
+const UNREAD: &str =
+    "An attached image couldn't be read from Keystone's data folder, so the message wasn't sent";
 
 pub struct RemoteConnection {
     link: Arc<Shared>,
     route: Route,
+    login: Option<Login>,
     registration: u64,
 }
 
 impl RemoteConnection {
     /// Events for `provider` and `account` on the link's machine arrive here, and
     /// `wake` runs when they do or the link's state changes. A connection made for the
-    /// same provider and account replaces this one's wake.
-    pub fn new(link: &Link, provider: Provider, account: Option<String>, wake: Wake) -> Self {
+    /// same provider and account replaces this one's wake. `account` is `None` for the
+    /// machine's default login; another is named by its ID and has a `login`.
+    pub fn new(
+        link: &Link,
+        provider: Provider,
+        account: Option<(String, Login)>,
+        wake: Wake,
+    ) -> Self {
         let link = link.shared();
+        let (account, login) = account.unzip();
         let route = Route { provider, account };
         let registration = link.register(&route, wake);
         Self {
             link,
             route,
+            login,
             registration,
         }
+    }
+
+    /// Reads Codex's stored history of `thread`, which arrives as
+    /// [`Event::HistoryRead`] with `ticket`, as [`crate::CodexConnection::read_history`].
+    pub fn read_history(&self, session: u64, thread: String, ticket: u64) {
+        let op = Op::ReadHistory {
+            session,
+            thread,
+            ticket,
+        };
+        self.report(session, op, Kind::Other);
+    }
+
+    /// Lists the Codex conversations that ran in `cwd` on the machine, which arrive as
+    /// [`Event::ThreadsListed`] with `ticket`, as [`crate::CodexConnection::list_threads`].
+    pub fn list_threads(&self, cwd: &str, ticket: u64) {
+        let op = Op::ListThreads {
+            cwd: cwd.to_owned(),
+            ticket,
+        };
+        self.report(0, op, Kind::Other);
+    }
+
+    /// Reads the newest turns of `thread` for an import, as
+    /// [`crate::CodexConnection::read_import`].
+    pub fn read_import(&self, thread: String, ticket: u64) {
+        self.report(0, Op::ReadImport { thread, ticket }, Kind::Other);
     }
 
     /// The approvals the session's provider waits on, as far as the host has said.
@@ -56,7 +95,7 @@ impl RemoteConnection {
     /// Sends `op` now or once the link reconnects. An error reply shows in the session.
     fn report(&self, session: u64, op: Op, kind: Kind) {
         let then = self.then(session, kind);
-        let _ = self.link.call(op, then, false);
+        let _ = self.link.call(op, then, self.login.as_ref(), false);
     }
 
     fn then(&self, session: u64, kind: Kind) -> Then {
@@ -86,6 +125,7 @@ impl Connection for RemoteConnection {
     /// such as a steer Claude can't take now, or an answer saying the message may not
     /// have run, arrives later in the session: as a warning while a turn runs, else as
     /// a failure, the way a local send reports a message that fails after it was taken.
+    /// Each image goes by its hash, after its bytes when this link hasn't sent them.
     fn send(
         &self,
         session: u64,
@@ -96,8 +136,24 @@ impl Connection for RemoteConnection {
         text: String,
         images: Vec<Image>,
     ) -> Result<(), &'static str> {
-        if !images.is_empty() {
-            return Err(NO_IMAGES);
+        let mut attached = Vec::with_capacity(images.len());
+        for image in images {
+            let bytes = match &image.base64 {
+                Some(data) => {
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &**data)
+                        .map_err(|_| UNREAD)?
+                }
+                None => std::fs::read(&image.path).map_err(|_| UNREAD)?,
+            };
+            let sha256 = Sha256::digest(&bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let image = Attached {
+                media_type: image.media_type,
+                sha256,
+            };
+            attached.push((image, bytes));
         }
         let op = Op::Send {
             session,
@@ -106,8 +162,15 @@ impl Connection for RemoteConnection {
             choice: choice.clone(),
             approval,
             text,
+            images: attached.iter().map(|(image, _)| image.clone()).collect(),
         };
-        self.link.call(op, self.then(session, Kind::Send), true)
+        let then = self.then(session, Kind::Send);
+        if attached.is_empty() {
+            self.link.call(op, then, self.login.as_ref(), true)
+        } else {
+            self.link
+                .send_images(attached, op, then, self.login.as_ref())
+        }
     }
 
     fn request_catalog(&self, session: u64, cwd: &str) {

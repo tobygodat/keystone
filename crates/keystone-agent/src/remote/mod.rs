@@ -5,6 +5,7 @@
 //! it. See `docs/design/remote.md`.
 
 mod attach;
+mod cache;
 mod connection;
 pub mod frame;
 mod journal;

@@ -33,7 +33,7 @@ It lists the covered files changed since the sync commit, committed or not, the 
 bash crates/keystone-desktop/.agents/skills/cursor-model/check.sh
 ```
 
-It needs `mise` and, on the first run, the network: it fetches TLC 1.7.4 (checksum-pinned) into `~/.cache/keystone/` and Java through `mise` (`java@temurin-21`), as the quit and restore models do. It keeps TLC's state files under `~/.cache/keystone/` too, since they don't fit a small `/tmp`. It runs twenty TLC jobs in parallel in about 3 minutes, prints one line per run, and exits 0 only when every result matches what it expected:
+It needs `mise` and, on the first run, the network: it fetches TLC 1.7.4 (checksum-pinned) into `~/.cache/keystone/` and Java through `mise` (`java@temurin-21`), as the quit and restore models do. It keeps TLC's state files under `~/.cache/keystone/` too, since they don't fit a small `/tmp`. It runs twenty-one TLC jobs in parallel in about 2 minutes, prints one line per run, and exits 0 only when every result matches what it expected:
 
 - `code` runs: each rule on the code as it is, under each set of bounds. All must hold.
 - `finding` runs: a known way the code breaks a rule, filed in Linear. It must keep breaking until the issue is fixed; then its line becomes a `code` line.
@@ -44,6 +44,7 @@ It needs `mise` and, on the first run, the network: it fetches TLC 1.7.4 (checks
   - `cross-journal` compares places by number alone, as the first build of TOB-319 did: it lowers them to the host's `latest` on a welcome, keeps `after` across journals, and only ever raises the saved cursor. `NothingLost` catches it: a replaced journal's new events, numbered from 1, are dropped as saved and trimmed.
   - `lossy-crash` lets a host crash or power loss take back commits the daemon had already sent, as `PRAGMA synchronous = NORMAL` did before TOB-319's third round. The daemon that starts next numbers its restart events over events the app has saved, the app drops them as saved, and `NothingLost` catches it.
   - `no-rotate` lets a journal that went back keep its identity. The link forgets its places for the run, but the saved cursors in the database keep that identity, so once the journal grows past them a later launch drops its new events. `NothingLost` catches it.
+  - `late-route` leaves one session's route unregistered while its events wait to be drained, as an app that made a route's connection only when it next sent, rather than when it made the link, would at a launch that replays that route's turn. The acknowledgement passes those events, the host trims them, and a kill loses them. `NothingLost` catches it.
 
 The `grows` finding (TOB-455): a journal that went back and numbered new events up to the app's place before the app reconnected has nothing behind that place, so the host can't tell, keeps its identity, and the app drops the new events as saved.
 
@@ -73,7 +74,7 @@ TLC errors other than a violation (parse errors, `TypeOK` failing) are always mo
 
 ## Coverage
 
-Sync commit: `b5942e54f`. Paths are under `crates/`. Find each function by name.
+Sync commit: `6d9fe748a`. Paths are under `crates/`. Find each function by name.
 
 | Model | Code |
 |---|---|
@@ -86,7 +87,7 @@ Sync commit: `b5942e54f`. Paths are under `crates/`. Find each function by name.
 | `HostAppends` | the daemon journals an event before it sends it, live once the replay is done (`remote/serve.rs`, `Journal::append`) |
 | `wire`, `Receive`, `received`, `inbox` | frames read on the link's thread, `Shared::route` with `State.received` and `RouteState.inbox` (`remote/link.rs`) |
 | `savedMem` | `State.saved`, seeded by `Link::with_cursors` and raised by `Link::saved` |
-| `Drain`, `unsaved` | `RemoteConnection::drain_placed` (`remote/connection.rs`) and `Shared::drain`, which adds to `State.unsaved`; the pump hands each event and its place over in order and commits the session (`keystone-desktop/src/app_state.rs` `pump`, `receive_placed`, `commit`), which queues the rows and the place with `Logs::append_through` (`keystone-agent/src/log.rs`) |
+| `Drain(s)`, `unsaved` | `RemoteConnection::drain_placed` (`remote/connection.rs`) and `Shared::drain`, which adds to `State.unsaved`; the pump hands each event and its place over in order and commits the session (`keystone-desktop/src/app_state.rs` `pump`, `receive_placed`, `commit`), which queues the rows and the place with `Logs::append_through` (`keystone-agent/src/log.rs`). Each session is on a route of its own, drained apart, as a Claude and a Codex session or two logins on one machine are. Every route has its connection before the link reads a frame (`open_link`, `remote_connection`); `late-route` breaks that |
 | `queue`, `Save` | `PendingSession.writes` and `PendingSession.through`; the writer's `Files::retry` and `PendingSession::retry`, which call `Database::append_logs` (`keystone-core/src/database.rs`) with the place, then `Files::through`, which reports `Report::Through` |
 | `log`, `cursor` | the `log_entries` and `remote_cursors` tables |
 | `Report` | `receive_placed` on `Report::Through`, calling `Link::saved` |
@@ -113,7 +114,7 @@ Assumed, so a break there would not show:
 - Every row an event adds is taken by the commit right after it is applied (`receive_placed` commits after each event). A row an event caused later, from another update, would be saved with a later place. For a remote session nothing adds one: checkpoints, the only such writer, are off there.
 - A loading conversation holds its events until its history is restored, and `commit` gives no place meanwhile, so the model's drain stands for the pump after the load.
 - The log writer saves a session's queue whole or not at all; its retries and directory barrier (`docs/design/storage.md`) are one `Save` that may be delayed forever. The store under it honours sync requests.
-- One route on the machine, with its connection registered. Events for a route with no connection don't hold the acknowledgement back by design, and are not covered by `NothingLost`.
+- Two routes on the machine, one per session, each with its connection registered before the link reads a frame (`AppState::open_link` registers every provider and account the machine's sessions run on, and `remote_connection` makes a new one before its first call). Events for a route with no connection don't hold the acknowledgement back by design, and are not covered by `NothingLost`; `late-route` shows what that would cost. Two sessions on one route are the case where one pump drains both at once.
 
 Left out:
 
