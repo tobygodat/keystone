@@ -196,6 +196,9 @@ pub struct Conversation {
     changed: BTreeSet<usize>,
     /// Widgets edited since they were last logged, by the call that showed them.
     unsaved_surfaces: BTreeSet<String>,
+    /// The unfinished items changed since [`Conversation::take_unfinished`]: an item
+    /// started, streamed, completed or was settled.
+    unfinished_changed: bool,
     /// The usage limit the provider said refused the turn now ending.
     limit: Option<UsageLimit>,
     /// Each turn the provider named a fork point for, in row order.
@@ -370,6 +373,15 @@ impl Conversation {
     /// and says so. What was sent meanwhile is shown and saved: it is logged as this
     /// run's, so a later restore still places it after the history.
     pub fn restore(&mut self, entries: Result<Vec<Entry>, String>) {
+        self.restore_resuming(entries, Vec::new());
+    }
+
+    /// As [`Conversation::restore`], for a session on another machine whose
+    /// unfinished items were saved with its cursor: the text a reply had streamed, a
+    /// tool still running. They go back after the restored rows, as this run's, so the
+    /// events the machine replays after that cursor go on from them and a turn's end
+    /// settles them. One whose item a saved row already holds is left out.
+    pub fn restore_resuming(&mut self, entries: Result<Vec<Entry>, String>, unfinished: Vec<Item>) {
         let Some(pending) = self.pending.take() else {
             return;
         };
@@ -383,6 +395,16 @@ impl Conversation {
         }
         self.run_start = self.rows.len();
         self.changed.extend(0..self.rows.len());
+        for item in unfinished {
+            // Item IDs are the provider's own, unique across turns for both providers.
+            let saved = self
+                .rows
+                .iter()
+                .any(|row| matches!(row, Row::Item(row) if row.id == item.id));
+            if !saved && item.status == ItemStatus::InProgress {
+                self.push(Row::Item(item));
+            }
+        }
         for pending in pending {
             match pending {
                 Pending::Local(sent) => self.push_message(sent),
@@ -1406,12 +1428,14 @@ impl Conversation {
                 self.write(Entry::TurnStarted, false);
             }
             Event::ItemStarted(item) => {
+                self.unfinished_changed = true;
                 self.place(item);
             }
             Event::ItemDelta { item_id, text } => {
                 if let Some(index) = self.position(&item_id)
                     && let Row::Item(item) = &mut self.rows[index]
                 {
+                    self.unfinished_changed = true;
                     item.text.push_str(&text);
                     // Command output can be huge. Cap it while it streams, not only at the
                     // end; trimming at three times the cap keeps the cost occasional.
@@ -1424,6 +1448,7 @@ impl Conversation {
                 }
             }
             Event::ItemCompleted(item) => {
+                self.unfinished_changed = true;
                 let index = self.place(item.clone());
                 self.log_item(index, item);
             }
@@ -1652,6 +1677,7 @@ impl Conversation {
     /// marked interrupted rather than failed, so the partial reply survives a restart
     /// and recovery may complete it. Restored rows finished in an earlier run.
     fn settle_unfinished(&mut self) {
+        self.unfinished_changed = true;
         let start = self.run_start;
         let unfinished: Vec<(usize, Item)> = self.rows[start..]
             .iter_mut()
@@ -1740,6 +1766,37 @@ impl Conversation {
     /// Entries to append to the session's log, in order.
     pub fn take_writes(&mut self) -> Vec<Write> {
         std::mem::take(&mut self.writes)
+    }
+
+    /// Whether the unfinished items changed since they were last taken.
+    pub fn unfinished_changed(&self) -> bool {
+        self.unfinished_changed
+    }
+
+    /// The items still in progress that the provider started, such as the reply it is
+    /// streaming or a tool it is running, as they stand, for a session on another
+    /// machine to save with its cursor. The neutral log holds only finished items, so
+    /// without these a relaunch would show none of their text until each finishes.
+    /// Each text keeps both ends of [`keystone_agent::OUTPUT_CAP`] at most, so a long
+    /// one costs a bounded write.
+    pub fn take_unfinished(&mut self) -> Vec<Item> {
+        self.unfinished_changed = false;
+        self.rows[self.run_start..]
+            .iter()
+            .filter_map(|row| match row {
+                // A message still being sent is saved as its own row.
+                Row::Item(item)
+                    if item.status == ItemStatus::InProgress
+                        && !(item.kind == ItemKind::UserMessage && item.id.starts_with(LOCAL)) =>
+                {
+                    Some(Item {
+                        text: cap_output(&item.text),
+                        ..item.clone()
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// The rows added or changed since the last call, as ascending, separate ranges.

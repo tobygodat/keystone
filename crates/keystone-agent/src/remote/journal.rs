@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS identity (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stamps (
+    client TEXT NOT NULL,
+    first INTEGER NOT NULL,
+    stamp INTEGER NOT NULL,
+    PRIMARY KEY (client, first)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS sessions (
     client TEXT NOT NULL,
     session INTEGER NOT NULL,
@@ -79,10 +85,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 ";
 
 /// The schema version [`SCHEMA`] writes.
-const VERSION: i64 = 5;
+const VERSION: i64 = 6;
 
 /// Each brings a journal from the version before it to the next, starting at 1.
-const UPGRADES: [&str; 4] = [
+const UPGRADES: [&str; 5] = [
     // A call is recorded when accepted, before it has a reply.
     "ALTER TABLE calls RENAME TO calls_1;
      CREATE TABLE calls (
@@ -100,6 +106,9 @@ const UPGRADES: [&str; 4] = [
     "ALTER TABLE sessions DROP COLUMN process;
      ALTER TABLE sessions DROP COLUMN started;",
     // Each message's reply, by the ID the app saved it under, which `SCHEMA` adds.
+    "",
+    // The stamp of each daemon run's numbers, which `SCHEMA` adds. Numbers given
+    // before it have none, which reads as 0.
     "",
 ];
 
@@ -126,6 +135,13 @@ pub(crate) struct Journal {
     cap: u64,
     /// The journal's identity, made once with the file and kept in it.
     id: String,
+    /// This run's stamp, drawn when the journal is opened and given with every number
+    /// this run gives. A journal restored from a backup is opened by a new run, so a
+    /// number it gives again has another stamp than the app saw with it.
+    stamp: u64,
+    /// The clients this run has recorded its stamp for, from the first number it gave
+    /// each.
+    stamped: BTreeSet<String>,
 }
 
 /// What the journal knew of a call when it arrived.
@@ -243,9 +259,43 @@ impl Journal {
         let id = sql(tx.query_row("SELECT id FROM identity", [], |row| row.get(0)))?;
         sql(tx.pragma_update(None, "user_version", VERSION))?;
         sql(tx.commit())?;
-        Ok(Self { db, cap, id })
+        Ok(Self {
+            db,
+            cap,
+            id,
+            stamp: new_stamp(),
+            stamped: BTreeSet::new(),
+        })
     }
 
+    /// The stamp of number `seq` in `client`'s sequence: that of the run that gave it.
+    /// Only numbers past the client's acknowledged cursor are sure to have theirs; 0
+    /// for one given before stamps were kept.
+    pub fn stamp(&self, client: &str, seq: u64) -> Result<u64, String> {
+        stamp_at(&self.db, client, seq)
+    }
+}
+
+/// Records the run's `stamp` for the numbers it gives `client` from `first` on, once
+/// per run (`stamped`, the clients it has recorded it for), in the transaction that
+/// gives the first of them. Returns whether it did.
+fn stamp_from(
+    tx: &Transaction,
+    (stamp, stamped): (u64, &BTreeSet<String>),
+    client: &str,
+    first: i64,
+) -> Result<bool, String> {
+    if stamped.contains(client) {
+        return Ok(false);
+    }
+    sql(tx.execute(
+        "INSERT OR REPLACE INTO stamps (client, first, stamp) VALUES (?1, ?2, ?3)",
+        params![client, first, stamp as i64],
+    ))?;
+    Ok(true)
+}
+
+impl Journal {
     /// The journal's identity, which `welcome` reports so the app knows which journal
     /// a place counts in.
     pub fn id(&self) -> &str {
@@ -272,6 +322,7 @@ impl Journal {
         events: &[(u64, Event)],
     ) -> Result<Vec<Vec<u8>>, String> {
         let cap = self.cap;
+        let stamp = self.stamp;
         let tx = sql(self.db.transaction())?;
         sql(tx.execute(
             "INSERT OR IGNORE INTO clients (client) VALUES (?1)",
@@ -282,13 +333,15 @@ impl Journal {
             [client],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ))?;
+        let run = (stamp, &self.stamped);
+        let stamped = !events.is_empty() && stamp_from(&tx, run, client, latest + 1)?;
         let mut lines = Vec::with_capacity(events.len());
         for (session, event) in events {
             let session = *session;
             latest += 1;
             track(&tx, client, route, session, event)?;
             let class = class(event);
-            let line = encode_event(latest as u64, route, session, event.clone());
+            let line = encode_event(latest as u64, stamp, route, session, event.clone());
             sql(tx.execute(
                 "INSERT INTO events (client, seq, class, provider, account, session, frame)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -313,6 +366,9 @@ impl Journal {
             params![client, latest, size],
         ))?;
         sql(tx.commit())?;
+        if stamped {
+            self.stamped.insert(client.to_owned());
+        }
         Ok(lines)
     }
 
@@ -324,6 +380,7 @@ impl Journal {
         route: &Route,
         sessions: &BTreeSet<u64>,
     ) -> Result<Vec<u8>, String> {
+        let stamp = self.stamp;
         let tx = sql(self.db.transaction())?;
         sql(tx.execute(
             "INSERT OR IGNORE INTO clients (client) VALUES (?1)",
@@ -334,11 +391,13 @@ impl Journal {
             [client],
             |row| row.get(0),
         ))?;
+        let stamped = stamp_from(&tx, (stamp, &self.stamped), client, seq)?;
         let line = frame::encode(&Frame::Gap {
             provider: route.provider,
             account: route.account.clone(),
             from: seq as u64,
             to: seq as u64,
+            stamp,
             sessions: sessions.iter().copied().collect(),
         })?;
         sql(tx.execute(
@@ -358,6 +417,9 @@ impl Journal {
             params![client, seq, line.len() as i64],
         ))?;
         sql(tx.commit())?;
+        if stamped {
+            self.stamped.insert(client.to_owned());
+        }
         Ok(line)
     }
 
@@ -421,6 +483,14 @@ impl Journal {
             "UPDATE clients SET acked = MAX(acked, MIN(?2, latest)), size = MAX(size - ?3, 0),
              acked_call = MAX(acked_call, ?4) WHERE client = ?1",
             params![client, seq, freed, calls],
+        ))?;
+        // A stamp is needed only for numbers past the acknowledged cursor: keep the
+        // run that gave the first of them, and every later one.
+        sql(tx.execute(
+            "DELETE FROM stamps WHERE client = ?1 AND first < (
+                 SELECT MAX(first) FROM stamps WHERE client = ?1
+                 AND first <= (SELECT acked + 1 FROM clients WHERE client = ?1))",
+            [client],
         ))?;
         sql(tx.commit())
     }
@@ -642,10 +712,35 @@ fn parse_approvals(text: &str) -> Vec<Approval> {
     })
 }
 
-fn encode_event(seq: u64, route: &Route, session: u64, event: Event) -> Vec<u8> {
+/// A random stamp for one run, never 0, which numbers given before stamps read as,
+/// and within SQLite's integers.
+fn new_stamp() -> u64 {
+    let mut bytes = [0u8; 8];
+    getrandom::getrandom(&mut bytes).expect("the system's random source");
+    (u64::from_le_bytes(bytes) >> 1).max(1)
+}
+
+fn stamp_at(db: &Connection, client: &str, seq: u64) -> Result<u64, String> {
+    sql(stamp_row(db, client, seq))
+}
+
+fn stamp_row(db: &Connection, client: &str, seq: u64) -> rusqlite::Result<u64> {
+    let stamp: Option<i64> = db
+        .query_row(
+            "SELECT stamp FROM stamps WHERE client = ?1 AND first <= ?2
+             ORDER BY first DESC LIMIT 1",
+            params![client, seq.min(i64::MAX as u64) as i64],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stamp.unwrap_or(0).max(0) as u64)
+}
+
+fn encode_event(seq: u64, stamp: u64, route: &Route, session: u64, event: Event) -> Vec<u8> {
     let routed = |event| {
         Frame::Event(Routed {
             seq,
+            stamp,
             provider: route.provider,
             account: route.account.clone(),
             session,
@@ -749,11 +844,15 @@ fn trim(tx: &Transaction, client: &str, size: i64, cap: i64) -> rusqlite::Result
             from = from.min(earlier);
             sessions.extend(named);
         }
+        // The gap takes the number of an item it drops, which the app may have
+        // received already, so it carries the stamp that number was given with.
+        let stamp = stamp_row(tx, client, to as u64)?;
         let gap = Frame::Gap {
             provider,
             account: account.clone(),
             from,
             to: to as u64,
+            stamp,
             sessions: sessions.into_iter().collect(),
         };
         let line = frame::encode(&gap).expect("a gap fits a frame");
@@ -988,11 +1087,66 @@ mod tests {
                 account: None,
                 from: 2,
                 to: 2,
+                stamp: journal.stamp,
                 sessions: vec![12, 15],
             }
         );
         assert_eq!(journal.cursor("app").unwrap().latest, 2);
         assert_eq!(journal.replay("app", 1, 2).unwrap(), [line]);
+    }
+
+    /// TOB-455: a journal restored from a backup keeps the stamps its numbers had,
+    /// and a number it gives again has the new run's, so the host can tell it from
+    /// one that never went back even once it has grown past the app's place.
+    #[test]
+    fn a_number_given_again_after_a_restore_has_another_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite3");
+        let backup = dir.path().join("backup.sqlite3");
+        let route = Route {
+            provider: Provider::Claude,
+            account: None,
+        };
+        let append = |journal: &mut Journal, n: usize| {
+            let events = vec![(12, Event::TurnStarted); n];
+            journal.append("app", &route, &events).unwrap();
+        };
+        let stamps = |journal: &Journal| {
+            (1..=journal.cursor("app").unwrap().latest)
+                .map(|seq| journal.stamp("app", seq).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let mut first = Journal::open(&path, CAP).unwrap();
+        append(&mut first, 2);
+        let given = first.stamp;
+        drop(first);
+        std::fs::copy(&path, &backup).unwrap();
+        let mut second = Journal::open(&path, CAP).unwrap();
+        assert_ne!(second.stamp, given, "each run draws its own");
+        append(&mut second, 2);
+        let seen = stamps(&second);
+        assert_eq!(seen, [given, given, second.stamp, second.stamp]);
+        drop(second);
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        std::fs::copy(&backup, &path).unwrap();
+        let mut restored = Journal::open(&path, CAP).unwrap();
+        assert_eq!(
+            stamps(&restored),
+            [given, given],
+            "the backup's numbers keep theirs"
+        );
+        append(&mut restored, 2);
+        let again = stamps(&restored);
+        assert_eq!(again[..2], seen[..2]);
+        assert_ne!(again[2], seen[2], "a number given again has another stamp");
+        restored.ack("app", 3, 0).unwrap();
+        assert_eq!(
+            restored.stamp("app", 4).unwrap(),
+            again[3],
+            "an acknowledgement keeps the stamp of every number past it"
+        );
     }
 
     /// A message runs at most once by the ID the app saved it under, whatever call

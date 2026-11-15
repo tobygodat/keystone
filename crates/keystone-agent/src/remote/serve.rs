@@ -1014,6 +1014,7 @@ impl Daemon {
                     after,
                     journal,
                     seen,
+                    places,
                     name,
                 },
                 None,
@@ -1021,8 +1022,8 @@ impl Daemon {
                 if let Some(name) = name.filter(|name| !name.is_empty() && name.len() <= 256) {
                     self.names.insert(client.clone(), name);
                 }
-                let places = after.zip(journal.clone()).into_iter();
-                self.went_back(&client, places.chain(seen.into_iter().map(|(j, s)| (s, j))));
+                // `places` holds `after` and `seen` too, with their stamps.
+                self.went_back(&client, &seen, &places);
                 // A place in another journal is no place in this one.
                 let after = after.filter(|_| journal.as_deref() == Some(self.journal.id()));
                 self.hello(id, protocol, client, after)
@@ -1047,24 +1048,40 @@ impl Daemon {
         }
     }
 
-    /// Takes a new journal identity when the app has a place in this journal past its
-    /// latest event for `client`: the journal went back, as a restored backup or a
-    /// damaged file would, so its numbers past that point may name other events. With
-    /// a new identity, every place the app had counts for nothing, as after any other
-    /// journal replacement, and that lasts, since the old identity is gone.
-    fn went_back(&mut self, client: &str, places: impl Iterator<Item = (u64, String)>) {
-        let places: Vec<(u64, String)> = places.collect();
-        let latest = match self.journal.cursor(client) {
-            Ok(cursor) => cursor.latest,
+    /// Takes a new journal identity when the app has a place in this journal that it
+    /// no longer holds for `client`: past its latest event, or past its acknowledged
+    /// cursor with another stamp than the journal has for that number. The journal went
+    /// back, as a restored backup or a damaged file would, and may have grown again
+    /// since, as its own restart events can make it, so its numbers past that point may
+    /// name other events. With a new identity, every place the app had counts for
+    /// nothing, as after any other journal replacement, and that lasts, since the old
+    /// identity is gone. A place at or below the acknowledged cursor can't be checked,
+    /// and needn't be: a journal acknowledged past the app's places numbered nothing
+    /// there since.
+    /// `seen` is the same places without stamps, as protocol 6 sent them, checked by
+    /// number alone.
+    fn went_back(&mut self, client: &str, seen: &[(String, u64)], places: &[(String, u64, u64)]) {
+        let cursor = match self.journal.cursor(client) {
+            Ok(cursor) => cursor,
             Err(error) => {
                 log!("{error}");
                 return;
             }
         };
         let own = self.journal.id().to_owned();
-        if places
-            .iter()
-            .any(|(seq, journal)| *journal == own && *seq > latest)
+        let differs = |seq: u64, stamp: u64| match self.journal.stamp(client, seq) {
+            Ok(given) => given != stamp,
+            Err(error) => {
+                log!("{error}");
+                false
+            }
+        };
+        let past = |journal: &String, seq: u64| *journal == own && seq > cursor.latest;
+        if seen.iter().any(|(journal, seq)| past(journal, *seq))
+            || places.iter().any(|(journal, seq, stamp)| {
+                past(journal, *seq)
+                    || (*journal == own && *seq > cursor.acked && differs(*seq, *stamp))
+            })
         {
             match self.journal.rotate() {
                 Ok(()) => {

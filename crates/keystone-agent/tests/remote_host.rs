@@ -447,6 +447,7 @@ impl Raw {
             after,
             journal,
             seen: Vec::new(),
+            places: Vec::new(),
             name: None,
         });
         match self.next() {
@@ -827,6 +828,7 @@ fn a_reader_that_hangs_up_mid_replay_is_sent_nothing_more() {
                 after: Some(0),
                 journal: journal_id(machine.dir.path()),
                 seen: Vec::new(),
+                places: Vec::new(),
                 name: None,
             })
             .unwrap(),
@@ -1496,6 +1498,7 @@ fn a_host_speaking_another_protocol_is_refused_with_the_reason() {
         after: None,
         journal: None,
         seen: Vec::new(),
+        places: Vec::new(),
         name: None,
     });
     match raw.next() {
@@ -1908,12 +1911,14 @@ fn scripted(seq: u64) -> Place {
     Place {
         journal: SCRIPTED.into(),
         seq,
+        stamp: 0,
     }
 }
 
 fn note(seq: u64, provider: Provider) -> Frame {
     Frame::Event(Routed {
         seq,
+        stamp: 0,
         provider,
         account: None,
         session: SESSION,
@@ -2509,6 +2514,7 @@ fn a_saved_cursor_from_another_journal_drops_nothing() {
     let old = Place {
         journal: "a-journal-that-is-gone".into(),
         seq: 2,
+        stamp: 0,
     };
     let link = Link::with_cursors(host.argv(), "app-1".into(), HashMap::from([(SESSION, old)]));
     let (claude, _) = connection(&link, Provider::Claude);
@@ -2520,6 +2526,64 @@ fn a_saved_cursor_from_another_journal_drops_nothing() {
     wait_for("the saves to be acknowledged", || {
         host.acks().last() == Some(&3)
     });
+}
+
+/// Protocol 6's `hello`, frozen from main at 71ee5a580: what a host before protocol 7
+/// parses before it checks the protocol. A frame it can't parse closes the link with
+/// no refusal, so the app would never show the install command.
+#[derive(serde::Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+enum Protocol6 {
+    Hello {
+        protocol: u32,
+        #[allow(dead_code)]
+        client: String,
+        #[allow(dead_code)]
+        after: Option<u64>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        journal: Option<String>,
+        #[serde(default)]
+        seen: Vec<(String, u64)>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        name: Option<String>,
+    },
+}
+
+/// An app upgraded before its host: a workspace with a saved cursor sends its places
+/// in the first `hello`, which an older host must still parse to say which protocol it
+/// needs. The scripted host refuses as a protocol 6 host does, and the link shows the
+/// install command rather than reconnecting for ever.
+#[test]
+fn a_protocol_6_host_parses_the_first_hello_of_a_workspace_with_saved_cursors() {
+    let host = Scripted::new(&[Frame::Refused {
+        reason: format!("protocol {} is needed, this host speaks 6", frame::PROTOCOL),
+    }]);
+    let link = Link::with_cursors(
+        host.argv(),
+        "app-1".into(),
+        HashMap::from([(SESSION, scripted(5))]),
+    );
+    host.go();
+    wait_for("the link to fail", || {
+        matches!(link.status(), Status::Failed(_))
+    });
+    let sent = std::fs::read_to_string(host.dir.path().join("sent")).unwrap_or_default();
+    let hello = sent.lines().next().expect("the link sent its hello");
+    let parsed: Protocol6 = serde_json::from_str(hello)
+        .unwrap_or_else(|error| panic!("a protocol 6 host can't parse {hello}: {error}"));
+    let Protocol6::Hello { protocol, seen, .. } = parsed;
+    assert_eq!(protocol, frame::PROTOCOL);
+    assert_eq!(
+        seen,
+        [(SCRIPTED.to_owned(), 5)],
+        "it still sees the saved place"
+    );
+    let Status::Failed(reason) = link.status() else {
+        unreachable!()
+    };
+    assert!(reason.contains("cargo install"), "{reason}");
 }
 
 /// The same journal behind a place the app saved from it went back, as a restored
@@ -2564,7 +2628,8 @@ fn a_host_whose_journal_went_back_takes_a_new_identity() {
         client: "app-1".into(),
         after: None,
         journal: None,
-        seen: vec![(first.clone(), 40)],
+        seen: Vec::new(),
+        places: vec![(first.clone(), 40, 0)],
         name: None,
     });
     let Frame::Welcome(welcome) = raw.next() else {
@@ -2585,7 +2650,8 @@ fn a_host_whose_journal_went_back_takes_a_new_identity() {
         client: "app-1".into(),
         after: None,
         journal: None,
-        seen: vec![(welcome.journal.clone(), 0)],
+        seen: Vec::new(),
+        places: vec![(welcome.journal.clone(), 0, 0)],
         name: None,
     });
     let Frame::Welcome(again) = raw.next() else {
@@ -2594,6 +2660,99 @@ fn a_host_whose_journal_went_back_takes_a_new_identity() {
     assert_eq!(
         again.journal, welcome.journal,
         "a journal not behind keeps its identity"
+    );
+}
+
+/// TOB-455: a journal restored from a backup that numbered new events back past the
+/// app's place before the app reconnected has nothing behind that place, but the
+/// number there now has another run's stamp, so the host still takes a new identity.
+/// The same place with the stamp it was given keeps the journal's identity.
+#[test]
+fn a_restored_journal_that_grew_past_the_apps_place_takes_a_new_identity() {
+    let machine = Machine::new();
+    let dir = folder(&[("delay-ms", "1")]);
+    let files = |to: &Path| {
+        for suffix in ["", "-wal", "-shm"] {
+            let name = format!("journal.sqlite3{suffix}");
+            let _ = std::fs::remove_file(to.join(&name));
+            let _ = std::fs::copy(machine.dir.path().join(&name), to.join(&name));
+        }
+    };
+    let turn = |raw: &mut Raw, id: u64, text: &str| -> Vec<Routed> {
+        raw.send(&send_call(id, dir.path(), text));
+        raw.until(turn_completed)
+            .into_iter()
+            .filter_map(|frame| match frame {
+                Frame::Event(routed) => Some(routed),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut raw = machine.raw();
+    let journal = raw.hello("app-1", None).journal;
+    raw.replay();
+    let first = turn(&mut raw, 1, "first");
+    drop(raw);
+    machine.kill_daemon();
+    let backup = tempfile::tempdir().unwrap();
+    files(backup.path());
+
+    let mut raw = machine.raw();
+    raw.hello("app-1", None);
+    raw.replay();
+    let second = turn(&mut raw, 1, "second");
+    let place = second.last().unwrap();
+    assert!(place.seq > first.last().unwrap().seq);
+    drop(raw);
+    machine.kill_daemon();
+    for suffix in ["", "-wal", "-shm"] {
+        let name = format!("journal.sqlite3{suffix}");
+        let _ = std::fs::remove_file(machine.dir.path().join(&name));
+        let _ = std::fs::copy(backup.path().join(&name), machine.dir.path().join(&name));
+    }
+
+    // The restored journal grows past the app's place before the app says where it is.
+    let mut raw = machine.raw();
+    assert_eq!(raw.hello("app-1", None).journal, journal);
+    raw.replay();
+    let grown = turn(&mut raw, 1, "third");
+    assert!(
+        grown.last().unwrap().seq >= place.seq,
+        "it grew back past the place"
+    );
+    drop(raw);
+    let hello = |stamp| Frame::Hello {
+        protocol: frame::PROTOCOL,
+        client: "app-1".into(),
+        after: None,
+        journal: None,
+        seen: Vec::new(),
+        places: vec![(journal.clone(), place.seq, stamp)],
+        name: None,
+    };
+    let given = grown.iter().find(|r| r.seq == place.seq).unwrap().stamp;
+    assert_ne!(
+        given, place.stamp,
+        "the number was given again by another run"
+    );
+    let mut raw = machine.raw();
+    raw.send(&hello(given));
+    let Frame::Welcome(kept) = raw.next() else {
+        panic!("expected welcome")
+    };
+    assert_eq!(
+        kept.journal, journal,
+        "a place with its own stamp is still there"
+    );
+    drop(raw);
+    let mut raw = machine.raw();
+    raw.send(&hello(place.stamp));
+    let Frame::Welcome(welcome) = raw.next() else {
+        panic!("expected welcome")
+    };
+    assert_ne!(
+        welcome.journal, journal,
+        "the place the app saw names another event now"
     );
 }
 
@@ -2618,6 +2777,7 @@ fn a_new_journal_has_a_new_identity_and_ignores_another_journals_place() {
         after: Some(40),
         journal: Some(first.clone()),
         seen: Vec::new(),
+        places: Vec::new(),
         name: None,
     });
     let Frame::Welcome(welcome) = raw.next() else {

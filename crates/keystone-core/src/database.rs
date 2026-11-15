@@ -21,7 +21,7 @@ fn copy_key(pair: &crate::integrations::copy::Pair) -> io::Result<String> {
     ))
 }
 
-pub(crate) const SCHEMA_VERSION: u32 = 8;
+pub(crate) const SCHEMA_VERSION: u32 = 9;
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// The `metadata` keys that hold each account's usage readings.
 const USAGE_PREFIX: &str = "usage/";
@@ -68,7 +68,7 @@ CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 /// Forward migrations, one per schema version after 1, each run in the opening
 /// IMMEDIATE transaction that also records the new `user_version`. A build that
 /// knows fewer versions refuses a newer database.
-const MIGRATIONS: [&str; 7] = [
+const MIGRATIONS: [&str; 8] = [
     "
 CREATE TABLE accounts (
     id TEXT PRIMARY KEY,
@@ -118,7 +118,36 @@ CREATE TABLE remote_cursors (
     seq INTEGER NOT NULL
 );
 ",
+    // Each place's stamp, the daemon run that gave its number, and what the
+    // session's unfinished items held at that place.
+    "
+ALTER TABLE remote_cursors ADD COLUMN stamp INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE remote_cursors ADD COLUMN unfinished TEXT CHECK(unfinished IS NULL OR json_valid(unfinished));
+",
 ];
+
+/// A remote session's place, as [`Database::append_logs`] saves it with the session's
+/// rows: the host journal's ID, the number in it and the stamp of the daemon run that
+/// gave that number, and, when `unfinished` is given, the JSON of what the session's
+/// unfinished items held there, which replaces what was saved.
+#[derive(Clone, Copy, Debug)]
+pub struct Through<'a> {
+    pub journal: &'a str,
+    pub seq: u64,
+    pub stamp: u64,
+    pub unfinished: Option<&'a str>,
+}
+
+/// A remote session's saved cursor, as [`Database::remote_cursors`] reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteCursor {
+    pub session: u64,
+    pub journal: String,
+    pub seq: u64,
+    pub stamp: u64,
+    /// The JSON of what the session's unfinished items held at this place.
+    pub unfinished: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct Database {
@@ -606,18 +635,26 @@ impl Database {
 
     /// Appends a session's log records in one transaction. With `through`, the
     /// session is on another machine and the records hold every row its events up to
-    /// that place added: the journal ID and the number in it. Its cursor becomes that
-    /// place in the same transaction, never ahead of the rows. Places come in the order
-    /// the session's events were applied, so the newest replaces the last, including
-    /// one in another journal after the machine's journal was replaced.
+    /// that place added. Its cursor becomes that place in the same transaction, never
+    /// ahead of the rows, and so do its unfinished items when `through` carries them.
+    /// Places come in the order the session's events were applied, so the newest
+    /// replaces the last, including one in another journal after the machine's
+    /// journal was replaced.
     pub fn append_logs(
         &self,
         session: u64,
         records: &[(String, String)],
-        through: Option<(&str, u64)>,
+        through: Option<Through<'_>>,
     ) -> io::Result<Durability> {
         let records = records.to_vec();
-        let through = through.map(|(journal, seq)| (journal.to_owned(), seq));
+        let through = through.map(|through| {
+            (
+                through.journal.to_owned(),
+                through.seq,
+                through.stamp,
+                through.unfinished.map(str::to_owned),
+            )
+        });
         self.write(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql_error)?;
             let session = session.to_string();
@@ -632,11 +669,23 @@ impl Database {
                 tx.execute("INSERT INTO events(kind, entity_id, payload, event_key) VALUES ('log.appended', ?1, ?2, ?3)", params![session, payload, key]).map_err(sql_error)?;
                 tx.execute("INSERT INTO log_entries(sequence, session_id, payload) VALUES (?1, ?2, ?3)", params![tx.last_insert_rowid(), session, payload]).map_err(sql_error)?;
             }
-            if let Some((journal, seq)) = &through {
+            if let Some((journal, seq, stamp, unfinished)) = &through {
+                let clamp = |n: u64| n.min(i64::MAX as u64) as i64;
                 tx.execute(
-                    "INSERT INTO remote_cursors(session_id, journal, seq) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(session_id) DO UPDATE SET journal = excluded.journal, seq = excluded.seq",
-                    params![session, journal, (*seq).min(i64::MAX as u64) as i64],
+                    "INSERT INTO remote_cursors(session_id, journal, seq, stamp, unfinished)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(session_id) DO UPDATE SET journal = excluded.journal,
+                         seq = excluded.seq, stamp = excluded.stamp,
+                         unfinished = CASE WHEN ?6 THEN excluded.unfinished
+                                           ELSE remote_cursors.unfinished END",
+                    params![
+                        session,
+                        journal,
+                        clamp(*seq),
+                        clamp(*stamp),
+                        unfinished,
+                        unfinished.is_some()
+                    ],
                 )
                 .map_err(sql_error)?;
             }
@@ -664,12 +713,12 @@ impl Database {
     }
 
     /// Each session on another machine with its saved cursor: the host journal it
-    /// counts in and the place there through which every row its events added is
-    /// saved.
-    pub fn remote_cursors(&self) -> io::Result<Vec<(u64, String, u64)>> {
+    /// counts in, the place there through which every row its events added is saved,
+    /// and what its unfinished items held there.
+    pub fn remote_cursors(&self) -> io::Result<Vec<RemoteCursor>> {
         self.read(|connection| {
             let mut statement = connection
-                .prepare("SELECT session_id, journal, seq FROM remote_cursors")
+                .prepare("SELECT session_id, journal, seq, stamp, unfinished FROM remote_cursors")
                 .map_err(sql_error)?;
             let rows = statement
                 .query_map([], |row| {
@@ -677,14 +726,22 @@ impl Database {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 })
                 .map_err(sql_error)?;
             let mut cursors = Vec::new();
             for row in rows {
-                let (session, journal, seq) = row.map_err(sql_error)?;
+                let (session, journal, seq, stamp, unfinished) = row.map_err(sql_error)?;
                 if let Ok(session) = session.parse() {
-                    cursors.push((session, journal, seq.max(0) as u64));
+                    cursors.push(RemoteCursor {
+                        session,
+                        journal,
+                        seq: seq.max(0) as u64,
+                        stamp: stamp.max(0) as u64,
+                        unfinished,
+                    });
                 }
             }
             Ok(cursors)
@@ -1860,33 +1917,68 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let database = Database::open(dir.path().join("workspace.sqlite3")).unwrap();
         let row = |key: &str| (key.to_string(), r#"{"entry":"turn_started"}"#.to_string());
-        let cursors = || database.remote_cursors().unwrap();
+        let at = |journal, seq, stamp, unfinished| Through {
+            journal,
+            seq,
+            stamp,
+            unfinished,
+        };
+        let cursors = || {
+            database
+                .remote_cursors()
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.session, c.journal, c.seq, c.stamp, c.unfinished))
+                .collect::<Vec<_>>()
+        };
+        let cursor = |journal: &str, seq, stamp, unfinished: Option<&str>| {
+            (
+                7,
+                journal.to_owned(),
+                seq,
+                stamp,
+                unfinished.map(str::to_owned),
+            )
+        };
         database
-            .append_logs(7, &[row("a")], Some(("old", 12)))
+            .append_logs(
+                7,
+                &[row("a")],
+                Some(at("old", 12, 5, Some(r#"[{"id":"m"}]"#))),
+            )
             .unwrap();
-        assert_eq!(cursors(), [(7, "old".to_owned(), 12)]);
+        assert_eq!(cursors(), [cursor("old", 12, 5, Some(r#"[{"id":"m"}]"#))]);
         let torn = (String::from("b"), String::from("{"));
         assert!(
             database
-                .append_logs(7, &[row("c"), torn], Some(("old", 20)))
+                .append_logs(7, &[row("c"), torn], Some(at("old", 20, 5, Some("[]"))))
                 .is_err()
         );
         assert_eq!(
             cursors(),
-            [(7, "old".to_owned(), 12)],
+            [cursor("old", 12, 5, Some(r#"[{"id":"m"}]"#))],
             "a transaction that fails leaves the cursor with the rows it had"
         );
         assert_eq!(database.read_logs(7).unwrap().len(), 1);
         database
-            .append_logs(7, &[row("d")], Some(("new", 3)))
+            .append_logs(7, &[row("d")], Some(at("new", 3, 9, None)))
             .unwrap();
         assert_eq!(
             cursors(),
-            [(7, "new".to_owned(), 3)],
-            "a place in the machine's new journal replaces one in its old journal"
+            [cursor("new", 3, 9, Some(r#"[{"id":"m"}]"#))],
+            "a place in the machine's new journal replaces one in its old journal, \
+             and a place saved without unfinished items keeps the ones saved before"
+        );
+        database
+            .append_logs(7, &[], Some(at("new", 4, 9, Some("[]"))))
+            .unwrap();
+        assert_eq!(
+            cursors(),
+            [cursor("new", 4, 9, Some("[]"))],
+            "unfinished items saved without rows move the cursor with them"
         );
         database.append_logs(8, &[row("e")], None).unwrap();
-        assert_eq!(cursors(), [(7, "new".to_owned(), 3)]);
+        assert_eq!(cursors(), [cursor("new", 4, 9, Some("[]"))]);
     }
 
     #[test]

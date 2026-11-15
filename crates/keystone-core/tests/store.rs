@@ -764,7 +764,7 @@ fn a_schema_6_database_gains_an_empty_machine_list_and_keeps_its_sessions() {
         .unwrap()
         .query_one("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 8);
+    assert_eq!(schema, 9);
     assert_eq!(Store::open(&path).unwrap().workspace().machines().len(), 1);
 }
 
@@ -797,16 +797,56 @@ fn a_schema_7_database_gains_remote_cursors_and_keeps_its_logs() {
         .append_logs(
             1,
             &[("next".into(), r#"{"entry":"turn_started"}"#.into())],
-            Some(("journal", 4)),
+            Some(keystone_core::Through {
+                journal: "journal",
+                seq: 4,
+                stamp: 0,
+                unfinished: None,
+            }),
         )
         .unwrap();
+    let cursors = database.remote_cursors().unwrap();
     assert_eq!(
-        database.remote_cursors().unwrap(),
-        [(1, "journal".to_owned(), 4)]
+        cursors
+            .iter()
+            .map(|c| (c.session, c.journal.as_str(), c.seq))
+            .collect::<Vec<_>>(),
+        [(1, "journal", 4)]
     );
     let schema: u32 = Connection::open(&path)
         .unwrap()
         .query_one("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 8);
+    assert_eq!(schema, 9);
+}
+
+#[test]
+fn a_schema_8_database_keeps_its_remote_cursors_with_no_stamp_or_unfinished_items() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("workspace.sqlite3");
+    let folder = WorkingDirectory::new(dir.path()).unwrap();
+    let mut store = Store::open(&path).unwrap();
+    store.create(Provider::Claude, &folder, 1).unwrap();
+    store.flush().unwrap();
+    drop(store);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE remote_cursors DROP COLUMN unfinished;
+             ALTER TABLE remote_cursors DROP COLUMN stamp;
+             INSERT INTO remote_cursors(session_id, journal, seq) VALUES ('1', 'journal', 4);
+             PRAGMA user_version=8;",
+        )
+        .unwrap();
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.database().remote_cursors().unwrap(),
+        [keystone_core::RemoteCursor {
+            session: 1,
+            journal: "journal".into(),
+            seq: 4,
+            stamp: 0,
+            unfinished: None,
+        }]
+    );
 }

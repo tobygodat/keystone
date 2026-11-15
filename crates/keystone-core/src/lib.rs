@@ -45,7 +45,7 @@ pub use composition::{
     Axis, Child, Component, Composition, Edit, Node, NodePath, Place, Problem, SavedComposition,
     Size, ViewId,
 };
-pub use database::{Database, StoredEvent, database_path};
+pub use database::{Database, RemoteCursor, StoredEvent, Through, database_path};
 pub use delivery::{Delivery, DeliveryState};
 pub use layout::{
     DIVIDER_WIDTH, MAIN_MIN_WIDTH, SavedLayout, SidebarLayout, SidebarSide, SidebarWidth,

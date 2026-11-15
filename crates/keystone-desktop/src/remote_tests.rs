@@ -805,6 +805,307 @@ fn a_kill_between_receiving_and_saving_loses_nothing(cx: &mut gpui::TestAppConte
     );
 }
 
+/// The numbers of the `wordN` words in `text`, in order.
+fn words(text: &str) -> Vec<u32> {
+    text.split_whitespace()
+        .filter_map(|word| word.strip_prefix("word")?.parse().ok())
+        .collect()
+}
+
+/// Whether `text` holds `word1` up to some `wordN`, each once and in order, as a reply
+/// streamed so far does.
+fn streamed_once(text: &str) -> bool {
+    let words = words(text);
+    words.iter().copied().eq(1..=words.len() as u32)
+}
+
+/// The session's agent replies as the saved log holds them, with their status.
+fn saved_replies(state_dir: &Path, session: u64) -> Vec<(String, keystone_agent::ItemStatus)> {
+    saved_log(state_dir, session)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            keystone_agent::log::Entry::Item { item, .. }
+                if item.kind == ItemKind::AgentMessage =>
+            {
+                Some((item.text, item.status))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The unfinished items saved with each session's cursor, as JSON.
+fn saved_unfinished(state_dir: &Path) -> Vec<(u64, String)> {
+    keystone_core::Database::open_read_only(state_dir.join("workspace.sqlite3"))
+        .unwrap()
+        .remote_cursors()
+        .unwrap()
+        .into_iter()
+        .filter_map(|cursor| Some((cursor.session, cursor.unfinished?)))
+        .collect()
+}
+
+/// TOB-453, Quit's case. With the machine set to end its sessions, Quit ends a turn
+/// that is streaming. The reply never completes there, yet the next launch shows what
+/// streamed before Quit, once and in order, and the turn ended as the user's Quit
+/// ended it. Before, those deltas were acknowledged and trimmed, and the text was gone.
+#[gpui::test]
+fn a_quit_that_ends_the_turn_keeps_what_streamed(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let state = runtime(dir.path(), cx);
+    assert_eq!(link(&state, host.argv(), "desk", cx), None);
+    let work = folder(&[("delay-ms", "20")]);
+    let session = state.update(cx, |state, cx| {
+        let machine = desk(state);
+        state.set_machine_end_on_quit(&machine, true, cx).unwrap();
+        let folder = RemoteFolder::new(work.path().to_str().unwrap()).unwrap();
+        state
+            .create_remote(&machine, &folder, WindowId::FIRST, None, cx)
+            .unwrap()
+            .value
+    });
+    assert!(send(&state, session, "hello long", cx));
+    wait_until(cx, &state, "the turn to stream ten words", |state| {
+        words(&agent_text(state, session)).len() >= 10
+    });
+    let before = state.read_with(cx, |state, _| agent_text(state, session));
+    quit(state, false, cx);
+
+    let state = relaunch(dir.path(), &host, cx);
+    state.update(cx, |state, _| state.ensure_history(session));
+    wait_until(cx, &state, "the history to load", |state| {
+        !state.conversations[&session].is_loading()
+    });
+    state.read_with(cx, |state, _| {
+        let text = agent_text(state, session);
+        assert!(
+            text.starts_with(&before),
+            "what streamed shows at once: {text:?}"
+        );
+        assert!(streamed_once(&text), "{text}");
+    });
+    wait_until(cx, &state, "Quit's end of the turn", |state| {
+        state.conversations[&session].rows.iter().any(|row| {
+            matches!(
+                row,
+                Row::TurnEnded {
+                    status: TurnStatus::Interrupted,
+                    ..
+                }
+            )
+        })
+    });
+    state.read_with(cx, |state, _| {
+        let text = agent_text(state, session);
+        assert!(text.starts_with(&before) && streamed_once(&text), "{text}");
+        assert!(
+            !words(&text).contains(&200),
+            "the turn ended before its reply did"
+        );
+    });
+    quit(state, false, cx);
+    let replies = saved_replies(dir.path(), session);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].0.starts_with(&before), "{replies:?}");
+    assert_eq!(replies[0].1, keystone_agent::ItemStatus::Interrupted);
+    assert!(
+        saved_unfinished(dir.path())
+            .iter()
+            .all(|(_, items)| items == "[]"),
+        "nothing is left unfinished once the turn's end is saved"
+    );
+}
+
+/// TOB-453, a tool's case. A tool that waits for its approval when Keystone quits is
+/// still running there, and the next launch shows its row as running at once, beside
+/// its approval card, rather than only once it completes.
+#[gpui::test]
+fn a_tool_running_at_quit_shows_at_the_next_launch(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let state = runtime(dir.path(), cx);
+    assert_eq!(link(&state, host.argv(), "desk", cx), None);
+    let work = folder(&[("delay-ms", "1")]);
+    let session = state.update(cx, |state, cx| {
+        let folder = RemoteFolder::new(work.path().to_str().unwrap()).unwrap();
+        state
+            .create_remote(&desk(state), &folder, WindowId::FIRST, None, cx)
+            .unwrap()
+            .value
+    });
+    let running_tools = |state: &AppState| {
+        items(state, session)
+            .into_iter()
+            .filter(|(kind, _)| !kind.starts_with("AgentMessage") && kind.ends_with("InProgress"))
+            .filter(|(kind, _)| !kind.starts_with("UserMessage"))
+            .count()
+    };
+    assert!(send(&state, session, "run the tests", cx));
+    wait_until(cx, &state, "the approval", |state| {
+        !state.conversations[&session].approvals.is_empty()
+    });
+    assert_eq!(state.read_with(cx, |state, _| running_tools(state)), 1);
+    quit(state, false, cx);
+
+    let state = relaunch(dir.path(), &host, cx);
+    state.update(cx, |state, _| state.ensure_history(session));
+    wait_until(cx, &state, "the history to load", |state| {
+        !state.conversations[&session].is_loading()
+    });
+    assert_eq!(
+        state.read_with(cx, |state, _| running_tools(state)),
+        1,
+        "the running tool shows at once"
+    );
+    wait_until(cx, &state, "the approval card to come back", |state| {
+        state.conversations[&session].approvals.len() == 1
+    });
+    let request = state.read_with(cx, |state, _| {
+        state.conversations[&session].approvals[0].request.clone()
+    });
+    state.update(cx, |state, cx| state.answer(session, request, true, cx));
+    wait_until(cx, &state, "the answered turn to end", |state| {
+        ended(state, session)
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(running_tools(state), 0, "{:?}", items(state, session));
+        let tools = items(state, session)
+            .into_iter()
+            .filter(|(kind, _)| {
+                !kind.starts_with("AgentMessage") && !kind.starts_with("UserMessage")
+            })
+            .count();
+        assert_eq!(
+            tools,
+            1,
+            "the tool's row is one row: {:?}",
+            items(state, session)
+        );
+    });
+}
+
+/// The app the streaming kill test starts and kills: it links a machine, starts a
+/// slow 200-word turn there and says so in `streaming`, then applies what arrives.
+#[gpui::test]
+#[ignore = "a process a_kill_mid_reply_shows_what_streamed_once starts and kills"]
+fn the_app_a_streaming_kill_test_kills(cx: &mut gpui::TestAppContext) {
+    let Some([state_dir, host, work]) = KILLED_APP
+        .map(|name| std::env::var_os(name).map(PathBuf::from))
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .and_then(|dirs| <[PathBuf; 3]>::try_from(dirs).ok())
+    else {
+        return;
+    };
+    let state = runtime(&state_dir, cx);
+    assert_eq!(link(&state, host_argv(&host), "desk", cx), None);
+    let session = state.update(cx, |state, cx| {
+        let folder = RemoteFolder::new(work.to_str().unwrap()).unwrap();
+        state
+            .create_remote(&desk(state), &folder, WindowId::FIRST, None, cx)
+            .unwrap()
+            .value
+    });
+    assert!(send(&state, session, "hello long", cx));
+    std::fs::write(state_dir.join("streaming"), session.to_string()).unwrap();
+    loop {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// TOB-453, a kill's case. An app killed mid-reply saved what streamed with its
+/// cursor, and the host kept every event after that. The next launch shows the saved
+/// text as soon as the history loads, goes on from it with what the replay brings, and
+/// never shows a word twice; the finished reply is saved once.
+#[gpui::test]
+fn a_kill_mid_reply_shows_what_streamed_once(cx: &mut gpui::TestAppContext) {
+    let state_dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let work = folder(&[("delay-ms", "40")]);
+    let log = std::fs::File::create(state_dir.path().join("killed-app.log")).unwrap();
+    let mut app = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "app_state::remote_tests::the_app_a_streaming_kill_test_kills",
+            "--ignored",
+            "--nocapture",
+        ])
+        .envs(
+            KILLED_APP
+                .iter()
+                .zip([state_dir.path(), host.0.path(), work.path()]),
+        )
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let saved_words = |state_dir: &Path| -> usize {
+        if !state_dir.join("streaming").exists() {
+            return 0;
+        }
+        saved_unfinished(state_dir)
+            .iter()
+            .map(|(_, items)| items.matches(" word").count())
+            .max()
+            .unwrap_or(0)
+    };
+    // Killed once a save of the reply holds twenty words, mid-reply.
+    while saved_words(state_dir.path()) < 20 {
+        assert!(
+            app.try_wait().unwrap().is_none(),
+            "the app exited: {}",
+            std::fs::read_to_string(state_dir.path().join("killed-app.log")).unwrap()
+        );
+        assert!(Instant::now() < deadline, "timed out waiting for a save");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    app.kill().unwrap();
+    app.wait().unwrap();
+    let session: u64 = std::fs::read_to_string(state_dir.path().join("streaming"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        saved_replies(state_dir.path(), session).is_empty(),
+        "nothing completed yet"
+    );
+
+    let state = relaunch(state_dir.path(), &host, cx);
+    state.update(cx, |state, _| state.ensure_history(session));
+    wait_until(cx, &state, "the history to load", |state| {
+        !state.conversations[&session].is_loading()
+    });
+    state.read_with(cx, |state, _| {
+        let text = agent_text(state, session);
+        assert!(
+            words(&text).len() >= 20,
+            "what streamed shows at once: {text:?}"
+        );
+        assert!(streamed_once(&text), "{text}");
+    });
+    // Every step of the replay goes on from the saved text, and never repeats it.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !state.read_with(cx, |state, _| ended(state, session)) {
+        cx.run_until_parked();
+        state.read_with(cx, |state, _| {
+            let text = agent_text(state, session);
+            assert!(streamed_once(&text), "{text}");
+        });
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the turn to end"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    quit(state, false, cx);
+    let replies = saved_replies(state_dir.path(), session);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(words(&replies[0].0), (1..=200).collect::<Vec<_>>());
+}
+
 /// What a machine's host loses when its state folder is wiped or `keystone-host` is
 /// reinstalled: the daemon, and the journal with every event and session it held.
 fn wipe_journal(host: &Host) {
@@ -2142,6 +2443,7 @@ fn a_links_routes_are_registered_before_it_reads_its_first_frame(cx: &mut gpui::
         }),
         Frame::Event(Routed {
             seq: 1,
+            stamp: 0,
             provider: Provider::Codex,
             account: None,
             session,
@@ -2444,6 +2746,7 @@ fn taken(id: u64, session: u64, seq: u64, text: &str) -> Vec<keystone_agent::rem
     let event = |seq, event| {
         Frame::Event(Routed {
             seq,
+            stamp: 0,
             provider: Provider::Claude,
             account: None,
             session,
@@ -2879,6 +3182,7 @@ fn a_pending_message_the_machine_never_received_is_not_sent(cx: &mut gpui::TestA
 fn routed(seq: u64, session: u64, event: Event) -> keystone_agent::remote::frame::Frame {
     keystone_agent::remote::frame::Frame::Event(keystone_agent::remote::frame::Routed {
         seq,
+        stamp: 0,
         provider: Provider::Claude,
         account: None,
         session,
@@ -3243,6 +3547,7 @@ fn a_steer_taken_in_one_turn_and_run_in_the_next_shows_once(cx: &mut gpui::TestA
     let event = |seq, event| {
         Frame::Event(Routed {
             seq,
+            stamp: 0,
             provider: Provider::Claude,
             account: None,
             session,
@@ -3337,6 +3642,7 @@ fn a_turn_replayed_before_its_message_is_answered_ends_and_shows_once(
     let event = |seq, event| {
         Frame::Event(Routed {
             seq,
+            stamp: 0,
             provider: Provider::Claude,
             account: None,
             session,

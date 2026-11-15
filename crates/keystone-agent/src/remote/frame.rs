@@ -14,8 +14,12 @@ use std::io::{self, BufRead, Read};
 /// `login` and `unknown` replies, which say how a call failed rather than leaving the
 /// app to read it from the message. 6 added `send`'s `send`, the ID the app saved the
 /// message under, the `recall` op that asks what became of one, and the `unrecorded`
-/// reply.
-pub const PROTOCOL: u32 = 6;
+/// reply. 7 added each event's and gap's `stamp`, the daemon run that gave its number,
+/// and `hello`'s `places`, every place the app has with its stamp, so a host can tell a
+/// journal that went back and grew again from one that never went back. `hello` keeps
+/// the shape protocol 6 parses, so an older host still reads its protocol and says
+/// which one it needs.
+pub const PROTOCOL: u32 = 7;
 
 /// The most of an image one `put_attachment` call carries, before base64, so a frame
 /// stays well within [`MAX_FRAME`].
@@ -31,9 +35,13 @@ pub enum Frame {
     /// `journal` names, or `None` on the first link of an app's run, which also starts
     /// call ids again from 1. A host whose journal isn't `journal` treats `after` as
     /// `None`: that number counts in a journal it doesn't have. `seen` is the highest
-    /// place the app saved in each journal it has places in. A host that finds its own
-    /// journal named there, or in `journal`, past its latest event went back, as a
-    /// restored backup would, and takes a new identity before it answers.
+    /// place the app has in each journal, as protocol 6 sent it, and `places` every
+    /// place it has, `after` and each saved cursor, as its journal, number and stamp. A
+    /// host that finds its own journal named there past its latest event, or past its
+    /// acknowledged cursor with another stamp than it gave that number, went back, as
+    /// a restored backup would, and takes a new identity before it answers. Every field
+    /// before `protocol` is checked keeps the shape a protocol 6 host parses, and such a
+    /// host ignores `places`.
     Hello {
         protocol: u32,
         client: String,
@@ -42,6 +50,8 @@ pub enum Frame {
         journal: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         seen: Vec<(String, u64)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        places: Vec<(String, u64, u64)>,
         /// What the app calls this machine, such as "desk".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -58,12 +68,14 @@ pub enum Frame {
     },
     Event(Routed),
     /// The journal no longer holds the items of `sessions` between `from` and `to`.
-    /// Its place in the event sequence is `to`.
+    /// Its place in the event sequence is `to`, with the stamp that number has.
     Gap {
         provider: Provider,
         account: Option<String>,
         from: u64,
         to: u64,
+        #[serde(default)]
+        stamp: u64,
         sessions: Vec<u64>,
     },
     /// A warning for `session` outside the event sequence, such as events waiting
@@ -266,6 +278,12 @@ impl From<Result<(), String>> for Outcome {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Routed {
     pub seq: u64,
+    /// The daemon run that gave `seq`: a random number each run of `keystone-host
+    /// serve` draws when it opens its journal. A journal restored from a backup keeps
+    /// the stamps its events had, and numbers it gives again get the new run's. Events
+    /// journaled before stamps were kept have 0.
+    #[serde(default)]
+    pub stamp: u64,
     pub provider: Provider,
     pub account: Option<String>,
     pub session: u64,
@@ -420,6 +438,7 @@ mod tests {
         }));
         let event = round_trip(Frame::Event(Routed {
             seq: 1042,
+            stamp: 77,
             provider: Provider::Claude,
             account: None,
             session: 12,
@@ -542,6 +561,7 @@ mod tests {
         };
         round_trip(Frame::Event(Routed {
             seq: 3,
+            stamp: 0,
             provider: Provider::Codex,
             account: None,
             session: 12,

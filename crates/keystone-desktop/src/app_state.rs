@@ -184,6 +184,17 @@ pub(crate) struct AppState {
     /// Each remote session's saved cursor as the log held it at launch, which each
     /// machine's link starts from.
     launch_cursors: HashMap<u64, remote::Place>,
+    /// Each remote session's unfinished items as they were saved with its cursor at
+    /// launch, put back when its history loads ([`Conversation::restore_resuming`]).
+    resumed: HashMap<u64, Vec<keystone_agent::Item>>,
+    /// When each remote session's unfinished items were last queued with its place.
+    unfinished_queued: HashMap<u64, std::time::Instant>,
+    /// The remote sessions whose unfinished items changed and wait for that save,
+    /// holding their place back meanwhile, and whether a timer is set for them.
+    unfinished_waiting: BTreeSet<u64>,
+    unfinished_timer: bool,
+    /// Set while every waiting session's items are saved at once, as Quit does.
+    unfinished_now: bool,
     /// How many times each machine's link found its host's journal replaced, as the
     /// app last saw, and the sessions on such a machine whose turn may have been
     /// running in the journal that is gone ([`AppState::end_lost_turns`]).
@@ -392,6 +403,11 @@ const UNREAD: &str = "Keystone could not read this conversation's history";
 
 /// How long Quit waits for every machine to hear that Keystone is quitting.
 const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How often a remote session's unfinished items are saved while they stream
+/// (TOB-453). The machine keeps each event until it is saved, so this is also how long
+/// a streaming reply keeps the machine from trimming its journal past it, and each save
+/// rewrites the items' text, at most both ends of [`keystone_agent::OUTPUT_CAP`] each.
+const UNFINISHED_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 const REMOTE_UNLINKED: &str =
     "Not sent. This session's machine isn't linked any more. Link it again in Settings → Machines.";
 /// Where a restart left a remote session's turn open. The turn's own rows after it say
@@ -1828,19 +1844,34 @@ impl AppState {
         let logs = Logs::with_database(store.database(), wake.clone());
         // Without them a replay after a crash shows rows the log has saved again,
         // which is worse than nothing only in being noisy, so a failed read goes on.
-        let launch_cursors = store
-            .database()
-            .remote_cursors()
-            .unwrap_or_else(|error| {
-                eprintln!("Keystone could not read where remote sessions were saved: {error}");
-                Vec::new()
-            })
-            .into_iter()
-            .map(|(session, journal, seq)| {
-                let journal = journal.into();
-                (session, remote::Place { journal, seq })
-            })
-            .collect();
+        let saved_cursors = store.database().remote_cursors().unwrap_or_else(|error| {
+            eprintln!("Keystone could not read where remote sessions were saved: {error}");
+            Vec::new()
+        });
+        let mut resumed = HashMap::new();
+        let mut launch_cursors = HashMap::new();
+        for cursor in saved_cursors {
+            let items = cursor.unfinished.as_deref().map_or(Ok(Vec::new()), |json| {
+                serde_json::from_str::<Vec<keystone_agent::Item>>(json)
+            });
+            match items {
+                Ok(items) if !items.is_empty() => {
+                    resumed.insert(cursor.session, items);
+                }
+                Ok(_) => {}
+                // The rows are still whole; only what streamed of the last items is lost.
+                Err(error) => eprintln!(
+                    "Keystone could not read the unfinished items of session {}: {error}",
+                    cursor.session
+                ),
+            }
+            let place = remote::Place {
+                journal: cursor.journal.into(),
+                seq: cursor.seq,
+                stamp: cursor.stamp,
+            };
+            launch_cursors.insert(cursor.session, place);
+        }
         let data_dir = store.path().parent().unwrap_or(std::path::Path::new("."));
         let attachments = keystone_core::attachment::Attachments::in_data_dir(data_dir);
         crate::sounds::SoundPlayer::install(data_dir, cx);
@@ -1878,6 +1909,11 @@ impl AppState {
             handed: HashMap::new(),
             through_due: BTreeSet::new(),
             launch_cursors,
+            resumed,
+            unfinished_queued: HashMap::new(),
+            unfinished_waiting: BTreeSet::new(),
+            unfinished_timer: false,
+            unfinished_now: false,
             shown_journals: BTreeMap::new(),
             lost_turns: BTreeSet::new(),
             asked: HashSet::new(),
@@ -2236,9 +2272,38 @@ impl AppState {
             self.through_due.remove(&session);
             self.handed.get(&session).cloned()
         };
+        let writes = conversation.take_writes();
+        // A remote session's unfinished items are saved with its place, so a relaunch
+        // shows what streamed. Once a second at most while they stream, or with rows:
+        // meanwhile the place waits, holding the machine's acknowledgement back
+        // (TOB-453, the cursor model's `Drain` and `Flush`).
+        let mut unfinished = None;
+        let through = match through {
+            Some(place) if conversation.unfinished_changed() => {
+                let due = self.unfinished_now
+                    || !writes.is_empty()
+                    || self
+                        .unfinished_queued
+                        .get(&session)
+                        .is_none_or(|at| at.elapsed() >= UNFINISHED_EVERY);
+                if due {
+                    let items = conversation.take_unfinished();
+                    unfinished =
+                        Some(serde_json::to_string(&items).expect("items serialize to JSON"));
+                    self.unfinished_queued
+                        .insert(session, std::time::Instant::now());
+                    self.unfinished_waiting.remove(&session);
+                    Some(place)
+                } else {
+                    self.unfinished_waiting.insert(session);
+                    None
+                }
+            }
+            through => through,
+        };
         let rejected = self
             .logs
-            .append_through(session, conversation.take_writes(), through)
+            .append_through(session, writes, through, unfinished)
             .is_err();
         let changed = conversation.take_changes();
         let replies = changed
@@ -2491,7 +2556,8 @@ impl AppState {
                             .session(session)
                             .is_some_and(|saved| saved.provider_thread().is_some());
                     if let Some(conversation) = self.conversations.get_mut(&session) {
-                        conversation.restore(entries);
+                        let resumed = self.resumed.remove(&session).unwrap_or_default();
+                        conversation.restore_resuming(entries, resumed);
                         if self.is_remote(session) {
                             self.apply_host_state(session);
                         }
@@ -2683,7 +2749,9 @@ impl AppState {
             if self.conversations.contains_key(&session) {
                 self.commit(session);
             } else if let Some(through) = self.handed.get(&session).cloned() {
-                let _ = self.logs.append_through(session, Vec::new(), Some(through));
+                let _ = self
+                    .logs
+                    .append_through(session, Vec::new(), Some(through), None);
             }
         }
         self.save_results();
@@ -2719,12 +2787,52 @@ impl AppState {
         if !alerts.is_empty() {
             cx.defer(move |cx| crate::notifications::offer(alerts, cx));
         }
+        self.arm_unfinished(cx);
         // Streamed text redraws only this view. The sidebar refreshes when a row changes.
         if sidebar_changed {
             self.refresh(cx);
         } else {
             self.publish(cx);
         }
+    }
+
+    /// Sets a timer, when none is set, that saves each waiting session's unfinished
+    /// items once [`UNFINISHED_EVERY`] has passed since their last save, so a reply
+    /// that stops streaming for a while is still saved and its place acknowledged.
+    fn arm_unfinished(&mut self, cx: &mut Context<Self>) {
+        let conversations = &self.conversations;
+        self.unfinished_waiting
+            .retain(|session| conversations.contains_key(session));
+        if self.unfinished_waiting.is_empty()
+            || self.unfinished_timer
+            || self.phase == Phase::Exiting
+        {
+            return;
+        }
+        self.unfinished_timer = true;
+        let wait = self
+            .unfinished_waiting
+            .iter()
+            .filter_map(|session| self.unfinished_queued.get(session))
+            .map(|at| UNFINISHED_EVERY.saturating_sub(at.elapsed()))
+            .min()
+            .unwrap_or_default()
+            .max(std::time::Duration::from_millis(20));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                this.unfinished_timer = false;
+                if this.phase == Phase::Exiting {
+                    return;
+                }
+                for session in this.unfinished_waiting.clone() {
+                    this.commit(session);
+                }
+                this.arm_unfinished(cx);
+                this.publish(cx);
+            });
+        })
+        .detach();
     }
 
     /// The latest usage readings of `provider`'s `account` on `machine`; `None` is
@@ -4181,6 +4289,12 @@ impl AppState {
         for session in edited {
             self.save_widgets(session);
         }
+        // What streamed waits for its save no longer, so a Quit keeps it.
+        self.unfinished_now = true;
+        for session in std::mem::take(&mut self.unfinished_waiting) {
+            self.commit(session);
+        }
+        self.unfinished_now = false;
         let result = self.logs.flush_pending();
         self.receive(self.logs.drain(), Vec::new(), cx);
         result.map_err(|error| format!("Could not save conversation logs before closing. {error}"))

@@ -249,7 +249,7 @@ mod tests {
                 .query_one("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(schema, crate::database::SCHEMA_VERSION);
-            assert_eq!(schema, 8);
+            assert_eq!(schema, 9);
         }
     }
 

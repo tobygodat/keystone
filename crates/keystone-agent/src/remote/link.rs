@@ -131,10 +131,18 @@ struct Pending {
     then: Then,
 }
 
+/// An event's number in the sequence and the stamp it was given with.
+type At = (u64, u64);
+
+/// The places `hello` shows the host: the highest in each journal, as protocol 6 sent
+/// them, and every place with its stamp.
+type Seen = (Vec<(String, u64)>, Vec<(String, u64, u64)>);
+
 #[derive(Default)]
 struct RouteState {
-    /// Events not drained yet, each with its place in the sequence when it has one.
-    inbox: Vec<(Option<u64>, u64, Event)>,
+    /// Events not drained yet, each with its place in the sequence and its stamp when
+    /// it has one.
+    inbox: Vec<(Option<At>, u64, Event)>,
     /// The registered connection's wake, with the token of its registration.
     wake: Option<(u64, Wake)>,
     sessions: HashMap<u64, SessionState>,
@@ -150,6 +158,8 @@ struct State {
     journal: Option<std::sync::Arc<str>>,
     /// The highest place received. Anything at or below it is a repeat.
     received: u64,
+    /// The stamp `received` came with.
+    received_stamp: u64,
     /// Events a connection drained whose session hasn't reported them saved, as
     /// `(place, session)`. The acknowledgement stays below the first of them.
     unsaved: BTreeSet<(u64, u64)>,
@@ -223,6 +233,7 @@ impl Link {
                 linked: false,
                 journal: None,
                 received: 0,
+                received_stamp: 0,
                 unsaved: BTreeSet::new(),
                 saved,
                 journal_changes: 0,
@@ -287,7 +298,9 @@ impl Link {
         }
         let seq = place.seq;
         let cursor = state.saved.entry(session).or_insert_with(|| place.clone());
-        cursor.seq = cursor.seq.max(seq);
+        if seq > cursor.seq {
+            *cursor = place.clone();
+        }
         state
             .unsaved
             .retain(|&(at, held)| held != session || at > seq);
@@ -479,7 +492,7 @@ impl Shared {
                 let _ = tail_done.send(());
             });
         }
-        let (after, journal, seen) = {
+        let (after, journal, (seen, places)) = {
             let mut state = self.state();
             state.transport = Some(child.id());
             state.heard = Instant::now();
@@ -497,6 +510,7 @@ impl Shared {
             after,
             journal,
             seen,
+            places,
             name: self.name.clone(),
         };
         let (out, queue) = mpsc::channel();
@@ -622,12 +636,14 @@ impl Shared {
                         provider: routed.provider,
                         account: routed.account,
                     };
-                    self.route(route, routed.seq, vec![(routed.session, routed.event)]);
+                    let at = (routed.seq, routed.stamp);
+                    self.route(route, at, vec![(routed.session, routed.event)]);
                 }
                 Frame::Gap {
                     provider,
                     account,
                     to,
+                    stamp,
                     sessions,
                     ..
                 } if welcomed => {
@@ -638,7 +654,7 @@ impl Shared {
                             (session, Event::Warning { message })
                         })
                         .collect();
-                    self.route(Route { provider, account }, to, warnings);
+                    self.route(Route { provider, account }, (to, stamp), warnings);
                 }
                 Frame::Warning {
                     provider,
@@ -685,15 +701,16 @@ impl Shared {
         }
     }
 
-    /// Adds the events at place `seq` to the route's inbox, unless they were received
-    /// before or their session saved them in an earlier run.
-    fn route(&self, route: Route, seq: u64, events: Vec<(u64, Event)>) {
+    /// Adds the events at place `seq`, given with `stamp`, to the route's inbox, unless
+    /// they were received before or their session saved them in an earlier run.
+    fn route(&self, route: Route, (seq, stamp): At, events: Vec<(u64, Event)>) {
         let wake = {
             let mut state = self.state();
             if seq <= state.received {
                 return;
             }
             state.received = seq;
+            state.received_stamp = stamp;
             let State { saved, routes, .. } = &mut *state;
             let target = routes.entry(route.clone()).or_default();
             let was_empty = target.inbox.is_empty();
@@ -707,7 +724,7 @@ impl Shared {
                 if saved.get(&session).is_some_and(|cursor| seq <= cursor.seq) {
                     continue;
                 }
-                target.inbox.push((Some(seq), session, event));
+                target.inbox.push((Some((seq, stamp)), session, event));
             }
             let wake = target.wake.as_ref().map(|(_, wake)| wake.clone());
             let waiting = !target.inbox.is_empty();
@@ -875,16 +892,20 @@ impl Shared {
         let drained = std::mem::take(&mut target.inbox);
         let places: Vec<_> = drained
             .iter()
-            .filter_map(|(seq, session, _)| seq.map(|seq| (seq, *session)))
+            .filter_map(|(at, session, _)| at.map(|(seq, _)| (seq, *session)))
             .collect();
         state.unsaved.extend(places);
         let journal = state.journal.clone();
         drained
             .into_iter()
-            .map(|(seq, session, event)| {
-                let place = seq
+            .map(|(at, session, event)| {
+                let place = at
                     .zip(journal.clone())
-                    .map(|(seq, journal)| Place { journal, seq });
+                    .map(|((seq, stamp), journal)| Place {
+                        journal,
+                        seq,
+                        stamp,
+                    });
                 (place, session, event)
             })
             .collect()
@@ -947,18 +968,28 @@ impl Shared {
 }
 
 impl State {
-    /// The highest place the link has in each journal: its saved cursors, and what
-    /// it received in the journal it took on. `hello` sends them, so a host whose
-    /// journal went back below one of them can tell, and take a new identity.
-    fn seen(&self) -> Vec<(String, u64)> {
-        let mut seen: BTreeMap<String, u64> = BTreeMap::new();
-        let received = self.journal.iter().map(|journal| (journal, self.received));
-        let saved = self.saved.values().map(|place| (&place.journal, place.seq));
-        for (journal, seq) in received.chain(saved) {
-            let highest = seen.entry(journal.to_string()).or_default();
-            *highest = (*highest).max(seq);
+    /// Every place the link has, with its stamp: its saved cursors, and what it
+    /// received in the journal it took on. `hello` sends them, so a host whose journal
+    /// went back from one of them can tell, even once it has grown past it again, and
+    /// take a new identity. Also the highest of them in each journal without stamps, as
+    /// protocol 6 sent them, so an older host still parses `hello` and refuses it.
+    fn seen(&self) -> Seen {
+        let received = self
+            .journal
+            .iter()
+            .filter(|_| self.received > 0)
+            .map(|journal| (journal.to_string(), self.received, self.received_stamp));
+        let saved = self
+            .saved
+            .values()
+            .map(|place| (place.journal.to_string(), place.seq, place.stamp));
+        let places: BTreeSet<_> = received.chain(saved).collect();
+        let mut highest: BTreeMap<String, u64> = BTreeMap::new();
+        for (journal, seq, _) in &places {
+            let high = highest.entry(journal.clone()).or_default();
+            *high = (*high).max(*seq);
         }
-        seen.into_iter().collect()
+        (highest.into_iter().collect(), places.into_iter().collect())
     }
 
     /// The one rule for places: a number counts only in the journal that numbered it.
@@ -992,6 +1023,7 @@ impl State {
         self.saved.retain(|_, place| place.journal == journal);
         self.journal = Some(journal);
         self.received = 0;
+        self.received_stamp = 0;
         self.unsaved.clear();
         for route in self.routes.values_mut() {
             for (seq, _, _) in &mut route.inbox {
@@ -1040,7 +1072,12 @@ impl State {
             .routes
             .values()
             .filter(|route| route.wake.is_some())
-            .flat_map(|route| route.inbox.iter().filter_map(|(seq, _, _)| *seq));
+            .flat_map(|route| {
+                route
+                    .inbox
+                    .iter()
+                    .filter_map(|(at, _, _)| at.map(|(seq, _)| seq))
+            });
         let unsaved = self.unsaved.first().map(|(seq, _)| *seq);
         let seq = undrained
             .chain(unsaved)

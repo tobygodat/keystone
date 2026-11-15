@@ -31,13 +31,15 @@ pub fn new_client_id() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// An event's place: its number in the sequence of the host journal `journal` names.
-/// A number from one journal says nothing about another, so a place is never compared
-/// without its journal.
+/// An event's place: its number in the sequence of the host journal `journal` names,
+/// and the stamp of the daemon run that gave it. A number from one journal says nothing
+/// about another, so a place is never compared without its journal. The stamp lets the
+/// host tell whether a number it holds is still the one it gave the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Place {
     pub journal: std::sync::Arc<str>,
     pub seq: u64,
+    pub stamp: u64,
 }
 
 /// Which connection on a machine an event or call belongs to.

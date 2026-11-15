@@ -173,7 +173,7 @@ impl SessionLog {
     }
 
     pub fn append(&mut self, entry: &Entry) -> io::Result<()> {
-        match self.append_records(&[(event_key(), serde_json::to_string(entry)?)], None)? {
+        match self.append_records(&[(event_key(), serde_json::to_string(entry)?)], None, None)? {
             Durability::Synced => Ok(()),
             Durability::DirectorySyncPending(error) => Err(io::Error::other(error)),
         }
@@ -195,13 +195,19 @@ impl SessionLog {
     }
 
     /// Appends `records` in one transaction, which moves the session's remote cursor
-    /// to `through` when it has one.
+    /// to `through` when it has one, with its unfinished items when given.
     fn append_records(
         &mut self,
         records: &[(String, String)],
         through: Option<&Place>,
+        unfinished: Option<&str>,
     ) -> io::Result<Durability> {
-        let through = through.map(|place| (&*place.journal, place.seq));
+        let through = through.map(|place| keystone_core::Through {
+            journal: &place.journal,
+            seq: place.seq,
+            stamp: place.stamp,
+            unfinished,
+        });
         #[cfg(test)]
         if matches!(self.faults.front(), Some(Fault::Transaction)) {
             self.faults.pop_front();
@@ -548,6 +554,13 @@ struct PendingSession {
     /// reported as [`Report::Through`]. The transaction that saves the last of them
     /// saves it as the session's cursor.
     through: Option<Place>,
+    /// The JSON of the session's unfinished items at `through`, not yet saved. Saved
+    /// with `through`, by the transaction that saves the last queued write or, with
+    /// none, by one of its own; `through` is reported only after.
+    unfinished: Option<String>,
+    /// `unfinished` was committed by a transaction of its own whose directory barrier
+    /// failed: it stays, holding `through`, until a retried barrier succeeds.
+    unfinished_unsynced: bool,
 }
 
 struct LimitedLine {
@@ -680,7 +693,7 @@ impl Logs {
     /// left is rejected: the session's log gets a marker in its place, and this
     /// returns an error. Later entries are admitted whenever they fit.
     pub fn append(&self, session: u64, writes: Vec<Write>) -> Result<(), String> {
-        self.append_through(session, writes, None)
+        self.append_through(session, writes, None, None)
     }
 
     /// As [`Logs::append`], for a session on another machine whose `writes` hold every
@@ -688,15 +701,23 @@ impl Logs {
     /// are saved, it reports [`Report::Through`]; the transaction that saves them moves
     /// the session's cursor there. With no writes, nothing more needs saving for
     /// those events, so the report follows the session's earlier writes.
+    ///
+    /// `unfinished`, given only with `through`, is the JSON of what the session's
+    /// unfinished items held at that place, such as the text a reply had streamed. It
+    /// is saved with the cursor, in the same transaction, replacing what was saved,
+    /// and the place is reported only once it is. A place given without it keeps the
+    /// last given, since the items haven't changed since.
     pub fn append_through(
         &self,
         session: u64,
         writes: Vec<Write>,
         through: Option<Place>,
+        unfinished: Option<String>,
     ) -> Result<(), String> {
         if writes.is_empty() && through.is_none() {
             return Ok(());
         }
+        let unfinished = unfinished.filter(|_| through.is_some());
         let mut admission = self.budget.lock().unwrap();
         let mut queued = Vec::new();
         let mut bytes = 0;
@@ -803,6 +824,10 @@ impl Logs {
             // The session's places come in the order its events were applied.
             if through.is_some() {
                 pending.through = through;
+                if unfinished.is_some() {
+                    pending.unfinished = unfinished;
+                    pending.unfinished_unsynced = false;
+                }
             }
             let report = files.retry(session, &budget).or_else(|| {
                 // The loss is news even while an earlier failure is unchanged.
@@ -959,7 +984,7 @@ impl Files {
     /// all saved.
     fn through(&mut self, session: u64) -> Option<Report> {
         let pending = self.sessions.get_mut(&session)?;
-        if !pending.writes.is_empty() {
+        if !pending.writes.is_empty() || pending.unfinished.is_some() {
             return None;
         }
         let place = pending.through.take()?;
@@ -969,7 +994,8 @@ impl Files {
     fn retry(&mut self, session: u64, budget: &Mutex<Budget>) -> Option<Report> {
         let pending = self.sessions.get_mut(&session).expect("queued above");
         let result: io::Result<()> = (|| {
-            if pending.writes.is_empty() {
+            let alone = pending.unfinished.is_some() && pending.through.is_some();
+            if pending.writes.is_empty() && !alone {
                 return Ok(());
             }
             if pending.log.is_none() {
@@ -1179,6 +1205,26 @@ impl PendingSession {
     }
 
     fn retry(&mut self, budget: &Mutex<Budget>) -> io::Result<()> {
+        // Unfinished items changed with no row to save: they move the cursor in a
+        // transaction of their own. Their place is reported only once that is durable,
+        // so a failed directory barrier keeps them, committed, until a retry of the
+        // barrier succeeds, as a row's write is kept.
+        if self.writes.is_empty()
+            && let (Some(log), Some(unfinished), Some(through)) =
+                (self.log.as_mut(), &self.unfinished, &self.through)
+        {
+            if self.unfinished_unsynced {
+                log.sync()?;
+            } else {
+                let durability = log.append_records(&[], Some(through), Some(unfinished))?;
+                if let Durability::DirectorySyncPending(error) = durability {
+                    self.unfinished_unsynced = true;
+                    return Err(io::Error::other(error));
+                }
+            }
+            self.unfinished = None;
+            self.unfinished_unsynced = false;
+        }
         while !self.writes.is_empty() {
             let log = self.log.as_mut().expect("opened above");
             let barrier = if self.committed > 0 {
@@ -1193,17 +1239,22 @@ impl PendingSession {
                     .skip(self.committed)
                     .map(|write| write.record.clone())
                     .collect();
-                let durability = match log.append_records(&records, self.through.as_ref()) {
-                    Ok(durability) => durability,
-                    // An append can commit and still fail. Rows the store has are not
-                    // sent again, so a collapse never counts them as lost. When the
-                    // store cannot say, they stay unsent: a restore may then overcount,
-                    // but never undercounts.
-                    Err(error) if log.saved(&records).unwrap_or(false) => {
-                        Durability::DirectorySyncPending(error.to_string())
-                    }
-                    Err(error) => return Err(error),
-                };
+                let unfinished = self.unfinished.as_deref();
+                let durability =
+                    match log.append_records(&records, self.through.as_ref(), unfinished) {
+                        Ok(durability) => durability,
+                        // An append can commit and still fail. Rows the store has are not
+                        // sent again, so a collapse never counts them as lost. When the
+                        // store cannot say, they stay unsent: a restore may then overcount,
+                        // but never undercounts.
+                        Err(error) if log.saved(&records).unwrap_or(false) => {
+                            Durability::DirectorySyncPending(error.to_string())
+                        }
+                        Err(error) => return Err(error),
+                    };
+                // Kept writes hold `through` until their barrier succeeds.
+                self.unfinished = None;
+                self.unfinished_unsynced = false;
                 self.committed = self.writes.len();
                 if let Durability::DirectorySyncPending(error) = durability {
                     // Committed rows are never sent again, so only entries counted in
@@ -1703,7 +1754,22 @@ mod tests {
         Some(Place {
             journal: "journal".into(),
             seq,
+            stamp: 3,
         })
+    }
+
+    /// Each saved cursor of session 1 as `(seq, unfinished)`.
+    fn saved_cursors(sessions: &Path) -> Vec<(u64, Option<String>)> {
+        Database::open_read_only(path(sessions, 1))
+            .unwrap()
+            .remote_cursors()
+            .unwrap()
+            .into_iter()
+            .map(|cursor| {
+                assert_eq!((cursor.journal.as_str(), cursor.stamp), ("journal", 3));
+                (cursor.seq, cursor.unfinished)
+            })
+            .collect()
     }
 
     /// A remote session's place is reported only once every write queued with or
@@ -1714,27 +1780,21 @@ mod tests {
         let (logs, _, dir) = logs();
         let sessions = dir.path().join("sessions");
         let cursors = || {
-            Database::open_read_only(path(&sessions, 1))
-                .unwrap()
-                .remote_cursors()
-                .unwrap()
+            saved_cursors(&sessions)
                 .into_iter()
-                .map(|(session, journal, seq)| {
-                    assert_eq!(journal, "journal");
-                    (session, seq)
-                })
+                .map(|(seq, _)| (1, seq))
                 .collect::<Vec<_>>()
         };
-        logs.append_through(1, vec![entry(0)], at(5)).unwrap();
+        logs.append_through(1, vec![entry(0)], at(5), None).unwrap();
         logs.writer.flush();
         assert_eq!(throughs(&logs), [(1, 5)]);
         assert_eq!(cursors(), [(1, 5)]);
 
         inject(&logs, 1, VecDeque::from([Fault::Transaction]));
-        logs.append_through(1, vec![entry(1)], at(8)).unwrap();
+        logs.append_through(1, vec![entry(1)], at(8), None).unwrap();
         logs.writer.flush();
         assert_eq!(throughs(&logs), [], "the rows of 8 are not saved");
-        logs.append_through(1, Vec::new(), at(9)).unwrap();
+        logs.append_through(1, Vec::new(), at(9), None).unwrap();
         logs.writer.flush();
         assert_eq!(
             throughs(&logs),
@@ -1743,13 +1803,113 @@ mod tests {
         );
         assert_eq!(seqs(&read(&sessions, 1).unwrap()), [0, 1]);
         assert_eq!(cursors(), [(1, 9)], "saved with the rows it covers");
-        logs.append_through(1, Vec::new(), at(12)).unwrap();
+        logs.append_through(1, Vec::new(), at(12), None).unwrap();
         logs.writer.flush();
         assert_eq!(throughs(&logs), [(1, 12)]);
         assert_eq!(cursors(), [(1, 9)], "a place with no rows needs no write");
         logs.append(2, vec![entry(2)]).unwrap();
         logs.writer.flush();
         assert_eq!(throughs(&logs), [], "a local session has no place");
+    }
+
+    /// TOB-453: a session's unfinished items are saved with its cursor, with rows or
+    /// in a transaction of their own, and their place is reported only once they are.
+    #[test]
+    fn unfinished_items_save_with_their_place_and_hold_its_report() {
+        let (logs, _, dir) = logs();
+        let sessions = dir.path().join("sessions");
+        let items = |text: &str| Some(format!(r#"[{{"text":"{text}"}}]"#));
+        logs.append_through(1, vec![entry(0)], at(5), items("Hel"))
+            .unwrap();
+        logs.writer.flush();
+        assert_eq!(throughs(&logs), [(1, 5)]);
+        assert_eq!(saved_cursors(&sessions), [(5, items("Hel"))]);
+
+        inject(&logs, 1, VecDeque::from([Fault::Transaction]));
+        logs.append_through(1, Vec::new(), at(6), items("Hello"))
+            .unwrap();
+        logs.writer.flush();
+        // The fault fails the next transaction, which here saves only the items.
+        assert_eq!(throughs(&logs), [], "the items of 6 are not saved");
+        assert_eq!(saved_cursors(&sessions), [(5, items("Hel"))]);
+        logs.append_through(1, Vec::new(), at(7), None).unwrap();
+        logs.writer.flush();
+        assert_eq!(
+            throughs(&logs),
+            [(1, 7)],
+            "7 changed nothing, and the retry saved the items with it"
+        );
+        assert_eq!(saved_cursors(&sessions), [(7, items("Hello"))]);
+        logs.append_through(1, vec![entry(1)], at(9), Some("[]".into()))
+            .unwrap();
+        logs.writer.flush();
+        assert_eq!(throughs(&logs), [(1, 9)]);
+        assert_eq!(saved_cursors(&sessions), [(9, Some("[]".into()))]);
+        logs.append_through(1, Vec::new(), None, items("lost"))
+            .unwrap();
+        logs.writer.flush();
+        assert_eq!(
+            saved_cursors(&sessions),
+            [(9, Some("[]".into()))],
+            "items without a place are never saved"
+        );
+    }
+
+    /// Unfinished items saved with no rows hold their place until the directory
+    /// barrier that makes the save durable succeeds, and the next flush retries it:
+    /// a place reported first could let the host trim what a power cut takes back.
+    #[cfg(unix)]
+    #[test]
+    fn unfinished_items_whose_directory_sync_failed_hold_their_place_until_it_succeeds() {
+        use std::os::unix::fs::PermissionsExt;
+        let (logs, _, dir) = logs();
+        logs.append_through(1, vec![entry(0)], at(5), Some("[]".into()))
+            .unwrap();
+        logs.writer.flush();
+        assert_eq!(throughs(&logs), [(1, 5)]);
+        let original = fs::metadata(dir.path()).unwrap().permissions();
+        // Writable but not readable: SQLite commits, and syncing the directory fails.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o300)).unwrap();
+        logs.append_through(
+            1,
+            Vec::new(),
+            at(6),
+            Some(r#"[{"text":"unsynced"}]"#.into()),
+        )
+        .unwrap();
+        logs.writer.flush();
+        let reports = logs.drain();
+        let flushed = logs.flush();
+        let after_flush = logs.drain();
+        fs::set_permissions(dir.path(), original).unwrap();
+        assert!(
+            reports.iter().any(|r| matches!(
+                r,
+                Report::Saved {
+                    error: Some(_),
+                    retryable: true,
+                    ..
+                }
+            )),
+            "the directory sync must fail: {reports:?}"
+        );
+        assert!(
+            !reports
+                .iter()
+                .chain(&after_flush)
+                .any(|r| matches!(r, Report::Through { .. })),
+            "a failed directory barrier holds the place: {reports:?} {after_flush:?}"
+        );
+        assert!(
+            flushed.is_err(),
+            "a flush retries the barrier and fails with it"
+        );
+        logs.flush().unwrap();
+        assert_eq!(
+            throughs(&logs),
+            [(1, 6)],
+            "the retried barrier releases the place"
+        );
     }
 
     #[test]

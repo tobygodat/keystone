@@ -15,7 +15,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(git -C "$here" rev-parse --show-toplevel)
 
 # The commit at which the model was last confirmed to describe the code below.
-SYNC=0e0ef69f9
+SYNC=ef85fd11c
 COVERED=(
   crates/keystone-agent/src/remote/link.rs
   crates/keystone-agent/src/remote/connection.rs
@@ -24,13 +24,15 @@ COVERED=(
   crates/keystone-agent/src/log.rs
   crates/keystone-core/src/database.rs
   crates/keystone-desktop/src/app_state.rs
+  crates/keystone-desktop/src/conversation.rs
 )
 FUNCTIONS=(
   route drain ack saved with_cursors resend connect_once read drain_placed
   replay hello append_logs remote_cursors append_through retry through
   pump receive receive_placed commit open_link watch_links new adopt end_lost_turns
   journal_changes has_events open id went_back rotate seen journal_events take deliver
-  refusal
+  refusal stamp stamp_from stamp_at take_unfinished unfinished_changed restore_resuming
+  settle_unfinished arm_unfinished flush_logs
 )
 
 if [[ ${1:-} == --drift ]]; then
@@ -86,7 +88,8 @@ mkdir -p "$cache"
 work=$(mktemp -d "$cache/cursor-model-work.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-# Sets of bounds, as "events-per-journal resets rewinds crashes kills drops grows-back". The
+# Sets of bounds, as "events-per-journal resets rewinds crashes kills drops grows-back
+# failed-barriers power-cuts". The
 # full product is too large to explore (over 9 minutes and 7 GB for three events, one
 # reset, one kill and one drop, without finishing), so each set spends its budget
 # where it matters:
@@ -97,50 +100,64 @@ trap 'rm -rf "$work"' EXIT
 #           event before the app next connects.
 #   grows:  as rewind, but it may number new events before the app connects, as its
 #           own restart events would. Then nothing in it is behind the app's place,
-#           and a journal that went back can't be told from one that didn't.
+#           and only the stamp at that place tells a journal that went back (TOB-455).
 #   crash:  2 events, the host crashes or loses power once at any point, losing only
 #           commits it never sent, and numbers its restart events at once. 1 kill,
 #           1 drop.
+#   barrier: 2 events, one save whose directory barrier fails after it commits, and
+#           the app's machine losing power once, which takes back what wasn't
+#           durable. 1 drop.
 # Every session and row assignment is checked in each.
 declare -A BOUNDS=(
-  [kills]="4 0 0 0 2 1 FALSE"
-  [reset]="2 1 0 0 1 1 FALSE"
-  [rewind]="2 0 1 0 1 1 FALSE"
-  [grows]="2 0 1 0 1 1 TRUE"
-  [crash]="2 0 0 1 1 1 FALSE"
+  [kills]="4 0 0 0 2 1 FALSE 0 0"
+  [reset]="2 1 0 0 1 1 FALSE 0 0"
+  [rewind]="2 0 1 0 1 1 FALSE 0 0"
+  [grows]="2 0 1 0 1 1 TRUE 0 0"
+  [crash]="2 0 0 1 1 1 FALSE 0 0"
+  [barrier]="3 0 0 0 1 1 FALSE 1 1"
 )
 
 # One run: a rule, the Mutation constant, the bounds, and the expected result.
 #   holds  - TLC finds no violation
 #   breaks - TLC finds one (a known finding, or a break that proves the rule can fail)
 EXPECT=(
-  # rule          mutation       bounds  expected  why
-  "NothingLost    none           kills   holds     code"
-  "SavedOnce      none           kills   holds     code"
-  "SavedInOrder   none           kills   holds     code"
-  "NothingLost    none           reset   holds     code"
-  "SavedOnce      none           reset   holds     code"
-  "SavedInOrder   none           reset   holds     code"
-  "NothingLost    none           rewind  holds     code"
-  "SavedOnce      none           rewind  holds     code"
-  "SavedInOrder   none           rewind  holds     code"
-  "NothingLost    none           grows   breaks    finding (TOB-455): a journal that went back and grew to the app's place before it reconnected"
-  "NothingLost    none           crash   holds     code"
-  "SavedOnce      none           crash   holds     code"
-  "SavedInOrder   none           crash   holds     code"
-  "NothingLost    ack-on-drain   kills   breaks    can fail"
-  "NothingLost    cursor-apart   kills   breaks    can fail"
-  "SavedOnce      no-skip        kills   breaks    can fail"
-  "SavedInOrder   no-skip        kills   breaks    can fail"
-  "NothingLost    cross-journal  reset   breaks    can fail: round one's cursors across journals"
-  "NothingLost    no-rotate      rewind  breaks    can fail: a journal that went back keeps its identity"
-  "NothingLost    lossy-crash    crash   breaks    can fail: a host crash takes back commits it had sent"
-  "NothingLost    late-route     kills   breaks    can fail: a route whose connection registers only after its events arrive"
+  # rule          mutation          bounds  expected  why
+  "NothingLost    none              kills   holds     code"
+  "SavedOnce      none              kills   holds     code"
+  "SavedInOrder   none              kills   holds     code"
+  "NothingLost    none              reset   holds     code"
+  "SavedOnce      none              reset   holds     code"
+  "SavedInOrder   none              reset   holds     code"
+  "NothingLost    none              rewind  holds     code"
+  "SavedOnce      none              rewind  holds     code"
+  "SavedInOrder   none              rewind  holds     code"
+  "NothingLost    none              grows   holds     code"
+  "SavedOnce      none              grows   holds     code"
+  "SavedInOrder   none              grows   holds     code"
+  "NothingLost    none              crash   holds     code"
+  "SavedOnce      none              crash   holds     code"
+  "SavedInOrder   none              crash   holds     code"
+  "NothingLost    none              barrier holds     code"
+  "SavedOnce      none              barrier holds     code"
+  "SavedInOrder   none              barrier holds     code"
+  "NothingLost    ack-on-drain      kills   breaks    can fail"
+  "NothingLost    cursor-apart      kills   breaks    can fail"
+  "SavedOnce      no-skip           kills   breaks    can fail"
+  "SavedInOrder   no-skip           kills   breaks    can fail"
+  "NothingLost    cross-journal     reset   breaks    can fail: round one's cursors across journals"
+  "NothingLost    no-rotate         rewind  breaks    can fail: a journal that went back keeps its identity"
+  "NothingLost    no-stamp          grows   breaks    can fail: numbers alone, as before TOB-455"
+  "NothingLost    lossy-crash       crash   breaks    can fail: a host crash takes back commits it had sent"
+  "NothingLost    late-route        kills   breaks    can fail: a route whose connection registers only after its events arrive"
+  "NothingLost    ack-unsaved-part  kills   breaks    can fail: a part acknowledged once applied, as before TOB-453"
+  "SavedOnce      parts-apart       kills   breaks    can fail: unfinished items saved apart from their cursor"
+  "NothingLost    no-restore        kills   breaks    can fail: a launch that leaves the saved unfinished items out"
+  "NothingLost    report-unsynced   barrier breaks    can fail: a place reported before its directory barrier succeeded"
 )
 
 config() {  # rule mutation bounds
-  local events resets rewinds crashes kills drops grows
-  read -r events resets rewinds crashes kills drops grows <<<"${BOUNDS[$3]}"
+  local events resets rewinds crashes kills drops grows fails cuts
+  read -r events resets rewinds crashes kills drops grows fails cuts <<<"${BOUNDS[$3]}"
   cat <<EOF
 CONSTANTS
     N = $events
@@ -150,6 +167,8 @@ CONSTANTS
     MaxKills = $kills
     MaxDrops = $drops
     GrowsBack = $grows
+    MaxFails = $fails
+    MaxCuts = $cuts
     Mutation = "$2"
 SPECIFICATION Spec
 INVARIANT TypeOK
@@ -194,16 +213,17 @@ run() {
   fi
 }
 
+# CURSOR_MODEL_JOBS runs at a time (default 8), each TLC with two workers.
+limit=${CURSOR_MODEL_JOBS:-8}
 failed=0
-pids=()
 for i in "${!EXPECT[@]}"; do
   read -r rule mutation bounds _ <<<"${EXPECT[$i]}"
+  while (($(jobs -rp | wc -l) >= limit)); do wait -n; done
   (run "$rule" "$mutation" "$bounds" >"$work/result-$i") &
-  pids+=($!)
 done
-wait "${pids[@]}"
+wait
 
-printf '%-14s %-14s %-7s %-7s %s\n' RULE MUTATION BOUNDS RESULT EXPECTED
+printf '%-14s %-17s %-7s %-7s %s\n' RULE MUTATION BOUNDS RESULT EXPECTED
 for i in "${!EXPECT[@]}"; do
   read -r rule mutation bounds expected why <<<"${EXPECT[$i]}"
   got=$(cat "$work/result-$i")
@@ -215,7 +235,7 @@ for i in "${!EXPECT[@]}"; do
     keep=$outputs/$rule-$mutation-$bounds.out
     cp "$work/$rule-$mutation-$bounds/tlc.out" "$keep"
   fi
-  printf '%-14s %-14s %-7s %-7s %-7s %s %s\n' "$rule" "$mutation" "$bounds" "$got" "$expected" "$mark" "$why"
+  printf '%-14s %-17s %-7s %-7s %-7s %s %s\n' "$rule" "$mutation" "$bounds" "$got" "$expected" "$mark" "$why"
   [[ $mark == UNEXPECTED ]] && echo "    TLC output: $keep"
 done
 exit $failed
