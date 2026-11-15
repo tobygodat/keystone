@@ -161,9 +161,19 @@ fn ranges(mut rows: Vec<usize>) -> Vec<Range<usize>> {
 /// The wall clock in unix milliseconds. The store takes it as an argument, so its
 /// tests pass fixed times.
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+        .map_or(0, |d| d.as_millis() as u64);
+    #[cfg(test)]
+    let now = now + CLOCK_AHEAD_MS.get();
+    now
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How far a test has moved this thread's wall clock on, so it can let the time
+    /// before a usage limit's reset pass without waiting through it.
+    static CLOCK_AHEAD_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Whether `event` ends a turn, and if so whether the turn failed. An interruption is a

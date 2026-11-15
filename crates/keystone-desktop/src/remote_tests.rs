@@ -4,6 +4,7 @@
 
 use super::*;
 use keystone_agent::ItemKind;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
@@ -39,10 +40,17 @@ impl Host {
         argv
     }
 
-    /// The daemon's process, while it holds its lock.
+    /// The daemon's process, while it holds its lock. The file keeps a killed daemon's
+    /// ID, so only the lock says whether it still runs.
     fn daemon(&self) -> Option<i32> {
-        let lock = self.0.path().join("run").join("host.lock");
-        std::fs::read_to_string(lock).ok()?.trim().parse().ok()
+        let path = self.0.path().join("run").join("host.lock");
+        let file = std::fs::File::open(&path).ok()?;
+        // SAFETY: flock only reads the descriptor, which `file` keeps open.
+        let free = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        if free {
+            return None;
+        }
+        std::fs::read_to_string(&path).ok()?.trim().parse().ok()
     }
 }
 
@@ -1459,12 +1467,12 @@ fn a_power_loss_on_the_machine_loses_no_turn_end(
     ));
     let state = runtime(dir.path(), cx);
     assert_eq!(link(&state, argv.clone(), "desk", cx), None);
-    let work = folder(&[("delay-ms", "1")]);
+    // A word every 2.5 s, so the app has saved all it got when the power goes.
+    let work = folder(&[("delay-ms", "2500")]);
     let session = new_remote(&state, work.path(), cx);
     assert!(send(&state, session, "hello long", cx));
-    std::fs::write(work.path().join(".fake-claude-delay-ms"), "2500").unwrap();
     wait_until(cx, &state, "the reply to start", move |state| {
-        agent_text(state, session).contains("**Mode:**")
+        !agent_text(state, session).is_empty()
     });
     for _ in 0..100 {
         cx.run_until_parked();

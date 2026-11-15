@@ -41,6 +41,45 @@ fn limit(home: &Path, seconds: u64) {
     std::fs::write(home.join(".fake-usage-limit"), seconds.to_string()).unwrap();
 }
 
+/// Lets `ms` pass at once for the app's wall clock and for the scripted limit in
+/// `home`, which counts from its file's modification time.
+fn pass(home: &Path, ms: u64) {
+    CLOCK_AHEAD_MS.set(CLOCK_AHEAD_MS.get() + ms);
+    if let Ok(file) = std::fs::File::options()
+        .write(true)
+        .open(home.join(".fake-usage-limit"))
+    {
+        let set = file.metadata().unwrap().modified().unwrap();
+        file.set_modified(set - Duration::from_millis(ms)).unwrap();
+    }
+}
+
+/// [`pass`] while the app runs, with its timers moved on as far.
+fn pass_running(vcx: &mut gpui::VisualTestContext, home: &Path, ms: u64) {
+    pass(home, ms);
+    vcx.executor().advance_clock(Duration::from_millis(ms));
+    vcx.run_until_parked();
+}
+
+/// Runs the app's timers past `at`, and on for 3 s, while its wall clock stops a second
+/// short of it, as a timer that runs ahead of the clock would.
+fn wake_a_second_before(vcx: &mut gpui::VisualTestContext, home: &Path, at: u64) {
+    let ahead = at - now_ms();
+    pass(home, ahead - 1_000);
+    vcx.executor().advance_clock(Duration::from_millis(ahead));
+    for _ in 0..10 {
+        vcx.executor().advance_clock(Duration::from_millis(300));
+        vcx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// [`pass_running`] until a second after `reset_ms`, since the scripted limit lifts at
+/// a whole second.
+fn pass_the_reset(vcx: &mut gpui::VisualTestContext, home: &Path, reset_ms: u64) {
+    pass_running(vcx, home, (reset_ms + 1_000).saturating_sub(now_ms()));
+}
+
 fn open<'a>(
     path: &Path,
     dir: &Path,
@@ -176,7 +215,8 @@ fn the_card_names_the_limit_and_a_scheduled_continue_goes_once_after_the_reset(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");
-    limit(&dir.path().join("default-claude"), 6);
+    let home = dir.path().join("default-claude");
+    limit(&home, 6);
     let (view, vcx) = open(&path, dir.path(), cx);
     click(vcx, "welcome-claude");
     type_and_send(&view, vcx, "Fix the login bug");
@@ -224,6 +264,13 @@ fn the_card_names_the_limit_and_a_scheduled_continue_goes_once_after_the_reset(
         Some(reset_ms)
     );
 
+    wake_a_second_before(vcx, &home, reset_ms);
+    assert_eq!(
+        continue_at(&view, vcx),
+        Some(reset_ms),
+        "nothing goes a second before the reset and its grace"
+    );
+    pass_running(vcx, &home, 1_000);
     wait(vcx, &view, "the continue after the reset", |view, cx| {
         replied(view, 1, "Continue where you left off", cx)
     });
@@ -296,6 +343,15 @@ fn sending_cancels_a_scheduled_continue_and_one_survives_a_restart(cx: &mut gpui
             .and_then(|s| s.continue_at())),
         Some(at)
     );
+    wake_a_second_before(vcx, &home, at);
+    assert_eq!(
+        state.read_with(vcx, |state, _| state
+            .session(1)
+            .and_then(|s| s.continue_at())),
+        Some(at),
+        "it waits until it is due"
+    );
+    pass_running(vcx, &home, 1_000);
     let deadline = std::time::Instant::now() + Duration::from_secs(45);
     let sent_after = loop {
         vcx.run_until_parked();
@@ -417,8 +473,9 @@ fn another_account_continues_in_a_linked_session_on_that_account(cx: &mut gpui::
 fn continue_sends_once_and_never_into_a_running_turn(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");
+    let home = dir.path().join("default-claude");
     // Long enough that a loaded machine still starts the turn inside the limit.
-    limit(&dir.path().join("default-claude"), 5);
+    limit(&home, 5);
     let (view, vcx) = open(&path, dir.path(), cx);
     click(vcx, "welcome-claude");
     type_and_send(&view, vcx, "Fix the login bug");
@@ -434,7 +491,7 @@ fn continue_sends_once_and_never_into_a_running_turn(cx: &mut gpui::TestAppConte
             .unwrap()
             * 1000
     });
-    wait(vcx, &view, "the reset", |_, _| now_ms() > reset_ms);
+    pass_the_reset(vcx, &home, reset_ms);
 
     // Pressed twice before anything is drawn again: only the first goes.
     let results = view.update(vcx, |view, cx| {
@@ -455,14 +512,14 @@ fn continue_sends_once_and_never_into_a_running_turn(cx: &mut gpui::TestAppConte
     );
 
     // Limited again and scheduled; a turn that starts before the reset cancels it.
-    limit(&dir.path().join("default-claude"), 600);
+    limit(&home, 600);
     type_and_send(&view, vcx, "One more thing");
     wait(vcx, &view, "the second limit", |view, cx| {
         limited(view, 1, cx)
     });
     click(vcx, "limit-schedule");
     assert!(continue_at(&view, vcx).is_some());
-    std::fs::remove_file(dir.path().join("default-claude").join(".fake-usage-limit")).unwrap();
+    std::fs::remove_file(home.join(".fake-usage-limit")).unwrap();
     view.update(vcx, |view, cx| {
         view.state.update(cx, |state, cx| {
             state.receive(Vec::new(), vec![(1, Event::TurnStarted)], cx);
@@ -541,7 +598,8 @@ fn a_codex_limit_takes_its_reset_from_the_usage_reading_and_any_hand_off_cancels
 fn a_continue_that_came_due_while_closed_waits_for_a_click(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");
-    limit(&dir.path().join("default-claude"), 6);
+    let home = dir.path().join("default-claude");
+    limit(&home, 6);
     let reset_ms = {
         let (view, vcx) = open(&path, dir.path(), cx);
         click(vcx, "welcome-claude");
@@ -570,9 +628,7 @@ fn a_continue_that_came_due_while_closed_waits_for_a_click(cx: &mut gpui::TestAp
     };
 
     // Keystone stays closed past the reset and the scheduled time.
-    while now_ms() <= reset_ms {
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    pass(&home, (reset_ms + 1_000).saturating_sub(now_ms()));
     Store::open(&path)
         .unwrap()
         .set_continue_at(1, Some(now_ms() - 1_000))
@@ -618,7 +674,8 @@ fn a_continue_that_came_due_while_closed_waits_for_a_click(cx: &mut gpui::TestAp
 fn a_continue_found_overdue_on_wake_waits_for_a_click(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workspace.json");
-    limit(&dir.path().join("default-claude"), 4);
+    let home = dir.path().join("default-claude");
+    limit(&home, 4);
     let (view, vcx) = open(&path, dir.path(), cx);
     click(vcx, "welcome-claude");
     type_and_send(&view, vcx, "Fix the login bug");
@@ -634,7 +691,7 @@ fn a_continue_found_overdue_on_wake_waits_for_a_click(cx: &mut gpui::TestAppCont
             .unwrap()
             * 1000
     });
-    wait(vcx, &view, "the reset", |_, _| now_ms() > reset_ms);
+    pass_the_reset(vcx, &home, reset_ms);
     let schedule = |vcx: &mut gpui::VisualTestContext, at: u64| {
         view.update(vcx, |view, cx| {
             view.state

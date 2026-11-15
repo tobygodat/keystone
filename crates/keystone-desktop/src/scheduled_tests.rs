@@ -94,7 +94,7 @@ fn a_run_into_an_existing_session_keeps_its_draft_and_never_steers_a_running_tur
 ) {
     let dir = tempfile::tempdir().unwrap();
     let state = runtime(dir.path(), cx);
-    connect(&state, dir.path(), 400, false, cx);
+    connect(&state, dir.path(), 100, false, cx);
     let claude = state.read_with(cx, |state, _| {
         state
             .store
@@ -342,7 +342,7 @@ fn task_edits_and_run_now_never_wait_for_a_stalled_save_and_send_once_after_it(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let state = runtime(dir.path(), cx);
-    connect(&state, dir.path(), 400, false, cx);
+    connect(&state, dir.path(), 100, false, cx);
     state.read_with(cx, |state, _| state.store.flush().unwrap());
     let stalled = dir.path().join("stalled");
     std::fs::write(&stalled, "").unwrap();

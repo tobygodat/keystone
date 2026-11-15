@@ -34,7 +34,29 @@ fn wait_until(
     }
 }
 
+/// The scripted `provider` streaming a word every `ms`.
+fn paced(provider: Provider, directory: &Path, ms: u64) -> PathBuf {
+    let script = directory.join(format!("{provider:?}-paced"));
+    keystone_core::test_support::write_executable(
+        &script,
+        format!(
+            "#!/bin/sh\nKEYSTONE_FAKE_CLAUDE_DELAY_MS={ms} KEYSTONE_FAKE_CODEX_DELAY_MS={ms} exec '{}' \"$@\"\n",
+            scripted(provider).display()
+        ),
+    );
+    script
+}
+
 fn setup(directory: &Path, provider: Provider, cx: &mut gpui::TestAppContext) -> Entity<AppState> {
+    setup_with(directory, provider, scripted, cx)
+}
+
+fn setup_with(
+    directory: &Path,
+    provider: Provider,
+    program: impl Fn(Provider) -> PathBuf,
+    cx: &mut gpui::TestAppContext,
+) -> Entity<AppState> {
     let mut store = Store::open(directory.join("workspace.json")).unwrap();
     let project = WorkingDirectory::new(directory).unwrap();
     store.create(provider, &project, 1).unwrap();
@@ -44,11 +66,11 @@ fn setup(directory: &Path, provider: Provider, cx: &mut gpui::TestAppContext) ->
         let mut state = AppState::new(store, cx);
         state.codex.insert(
             None,
-            CodexConnection::new(Some(scripted(Provider::Codex)), "test", state.wake.clone()),
+            CodexConnection::new(Some(program(Provider::Codex)), "test", state.wake.clone()),
         );
         state.claude.insert(
             None,
-            ClaudeConnection::new(Some(scripted(Provider::Claude)), state.wake.clone()),
+            ClaudeConnection::new(Some(program(Provider::Claude)), state.wake.clone()),
         );
         state
     })
@@ -780,7 +802,15 @@ fn an_agent_launched_claude_child_is_evicted_and_answers_reads_while_dormant(
 /// turn of the parent, after the turn that launched it.
 fn delegation_scenario(provider: Provider, busy: bool, cx: &mut gpui::TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
-    let state = setup(directory.path(), provider, cx);
+    // The busy parent outlasts its child, and the idle parent's turn ends before its
+    // child's, by how many words each streams, whatever the pace.
+    let scripts = tempfile::tempdir().unwrap();
+    let state = setup_with(
+        directory.path(),
+        provider,
+        |provider| paced(provider, scripts.path(), 20),
+        cx,
+    );
     let target = match provider {
         Provider::Claude => "codex",
         Provider::Codex => "claude",
@@ -796,6 +826,36 @@ fn delegation_scenario(provider: Provider, busy: bool, cx: &mut gpui::TestAppCon
             cx
         ))
     });
+    let delivery = |state: &AppState| {
+        state
+            .store
+            .workspace()
+            .delivery(2)
+            .map(|delivery| delivery.state().clone())
+    };
+    if busy {
+        wait_until(&state, cx, |state| {
+            !matches!(delivery(state), None | Some(DeliveryState::Working))
+        });
+        state.read_with(cx, |state, _| {
+            assert!(
+                matches!(delivery(state), Some(DeliveryState::Ready { .. }))
+                    && state.conversations[&1].running,
+                "the result waits while the parent is busy"
+            );
+        });
+    } else {
+        wait_until(&state, cx, |state| {
+            state.conversations.get(&1).is_some_and(|c| !c.running)
+        });
+        state.read_with(cx, |state, _| {
+            assert_eq!(
+                delivery(state),
+                Some(DeliveryState::Working),
+                "the parent is idle before its child's result"
+            );
+        });
+    }
     wait_until(&state, cx, |state| {
         state.conversations.get(&1).is_some_and(|c| !c.running)
             && transcript(state, 1).contains("You wrote: Result from session 2")
@@ -803,7 +863,7 @@ fn delegation_scenario(provider: Provider, busy: bool, cx: &mut gpui::TestAppCon
     state.update(cx, |state, cx| {
         assert!(matches!(
             *state.store.workspace().delivery(2).unwrap().state(),
-            keystone_core::DeliveryState::Delivered { .. }
+            DeliveryState::Delivered { .. }
         ));
         let rows = &state.conversations[&1].rows;
         let position = |found: &dyn Fn(&keystone_agent::Item) -> bool| {
