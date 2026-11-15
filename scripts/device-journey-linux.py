@@ -99,6 +99,13 @@ def frame():
 def current():
     return 'Pixel_9' if (STATE / 'reused').exists() else 'Pixel_8'
 
+def serial():
+    # The emulator's console port, which Keystone gives it with -port.
+    try:
+        return (STATE / 'serial').read_text().strip()
+    except FileNotFoundError:
+        return 'emulator-5554'
+
 if args == ['__frame']:
     sys.stdout.buffer.write(frame())
 elif args == ['__booted']:
@@ -107,22 +114,22 @@ elif args == ['__booted']:
 elif args[:2] == ['devices', '-l']:
     print('List of devices attached')
     if emulator_pid():
-        print('emulator-5554          device product:sdk_gphone64_x86_64 model:Pixel_8 '
+        print(f'{serial()}          device product:sdk_gphone64_x86_64 model:Pixel_8 '
               'device:emu64x transport_id:1')
     print('emulator-5556          offline transport_id:2')
     print()
 elif args[:1] == ['-s'] and args[2:] == ['emu', 'avd', 'name']:
-    if args[1] == 'emulator-5554' and emulator_pid():
+    if args[1] == serial() and emulator_pid():
         sys.stdout.write(f'{current()}\r\nOK\r\n')
     else:
         port = args[1].split('-')[-1]
         sys.stderr.write(f'error: could not connect to TCP port {port}: Connection refused\n')
         sys.exit(1)
-elif args[:1] == ['-s'] and args[1] != 'emulator-5554':
+elif args[:1] == ['-s'] and args[1] != serial():
     sys.stderr.write(f"adb: device '{args[1]}' not found\n")
     sys.exit(1)
 elif not emulator_pid():
-    sys.stderr.write("adb: device 'emulator-5554' not found\n")
+    sys.stderr.write(f"adb: device '{serial()}' not found\n")
     sys.exit(1)
 elif args[2:] == ['emu', 'kill']:
     with open(STATE / 'device.log', 'a') as log:
@@ -170,6 +177,8 @@ if sys.argv[1:] == ['-list-avds']:
     print('Pixel_8')
     sys.exit(0)
 if sys.argv[1:3] == ['-avd', 'Pixel_8']:
+    port = sys.argv[sys.argv.index('-port') + 1] if '-port' in sys.argv else '5554'
+    (STATE / 'serial').write_text(f'emulator-{port}')
     (STATE / 'emulator.pid').write_text(str(os.getpid()))
     (STATE / 'started').write_text(str(time.time()))
     os.execvp('sleep', ['sleep', '100000'])
@@ -480,8 +489,11 @@ class Journey:
         emulator = int((self.state / 'emulator.pid').read_text())
         launched = [line for line in (self.state / 'emulator.log').read_text().splitlines()
                     if line.startswith('-avd')]
-        self.step('Open launches the emulator headless',
-                  launched == ['-avd Pixel_8 -no-window -no-audio -no-boot-anim'], json.dumps(launched))
+        self.step('Open launches the emulator headless at a console port of its own',
+                  len(launched) == 1
+                  and re.fullmatch(r'-avd Pixel_8 -no-window -no-audio -no-boot-anim -port 55\d[02468]',
+                                   launched[0]) is not None,
+                  json.dumps(launched))
         self.wait_for('device-frame', seconds=30)
         time.sleep(0.8)
         self.shot('booted-frame')

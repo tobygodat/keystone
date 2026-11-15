@@ -15,7 +15,7 @@ use futures::channel::oneshot;
 use gpui::{AppContext, Context, Entity, Task};
 use keystone_agent::device::{
     Action, BootState, Deadline, DeviceError, DeviceHost, DeviceId, Input, Inventory, Platform,
-    Start,
+    Power, Start,
 };
 use keystone_agent::mcp::{HandlerError, Reply};
 use keystone_agent::worker::Worker;
@@ -211,6 +211,23 @@ impl Devices {
             next: 0,
             #[cfg(test)]
             captures: 0,
+        }
+    }
+
+    /// Writes what Keystone last knew of `device`, which it is forgetting, into the
+    /// listing the picker shows until the next one, so a device booting elsewhere
+    /// never reads Off from a listing taken before it started.
+    fn remember(&mut self, device: &DeviceId, life: &Life) {
+        let power = match life {
+            Life::Booting { .. } | Life::Stalled => Power::Booting,
+            Life::Booted => Power::Booted,
+            Life::Off => Power::Shutdown,
+            Life::Starting | Life::ShuttingDown { .. } | Life::Failed(_) => return,
+        };
+        let listed = (self.inventory.as_mut())
+            .and_then(|inventory| inventory.devices.iter_mut().find(|d| &d.id == device));
+        if let Some(listed) = listed {
+            listed.power = power;
         }
     }
 
@@ -821,6 +838,9 @@ impl AppState {
         let dropped = forget
             .then(|| self.devices.records.remove(device))
             .flatten();
+        if let Some(record) = &dropped {
+            self.devices.remember(device, record.life());
+        }
         if !answers.is_empty() || dropped.is_some() {
             self.list_devices(cx);
         }
@@ -861,13 +881,13 @@ impl AppState {
             .collect();
         record.waiting.retain(|w| w.wants != Wants::Close);
         match outcome {
-            Ok(()) => {
+            Ok(shut) => {
                 for (session, request) in closers {
                     if self.devices.beside.get(&session).map(|b| &b.device) == Some(device) {
                         self.devices.beside.remove(&session);
                     }
                     if let Some(request) = request {
-                        self.reply_to(request, closed(device, true));
+                        self.reply_to(request, closed(device, shut));
                     }
                 }
                 // A session opened it again while it shut down.

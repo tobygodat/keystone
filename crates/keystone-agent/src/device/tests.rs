@@ -87,15 +87,27 @@ exit 0"#,
     /// screenshot something other than a PNG. `unnamed` makes its console
     /// unreachable. `stale` adds an offline `emulator-5556` whose console fails with that
     /// file's text. `noprops` makes the image set no AVD property. `hang-shot` makes a
-    /// screenshot hang, writing its pid to `shot.pid`. Commands run through a stand-in
-    /// device shell, and whatever reaches a device goes to `device.log` under its AVD.
+    /// screenshot hang, writing its pid to `shot.pid`. `own-listed` adds the emulator
+    /// Keystone launched, running Tablet_API_35 at the port it was given, and
+    /// `hang-devices` makes `devices -l` hang. Commands run through a stand-in device
+    /// shell, and whatever reaches a device goes to `device.log` under its AVD.
     fn adb(&self) -> PathBuf {
         self.script(
             "adb",
             r#"if [ -f "$D/swapped" ] || [ -f "$D/reused" ]; then cur=Tablet_API_35; else cur=Pixel_8; fi
 serial=; if [ "$1" = -s ]; then serial=$2; shift 2; fi
+own=; if [ -f "$D/own-listed" ] && [ -f "$D/port" ]; then own=emulator-$(cat "$D/port"); fi
+if [ -n "$own" ] && [ "$serial" = "$own" ]; then
+  case "$*" in
+    "emu avd name") printf 'Tablet_API_35\r\nOK\r\n'; exit 0 ;;
+    "emu kill") echo "Tablet_API_35 killed at $own" >> "$D/device.log"; echo "OK: killing emulator, bye bye"; exit 0 ;;
+  esac
+  cur=Tablet_API_35; serial=emulator-5554
+fi
 case "$serial:$*" in
   ":devices -l")
+    if [ -f "$D/hang-devices" ]; then exec sleep 30; fi
+    if [ -n "$own" ]; then printf '%s          device product:sdk_gphone64_arm64 transport_id:7\n' "$own"; fi
     if [ -f "$D/swapped" ]; then t=2; else t=1; fi
     printf 'List of devices attached\nemulator-5554          device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emu64a transport_id:%s\n' "$t"
     if [ -f "$D/stale" ]; then printf 'emulator-5556          offline transport_id:9\n'; fi
@@ -134,13 +146,15 @@ eval "$*""#,
         std::fs::read_to_string(self.path("device.log")).unwrap_or_default()
     }
 
-    /// Lists two AVDs. Launching one fails at once, or runs until stopped once
-    /// `emulator-runs` exists, writing its pid to `emulator.pid`, or runs until killed,
-    /// asking nothing to SIGTERM, once `emulator-stubborn` exists.
+    /// Lists two AVDs. Launching one writes the console port it was given to `port`,
+    /// then fails at once, or runs until stopped once `emulator-runs` exists, writing
+    /// its pid to `emulator.pid`, or runs until killed, asking nothing to SIGTERM, once
+    /// `emulator-stubborn` exists.
     fn emulator(&self) -> PathBuf {
         self.script(
             "emulator",
             r#"if [ "$1" = -list-avds ]; then printf 'Pixel_8\nTablet_API_35\n'; exit 0; fi
+prev=; for a; do if [ "$prev" = -port ]; then echo "$a" > "$D/port"; fi; prev=$a; done
 if [ -f "$D/emulator-stubborn" ]; then echo $$ > "$D/emulator.pid"; trap '' TERM; while :; do sleep 0.05; done; fi
 if [ -f "$D/emulator-runs" ]; then echo $$ > "$D/emulator.pid"; exec sleep 30; fi
 echo "ERROR   | Unknown AVD name [$2], use -list-avds to see valid list."; exit 1"#,
@@ -964,6 +978,126 @@ fn the_hosts_stop_kills_an_emulator_a_shutdown_asked_to_exit() {
     assert!(started.elapsed() < Duration::from_secs(5));
     // SAFETY: as above.
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "killed and reaped");
+}
+
+/// The pid the stand-in emulator wrote once it runs.
+fn emulator_pid(fakes: &Fakes) -> libc::pid_t {
+    eventually("the emulator runs", || fakes.path("emulator.pid").exists());
+    std::fs::read_to_string(fakes.path("emulator.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+fn alive(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only asks whether the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[test]
+fn the_hosts_stop_kills_an_emulator_whose_shutdown_still_waits_on_adb() {
+    let fakes = Fakes::new();
+    std::fs::write(fakes.path("emulator-stubborn"), "").unwrap();
+    let host = std::sync::Arc::new(LocalHost::new(Tools {
+        adb: Some(fakes.adb()),
+        emulator: Some(fakes.emulator()),
+        ..Tools::default()
+    }));
+    let tablet = "android:Tablet_API_35".parse::<DeviceId>().unwrap();
+    assert_eq!(host.start(&tablet, soon()), Ok(Start::Started));
+    let pid = emulator_pid(&fakes);
+    std::fs::write(fakes.path("hang-devices"), "").unwrap();
+    let shutting = host.clone();
+    let shutdown = std::thread::spawn(move || {
+        shutting.shutdown(&tablet, Deadline::after(Duration::from_secs(20)))
+    });
+    eventually("the shutdown asks adb", || {
+        fakes.log().matches("adb devices -l").count() == 2
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(alive(pid), "the shutdown never got past adb");
+    host.stop();
+    eventually("the emulator is killed and reaped", || !alive(pid));
+    assert_eq!(shutdown.join().unwrap(), Ok(()));
+}
+
+#[test]
+fn a_boot_wait_never_claims_the_users_emulator_while_keystones_still_runs() {
+    let fakes = Fakes::new();
+    std::fs::write(fakes.path("emulator-runs"), "").unwrap();
+    let host = LocalHost::new(Tools {
+        adb: Some(fakes.adb()),
+        emulator: Some(fakes.emulator()),
+        ..Tools::default()
+    });
+    let tablet = "android:Tablet_API_35".parse::<DeviceId>().unwrap();
+    assert_eq!(host.start(&tablet, soon()), Ok(Start::Started));
+    let pid = emulator_pid(&fakes);
+    // The user's emulator runs the AVD, booted, at a serial of its own, while
+    // Keystone's has yet to find the AVD locked.
+    std::fs::write(fakes.path("swapped"), "").unwrap();
+    assert_eq!(
+        host.wait(&tablet, Deadline::after(Duration::from_millis(1500))),
+        Ok(BootState::Booting),
+        "never Booted on another's boot"
+    );
+    host.shutdown(&tablet, soon()).unwrap();
+    assert!(
+        !fakes.device_log().contains("killed"),
+        "the user's emulator keeps running: {}",
+        fakes.device_log()
+    );
+    eventually("Keystone's own emulator stops", || !alive(pid));
+
+    let fakes = Fakes::new();
+    std::fs::write(fakes.path("emulator-runs"), "").unwrap();
+    let host = LocalHost::new(Tools {
+        adb: Some(fakes.adb()),
+        emulator: Some(fakes.emulator()),
+        ..Tools::default()
+    });
+    assert_eq!(host.start(&tablet, soon()), Ok(Start::Started));
+    let pid = emulator_pid(&fakes);
+    std::fs::write(fakes.path("swapped"), "").unwrap();
+    // SAFETY: kill has no memory effects. The stand-in leads its own process group.
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    eventually("Keystone's emulator exits", || {
+        android::exited(&host, "Tablet_API_35").is_some()
+    });
+    assert_eq!(host.wait(&tablet, soon()), Ok(BootState::Elsewhere));
+}
+
+#[test]
+fn keystones_emulator_is_the_one_at_the_port_it_was_given() {
+    let fakes = Fakes::new();
+    std::fs::write(fakes.path("emulator-runs"), "").unwrap();
+    let host = LocalHost::new(Tools {
+        adb: Some(fakes.adb()),
+        emulator: Some(fakes.emulator()),
+        ..Tools::default()
+    });
+    let tablet = "android:Tablet_API_35".parse::<DeviceId>().unwrap();
+    assert_eq!(host.start(&tablet, soon()), Ok(Start::Started));
+    let pid = emulator_pid(&fakes);
+    let port: u16 = std::fs::read_to_string(fakes.path("port"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        (5556..=5584).contains(&port) && port % 2 == 0,
+        "a free even console port adb looks at, not the listed 5554: {port}"
+    );
+    std::fs::write(fakes.path("own-listed"), "").unwrap();
+    assert_eq!(host.wait(&tablet, soon()), Ok(BootState::Booted));
+    host.shutdown(&tablet, soon()).unwrap();
+    assert_eq!(
+        fakes.device_log().trim(),
+        format!("Tablet_API_35 killed at emulator-{port}")
+    );
+    // SAFETY: as above. The stand-in's emu kill only logs.
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
 }
 
 #[test]

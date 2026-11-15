@@ -368,6 +368,7 @@ crates/keystone-agent/src/device/android.rs
 	Connection refused
 	Couldn't list Android Emulators: {error}
 	Couldn't start the emulator: {e}
+	Every emulator port from {} to {} is taken
 	No activities found
 	No launchable app {app} on this emulator
 	The Android emulator was not found. Install it with Android Studio, or set KEYSTONE_EMULATOR_PATH.
@@ -456,9 +457,9 @@ crates/keystone-agent/src/device/tests.rs
 	com.apple.CoreSimulator.SimRuntime.watchOS-12-0
 	iPhone 18 Pro
 	iPhone 19
-	if [ "$1" = -list-avds ]; then printf 'Pixel_8\\nTablet_API_35\\n'; exit 0; fi\nif [ -f "$D/emulator-stubborn" ]; then echo $$ > "$D/emulator.pid"; trap '' TERM; while :; do sleep 0.05; done; fi\nif [ -f "$D/emulator-runs" ]; then echo $$ > "$D/emulator.pid"; exec sleep 30; fi\necho "ERROR   | Unknown AVD name [$2], use -list-avds to see valid list."; exit 1
-	if [ -f "$D/swapped" ] || [ -f "$D/reused" ]; then cur=Tablet_API_35; else cur=Pixel_8; fi\nserial=; if [ "$1" = -s ]; then serial=$2; shift 2; fi\ncase "$serial:$*" in\n  ":devices -l")\n    if [ -f "$D/swapped" ]; then t=2; else t=1; fi\n    printf 'List of devices attached\\nemulator-5554          device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emu64a transport_id:%s\\n' "$t"\n    if [ -f "$D/stale" ]; then printf 'emulator-5556          offline transport_id:9\\n'; fi\n    echo; exit 0 ;;\n  "emulator-5556:emu avd name") cat "$D/stale" >&2; exit 1 ;;\n  emulator-5556:*) echo "adb: device offline" >&2; exit 1 ;;\n  "emulator-5554:emu avd name")\n    if [ -f "$D/unnamed" ]; then echo "error: could not connect to TCP port 5554: Operation timed out" >&2; exit 1; fi\n    printf '%s\\r\\nOK\\r\\n' "$cur"; exit 0 ;;\n  "emulator-5554:emu kill") echo "$cur killed" >> "$D/device.log"; echo "OK: killing emulator, bye bye"; exit 0 ;;\nesac\n[ "$serial" = emulator-5554 ] || exit 0\ncase "$1" in exec-out|shell) shift ;; *) exit 0 ;; esac\nif [ -f "$D/exec-fails" ]; then echo "error: closed" >&2; exit 1; fi\ngetprop() {\n  case "$1" in\n    ro.boot.qemu.avd_name)\n      if [ -f "$D/noprops" ]; then echo; elif [ -f "$D/liar" ]; then echo sdk_gphone64_arm64; else echo "$cur"; fi ;;\n    ro.kernel.qemu.avd_name) echo ;;\n    sys.boot_completed) echo 1 ;;\n  esac\n}\nscreencap() {\n  if [ -f "$D/hang-shot" ]; then echo $$ > "$D/shot.pid"; exec sleep 30; fi\n  if [ -f "$D/garbage" ]; then echo not a png; return; fi\n  if [ "$cur" = Pixel_8 ]; then cat "$D/frame.png"; else cat "$D/tablet.png"; fi\n}\ninput() { echo "$cur input $*" >> "$D/device.log"; }\nmonkey() { echo "$cur monkey $*" >> "$D/device.log"; echo "Events injected: 1"; }\nwm() { echo 'Physical size: 1080x2400'; }\neval "$*"
+	if [ "$1" = -list-avds ]; then printf 'Pixel_8\\nTablet_API_35\\n'; exit 0; fi\nprev=; for a; do if [ "$prev" = -port ]; then echo "$a" > "$D/port"; fi; prev=$a; done\nif [ -f "$D/emulator-stubborn" ]; then echo $$ > "$D/emulator.pid"; trap '' TERM; while :; do sleep 0.05; done; fi\nif [ -f "$D/emulator-runs" ]; then echo $$ > "$D/emulator.pid"; exec sleep 30; fi\necho "ERROR   | Unknown AVD name [$2], use -list-avds to see valid list."; exit 1
 	simctl io
+	the emulator runs
 
 crates/keystone-agent/src/diff.rs
 	--- {from}\n+++ {to}\n
@@ -1416,8 +1417,10 @@ crates/keystone-desktop/src/device/tests/lifecycle.rs
 	Keystone waits on the boot
 	Refresh finds it running
 	a capture finds it stopped
+	a listing that found it off
 	a listing that saw the change
 	a listing tries again
+	a new wait follows the other launch
 	a second Close shuts it down
 	both let go
 	frames arrive
@@ -1429,6 +1432,7 @@ crates/keystone-desktop/src/device/tests/lifecycle.rs
 	session 1 lets go
 	session 2 has it running
 	session 2 lets go
+	shutdown {SLOW}
 	the boot it still waits on
 	the close goes through
 	the close waits on the start
@@ -1445,7 +1449,9 @@ crates/keystone-desktop/src/device/tests/lifecycle.rs
 	the shutdown fails
 	the shutdown runs
 	the slow boot is waited on
+	the slow device Keystone booted is let go
 	the tap reaches the device
+	wait {SLOW}
 
 crates/keystone-desktop/src/device/tests/mod.rs
 	Fake {id}

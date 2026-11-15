@@ -20,6 +20,9 @@ const NO_EMULATOR: &str = "The Android emulator was not found. Install it with A
 const LAUNCH_GRACE: Duration = Duration::from_secs(120);
 /// How often the emulator this host started is checked for having exited.
 const REAP_PAUSE: Duration = Duration::from_millis(250);
+/// The console ports an emulator takes, even ones only, its adb port one above each.
+/// adb looks for emulators on exactly these.
+const PORTS: std::ops::RangeInclusive<u16> = 5554..=5584;
 
 /// An emulator this host started and adb may not list yet.
 #[derive(Clone)]
@@ -30,13 +33,21 @@ pub(crate) struct Launch {
     child: Arc<Mutex<Child>>,
     /// Why the emulator exited, once it has.
     exit: Arc<OnceLock<String>>,
-    /// Set once a shutdown has asked it to exit, so the host's stop kills it.
+    /// Set once a shutdown has started for it, so the host's stop kills it, even while
+    /// the shutdown still waits on adb.
     stopping: Arc<AtomicBool>,
+    /// The serial adb lists it at, from the console port it was given. Another emulator
+    /// running its AVD is someone else's.
+    serial: String,
 }
 
 /// The running emulators adb lists, by the AVD each runs.
 struct Running {
     by_avd: HashMap<String, (String, bool)>,
+    /// The AVD each named emulator runs and whether adb has it online, by serial.
+    by_serial: HashMap<String, (String, bool)>,
+    /// Every serial adb lists, offline ones included.
+    listed: Vec<String>,
     /// Why an emulator adb lists could not be asked its AVD, if one could not.
     unnamed: Option<DeviceError>,
 }
@@ -50,6 +61,16 @@ impl Running {
             (Some(found), _) => Ok(Some(found.clone())),
             (None, Some(error)) => Err(error.clone()),
             (None, None) => Ok(None),
+        }
+    }
+
+    /// Whether adb has the emulator at `serial` online, if it runs `avd`. An emulator
+    /// that could not be asked might be it, so then the answer is that error.
+    fn at(&self, serial: &str, avd: &str) -> Result<Option<bool>, DeviceError> {
+        match (self.by_serial.get(serial), &self.unnamed) {
+            (Some((name, online)), _) => Ok((name == avd).then_some(*online)),
+            (None, Some(error)) if self.listed.iter().any(|s| s == serial) => Err(error.clone()),
+            (None, _) => Ok(None),
         }
     }
 }
@@ -103,11 +124,16 @@ fn running(host: &LocalHost, until: Deadline) -> Result<Running, DeviceError> {
     let listed = parse::adb_emulators(&run(&host.children, &adb, &["devices", "-l"], until)?);
     let mut found = Running {
         by_avd: HashMap::new(),
+        by_serial: HashMap::new(),
+        listed: listed.iter().map(|e| e.serial.clone()).collect(),
         unnamed: None,
     };
     for emulator in listed {
         match avd_at(host, &adb, &emulator.serial, until) {
             Ok(name) => {
+                found
+                    .by_serial
+                    .insert(emulator.serial.clone(), (name.clone(), emulator.online));
                 found
                     .by_avd
                     .insert(name, (emulator.serial, emulator.online));
@@ -388,9 +414,39 @@ pub(super) fn inventory(host: &LocalHost, until: Deadline) -> (Vec<Device>, Plat
     )
 }
 
-/// Starts `avd` in its own session, so it outlives the call and Keystone. Its output
-/// goes to a file, whose last line says why it exited if it does.
-fn launch(host: &LocalHost, avd: &str) -> Result<(), DeviceError> {
+/// The console port for an emulator this host launches: the highest one adb lists
+/// nothing at, no emulator this host launched still holds, and nothing listens on, with
+/// the adb port above it. An emulator started without a port takes the lowest free one,
+/// so one the user starts at the same moment doesn't race Keystone's for it.
+fn free_port(host: &LocalHost, running: &Running) -> Result<u16, DeviceError> {
+    let free =
+        |port: u16| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok();
+    let launched = host.launched.lock().unwrap();
+    let taken = (launched.values())
+        .filter(|launch| launch.exit.get().is_none())
+        .map(|launch| &launch.serial)
+        .chain(&running.listed);
+    PORTS
+        .rev()
+        .step_by(2)
+        .find(|&port| {
+            let serial = format!("emulator-{port}");
+            !taken.clone().any(|taken| *taken == serial) && free(port) && free(port + 1)
+        })
+        .ok_or_else(|| {
+            DeviceError::Failed(format!(
+                "Every emulator port from {} to {} is taken",
+                PORTS.start(),
+                PORTS.end()
+            ))
+        })
+}
+
+/// Starts `avd` in its own session at a console port of its own, so it outlives the
+/// call and Keystone and adb lists it at a serial Keystone knows. Its output goes to a
+/// file, whose last line says why it exited if it does.
+fn launch(host: &LocalHost, avd: &str, running: &Running) -> Result<(), DeviceError> {
+    let port = free_port(host, running)?.to_string();
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let log_path = std::env::temp_dir().join(format!(
         "keystone-emulator-{}-{}-{avd}.log",
@@ -401,7 +457,15 @@ fn launch(host: &LocalHost, avd: &str) -> Result<(), DeviceError> {
         .map_err(|e| DeviceError::Failed(format!("Couldn't start the emulator: {e}")))?;
     let mut command = crate::git::program(&emulator(host)?, &std::env::temp_dir());
     command
-        .args(["-avd", avd, "-no-window", "-no-audio", "-no-boot-anim"])
+        .args([
+            "-avd",
+            avd,
+            "-no-window",
+            "-no-audio",
+            "-no-boot-anim",
+            "-port",
+            &port,
+        ])
         .stdout(Stdio::from(log.try_clone().map_err(|e| {
             DeviceError::Failed(format!("Couldn't start the emulator: {e}"))
         })?))
@@ -414,6 +478,7 @@ fn launch(host: &LocalHost, avd: &str) -> Result<(), DeviceError> {
         child: Arc::new(Mutex::new(child)),
         exit: Arc::new(OnceLock::new()),
         stopping: Arc::default(),
+        serial: format!("emulator-{port}"),
     };
     host.launched
         .lock()
@@ -459,11 +524,18 @@ pub(super) fn start(host: &LocalHost, avd: &str, until: Deadline) -> Result<Star
         None => match running.unnamed {
             Some(error) => Err(error),
             None => {
-                launch(host, avd)?;
+                launch(host, avd, &running)?;
                 Ok(Start::Started)
             }
         },
     }
+}
+
+/// The serial of the emulator this host launched for `avd`, while it runs.
+fn ours(host: &LocalHost, avd: &str) -> Option<String> {
+    let launched = host.launched.lock().unwrap();
+    let launch = launched.get(avd)?;
+    launch.exit.get().is_none().then(|| launch.serial.clone())
 }
 
 pub(super) fn wait(host: &LocalHost, avd: &str, until: Deadline) -> Result<BootState, DeviceError> {
@@ -472,10 +544,23 @@ pub(super) fn wait(host: &LocalHost, avd: &str, until: Deadline) -> Result<BootS
             Err(_) if until.passed() => return Ok(BootState::Booting),
             running => running?,
         };
-        match running.find(avd) {
+        // While the emulator this host launched runs, only its own serial is it. Another
+        // emulator running `avd` is the user's, which took the AVD first, and Keystone's
+        // exits once it finds the AVD locked.
+        let ours = ours(host, avd);
+        let found = match &ours {
+            Some(serial) => running
+                .at(serial, avd)
+                .map(|online| online.map(|online| (serial.clone(), online))),
+            None => running.find(avd),
+        };
+        // Whether the emulator this host launched exited, and had already when `found`
+        // was taken. One that exits after it is looked at again on the next round.
+        let gone = || ours.is_none().then(|| exited(host, avd)).flatten();
+        match found {
             // The emulator this host launched exited, so the one running `avd` is
             // another's: the user's own launch of it took the AVD's lock first.
-            Ok(Some(_)) if exited(host, avd).is_some() => {
+            Ok(Some(_)) if gone().is_some() => {
                 host.launched.lock().unwrap().remove(avd);
                 return Ok(BootState::Elsewhere);
             }
@@ -483,12 +568,13 @@ pub(super) fn wait(host: &LocalHost, avd: &str, until: Deadline) -> Result<BootS
                 host.launched.lock().unwrap().remove(avd);
                 return Ok(BootState::Booted);
             }
-            Err(_) if let Some(reason) = exited(host, avd) => {
+            Err(_) if let Some(reason) = gone() => {
                 return Err(DeviceError::Failed(reason));
             }
             // Booting, or an emulator that might be it couldn't say yet.
             Ok(Some(_)) | Err(_) => {}
             Ok(None) if launching(host, avd) => {}
+            Ok(None) if ours.is_some() && exited(host, avd).is_some() => {}
             Ok(None) => {
                 return Err(exited(host, avd).map_or(DeviceError::NotBooted, DeviceError::Failed));
             }
@@ -592,40 +678,51 @@ pub(super) fn shutdown(host: &LocalHost, avd: &str, until: Deadline) -> Result<(
     host.pinned.lock().unwrap().remove(avd);
     host.blind.lock().unwrap().remove(avd);
     let launched = host.launched.lock().unwrap().get(avd).cloned();
+    if let Some(launch) = launched.as_ref().filter(|l| l.exit.get().is_none()) {
+        // Marked before adb is asked anything, so the host's stop kills it even when
+        // adb hangs past Quit's budget and this never reaches `stop`.
+        launch.stopping.store(true, Ordering::Release);
+        // Only the emulator at its own serial is Keystone's: another running `avd` is
+        // the user's. The emulator there answers its console with its own AVD, so one
+        // that took the port once Keystone's exited is never shut down for it.
+        match running(host, until).and_then(|running| running.at(&launch.serial, avd)) {
+            Ok(Some(_)) => kill(host, &launch.serial, until)?,
+            // adb can't name it yet, or lists it nowhere: this host started it, so its
+            // process goes.
+            _ => stop(launch, until)?,
+        }
+        host.launched.lock().unwrap().remove(avd);
+        return Ok(());
+    }
     // The lookup asks each emulator's console, so one that took a freed serial and port
     // answers with its own AVD and is never shut down for `avd`.
     match (lookup(host, avd, until), launched) {
         // The emulator this host launched exited, so the one running `avd` is another's.
-        (Ok(_), Some(launch)) if launch.exit.get().is_some() => {
+        (Ok(_), Some(_)) => {
             host.launched.lock().unwrap().remove(avd);
             Ok(())
         }
-        (Ok(serial), _) => {
-            run(
-                &host.children,
-                &adb(host)?,
-                &["-s", &serial, "emu", "kill"],
-                until,
-            )?;
-            host.launched.lock().unwrap().remove(avd);
-            Ok(())
-        }
-        // adb can't name it yet, but this host started it, so its process goes.
-        (Err(_), Some(launch)) if launch.exit.get().is_none() => {
-            stop(&launch, until)?;
-            host.launched.lock().unwrap().remove(avd);
-            Ok(())
-        }
+        (Ok(serial), None) => kill(host, &serial, until),
         (Err(DeviceError::NotBooted), _) => Ok(()),
         (Err(error), _) => Err(error),
     }
+}
+
+/// Asks the emulator at `serial` to exit through its console.
+fn kill(host: &LocalHost, serial: &str, until: Deadline) -> Result<(), DeviceError> {
+    run(
+        &host.children,
+        &adb(host)?,
+        &["-s", serial, "emu", "kill"],
+        until,
+    )?;
+    Ok(())
 }
 
 /// Stops the emulator `launch` started, with whatever it started, and returns once it
 /// has exited: asked first, then killed when a second is left.
 fn stop(launch: &Launch, until: Deadline) -> Result<(), DeviceError> {
     let signal = |signal| launch.signal(signal);
-    launch.stopping.store(true, Ordering::Release);
     signal(libc::SIGTERM);
     let mut killed = false;
     loop {

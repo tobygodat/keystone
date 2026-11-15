@@ -152,10 +152,11 @@ fn replacing_a_device_lets_go_of_it_the_way_close_does(cx: &mut TestAppContext) 
     open_for_user(&state, &[1], RUNNING, cx);
     assert_eq!(host.calls("shutdown"), 0, "session 2 still has the phone");
     open_for_user(&state, &[2], RUNNING, cx);
+    // The fake logs a shutdown before it turns the device off, so wait for the power.
     wait_until(&state, cx, "the phone shuts down", |_, _| {
-        host.calls("shutdown") == 1
+        host.power(&id(PHONE)) == Some(Power::Shutdown)
     });
-    assert_eq!(host.power(&id(PHONE)), Some(Power::Shutdown));
+    assert_eq!(host.calls("shutdown"), 1);
 }
 
 #[gpui::test]
@@ -179,17 +180,65 @@ fn an_older_open_never_replaces_a_newer_one(cx: &mut TestAppContext) {
         "{older}"
     );
     host.release.store(true, Ordering::Release);
-    cx.run_until_parked();
-    std::thread::sleep(Duration::from_millis(50));
+    wait_until(
+        &state,
+        cx,
+        "the slow device Keystone booted is let go",
+        |_, _| host.power(&id(SLOW)) == Some(Power::Shutdown),
+    );
     cx.run_until_parked();
     state.read_with(cx, |state, _| {
         assert_eq!(beside(state, 1), Some(id(RUNNING)));
     });
-    assert_eq!(
-        host.calls(&format!("shutdown {SLOW}")),
-        1,
-        "the slow device Keystone booted was let go"
-    );
+    assert_eq!(host.calls(&format!("shutdown {SLOW}")), 1);
+}
+
+#[gpui::test]
+fn a_device_another_launch_took_during_its_shutdown_reads_booting_not_off(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let host = FakeHost::new();
+    let state = setup(directory.path(), ApprovalMode::Ask, &host, cx);
+    state.update(cx, |state, cx| state.open_device(1, id(SLOW), cx));
+    wait_until(&state, cx, "Keystone waits on the boot", |state, _| {
+        matches!(life(state, SLOW), Some(Life::Booting { .. }))
+    });
+    // A listing between Keystone's launch exiting and adb listing the user's finds it
+    // off.
+    host.set_power(&id(SLOW), Power::Shutdown);
+    state.update(cx, |state, cx| state.list_devices(cx));
+    wait_until(&state, cx, "a listing that found it off", |state, _| {
+        state.devices.list == Fetch::Idle
+            && (state.devices.inventory.as_ref())
+                .and_then(|inventory| inventory.device(&id(SLOW)))
+                .is_some_and(|d| d.power == Power::Shutdown)
+    });
+    host.hold("shutdown");
+    send(&state, 1, "orchestrator test: device close", cx);
+    wait_until(&state, cx, "the shutdown runs", |_, _| {
+        host.calls(&format!("shutdown {SLOW}")) == 1
+    });
+    let waits = host.calls(&format!("wait {SLOW}"));
+    host.taken.store(true, Ordering::Release);
+    wait_until(&state, cx, "a new wait follows the other launch", |_, _| {
+        host.calls(&format!("wait {SLOW}")) == waits + 1
+    });
+    // The listing after the close stays on the fake's side until the panel is read.
+    host.hold("inventory");
+    host.let_go("shutdown");
+    let closed = reply(&state, 1, cx);
+    assert!(closed.contains("shut_down=false"), "{closed}");
+    state.read_with(cx, |state, _| {
+        assert_eq!(beside(state, 1), None);
+        assert_eq!(life(state, SLOW), None, "not Keystone's, so forgotten");
+        let listed = state.devices.inventory.as_ref().unwrap().device(&id(SLOW));
+        assert_eq!(
+            listed.map(|d| super::super::pane::row_state(None, d.power)),
+            Some("Booting"),
+            "the picker says it boots elsewhere, not Off"
+        );
+    });
+    host.let_go("inventory");
+    host.release.store(true, Ordering::Release);
 }
 
 #[gpui::test]

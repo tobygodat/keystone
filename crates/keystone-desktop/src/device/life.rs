@@ -207,19 +207,27 @@ impl Lifecycle {
     }
 
     /// Keystone's shutdown answered. `None` when Keystone wasn't shutting it down;
-    /// otherwise the error to show when it failed, the device keeping the life it had.
+    /// otherwise whether it shut the device down, or the error to show when it failed,
+    /// the device keeping the life it had. A boot watch that said meanwhile that another
+    /// launch runs the device leaves it that life too: the shutdown left that launch
+    /// running, so the device isn't off.
     pub(crate) fn shut_down(
         &mut self,
         result: Result<(), DeviceError>,
-    ) -> Option<Result<(), String>> {
+    ) -> Option<Result<bool, String>> {
         let Life::ShuttingDown { was } = &mut self.life else {
             return None;
         };
         let was = std::mem::replace(was.as_mut(), Life::Off);
         Some(match result {
+            // Only a boot watch's Elsewhere changes who booted it during a shutdown.
+            Ok(()) if self.origin == Origin::Elsewhere => {
+                self.set(was);
+                Ok(false)
+            }
             Ok(()) => {
                 self.set(Life::Off);
-                Ok(())
+                Ok(true)
             }
             Err(error) => {
                 let message = format!("Couldn't shut the device down: {error}");
@@ -317,7 +325,7 @@ mod tests {
             "a listing tries again once none does"
         );
         assert_eq!(device.settle(false), Settle::ShutDown);
-        assert_eq!(device.shut_down(Ok(())), Some(Ok(())));
+        assert_eq!(device.shut_down(Ok(())), Some(Ok(true)));
         assert_eq!((device.life.clone(), device.owned()), (Life::Off, false));
         assert_eq!(device.settle(false), Settle::LetGo { forget: true });
 
@@ -404,6 +412,26 @@ mod tests {
         );
         assert!(!device.owned());
         assert!(device.waited(2, Ok(BootState::Booted)));
+        assert_eq!(device.settle(false), Settle::LetGo { forget: true });
+    }
+
+    #[test]
+    fn a_shutdown_that_another_launch_outlived_leaves_the_device_booting_not_off() {
+        let mut device = Lifecycle::default();
+        device.open(1);
+        device.started(1, Ok(Start::Started), 2);
+        assert_eq!(device.settle(false), Settle::ShutDown);
+        assert!(device.waited(2, Ok(BootState::Elsewhere)));
+        assert_eq!(
+            device.shut_down(Ok(())),
+            Some(Ok(false)),
+            "Keystone didn't shut it down"
+        );
+        assert_eq!(
+            (device.life.clone(), device.origin),
+            (Life::Booting { watch: 2 }, Origin::Elsewhere),
+            "still booting elsewhere, followed by the same watch"
+        );
         assert_eq!(device.settle(false), Settle::LetGo { forget: true });
     }
 
