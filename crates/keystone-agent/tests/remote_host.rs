@@ -1857,9 +1857,11 @@ impl Scripted {
         Self { dir }
     }
 
+    /// The last `cat` is not an `exec`: the shell keeps stdout open while it runs, so the
+    /// link stays connected instead of reading the sent frames' end as the host dropping.
     fn argv(&self) -> Vec<OsString> {
         let script =
-            r#"while [ ! -e "$0/go" ]; do sleep 0.01; done; cat "$0/frames"; exec cat > "$0/sent""#;
+            r#"while [ ! -e "$0/go" ]; do sleep 0.01; done; cat "$0/frames"; cat > "$0/sent""#;
         vec![
             "sh".into(),
             "-c".into(),
