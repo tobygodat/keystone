@@ -761,3 +761,15 @@ fn a_dock_click_after_the_last_window_closed_reopens_it(cx: &mut TestAppContext)
     view(WindowId::FIRST, cx);
     assert!(!cx.read(|cx| state.read(cx).quit_when_idle));
 }
+
+/// A message another machine refused never ran, which the user hears about as a
+/// failed turn, a scheduled run's included.
+#[test]
+fn a_message_its_machine_refused_notifies_as_a_failed_turn() {
+    let refused = Event::NotSent {
+        send: "local:1-0".into(),
+        message: "/srv/app isn't a folder on desk".into(),
+        login: false,
+    };
+    assert_eq!(Alert::of(&refused), Some(Alert::TurnFailed));
+}

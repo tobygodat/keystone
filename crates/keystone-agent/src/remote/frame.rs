@@ -9,8 +9,13 @@ use std::io::{self, BufRead, Read};
 
 /// The protocol both sides must speak. A host that speaks another refuses the link.
 /// 3 added Codex, accounts and images: a call's `login`, `send`'s `images`, and the
-/// `put_attachment`, `read_history`, `list_threads` and `read_import` ops.
-pub const PROTOCOL: u32 = 3;
+/// `put_attachment`, `read_history`, `list_threads` and `read_import` ops. 4 added
+/// `hello`'s `name`, which the host names the machine by in what it says. 5 added the
+/// `login` and `unknown` replies, which say how a call failed rather than leaving the
+/// app to read it from the message. 6 added `send`'s `send`, the ID the app saved the
+/// message under, the `recall` op that asks what became of one, and the `unrecorded`
+/// reply.
+pub const PROTOCOL: u32 = 6;
 
 /// The most of an image one `put_attachment` call carries, before base64, so a frame
 /// stays well within [`MAX_FRAME`].
@@ -37,6 +42,9 @@ pub enum Frame {
         journal: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         seen: Vec<(String, u64)>,
+        /// What the app calls this machine, such as "desk".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     Welcome(Welcome),
     Refused {
@@ -151,6 +159,9 @@ pub struct Attached {
 pub enum Op {
     Send {
         session: u64,
+        /// The ID the app saved the message under, which the host records with the
+        /// call's reply so [`Op::Recall`] can find it after the app's next launch.
+        send: String,
         cwd: String,
         resume: Option<String>,
         choice: ModelChoice,
@@ -158,6 +169,13 @@ pub enum Op {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<Attached>,
+    },
+    /// What became of the message the app sent as `send`, in an earlier run whose
+    /// call the app no longer has: the reply is that call's, `unknown` when it was
+    /// taken and has none, or `unrecorded` when it never reached the host.
+    Recall {
+        session: u64,
+        send: String,
     },
     Command(Command),
     /// Part of an image's bytes, in base64, from `offset` of its `size`. The host
@@ -216,13 +234,23 @@ pub enum Op {
     },
 }
 
-/// What a call returned: `"ok": null`, or `"err"` with the reason.
+/// What a call returned: `"ok": null`, or why it failed. `"err"` and `"login"` are
+/// refusals before the call ran, `"login"` because of the account's login (its home on
+/// the machine, or none given); `"unknown"` is a call the host lost track of, which
+/// may or may not have run, so the app never offers it again as unsent. `"unrecorded"`
+/// answers a `recall` for a message the host never received.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Outcome {
     #[serde(rename = "ok")]
     Ok(()),
     #[serde(rename = "err")]
     Err(String),
+    #[serde(rename = "login")]
+    Login(String),
+    #[serde(rename = "unknown")]
+    Unknown(String),
+    #[serde(rename = "unrecorded")]
+    Unrecorded,
 }
 
 impl From<Result<(), String>> for Outcome {
@@ -339,6 +367,7 @@ mod tests {
             login: None,
             op: Op::Send {
                 session: 12,
+                send: "local:42-0".into(),
                 cwd: "/home/dev/src/app".into(),
                 resume: None,
                 choice: ModelChoice::default(),
@@ -350,7 +379,14 @@ mod tests {
                 images: Vec::new(),
             },
         }));
-        assert!(call.starts_with(r#"{"t":"call","id":7,"provider":"Claude","account":null,"op":"send","args":{"session":12,"#));
+        assert!(call.starts_with(r#"{"t":"call","id":7,"provider":"Claude","account":null,"op":"send","args":{"session":12,"send":"local:42-0","#));
+        assert_eq!(
+            round_trip(Frame::Reply {
+                id: 8,
+                outcome: Outcome::Unrecorded
+            }),
+            "{\"t\":\"reply\",\"id\":8,\"unrecorded\":null}\n"
+        );
         let value: serde_json::Value = serde_json::from_str(&call).unwrap();
         assert_eq!(
             value["args"]["choice"],
@@ -425,6 +461,7 @@ mod tests {
                 login,
                 op: Op::Send {
                     session: 4,
+                    send: "local:43-1".into(),
                     cwd: "/srv/app".into(),
                     resume: None,
                     choice: ModelChoice::default(),

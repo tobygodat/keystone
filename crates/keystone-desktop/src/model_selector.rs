@@ -8,7 +8,9 @@ use gpui::{
     SharedString, Size, Stateful, Styled, Window, div, point, prelude::*, px,
 };
 use keystone_agent::{Catalog, Commands, ModelInfo};
-use keystone_core::{Account, AccountId, MachineId, ModelChoice, Provider, WorkingDirectory};
+use keystone_core::{
+    Account, AccountId, MachineId, ModelChoice, Provider, RemoteFolder, WorkingDirectory,
+};
 use keystone_ui::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -40,6 +42,15 @@ pub enum CatalogState {
     Failed(String),
 }
 
+/// Where a catalog is asked: a conversation folder here, or one on another machine,
+/// whose host asks that machine's CLI. Machines may offer different models, so no
+/// catalog is shared between them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CatalogPlace {
+    Local(WorkingDirectory),
+    Remote(MachineId, RemoteFolder),
+}
+
 /// A provider account's catalog as it answers in one conversation folder. Accounts
 /// may offer different models, so no catalog is shared between them.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -47,7 +58,7 @@ pub struct CatalogKey {
     pub provider: Provider,
     /// `None` is the provider's default account.
     pub account: Option<AccountId>,
-    pub directory: WorkingDirectory,
+    pub place: CatalogPlace,
 }
 
 /// Each catalog, asked once per app run and kept until Retry, with the commands the
@@ -55,9 +66,9 @@ pub struct CatalogKey {
 #[derive(Default)]
 pub struct Catalogs {
     states: HashMap<CatalogKey, CatalogState>,
-    asked: HashMap<(Provider, Option<AccountId>, u64), WorkingDirectory>,
+    asked: HashMap<(Provider, Option<AccountId>, u64), CatalogPlace>,
     commands: HashMap<CatalogKey, Option<Commands>>,
-    commands_asked: HashMap<(Provider, Option<AccountId>, u64), WorkingDirectory>,
+    commands_asked: HashMap<(Provider, Option<AccountId>, u64), CatalogPlace>,
 }
 
 impl Catalogs {
@@ -87,8 +98,8 @@ impl Catalogs {
             return false;
         }
         let asker = (key.provider, key.account.clone(), session);
-        self.asked.insert(asker.clone(), key.directory.clone());
-        self.commands_asked.insert(asker, key.directory.clone());
+        self.asked.insert(asker.clone(), key.place.clone());
+        self.commands_asked.insert(asker, key.place.clone());
         self.commands.insert(key.clone(), None);
         self.states.insert(key, CatalogState::Loading);
         true
@@ -101,7 +112,7 @@ impl Catalogs {
         session: u64,
         commands: Commands,
     ) {
-        let Some(directory) = self
+        let Some(place) = self
             .commands_asked
             .remove(&(provider, account.clone(), session))
         else {
@@ -110,7 +121,7 @@ impl Catalogs {
         let key = CatalogKey {
             provider,
             account,
-            directory,
+            place,
         };
         self.commands.insert(key, Some(commands));
     }
@@ -122,7 +133,7 @@ impl Catalogs {
         session: u64,
         catalog: Catalog,
     ) {
-        let Some(directory) = self.asked.remove(&(provider, account.clone(), session)) else {
+        let Some(place) = self.asked.remove(&(provider, account.clone(), session)) else {
             return;
         };
         let state = match catalog {
@@ -144,7 +155,7 @@ impl Catalogs {
             CatalogKey {
                 provider,
                 account,
-                directory,
+                place,
             },
             state,
         );

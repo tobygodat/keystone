@@ -173,7 +173,8 @@ impl Machine {
         provider: Provider,
         account: Option<(String, Login)>,
     ) -> Client {
-        let link = Link::new(argv, id.into());
+        // Registered before the link reads anything, and named as the app names it.
+        let link = Link::prepared(argv, id.into(), HashMap::new(), Some("desk".into()));
         let (tx, wake) = channel();
         let conn = RemoteConnection::new(
             &link,
@@ -183,6 +184,7 @@ impl Machine {
                 let _ = tx.send(());
             }),
         );
+        link.start();
         Client {
             link,
             conn,
@@ -445,6 +447,7 @@ impl Raw {
             after,
             journal,
             seen: Vec::new(),
+            name: None,
         });
         match self.next() {
             Frame::Welcome(welcome) => welcome,
@@ -508,6 +511,7 @@ fn send_call_to(id: u64, session: u64, dir: &Path, text: &str) -> Frame {
         login: None,
         op: Op::Send {
             session,
+            send: format!("message-{id}-{text}"),
             cwd: dir.to_string_lossy().into_owned(),
             resume: None,
             choice: ModelChoice::default(),
@@ -689,7 +693,7 @@ fn a_call_sent_again_after_a_crash_before_its_reply_does_not_run_again() {
     assert!(
         matches!(
             frames.last(),
-            Some(Frame::Reply { outcome: Outcome::Err(reason), .. })
+            Some(Frame::Reply { outcome: Outcome::Unknown(reason), .. })
                 if reason.contains("may or may not have run")
         ),
         "{frames:?}"
@@ -823,6 +827,7 @@ fn a_reader_that_hangs_up_mid_replay_is_sent_nothing_more() {
                 after: Some(0),
                 journal: journal_id(machine.dir.path()),
                 seen: Vec::new(),
+                name: None,
             })
             .unwrap(),
         )
@@ -1491,6 +1496,7 @@ fn a_host_speaking_another_protocol_is_refused_with_the_reason() {
         after: None,
         journal: None,
         seen: Vec::new(),
+        name: None,
     });
     match raw.next() {
         Frame::Refused { reason } => {
@@ -2029,7 +2035,7 @@ fn a_call_the_host_refuses_shows_in_its_session_later() {
     assert_eq!(sent, Ok(()), "send returns once the call is queued");
     let events = drain_all(&client.link, &stranger, 1);
     assert!(
-        matches!(&events[..], [(SESSION, Event::Failed { message })] if message.contains("needs a full path")),
+        matches!(&events[..], [(SESSION, Event::NotSent { message, login: true, .. })] if message.contains("needs a full path on desk")),
         "{events:?}"
     );
 }
@@ -2264,7 +2270,11 @@ fn the_host_trims_only_up_to_what_every_session_saved() {
     }
     wait_for("both turns to be drained", || {
         for (place, session, event) in client.conn.drain_placed() {
-            let place = place.expect("the host's events have places");
+            // Each send's answer is the app's own, outside the host's sequence.
+            let Some(place) = place else {
+                assert!(matches!(event, Event::Taken { .. }), "{event:?}");
+                continue;
+            };
             if session == QUICK {
                 client.link.saved(QUICK, &place);
                 quick.push((session, event));
@@ -2553,6 +2563,7 @@ fn a_host_whose_journal_went_back_takes_a_new_identity() {
         after: None,
         journal: None,
         seen: vec![(first.clone(), 40)],
+        name: None,
     });
     let Frame::Welcome(welcome) = raw.next() else {
         panic!("expected welcome")
@@ -2573,6 +2584,7 @@ fn a_host_whose_journal_went_back_takes_a_new_identity() {
         after: None,
         journal: None,
         seen: vec![(welcome.journal.clone(), 0)],
+        name: None,
     });
     let Frame::Welcome(again) = raw.next() else {
         panic!("expected welcome")
@@ -2604,6 +2616,7 @@ fn a_new_journal_has_a_new_identity_and_ignores_another_journals_place() {
         after: Some(40),
         journal: Some(first.clone()),
         seen: Vec::new(),
+        name: None,
     });
     let Frame::Welcome(welcome) = raw.next() else {
         panic!("expected welcome")
@@ -2722,7 +2735,7 @@ fn every_four_event_route_assignment_acknowledges_only_the_drained_prefix() {
 }
 
 #[test]
-fn a_send_to_a_folder_the_machine_lacks_fails_in_its_session() {
+fn a_send_to_a_folder_the_machine_lacks_comes_back_not_sent() {
     let machine = Machine::new();
     let mut client = machine.client("app-1");
     client.connected();
@@ -2734,8 +2747,8 @@ fn a_send_to_a_folder_the_machine_lacks_fails_in_its_session() {
     client.wait("the host to refuse the folder", |events, _| {
         events.iter().any(|(session, event)| {
             *session == SESSION
-                && matches!(event, Event::Failed { message }
-                    if message == "/nowhere/keystone-test isn't a folder on this machine")
+                && matches!(event, Event::NotSent { message, login: false, .. }
+                    if message == "/nowhere/keystone-test isn't a folder on desk")
         })
     });
 }
@@ -3004,7 +3017,7 @@ fn an_account_on_the_machine_runs_with_its_own_home_there() {
     overlapping.send(dir.path(), "hi").unwrap();
     overlapping.wait("the refusal", |events, _| {
         events.iter().any(|(_, event)| {
-            matches!(event, Event::Failed { message } if message.contains("overlaps this machine's default home"))
+            matches!(event, Event::NotSent { message, login: true, .. } if message.contains("overlaps desk's default home"))
         })
     });
     assert!(!default.exists(), "nothing was made for a refused account");
@@ -3088,4 +3101,617 @@ fn an_image_is_uploaded_once_and_sent_by_its_hash() {
         2,
         "Claude read the same bytes both times: {received}"
     );
+}
+
+fn login(label: &str, home: &Path) -> Login {
+    Login {
+        label: label.into(),
+        home: home.to_string_lossy().into_owned(),
+    }
+}
+
+/// A home that reaches the machine's default home through a symlink is refused, and
+/// the refusal names the machine: a `..` after a symlink into it, a symlinked parent,
+/// and a home that is itself a symlink to it. Nothing is made in the default home.
+#[test]
+fn a_home_that_reaches_the_default_home_through_a_symlink_is_refused() {
+    use std::os::unix::fs::symlink;
+    let machine = Machine::new();
+    let dir = folder(&[]);
+    let default = machine.dir.path().join(".codex");
+    std::fs::create_dir_all(default.join("sub")).unwrap();
+    let links = machine.dir.path().join("links");
+    std::fs::create_dir_all(&links).unwrap();
+    symlink(default.join("sub"), links.join("into-sub")).unwrap();
+    symlink(&default, links.join("to-default")).unwrap();
+    let homes = [
+        (
+            links.join("into-sub/.."),
+            "needs a full path on desk without . or ..",
+        ),
+        (
+            links.join("to-default/work"),
+            "overlaps desk's default home",
+        ),
+        (links.join("to-default"), "overlaps desk's default home"),
+    ];
+    for (n, (home, reason)) in homes.iter().enumerate() {
+        let mut client = machine.client_on(
+            &format!("app-{n}"),
+            machine.argv(),
+            Provider::Codex,
+            Some((format!("codex-{n}"), login("Sneaky", home))),
+        );
+        client.connected();
+        client.send(dir.path(), "hi").unwrap();
+        client.wait("the refusal", |events, _| {
+            events.iter().any(|(_, event)| {
+                matches!(event, Event::NotSent { message, login: true, .. } if message.contains(reason))
+            })
+        });
+        assert_eq!(
+            count(&client.events, |e| matches!(e, Event::TurnStarted)),
+            0,
+            "{home:?} started nothing"
+        );
+    }
+    let made: Vec<_> = std::fs::read_dir(&default)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(made, ["sub"], "nothing was made in the default home");
+}
+
+/// A home through a symlink that leads somewhere safe runs, and the CLI is given its
+/// real path, never the symlink.
+#[test]
+fn a_home_through_a_symlink_runs_on_its_real_path() {
+    use std::os::unix::fs::symlink;
+    let receipt = tempfile::tempdir().unwrap();
+    let env = receipt.path().join("env");
+    let machine = Machine::new().with("KEYSTONE_FAKE_ENV_RECEIPT", &env.to_string_lossy());
+    let dir = folder(&[]);
+    let real = machine.dir.path().join("logins");
+    std::fs::create_dir_all(&real).unwrap();
+    symlink(&real, machine.dir.path().join("linked")).unwrap();
+    let home = machine.dir.path().join("linked/work");
+    let mut client = machine.client_on(
+        "app-1",
+        machine.argv(),
+        Provider::Codex,
+        Some(("codex-work".into(), login("Work", &home))),
+    );
+    client.connected();
+    client.send(dir.path(), "hi").unwrap();
+    assert_eq!(client.turn_ended(), TurnStatus::Completed);
+    let real_home = real.canonicalize().unwrap().join("work");
+    let homes: Vec<String> = std::fs::read_to_string(&env)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|process| process["argv"] != serde_json::json!(["--version"]))
+        .map(|process| {
+            process["CODEX_HOME"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(!homes.is_empty());
+    assert!(
+        homes.iter().all(|home| home == real_home.to_str().unwrap()),
+        "{homes:?}"
+    );
+}
+
+/// Sends `text` with the picture at `png`, and waits for the host's answer: the
+/// turn's end, or the message coming back as not sent.
+fn send_picture(client: &mut Client, dir: &Path, png: &Path, text: &str) -> Result<(), String> {
+    client.events.clear();
+    let image = keystone_agent::Image {
+        path: png.to_owned(),
+        media_type: "image/png".into(),
+        base64: None,
+    };
+    client
+        .conn
+        .send(
+            SESSION,
+            &dir.to_string_lossy(),
+            None,
+            &ModelChoice::default(),
+            ApprovalState::default(),
+            text.into(),
+            vec![image],
+        )
+        .unwrap();
+    let mut answer = None;
+    client.wait("the host's answer", |events, _| {
+        answer = events.iter().find_map(|(_, event)| match event {
+            Event::TurnCompleted { .. } => Some(Ok(())),
+            Event::NotSent {
+                message,
+                login: false,
+                ..
+            } => Some(Err(message.clone())),
+            _ => None,
+        });
+        answer.is_some()
+    });
+    answer.unwrap()
+}
+
+/// An image the host lost, deleted or rewritten in its cache, is refused once, before
+/// anything reaches the provider, and the next message that carries it uploads it
+/// again and goes through.
+#[test]
+fn an_image_the_host_lost_or_that_changed_is_uploaded_again() {
+    let receipts = tempfile::tempdir().unwrap();
+    let sent = receipts.path().join("sent");
+    let machine = Machine::new();
+    let dir = folder(&[]);
+    let png = receipts.path().join("picture.png");
+    std::fs::write(&png, b"\x89PNG\r\n\x1a\na picture the host loses").unwrap();
+    let hash = {
+        use sha2::Digest;
+        sha2::Sha256::digest(std::fs::read(&png).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let kept = machine.dir.path().join(format!("attachments/{hash}.png"));
+    let uploads = || {
+        std::fs::read_to_string(&sent)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(r#""op":"put_attachment""#))
+            .count()
+    };
+    let mut client = machine.client_on(
+        "app-1",
+        teed(&machine.argv(), &sent),
+        Provider::Claude,
+        None,
+    );
+    client.connected();
+    send_picture(&mut client, dir.path(), &png, "first").unwrap();
+    assert_eq!(uploads(), 1);
+
+    std::fs::remove_file(&kept).unwrap();
+    let refused = send_picture(&mut client, dir.path(), &png, "after a delete").unwrap_err();
+    assert!(refused.contains("is no longer on desk"), "{refused}");
+    assert_eq!(
+        count(&client.events, |e| matches!(e, Event::TurnStarted)),
+        0
+    );
+    send_picture(&mut client, dir.path(), &png, "again").unwrap();
+    assert_eq!(uploads(), 2, "the retry uploaded the image again");
+    assert!(kept.exists());
+
+    std::fs::write(&kept, b"not the picture").unwrap();
+    let refused = send_picture(&mut client, dir.path(), &png, "after a rewrite").unwrap_err();
+    assert!(refused.contains("is no longer on desk"), "{refused}");
+    assert!(!kept.exists(), "the rewritten file was dropped");
+    send_picture(&mut client, dir.path(), &png, "once more").unwrap();
+    assert_eq!(uploads(), 3);
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        std::fs::read(&png).unwrap(),
+        "the host holds the real bytes again"
+    );
+    let messages = lines(dir.path(), "messages");
+    assert_eq!(
+        messages.len(),
+        3,
+        "only the three that went reached Claude: {messages:?}"
+    );
+}
+
+/// Whether a refused send is offered again follows the reply's kind, never its words:
+/// an `unknown` reply that reads like a refusal stays a failure, since that call may
+/// have run, and an `err` reply that reads like "may have run" comes back not sent.
+#[test]
+fn a_reply_that_may_have_run_is_never_offered_again_whatever_it_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, frames: &[Frame]| {
+        let text: Vec<u8> = frames
+            .iter()
+            .flat_map(|frame| frame::encode(frame).unwrap())
+            .collect();
+        std::fs::write(dir.path().join(name), text).unwrap();
+    };
+    write("welcome", &[welcome(0), Frame::Synced { seq: 0 }]);
+    write(
+        "first",
+        &[Frame::Reply {
+            id: 1,
+            outcome: Outcome::Unknown("Refused before it ran, so send it again".into()),
+        }],
+    );
+    write(
+        "second",
+        &[Frame::Reply {
+            id: 2,
+            outcome: Outcome::Err(
+                "The machine lost track of this call, so it may or may not have run".into(),
+            ),
+        }],
+    );
+    // Each reply waits for its call, past the acknowledgements between them.
+    let script = r#"call() { while read -r line; do case "$line" in *'"t":"call"'*) return;; esac; done; }
+read -r hello; cat "$0/welcome"; call; cat "$0/first"; call; cat "$0/second"; exec cat >> "$0/sent""#;
+    let argv: Vec<OsString> = vec!["sh".into(), "-c".into(), script.into(), dir.path().into()];
+    let link = Link::new(argv, "app-1".into());
+    let (conn, _) = connection(&link, Provider::Claude);
+    wait_for("the link to connect", || link.status() == Status::Connected);
+    let folder = tempfile::tempdir().unwrap();
+    let send = |text: &str| {
+        conn.send(
+            SESSION,
+            &folder.path().to_string_lossy(),
+            None,
+            &ModelChoice::default(),
+            ApprovalState::default(),
+            text.into(),
+            Vec::new(),
+        )
+        .unwrap();
+    };
+    send("first");
+    let first = drain_all(&link, &conn, 2);
+    assert!(
+        matches!(
+            &first[..],
+            [
+                (SESSION, Event::Taken { .. }),
+                (SESSION, Event::Failed { .. })
+            ]
+        ),
+        "{first:?}"
+    );
+    send("second");
+    let second = drain_all(&link, &conn, 1);
+    assert!(
+        matches!(
+            &second[..],
+            [(SESSION, Event::NotSent { login: false, .. })]
+        ),
+        "{second:?}"
+    );
+}
+
+/// A Codex turn on the account "codex-work" held until `release` exists, sent by a
+/// client that then goes away, as an app that quit keeping its sessions. Returns the
+/// client that comes back with `login`, once the host has answered a catalog call that
+/// carries it, as the model menu's call does on relaunch.
+fn held_then_back(machine: &Machine, first: Login, back: Login, folder: &Path) -> Client {
+    let mut client = machine.client_on(
+        "app-1",
+        machine.argv(),
+        Provider::Codex,
+        Some(("codex-work".into(), first)),
+    );
+    client.connected();
+    client.send(folder, "hold this until released").unwrap();
+    client.wait("the turn to start", |events, _| {
+        count(events, |e| matches!(e, Event::TurnStarted)) == 1
+    });
+    drop(client);
+    let mut client = machine.client_on(
+        "app-1",
+        machine.argv(),
+        Provider::Codex,
+        Some(("codex-work".into(), back)),
+    );
+    client.connected();
+    client
+        .conn
+        .request_catalog(SESSION, &folder.to_string_lossy());
+    client.wait("the catalog", |events, _| {
+        events.iter().any(|(_, e)| matches!(e, Event::Catalog(_)))
+    });
+    client
+}
+
+fn turn_ends(events: &[(u64, Event)]) -> Vec<(TurnStatus, Option<String>, bool)> {
+    events
+        .iter()
+        .filter_map(|(_, event)| match event {
+            Event::TurnCompleted {
+                status,
+                error,
+                stopped,
+            } => Some((*status, error.clone(), *stopped)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Waits a moment longer, so a second end would have arrived.
+fn settle(client: &mut Client) {
+    let until = Instant::now() + Duration::from_millis(800);
+    client.wait("a moment", |_, _| Instant::now() >= until);
+}
+
+/// A login's name is not its identity: renamed while its turn runs, and called by its
+/// new name when the app comes back, it keeps its app-server, and the turn finishes.
+#[test]
+fn a_renamed_login_keeps_its_running_turn_across_a_relaunch() {
+    let gate = tempfile::tempdir().unwrap();
+    let release = gate.path().join("release");
+    let machine = Machine::new().with("KEYSTONE_FAKE_CODEX_RELEASE", &release.to_string_lossy());
+    let folder = tempfile::tempdir().unwrap();
+    let home = machine.dir.path().join("logins/sneaky");
+    let mut client = held_then_back(
+        &machine,
+        login("Sneaky", &home),
+        login("Renamed", &home),
+        folder.path(),
+    );
+    std::fs::write(&release, "").unwrap();
+    assert_eq!(client.turn_ended(), TurnStatus::Completed);
+    settle(&mut client);
+    let ends = turn_ends(&client.events);
+    assert_eq!(ends, [(TurnStatus::Completed, None, false)]);
+}
+
+/// Whenever the host lets go of a connection with a turn still running, here because
+/// the login's folder changed under it, that turn ends there once, failed, saying why.
+#[test]
+fn a_connection_let_go_of_mid_turn_ends_its_turn_once() {
+    let gate = tempfile::tempdir().unwrap();
+    let release = gate.path().join("release");
+    let machine = Machine::new().with("KEYSTONE_FAKE_CODEX_RELEASE", &release.to_string_lossy());
+    let folder = tempfile::tempdir().unwrap();
+    let mut client = held_then_back(
+        &machine,
+        login("Work", &machine.dir.path().join("logins/one")),
+        login("Work", &machine.dir.path().join("logins/two")),
+        folder.path(),
+    );
+    assert_eq!(client.turn_ended(), TurnStatus::Failed);
+    std::fs::write(&release, "").unwrap();
+    settle(&mut client);
+    let ends = turn_ends(&client.events);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    let reason = ends[0].1.clone().unwrap_or_default();
+    assert!(reason.contains("folder changed"), "{reason}");
+    assert!(!reason.contains('\n'), "one line: {reason}");
+}
+
+/// Stop on a turn the journal still has running but no connection runs, as after a
+/// connection lost without a word, ends it rather than reaching nothing.
+#[test]
+fn stop_on_a_turn_whose_connection_is_gone_ends_it() {
+    let gate = tempfile::tempdir().unwrap();
+    let release = gate.path().join("release");
+    let faults = tempfile::tempdir().unwrap();
+    std::fs::write(faults.path().join("let-go-silently"), "").unwrap();
+    let machine = Machine::new()
+        .with("KEYSTONE_FAKE_CODEX_RELEASE", &release.to_string_lossy())
+        .with("KEYSTONE_HOST_FAULTS", &faults.path().to_string_lossy());
+    let folder = tempfile::tempdir().unwrap();
+    let mut client = held_then_back(
+        &machine,
+        login("Work", &machine.dir.path().join("logins/one")),
+        login("Work", &machine.dir.path().join("logins/two")),
+        folder.path(),
+    );
+    settle(&mut client);
+    assert!(
+        turn_ends(&client.events).is_empty(),
+        "the turn was orphaned"
+    );
+    client.conn.command(Command::Interrupt { session: SESSION });
+    assert_eq!(client.turn_ended(), TurnStatus::Interrupted);
+    settle(&mut client);
+    let ends = turn_ends(&client.events);
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert!(ends[0].2, "it reads as stopped: {ends:?}");
+}
+
+/// The model menu asks for a session's catalog on the provider's default route before
+/// its login is chosen, so that route's connection serves the session too. Let go of
+/// once no app needs it, that connection ends no turn of the session's login.
+#[test]
+fn letting_go_of_another_routes_connection_keeps_the_sessions_turn() {
+    let gate = tempfile::tempdir().unwrap();
+    let release = gate.path().join("release");
+    let machine = Machine::new().with("KEYSTONE_FAKE_CODEX_RELEASE", &release.to_string_lossy());
+    let folder = tempfile::tempdir().unwrap();
+    let home = machine.dir.path().join("logins/sneaky");
+    let mut client = machine.client_on(
+        "app-1",
+        machine.argv(),
+        Provider::Codex,
+        Some(("codex-work".into(), login("Sneaky", &home))),
+    );
+    client.connected();
+    let (default, _wake) = connection(&client.link, Provider::Codex);
+    default.request_catalog(SESSION, &folder.path().to_string_lossy());
+    wait_for("the default route's catalog", || {
+        default
+            .drain_placed()
+            .iter()
+            .any(|(_, _, event)| matches!(event, Event::Catalog(_)))
+    });
+    client
+        .send(folder.path(), "hold this until released")
+        .unwrap();
+    client.wait("the turn to start", |events, _| {
+        count(events, |e| matches!(e, Event::TurnStarted)) == 1
+    });
+    drop(default);
+    drop(client);
+    // Several ticks, in which the host lets go of the default route's idle connection.
+    std::thread::sleep(Duration::from_millis(1500));
+    let mut client = machine.client_on(
+        "app-1",
+        machine.argv(),
+        Provider::Codex,
+        Some(("codex-work".into(), login("Sneaky", &home))),
+    );
+    // The app reads the session's events on every route it has, as here.
+    let (default, _wake) = connection(&client.link, Provider::Codex);
+    client.connected();
+    settle(&mut client);
+    let mut elsewhere = saving(&client.link, &default);
+    assert!(turn_ends(&client.events).is_empty(), "{:?}", client.events);
+    std::fs::write(&release, "").unwrap();
+    assert_eq!(client.turn_ended(), TurnStatus::Completed);
+    settle(&mut client);
+    elsewhere.extend(saving(&client.link, &default));
+    assert!(turn_ends(&elsewhere).is_empty(), "{elsewhere:?}");
+    assert_eq!(
+        turn_ends(&client.events),
+        [(TurnStatus::Completed, None, false)]
+    );
+}
+
+/// Each answer names the message the app saved its send under, and after the app
+/// launches again a recall gets the same answer by that ID: taken, refused, or never
+/// received. A message sent again under the same ID never runs twice, and one the
+/// host refused runs when it is sent again.
+#[test]
+fn a_message_from_an_earlier_run_is_recalled_by_its_id() {
+    let machine = Machine::new();
+    let dir = folder(&[]);
+    let mut client = machine.client("app-1");
+    client.connected();
+    client.conn.tag_send(SESSION, "m-taken");
+    client.send(dir.path(), "hi").unwrap();
+    assert_eq!(client.turn_ended(), TurnStatus::Completed);
+    client.conn.tag_send(SESSION, "m-refused");
+    let missing = dir.path().join("missing");
+    client.send(&missing, "lost").unwrap();
+    client.wait("the refusal", |events, _| {
+        events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::NotSent { .. }))
+    });
+    // A taken message is said twice: by the journal and by the call's reply.
+    let mut answers: Vec<_> = client
+        .events
+        .iter()
+        .filter_map(|(_, event)| match event {
+            Event::Taken { send } => Some(format!("taken {send}")),
+            Event::NotSent { send, .. } => Some(format!("not sent {send}")),
+            _ => None,
+        })
+        .collect();
+    answers.dedup();
+    assert_eq!(answers, ["taken m-taken", "not sent m-refused"]);
+    drop(client);
+
+    let mut client = machine.client("app-1");
+    client.connected();
+    client.events.clear();
+    for send in ["m-taken", "m-refused", "m-never"] {
+        client.conn.recall(SESSION, send).unwrap();
+    }
+    client.wait("three answers", |events, _| {
+        count(events, |e| {
+            matches!(e, Event::Taken { .. } | Event::NotSent { .. })
+        }) == 3
+    });
+    let recalled: Vec<_> = client
+        .events
+        .iter()
+        .filter_map(|(_, event)| match event {
+            Event::Taken { send } => Some(format!("taken {send}")),
+            Event::NotSent { send, message, .. } => Some(format!("not sent {send}: {message}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recalled[0], "taken m-taken");
+    assert!(
+        recalled[1].starts_with("not sent m-refused: ") && recalled[1].contains("isn't a folder"),
+        "{recalled:?}"
+    );
+    assert_eq!(
+        recalled[2],
+        "not sent m-never: The machine never received this message"
+    );
+
+    client.events.clear();
+    client.conn.tag_send(SESSION, "m-taken");
+    client.send(dir.path(), "hi").unwrap();
+    client.wait("the repeat's answer", |events, _| {
+        events.iter().any(|(_, e)| matches!(e, Event::Taken { .. }))
+    });
+    settle(&mut client);
+    assert_eq!(
+        count(&client.events, |e| matches!(e, Event::TurnStarted)),
+        0,
+        "the message ran once: {:?}",
+        client.events
+    );
+
+    // The refused message never ran, so sent again under its ID it runs, once.
+    client.events.clear();
+    client.conn.tag_send(SESSION, "m-refused");
+    client.send(dir.path(), "lost").unwrap();
+    assert_eq!(client.turn_ended(), TurnStatus::Completed);
+    settle(&mut client);
+    assert_eq!(
+        count(&client.events, |e| matches!(e, Event::TurnStarted)),
+        1,
+        "{:?}",
+        client.events
+    );
+    assert!(
+        client
+            .events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::Taken { send } if send == "m-refused"))
+    );
+    // Taken now, it is final: sending it once more runs nothing.
+    client.events.clear();
+    client.conn.tag_send(SESSION, "m-refused");
+    client.send(dir.path(), "lost").unwrap();
+    client.wait("the third answer", |events, _| {
+        events.iter().any(|(_, e)| matches!(e, Event::Taken { .. }))
+    });
+    settle(&mut client);
+    assert_eq!(
+        count(&client.events, |e| matches!(e, Event::TurnStarted)),
+        0,
+        "{:?}",
+        client.events
+    );
+}
+
+/// The host journals which message it took, before that turn's events, so an app
+/// that was away when the reply came learns it from the replay.
+#[test]
+fn the_journal_names_the_message_each_turn_was_taken_from() {
+    let machine = Machine::new();
+    let dir = folder(&[]);
+    let client = machine.client("app-1");
+    wait_for("the link", || client.link.status() == Status::Connected);
+    client.conn.tag_send(SESSION, "m-journal");
+    client.send(dir.path(), "hi").unwrap();
+    let mut placed = Vec::new();
+    wait_for("the turn's end", || {
+        for (place, _, event) in client.conn.drain_placed() {
+            if let Some(place) = place {
+                client.link.saved(SESSION, &place);
+                placed.push((place.seq, event));
+            }
+        }
+        placed
+            .iter()
+            .any(|(_, event)| matches!(event, Event::TurnCompleted { .. }))
+    });
+    let taken = placed
+        .iter()
+        .find(|(_, event)| matches!(event, Event::Taken { send } if send == "m-journal"))
+        .map(|(seq, _)| *seq)
+        .expect("the journal holds the message's ID");
+    let started = placed
+        .iter()
+        .find(|(_, event)| matches!(event, Event::TurnStarted))
+        .map(|(seq, _)| *seq)
+        .unwrap();
+    assert!(taken < started, "{placed:?}");
 }

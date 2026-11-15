@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS calls (
     reply TEXT,
     PRIMARY KEY (client, id)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS sends (
+    client TEXT NOT NULL,
+    send TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    reply TEXT,
+    PRIMARY KEY (client, send)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS identity (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     id TEXT NOT NULL
@@ -72,10 +79,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 ";
 
 /// The schema version [`SCHEMA`] writes.
-const VERSION: i64 = 4;
+const VERSION: i64 = 5;
 
 /// Each brings a journal from the version before it to the next, starting at 1.
-const UPGRADES: [&str; 3] = [
+const UPGRADES: [&str; 4] = [
     // A call is recorded when accepted, before it has a reply.
     "ALTER TABLE calls RENAME TO calls_1;
      CREATE TABLE calls (
@@ -92,7 +99,13 @@ const UPGRADES: [&str; 3] = [
     // Each provider's watcher holds a lock file instead.
     "ALTER TABLE sessions DROP COLUMN process;
      ALTER TABLE sessions DROP COLUMN started;",
+    // Each message's reply, by the ID the app saved it under, which `SCHEMA` adds.
+    "",
 ];
+
+/// How many messages' replies the journal keeps per client, newest first. An app
+/// recalls only the messages it sent before it last quit, a handful at most.
+const SENDS_KEPT: i64 = 4096;
 
 /// Which events the cap may drop, oldest first: deltas, then items. Everything else,
 /// lifecycle events included, is kept until acknowledged.
@@ -116,6 +129,7 @@ pub(crate) struct Journal {
 }
 
 /// What the journal knew of a call when it arrived.
+#[derive(Debug)]
 pub(crate) enum Accepted {
     /// Never seen: it is now recorded as accepted, so it must run.
     New,
@@ -138,6 +152,23 @@ pub(crate) struct Interrupted {
     pub route: Route,
     pub session: u64,
     pub approvals: Vec<Approval>,
+}
+
+fn recalled(tx: &Transaction, client: &str, send: &str) -> Result<Option<Accepted>, String> {
+    let row: Option<Option<String>> = sql(tx
+        .query_row(
+            "SELECT reply FROM sends WHERE client = ?1 AND send = ?2",
+            params![client, send],
+            |row| row.get(0),
+        )
+        .optional())?;
+    Ok(match row {
+        None => None,
+        Some(None) => Some(Accepted::Unanswered),
+        Some(Some(text)) => Some(Accepted::Replied(
+            serde_json::from_str(&text).map_err(|e| format!("journal: message {send}: {e}"))?,
+        )),
+    })
 }
 
 fn sql<T>(result: rusqlite::Result<T>) -> Result<T, String> {
@@ -395,8 +426,15 @@ impl Journal {
     }
 
     /// Records call `id` as accepted if it is new, in one transaction, so that a call
-    /// sent again never runs twice.
-    pub fn accept(&mut self, client: &str, id: u64) -> Result<Accepted, String> {
+    /// sent again never runs twice. A message, `send`, is recorded the same way by the
+    /// ID the app saved it under, so it runs at most once whatever call carries it. A
+    /// message the host refused before it ran can be sent again under its ID and runs.
+    pub fn accept(
+        &mut self,
+        client: &str,
+        id: u64,
+        send: Option<&str>,
+    ) -> Result<Accepted, String> {
         let tx = sql(self.db.transaction())?;
         let acked: Option<i64> = sql(tx
             .query_row(
@@ -417,16 +455,44 @@ impl Journal {
                 |row| row.get(0),
             )
             .optional())?;
-        let accepted = match row {
-            None => {
+        let sent = match send {
+            Some(send) => match recalled(&tx, client, send)? {
+                // A message refused before it ran never ran, so sending it again under
+                // its ID runs it: its record starts afresh. One taken stays final.
+                Some(Accepted::Replied(Outcome::Err(_) | Outcome::Login(_))) => {
+                    sql(tx.execute(
+                        "DELETE FROM sends WHERE client = ?1 AND send = ?2",
+                        params![client, send],
+                    ))?;
+                    None
+                }
+                sent => sent,
+            },
+            None => None,
+        };
+        let accepted = match (row, sent) {
+            (None, Some(sent)) => sent,
+            (None, None) => {
                 sql(tx.execute(
                     "INSERT INTO calls (client, id) VALUES (?1, ?2)",
                     params![client, id as i64],
                 ))?;
+                if let Some(send) = send {
+                    sql(tx.execute(
+                        "INSERT INTO sends (client, send, n) VALUES (?1, ?2,
+                         COALESCE((SELECT MAX(n) FROM sends WHERE client = ?1), 0) + 1)",
+                        params![client, send],
+                    ))?;
+                    sql(tx.execute(
+                        "DELETE FROM sends WHERE client = ?1
+                         AND n <= (SELECT MAX(n) FROM sends WHERE client = ?1) - ?2",
+                        params![client, SENDS_KEPT],
+                    ))?;
+                }
                 Accepted::New
             }
-            Some(None) => Accepted::Unanswered,
-            Some(Some(text)) => Accepted::Replied(
+            (Some(None), _) => Accepted::Unanswered,
+            (Some(Some(text)), _) => Accepted::Replied(
                 serde_json::from_str(&text).map_err(|e| format!("journal: call {id}: {e}"))?,
             ),
         };
@@ -434,14 +500,34 @@ impl Journal {
         Ok(accepted)
     }
 
-    /// Records the reply of accepted call `id`.
-    pub fn reply(&mut self, client: &str, id: u64, outcome: &Outcome) -> Result<(), String> {
+    /// Records the reply of accepted call `id`, and of the message `send` it carried.
+    pub fn reply(
+        &mut self,
+        client: &str,
+        id: u64,
+        send: Option<&str>,
+        outcome: &Outcome,
+    ) -> Result<(), String> {
         let reply = serde_json::to_string(outcome).map_err(|e| e.to_string())?;
-        sql(self.db.execute(
+        let tx = sql(self.db.transaction())?;
+        sql(tx.execute(
             "UPDATE calls SET reply = ?3 WHERE client = ?1 AND id = ?2",
             params![client, id as i64, reply],
-        ))
-        .map(drop)
+        ))?;
+        if let Some(send) = send {
+            sql(tx.execute(
+                "UPDATE sends SET reply = ?3 WHERE client = ?1 AND send = ?2",
+                params![client, send, reply],
+            ))?;
+        }
+        sql(tx.commit())
+    }
+
+    /// What became of the message `send`: its reply, `None` when the host never
+    /// received it, or [`Accepted::Unanswered`] when it was taken and has none.
+    pub fn recall(&mut self, client: &str, send: &str) -> Result<Option<Accepted>, String> {
+        let tx = sql(self.db.transaction())?;
+        recalled(&tx, client, send)
     }
 
     /// A new run of the app numbers its calls from 1 again.
@@ -724,11 +810,16 @@ fn drop_oldest(
 /// What a Claude driver reports when its process exits during a turn
 /// (`ClaudeDriver::on_exit`), for a turn the host lost when it restarted.
 pub(crate) fn restarted(approvals: &[Approval]) -> Vec<Event> {
+    lost(approvals, "keystone-host restarted, so the turn ended")
+}
+
+/// The same for a turn whose process the host let go of, failed with `reason`.
+pub(crate) fn lost(approvals: &[Approval], reason: &str) -> Vec<Event> {
     let mut events = vec![Event::RecoveryNeeded];
     events.extend(resolved(approvals));
     events.push(Event::TurnCompleted {
         status: TurnStatus::Failed,
-        error: Some("keystone-host restarted, so the turn ended".into()),
+        error: Some(reason.to_owned()),
         stopped: false,
     });
     events.push(Event::ModelLost);
@@ -805,17 +896,22 @@ mod tests {
         drop(db);
         let mut journal = Journal::open(&path, CAP).unwrap();
         assert!(matches!(
-            journal.accept("app", 1).unwrap(),
+            journal.accept("app", 1, None).unwrap(),
             Accepted::Replied(Outcome::Ok(()))
         ));
-        assert!(matches!(journal.accept("app", 2).unwrap(), Accepted::New));
         assert!(matches!(
-            journal.accept("app", 2).unwrap(),
+            journal.accept("app", 2, None).unwrap(),
+            Accepted::New
+        ));
+        assert!(matches!(
+            journal.accept("app", 2, None).unwrap(),
             Accepted::Unanswered
         ));
-        journal.reply("app", 2, &Outcome::Err("no".into())).unwrap();
+        journal
+            .reply("app", 2, None, &Outcome::Err("no".into()))
+            .unwrap();
         assert!(matches!(
-            journal.accept("app", 2).unwrap(),
+            journal.accept("app", 2, None).unwrap(),
             Accepted::Replied(Outcome::Err(reason)) if reason == "no"
         ));
         assert_eq!(journal.interrupted(None).unwrap().len(), 1);
@@ -897,5 +993,45 @@ mod tests {
         );
         assert_eq!(journal.cursor("app").unwrap().latest, 2);
         assert_eq!(journal.replay("app", 1, 2).unwrap(), [line]);
+    }
+
+    /// A message runs at most once by the ID the app saved it under, whatever call
+    /// carries it, and a recall says what became of it: its reply, unknown while it
+    /// has none, or nothing for one the host never received.
+    #[test]
+    fn a_message_is_recalled_by_its_id_and_runs_again_only_when_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(&dir.path().join("journal.sqlite3"), CAP).unwrap();
+        assert!(journal.recall("app", "m1").unwrap().is_none());
+        assert!(matches!(
+            journal.accept("app", 1, Some("m1")).unwrap(),
+            Accepted::New
+        ));
+        assert!(matches!(
+            journal.recall("app", "m1").unwrap(),
+            Some(Accepted::Unanswered)
+        ));
+        journal
+            .reply("app", 1, Some("m1"), &Outcome::Login("refused".into()))
+            .unwrap();
+        assert!(matches!(
+            journal.recall("app", "m1").unwrap(),
+            Some(Accepted::Replied(Outcome::Login(reason))) if reason == "refused"
+        ));
+        journal.forget_calls("app").unwrap();
+        // Refused, it never ran, so sent again under its ID it runs.
+        assert!(matches!(
+            journal.accept("app", 1, Some("m1")).unwrap(),
+            Accepted::New
+        ));
+        journal
+            .reply("app", 1, Some("m1"), &Outcome::Ok(()))
+            .unwrap();
+        // Taken, it is final: sent again it gets its recorded reply and runs nothing.
+        assert!(matches!(
+            journal.accept("app", 2, Some("m1")).unwrap(),
+            Accepted::Replied(Outcome::Ok(()))
+        ));
+        assert!(journal.recall("other", "m1").unwrap().is_none());
     }
 }

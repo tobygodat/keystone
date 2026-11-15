@@ -166,6 +166,24 @@ pub enum Event {
     Failed {
         message: String,
     },
+    /// Another machine took the message the app sent as `send`, so it is a turn's
+    /// now. The host journals it as it takes the message, before that turn's events,
+    /// and the app's link also makes it from the call's reply. No provider sends it.
+    Taken {
+        send: String,
+    },
+    /// Another machine refused the message the app sent as `send` before any provider
+    /// saw it, such as one naming an image its host no longer holds. Nothing ran, so
+    /// the app can offer the message again. Only the app's link makes it; no host or
+    /// provider sends it.
+    NotSent {
+        send: String,
+        message: String,
+        /// The machine refused the account's login, so another login, or this one
+        /// with its own folder, would go.
+        #[serde(default)]
+        login: bool,
+    },
     /// Something went wrong that does not end the turn, such as a rejected steer.
     Warning {
         message: String,

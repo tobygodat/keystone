@@ -125,6 +125,10 @@ pub trait Connection {
     /// own, fork `point`'s instead of starting a new one. Once the provider reports
     /// the fork's own conversation ([`Event::ThreadReady`]), that one is resumed.
     fn set_fork(&self, session: u64, point: ForkPoint);
+    /// Names the session's next [`Connection::send`] `send`, the ID the app saved the
+    /// message under, for a connection whose answer comes later and must say which
+    /// message it is about. Only a connection to another machine uses it.
+    fn tag_send(&self, _session: u64, _send: &str) {}
     /// Runs `job` on the thread that delivers the session's commands, after every
     /// command given before it and before any given after it. A checkpoint taken there
     /// sees the session's files as the provider left them, before the next message

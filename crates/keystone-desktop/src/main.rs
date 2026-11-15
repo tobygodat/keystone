@@ -85,7 +85,7 @@ use keystone_ui::markdown::Document;
 use keystone_ui::text_input::{Changed, SelectAll};
 use keystone_ui::{automation, prelude::*};
 use model_selector::{
-    CatalogKey, Catalogs, Choices, provider_icon, provider_icon_color, provider_name,
+    CatalogKey, CatalogPlace, Catalogs, Choices, provider_icon, provider_icon_color, provider_name,
 };
 use presentation::Presentation;
 use relative_time::{LocalTime, relative};
@@ -121,6 +121,8 @@ gpui::actions!(
     ]
 );
 
+/// Why Edit on a refused message is off: it would replace what the user is writing.
+const EDIT_BLOCKED: &str = "Your draft isn't empty. Send or clear it to edit this message.";
 /// The transcript and the composer share one centred column.
 const CONTENT_WIDTH: f32 = 720.;
 /// The top bar's height at Spacious density, which smaller densities scale down.
@@ -195,6 +197,7 @@ struct FullAccessConfirmation {
     focus: DialogFocus,
 }
 
+#[derive(Clone)]
 struct ComposerDraft {
     session: u64,
     text: String,
@@ -660,6 +663,14 @@ impl Keystone {
             });
         }
         self.agent_changed_files(&changed.files, cx);
+        // A message the user took out of its bubble to edit is in its draft.
+        if self.composer.read(cx).value().is_empty()
+            && self
+                .selected(cx)
+                .is_some_and(|session| changed.drafts.contains(&session))
+        {
+            self.sync_draft(cx);
+        }
         for (folder, text) in &changed.commit_drafts {
             self.changes.sync_draft(folder, text, cx);
         }
@@ -1200,6 +1211,37 @@ impl Keystone {
 
     /// Shows the selected session's draft: as typed in another window that shows it,
     /// else as saved.
+    /// Whether `session`'s draft is empty: the composer on screen for the selected
+    /// session, which the saved draft can lag behind, and the saved draft otherwise.
+    fn composer_empty(&self, session: u64, cx: &App) -> bool {
+        let Some(saved) = self.state.read(cx).session(session) else {
+            return false;
+        };
+        let text_empty = if self.selected(cx) == Some(session) {
+            self.composer.read(cx).value().trim().is_empty()
+        } else {
+            saved.draft().trim().is_empty()
+        };
+        text_empty && saved.draft_attachments().is_empty()
+    }
+
+    /// Takes a refused message into the empty composer to edit.
+    fn edit_refused(
+        &mut self,
+        session: u64,
+        send: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let empty = self.composer_empty(session, cx);
+        let edited = self
+            .state
+            .update(cx, |state, cx| state.edit_refused(session, send, empty, cx));
+        if edited && self.selected(cx) == Some(session) {
+            self.composer.focus_handle(cx).focus(window, cx);
+        }
+    }
+
     fn sync_draft(&mut self, cx: &mut Context<Self>) {
         let selected = self.selected(cx);
         let this = cx.entity();
@@ -2997,6 +3039,68 @@ impl Keystone {
                     Row::Surface(surface) => Some(self.widget_control(key, index, &surface.call)),
                     _ => None,
                 };
+                // A message its machine refused can be sent again under its ID, or taken
+                // out to edit into the empty composer.
+                let refused = match row {
+                    Row::Item(item)
+                        if item.kind == ItemKind::UserMessage
+                            && item.status == keystone_agent::ItemStatus::Failed
+                            && self
+                                .state
+                                .read(cx)
+                                .refused_send(session, &item.id)
+                                .is_some() =>
+                    {
+                        let (again, edit) = (item.id.clone(), item.id.clone());
+                        Some(transcript::RefusedControl {
+                            on_send_again: Box::new(self.scoped_listener(
+                                cx,
+                                move |this, _, _, cx| {
+                                    this.state.update(cx, |state, cx| {
+                                        state.send_again(session, &again, cx)
+                                    });
+                                },
+                            )),
+                            on_edit: Box::new(self.scoped_listener(
+                                cx,
+                                move |this, _, window, cx| {
+                                    this.edit_refused(session, &edit, window, cx)
+                                },
+                            )),
+                            edit_blocked: (!self.composer_empty(session, cx))
+                                .then_some(EDIT_BLOCKED),
+                        })
+                    }
+                    _ => None,
+                };
+                // A message still sending while its machine can't be reached can be
+                // given up, which frees the session.
+                let unreached = match row {
+                    Row::Item(item)
+                        if item.kind == ItemKind::UserMessage
+                            && item.status == keystone_agent::ItemStatus::InProgress =>
+                    {
+                        self.state
+                            .read(cx)
+                            .unreached(session)
+                            .map(|(reason, machine)| {
+                                let send = item.id.clone();
+                                transcript::UnreachedControl {
+                                    reason,
+                                    machine,
+                                    on_discard: Box::new(self.scoped_listener(
+                                        cx,
+                                        move |this, _, _, cx| {
+                                            this.state.update(cx, |state, cx| {
+                                                state.discard_send(session, &send, cx)
+                                            });
+                                        },
+                                    )),
+                                }
+                            })
+                    }
+                    _ => None,
+                };
                 let fork = fork::forkable(row).then(|| transcript::ForkControl {
                     label: fork::label(&conversation.fork_from(index)),
                     on_click: Box::new(self.scoped_listener(cx, move |this, _, window, cx| {
@@ -3056,6 +3160,8 @@ impl Keystone {
                         widget,
                         result,
                         fork,
+                        unreached,
+                        refused,
                         restore,
                         second_opinion,
                         edit_folder: matches!(
@@ -3275,6 +3381,17 @@ impl Keystone {
         } else if let Some(limit) = conversation.usage_limit() {
             empty = false;
             view = view.child(self.limit_card(key, limit, cx));
+        } else if let Some(waits) = self.state.read(cx).turn_waits(session) {
+            // A turn on a machine out of reach ends when the machine says how it went.
+            empty = false;
+            view = view.child(
+                h_flex()
+                    .id(arrangement::selector("turn-status", key.view))
+                    .automation_id(arrangement::selector("turn-waits", key.view))
+                    .gap_2()
+                    .child(div().size(px(6.)).rounded_full().bg(colors.text_muted))
+                    .child(Label::new(waits).size(TextSize::Ui).color(Color::Muted)),
+            );
         } else if conversation.running && !conversation.awaiting_widget() {
             empty = false;
             view = view.child(
@@ -3721,7 +3838,8 @@ impl SessionSidebar {
             || machine.is_some()
             || !excerpt.is_empty();
         // The line holds at the sidebar's width in every state: the reason keeps its
-        // words, and a machine's name gives way first.
+        // words, and a machine's name gives way first; without a reason the excerpt
+        // does.
         let detail = match reason {
             Some(reason) => h_flex()
                 .min_w_0()
@@ -3752,11 +3870,15 @@ impl SessionSidebar {
                         )
                 }))
                 .children(branch)
+                // The excerpt takes only the room left, so a long draft never squeezes
+                // the machine's name.
                 .child(
-                    Label::new(excerpt)
-                        .size(TextSize::Sm)
-                        .color(Color::Muted)
-                        .truncate(),
+                    div().flex_1().min_w_0().child(
+                        Label::new(excerpt)
+                            .size(TextSize::Sm)
+                            .color(Color::Muted)
+                            .truncate(),
+                    ),
                 ),
         };
         let (select, open_tab, settle, sidebar) = (

@@ -961,7 +961,10 @@ fn adding_an_account_creates_a_private_folder_and_refuses_shared_homes(
             state.add_account(Provider::Codex, "Inside", inside.to_str().unwrap(), cx)
         })
         .unwrap_err();
-    assert!(refused.contains("already used"), "{refused}");
+    assert!(
+        refused.contains("overlaps") && refused.contains("\u{201c}Work\u{201d}"),
+        "{refused}"
+    );
     assert!(!inside.exists(), "a refused account leaves no new folder");
     assert!(
         state
@@ -1012,7 +1015,7 @@ fn a_symlinked_or_refused_folder_is_checked_before_anything_is_created(
             state.add_account(Provider::Codex, "Through", through.to_str().unwrap(), cx)
         })
         .unwrap_err();
-    assert!(refused.contains("already"), "{refused}");
+    assert!(refused.contains("overlaps"), "{refused}");
     assert!(
         !real.join("nested").exists(),
         "nothing is created inside another account's folder"
@@ -1288,13 +1291,14 @@ fn an_account_never_shows_usage_left_under_its_id(cx: &mut gpui::TestAppContext)
         .value;
     assert_eq!(again, id);
     state.read_with(cx, |state, _| {
-        assert_eq!(state.usage(Provider::Claude, Some(&again)), None);
+        assert_eq!(state.usage(None, Provider::Claude, Some(&again)), None);
     });
 
     // A save still queued when its account goes is dropped.
     state.update(cx, |state, cx| {
         state.usage_saves.lock().unwrap().1 = true;
         state.record_usage(
+            None,
             Provider::Claude,
             Some(&again),
             usage.readings.iter().map(|r| r.window.clone()).collect(),

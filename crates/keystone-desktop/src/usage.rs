@@ -149,7 +149,7 @@ impl Keystone {
         let state = self.state.read(cx);
         let saved = state.session(session)?;
         let (provider, account) = (saved.provider(), saved.account().cloned());
-        let usage = state.usage(provider, account.as_ref());
+        let usage = state.usage(saved.machine(), provider, account.as_ref());
         let context = state.conversations().get(&session).and_then(|c| c.context);
         let now = crate::now_ms();
         let (label, used) = meter_reading(usage, context, now)?;
@@ -231,7 +231,12 @@ impl Keystone {
     ) -> AnyElement {
         let now = crate::now_ms();
         let colors = cx.theme().colors;
-        let usage = self.state.read(cx).usage(provider, account);
+        let state = self.state.read(cx);
+        // A login on another machine has its usage there.
+        let machine = account
+            .and_then(|id| state.store().workspace().account(id))
+            .and_then(keystone_core::Account::machine);
+        let usage = state.usage(machine, provider, account);
         let readings = usage.map_or(&[][..], |usage| &usage.readings[..]);
         let (texts, Some(newest_age)) = describe_all(now, readings) else {
             return div().into_any_element();

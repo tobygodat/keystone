@@ -42,7 +42,7 @@ const QUEUE_FLOOR: u64 = 64 * 1024;
 /// How long a session may stay held for its last run's processes before it says so.
 const HOLD: Duration = Duration::from_secs(60);
 
-const NO_LOGIN: &str = "The app didn't say where this account keeps its files on this machine";
+const NO_LOGIN: &str = "The app didn't say where this account keeps its files";
 const NO_IMAGES: &str = "An image went with this message as a file here, so it wasn't sent";
 const UNSAVED: &str = "The machine couldn't save this session's latest events, so they wait there and arrive once it can";
 const UNANSWERED: &str =
@@ -117,6 +117,7 @@ pub fn serve() -> Result<(), String> {
         held: HashMap::new(),
         backlog: HashMap::new(),
         quiet_since: None,
+        names: HashMap::new(),
     };
     daemon.recover(reap::left(&paths.run, RELEASE_WAIT))?;
     daemon.run(rx);
@@ -330,6 +331,12 @@ struct Socket {
     pinged: Instant,
 }
 
+/// Whether the journal has `state`'s session on `route`, the provider and account its
+/// turns run with.
+fn on_route(state: &SessionState, route: &Route) -> bool {
+    state.provider == route.provider && state.account == route.account
+}
+
 /// Drops `conn` on a thread of its own: dropping one waits for a provider that is
 /// still starting, and the daemon's thread serves every client.
 fn release(conn: Option<Conn>) {
@@ -358,6 +365,9 @@ impl Runner {
 
 struct Conn {
     runner: Runner,
+    /// The login it runs as, `None` for the default; a call with another, after the
+    /// app changed the account's folder, gets a new connection.
+    login: Option<Login>,
     /// Every session this connection served, for ending idle processes.
     sessions: BTreeSet<u64>,
 }
@@ -381,6 +391,25 @@ impl Conn {
     }
 }
 
+/// Why the host refused a call before it ran: for the call itself, or for the account's
+/// login, which the app then says how to fix.
+enum Refused {
+    Call(String),
+    Login(String),
+}
+
+impl From<String> for Refused {
+    fn from(reason: String) -> Self {
+        Refused::Call(reason)
+    }
+}
+
+impl From<&str> for Refused {
+    fn from(reason: &str) -> Self {
+        Refused::Call(reason.to_owned())
+    }
+}
+
 /// The CLI's name, for what the host says about its processes.
 fn cli_name(provider: Provider) -> &'static str {
     match provider {
@@ -389,56 +418,80 @@ fn cli_name(provider: Provider) -> &'static str {
     }
 }
 
-/// How the host runs `login`'s CLI: with its config home, which must be an absolute
-/// path that overlaps neither provider's default home on this machine. A home that
-/// doesn't exist yet is made, private to this user, as the app makes a local one.
-fn login_profile(provider: Provider, login: &Login) -> Result<LaunchProfile, String> {
+/// How the host runs `login`'s CLI on `machine`, the app's name for this machine:
+/// with its config home, which must be a full path with no `.` or `..` part, made
+/// private to this user when it doesn't exist yet, as the app makes a local one. It
+/// must overlap neither provider's default home here, checked before anything is made
+/// and again on the folder's real path once it exists, and the CLI is given that real
+/// path, so a symlink can't lead it into a default home.
+fn login_profile(
+    provider: Provider,
+    login: &Login,
+    machine: &str,
+) -> Result<LaunchProfile, String> {
+    let label = &login.label;
     let home = Path::new(&login.home);
-    if !home.is_absolute() || keystone_core::lexical(home).parent().is_none() {
+    let dotted = login
+        .home
+        .split('/')
+        .any(|part| part == "." || part == "..");
+    if !home.is_absolute() || dotted {
         return Err(format!(
-            "The account \u{201c}{}\u{201d} needs a full path on this machine, not {}",
-            login.label, login.home
+            "The account \u{201c}{label}\u{201d} needs a full path on {machine} without . or .. in it, not {}",
+            login.home
         ));
     }
-    let real = resolved(home);
-    let defaults = [Provider::Claude, Provider::Codex].map(crate::default_home);
-    if let Some(default) = defaults
-        .iter()
-        .flatten()
-        .find(|default| keystone_core::homes_overlap(&resolved(default), &real))
-    {
+    if home.parent().is_none() {
         return Err(format!(
-            "The account \u{201c}{}\u{201d} uses {}, which overlaps this machine's default home {}. Give it a folder of its own",
-            login.label,
-            login.home,
-            default.display()
+            "The account \u{201c}{label}\u{201d} can't use {}, which is the whole of {machine}'s disk",
+            login.home
         ));
     }
+    let overlap = |real: &Path| -> Result<(), String> {
+        let defaults = [Provider::Claude, Provider::Codex].map(crate::default_home);
+        match defaults
+            .iter()
+            .flatten()
+            .find(|default| keystone_core::homes_overlap(&resolved(default), real))
+        {
+            Some(default) => Err(format!(
+                "The account \u{201c}{label}\u{201d} uses {}, which overlaps {machine}'s default home {}",
+                login.home,
+                default.display()
+            )),
+            None => Ok(()),
+        }
+    };
+    overlap(&resolved(home))?;
     if !home.exists() {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(home)
-            .map_err(|e| format!("Could not make {}: {e}", login.home))?;
+            .map_err(|e| format!("Could not make {} on {machine}: {e}", login.home))?;
     }
-    if !home.is_dir() {
-        return Err(format!("{} isn't a folder on this machine", login.home));
+    let real = home
+        .canonicalize()
+        .map_err(|e| format!("Could not open {} on {machine}: {e}", login.home))?;
+    if !real.is_dir() {
+        return Err(format!("{} isn't a folder on {machine}", login.home));
     }
-    Ok(LaunchProfile::account(provider, &login.label, home))
+    overlap(&real)?;
+    Ok(LaunchProfile::account(provider, label, &real))
 }
 
 /// `path` with its deepest existing folder resolved through its symlinks, and the
-/// rest as written, so a home that doesn't exist yet compares as it will.
+/// rest as written, so a home that doesn't exist yet compares as it will. Callers
+/// refuse `.` and `..` first, so the rest is taken as it is.
 fn resolved(path: &Path) -> PathBuf {
-    let path = keystone_core::lexical(path);
     for base in path.ancestors() {
         if let Ok(real) = base.canonicalize() {
             let rest = path.strip_prefix(base).unwrap_or(Path::new(""));
             return real.join(rest);
         }
     }
-    path
+    path.to_path_buf()
 }
 
 /// A session of the last daemon whose watchers still end its processes. It starts no
@@ -635,6 +688,8 @@ struct Daemon {
     /// Nothing of a connection goes out live past what waits here.
     backlog: HashMap<Key, Backlog>,
     quiet_since: Option<Instant>,
+    /// What each client calls this machine, from its last `hello`.
+    names: HashMap<String, String>,
 }
 
 impl Daemon {
@@ -870,8 +925,10 @@ impl Daemon {
             .map(|(key, _)| key.clone())
             .collect();
         for key in unneeded {
-            self.pump(&key);
-            release(self.conns.remove(&key));
+            self.let_go(
+                &key,
+                "keystone-host let go of its provider, so the turn ended",
+            );
         }
         self.release();
         let waiting: Vec<Key> = self.backlog.keys().cloned().collect();
@@ -957,9 +1014,13 @@ impl Daemon {
                     after,
                     journal,
                     seen,
+                    name,
                 },
                 None,
             ) => {
+                if let Some(name) = name.filter(|name| !name.is_empty() && name.len() <= 256) {
+                    self.names.insert(client.clone(), name);
+                }
                 let places = after.zip(journal.clone()).into_iter();
                 self.went_back(&client, places.chain(seen.into_iter().map(|(j, s)| (s, j))));
                 // A place in another journal is no place in this one.
@@ -1093,21 +1154,53 @@ impl Daemon {
     /// accepted and never answered.
     fn call(&mut self, id: u64, client: &str, call: Call) {
         let call_id = call.id;
-        let outcome = match self.journal.accept(client, call_id) {
+        // Only reads the journal, so it may run any number of times.
+        if let Op::Recall { send, .. } = &call.op {
+            let outcome = match self.journal.recall(client, send) {
+                Ok(None) => Outcome::Unrecorded,
+                Ok(Some(Accepted::Replied(outcome))) => outcome,
+                Ok(Some(_)) => Outcome::Unknown(UNANSWERED.into()),
+                Err(error) => {
+                    log!("{error}");
+                    Outcome::Unknown(format!(
+                        "keystone-host couldn't read what became of this message: {error}"
+                    ))
+                }
+            };
+            return self.send(
+                id,
+                &Frame::Reply {
+                    id: call_id,
+                    outcome,
+                },
+            );
+        }
+        let send = match &call.op {
+            Op::Send { send, .. } => Some(send.clone()),
+            _ => None,
+        };
+        let outcome = match self.journal.accept(client, call_id, send.as_deref()) {
             Ok(Accepted::New) => {
-                let outcome = Outcome::from(self.perform(client, call));
+                let outcome = match self.perform(client, call) {
+                    Ok(()) => Outcome::Ok(()),
+                    Err(Refused::Call(reason)) => Outcome::Err(reason),
+                    Err(Refused::Login(reason)) => Outcome::Login(reason),
+                };
                 if fault("crash-before-reply") {
                     thread::sleep(Duration::from_secs(2));
                     // SAFETY: kill only signals this process.
                     unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
                 }
-                if let Err(error) = self.journal.reply(client, call_id, &outcome) {
+                if let Err(error) = self
+                    .journal
+                    .reply(client, call_id, send.as_deref(), &outcome)
+                {
                     log!("{error}");
                 }
                 outcome
             }
             Ok(Accepted::Replied(outcome)) => outcome,
-            Ok(Accepted::Unanswered) => Outcome::Err(UNANSWERED.into()),
+            Ok(Accepted::Unanswered) => Outcome::Unknown(UNANSWERED.into()),
             Err(error) => {
                 log!("{error}");
                 Outcome::Err(format!(
@@ -1124,7 +1217,7 @@ impl Daemon {
         );
     }
 
-    fn perform(&mut self, client: &str, call: Call) -> Result<(), String> {
+    fn perform(&mut self, client: &str, call: Call) -> Result<(), Refused> {
         let Call {
             provider,
             account,
@@ -1144,7 +1237,7 @@ impl Daemon {
                 media_type: media_type.clone(),
                 sha256: sha256.clone(),
             };
-            return self.cache.put(&attached, *size, *offset, data);
+            return Ok(self.cache.put(&attached, *size, *offset, data)?);
         }
         let route = Route { provider, account };
         let key = (client.to_owned(), route);
@@ -1157,7 +1250,8 @@ impl Daemon {
             | Op::ReleaseFollowUps { session }
             | Op::EvictIdle { session, .. }
             | Op::DeclineIdle { session, .. }
-            | Op::ReadHistory { session, .. } => *session,
+            | Op::ReadHistory { session, .. }
+            | Op::Recall { session, .. } => *session,
             Op::ListThreads { .. } | Op::ReadImport { .. } | Op::PutAttachment { .. } => 0,
             Op::Command(command) => command_session(command),
         };
@@ -1173,16 +1267,33 @@ impl Daemon {
             return Err(STOPPING.into());
         }
         if starts && let Some(error) = self.backlogged() {
-            return Err(format!("{BACKLOGGED} ({error})"));
+            return Err(format!("{BACKLOGGED} ({error})").into());
         }
+        if matches!(op, Op::Command(Command::Interrupt { .. })) && self.end_orphan(&key, session) {
+            return Ok(());
+        }
+        let machine = self.machine_name(client);
         let images = match &op {
             Op::Send { images, .. } => images
                 .iter()
-                .map(|image| self.cache.image(image))
+                .map(|image| {
+                    self.cache.image(image).map_err(|error| match error.as_str() {
+                        super::cache::GONE => format!(
+                            "An image in this message is no longer on {machine}. Send it again to upload it"
+                        ),
+                        _ => error,
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?,
             _ => Vec::new(),
         };
-        let conn = self.connection(&key, login.as_ref())?;
+        let taken = match &op {
+            Op::Send { send, .. } => Some(send.clone()),
+            _ => None,
+        };
+        let conn = self
+            .connection(&key, login.as_ref(), &machine)
+            .map_err(Refused::Login)?;
         if session != 0 {
             conn.sessions.insert(session);
         }
@@ -1199,7 +1310,7 @@ impl Daemon {
                 ..
             } => {
                 if !std::path::Path::new(&cwd).is_dir() {
-                    return Err(format!("{cwd} isn't a folder on this machine"));
+                    return Err(format!("{cwd} isn't a folder on {machine}").into());
                 }
                 connection
                     .send(
@@ -1247,7 +1358,12 @@ impl Daemon {
             } => codex(runner)?.read_history(session, thread, ticket),
             Op::ListThreads { cwd, ticket } => codex(runner)?.list_threads(&cwd, ticket),
             Op::ReadImport { thread, ticket } => codex(runner)?.read_import(thread, ticket),
-            Op::PutAttachment { .. } => unreachable!("handled above"),
+            Op::PutAttachment { .. } | Op::Recall { .. } => unreachable!("handled above"),
+        }
+        // The journal says which message the turn after it is, before any of that
+        // turn's events, so an app that was away learns it from the replay.
+        if let Some(send) = taken {
+            self.enqueue(&key, session, vec![Event::Taken { send }]);
         }
         Ok(())
     }
@@ -1288,14 +1404,42 @@ impl Daemon {
 
     /// The connection for `key`, made on its first call. One for an account other
     /// than the default login runs with `login`'s profile.
-    fn connection(&mut self, key: &Key, login: Option<&Login>) -> Result<&mut Conn, String> {
-        if self.conns.contains_key(key) {
-            return Ok(self.conns.get_mut(key).expect("checked above"));
+    /// What `client` calls this machine, or its hostname when it said nothing.
+    fn machine_name(&self, client: &str) -> String {
+        self.names
+            .get(client)
+            .cloned()
+            .unwrap_or_else(|| self.welcome.hostname.clone())
+    }
+
+    fn connection(
+        &mut self,
+        key: &Key,
+        login: Option<&Login>,
+        machine: &str,
+    ) -> Result<&mut Conn, String> {
+        // The account is the route's, so its connection is its folder's: a new name
+        // for it changes nothing that runs.
+        let home = |login: Option<&Login>| login.map(|login| login.home.clone());
+        match self.conns.get_mut(key) {
+            Some(conn) if login.is_none() || home(conn.login.as_ref()) == home(login) => {
+                if login.is_some() {
+                    conn.login = login.cloned();
+                }
+                return Ok(self.conns.get_mut(key).expect("checked above"));
+            }
+            // The account's folder changed, which the app allows only while none of
+            // its sessions has a message the host took. Whatever still ran there ends.
+            Some(_) => self.let_go(
+                key,
+                "This login's folder changed, so the turn on the old one ended",
+            ),
+            None => {}
         }
         let (client, route) = key.clone();
         let profile = match (&route.account, login) {
             (None, _) => LaunchProfile::inherited(),
-            (Some(_), Some(login)) => login_profile(route.provider, login)?,
+            (Some(_), Some(login)) => login_profile(route.provider, login, machine)?,
             (Some(_), None) => return Err(NO_LOGIN.into()),
         };
         let tx = self.tx.clone();
@@ -1338,8 +1482,69 @@ impl Daemon {
         };
         Ok(self.conns.entry(key.clone()).or_insert(Conn {
             runner,
+            login: login.cloned(),
             sessions: BTreeSet::new(),
         }))
+    }
+
+    /// Lets go of `key`'s connection once what it reported is journaled. Each turn it
+    /// still ran, or approval it still waited on, ends there failed with `reason`, so
+    /// no session waits on a process that is gone. A session it served only for a call
+    /// on its route, such as the model menu's catalog before its login was chosen,
+    /// runs its turn on another route and keeps it.
+    fn let_go(&mut self, key: &Key, reason: &str) {
+        self.pump(key);
+        let Some(conn) = self.conns.remove(key) else {
+            return;
+        };
+        // A test's stand-in for a connection lost without a word, which Stop then ends.
+        if fault("let-go-silently") {
+            return release(Some(conn));
+        }
+        let reason = format!("{reason}.");
+        match self.states(&key.0) {
+            Ok(states) => {
+                for session in &conn.sessions {
+                    if let Some(state) = states.get(session)
+                        && on_route(state, &key.1)
+                        && (state.running || !state.approvals.is_empty())
+                    {
+                        let events = journal::lost(&state.approvals, &reason);
+                        self.enqueue(key, *session, events);
+                    }
+                }
+            }
+            Err(error) => log!("{error}"),
+        }
+        release(Some(conn));
+    }
+
+    /// Ends `session`'s turn when the journal has one running that no connection of
+    /// `key` runs, as after its process was let go of without a word, and says whether
+    /// it did. Stop then ends it rather than reaching nothing.
+    fn end_orphan(&mut self, key: &Key, session: u64) -> bool {
+        self.pump(key);
+        if self
+            .conns
+            .get(key)
+            .is_some_and(|conn| conn.runner.connection().has_work(session))
+        {
+            return false;
+        }
+        let state = match self.states(&key.0) {
+            Ok(mut states) => states.remove(&session),
+            Err(error) => {
+                log!("{error}");
+                None
+            }
+        };
+        let Some(state) = state.filter(|state| {
+            on_route(state, &key.1) && (state.running || !state.approvals.is_empty())
+        }) else {
+            return false;
+        };
+        self.enqueue(key, session, journal::quit(&state.approvals));
+        true
     }
 
     /// Journals what the connection reported, after anything of it still waiting for
@@ -1563,6 +1768,28 @@ mod tests {
             .filter(|(_, event)| keep(event))
             .map(|(_, event)| serde_json::to_vec(event).unwrap().len())
             .sum()
+    }
+
+    #[test]
+    fn a_home_that_is_the_whole_disk_or_has_dots_says_which() {
+        let refused = |home: &str| {
+            let login = Login {
+                label: "Work".into(),
+                home: home.into(),
+            };
+            login_profile(Provider::Codex, &login, "desk").unwrap_err()
+        };
+        for home in ["/", "//"] {
+            let reason = refused(home);
+            assert!(
+                reason.contains("the whole of desk's disk"),
+                "{home}: {reason}"
+            );
+        }
+        for home in ["/a/../b", "/a/./b", "relative"] {
+            let reason = refused(home);
+            assert!(reason.contains("without . or .."), "{home}: {reason}");
+        }
     }
 
     #[test]

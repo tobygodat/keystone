@@ -57,6 +57,9 @@ enum SendKind {
     Result,
     /// A scheduled task's prompt. Only ever a new turn, and the draft stays.
     Scheduled,
+    /// A message its machine refused, sent again under its own ID
+    /// ([`AppState::send_again`]). The draft stays.
+    Again,
 }
 
 /// What became of a message given to `send_message_from`.
@@ -88,6 +91,9 @@ struct Placed {
 
 /// A connection on another machine: the machine, provider and account it serves.
 type RemoteKey = (MachineId, Provider, Option<AccountId>);
+
+/// What a refused login's message says to do next.
+const WAY_OUT: &str = "Pick another login in the model menu, then press Send again, or give this login its own folder in Settings \u{2192} Accounts.";
 
 const REMOTE_LOGIN: &str =
     "Not sent. This session's account isn't a login on its machine any more. Start a new session.";
@@ -122,6 +128,9 @@ pub(crate) struct RuntimeChanged {
     /// Sessions whose agent opened the browser page, so windows showing them open the
     /// Browser surface.
     pub browser: Vec<u64>,
+    /// Sessions whose saved draft the app put back, so a window showing one with an
+    /// empty composer shows it.
+    pub drafts: Vec<u64>,
 }
 pub(crate) struct RowChange {
     pub session: u64,
@@ -180,6 +189,12 @@ pub(crate) struct AppState {
     /// running in the journal that is gone ([`AppState::end_lost_turns`]).
     shown_journals: BTreeMap<MachineId, u64>,
     lost_turns: BTreeSet<u64>,
+    /// The messages to other machines this run sent or asked about, by the ID each was
+    /// saved under. Any other a session still has pending was sent before this launch,
+    /// and its machine is asked what became of it ([`AppState::settle_pending`]).
+    asked: HashSet<String>,
+    /// The ID of the refused message [`AppState::send_again`] is sending.
+    resending: Option<String>,
     /// Each session's checkpoints, as last read from its repository.
     checkpoints: HashMap<u64, checkpoints::State>,
     /// The tree each session's next or running turn starts from.
@@ -279,6 +294,10 @@ pub(crate) struct AppState {
     /// attach`. Without one a test's link runs nothing and fails.
     #[cfg(test)]
     pub(crate) test_transport: Option<Vec<std::ffi::OsString>>,
+    /// How long `open_link` waits just before it registers the routes, so a test can
+    /// tell whether the link started reading before them.
+    #[cfg(test)]
+    pub(crate) test_route_pause: Option<std::time::Duration>,
     /// Whether a test put its own Claude connection in place, which runs the program
     /// it names. A connection started without one runs the `claude` on `PATH`.
     #[cfg(test)]
@@ -381,9 +400,6 @@ const REMOTE_UNLINKED: &str =
 /// whether it went on there or Quit ended it.
 const REMOTE_CLOSED: &str = "Keystone was closed during this turn on";
 
-/// The model menu of a session on another machine, whose catalog isn't asked yet.
-const REMOTE_MODELS: &str =
-    "Models on other machines aren't listed yet, so the session uses its default.";
 /// Never shown: a session on another machine never asks for a folder here.
 const REMOTE_LOCAL_FOLDER: &str = "Not sent. This conversation's folder is on another machine.";
 
@@ -984,7 +1000,8 @@ impl AppState {
         }
         // The store forgot any readings left under a reused ID; so does this run.
         if let Ok(added) = &result {
-            self.usage.remove(&usage_key(provider, Some(&added.value)));
+            self.usage
+                .remove(&usage_key(None, provider, Some(&added.value)));
         }
         self.changes.sidebar = true;
         self.publish(cx);
@@ -1011,7 +1028,35 @@ impl AppState {
             .add_remote_account(provider, label, machine, &home)
             .map_err(|error| error.to_string());
         if let Ok(added) = &result {
-            self.usage.remove(&usage_key(provider, Some(&added.value)));
+            self.usage
+                .remove(&usage_key(Some(machine), provider, Some(&added.value)));
+        }
+        self.changes.sidebar = true;
+        self.publish(cx);
+        result
+    }
+
+    /// Moves a login on another machine to `folder` there, while none of its sessions
+    /// has a message the machine took. Its connections and catalogs go with the old
+    /// folder, so the next call carries the new one and the host starts it afresh.
+    pub(crate) fn set_remote_account_home(
+        &mut self,
+        id: &AccountId,
+        folder: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied<()>, String> {
+        if self.phase == Phase::Exiting {
+            return Err("Keystone is exiting.".into());
+        }
+        let home = RemoteFolder::new(folder)?;
+        let result = self
+            .store
+            .set_remote_account_home(id, &home)
+            .map_err(|error| error.to_string());
+        if result.is_ok() {
+            self.remote
+                .retain(|(_, _, account), _| account.as_ref() != Some(id));
+            self.catalogs.forget_account(id);
         }
         self.changes.sidebar = true;
         self.publish(cx);
@@ -1067,12 +1112,12 @@ impl AppState {
             self.catalogs.forget_account(id);
             // The store forgot its saved readings in the same transaction; a save
             // still queued must not write them back.
+            // Its readings here, or on the machine it was a login on.
             let mut saves = self.usage_saves.lock().unwrap();
-            for provider in [Provider::Claude, Provider::Codex] {
-                let key = usage_key(provider, Some(id));
-                self.usage.remove(&key);
-                saves.0.remove(&key);
-            }
+            let suffix = format!("/{}", id.as_str());
+            let gone = |key: &String| key.ends_with(&suffix);
+            self.usage.retain(|key, _| !gone(key));
+            saves.0.retain(|key, _| !gone(key));
         }
         self.changes.sidebar = true;
         self.publish(cx);
@@ -1828,6 +1873,8 @@ impl AppState {
             launch_cursors,
             shown_journals: BTreeMap::new(),
             lost_turns: BTreeSet::new(),
+            asked: HashSet::new(),
+            resending: None,
             checkpoints: HashMap::new(),
             turn_starts: checkpoints::Starts::default(),
             checkpoint_store: checkpoints::StoreName::new(store.database()),
@@ -1892,6 +1939,8 @@ impl AppState {
             test_programs: None,
             #[cfg(test)]
             test_transport: None,
+            #[cfg(test)]
+            test_route_pause: None,
             #[cfg(test)]
             test_claude_installed: false,
             #[cfg(test)]
@@ -1990,11 +2039,15 @@ impl AppState {
             presentation::ConversationFolder::Recorded(directory) => Some(CatalogKey {
                 provider,
                 account: self.catalog_account(session, provider),
-                directory,
+                place: CatalogPlace::Local(directory),
             }),
-            // A remote machine's catalog isn't asked yet (TOB-320).
-            presentation::ConversationFolder::Remote(..)
-            | presentation::ConversationFolder::LegacyMissing
+            // Another machine's catalog is its CLI's, asked through its host.
+            presentation::ConversationFolder::Remote(machine, folder) => Some(CatalogKey {
+                provider,
+                account: self.catalog_account(session, provider),
+                place: CatalogPlace::Remote(machine, folder),
+            }),
+            presentation::ConversationFolder::LegacyMissing
             | presentation::ConversationFolder::Unsupported => None,
         }
     }
@@ -2014,20 +2067,18 @@ impl AppState {
         let saved = self.session(session);
         let mut default_model = None;
         let choices = match self.conversation_folder(session) {
-            Some(presentation::ConversationFolder::Recorded(directory)) => {
-                let key = CatalogKey {
-                    provider,
-                    account: self.catalog_account(session, provider),
-                    directory,
-                };
+            Some(
+                presentation::ConversationFolder::Recorded(_)
+                | presentation::ConversationFolder::Remote(..),
+            ) => {
+                let key = self
+                    .catalog_key(session, provider)
+                    .expect("a recorded or remote folder has a catalog");
                 default_model = self.catalogs.default_model(&key);
                 self.catalogs.choices(&key)
             }
             Some(presentation::ConversationFolder::LegacyMissing) => {
                 Choices::Unavailable("Choose a conversation folder to load choices.")
-            }
-            Some(presentation::ConversationFolder::Remote(..)) => {
-                Choices::Unavailable(REMOTE_MODELS)
             }
             Some(presentation::ConversationFolder::Unsupported) | None => Choices::Unavailable(
                 "Choices need this conversation's saved folder, which this version cannot use.",
@@ -2053,7 +2104,10 @@ impl AppState {
             // What it last reported before this run, for the chip until it reports again.
             last_model_name: saved.and_then(|s| s.last_model_name()),
             default_model,
-            started: saved.is_none_or(|s| s.started()),
+            // A message still being sent goes with the provider and login it was
+            // sent with.
+            started: saved
+                .is_none_or(|s| s.started() || s.pending().iter().any(|send| !send.refused)),
             choices,
         }
     }
@@ -2101,14 +2155,27 @@ impl AppState {
             return;
         }
         let (provider, account) = (key.provider, key.account.clone());
-        let directory = key.directory.clone();
+        let place = key.place.clone();
         if self.catalogs.ask(key, asker) {
-            let refused = match self.connection(provider, account.as_ref()) {
-                Ok(connection) => {
-                    connection.request_catalog(asker, directory.as_str());
-                    None
+            let refused = match &place {
+                CatalogPlace::Local(directory) => {
+                    match self.connection(provider, account.as_ref()) {
+                        Ok(connection) => {
+                            connection.request_catalog(asker, directory.as_str());
+                            None
+                        }
+                        Err(error) => Some(error),
+                    }
                 }
-                Err(error) => Some(error),
+                CatalogPlace::Remote(machine, folder) => {
+                    match self.remote_connection(machine, provider, account.as_ref()) {
+                        Ok(connection) => {
+                            connection.request_catalog(asker, folder.wire());
+                            None
+                        }
+                        Err(error) => Some(error),
+                    }
+                }
             };
             if let Some(error) = refused {
                 let failed = Commands::Failed(error.clone());
@@ -2264,28 +2331,37 @@ impl AppState {
                     event,
                 };
                 match event {
-                    // What a provider on another machine reports about its account is
-                    // that machine's, and Keystone keeps catalogs, usage and MCP
-                    // status for this machine's accounts only, so it never overwrites
-                    // theirs.
-                    Event::Catalog(_)
-                    | Event::Commands(_)
-                    | Event::Usage(_)
-                    | Event::McpStatus(_)
-                        if remote =>
-                    {
-                        events.push(placed(None))
-                    }
+                    // A catalog goes where its asker asked it, here or on the machine
+                    // it came from, and a machine's usage is kept as that machine's,
+                    // so neither overwrites another's. MCP status is kept for this
+                    // machine's sessions only. An event from a machine still takes its
+                    // place, so the host may trim it.
+                    Event::McpStatus(_) if remote => events.push(placed(None)),
                     Event::Catalog(catalog) => {
                         self.catalogs
                             .apply(provider, account.clone(), session, catalog);
+                        if remote {
+                            events.push(placed(None));
+                        }
                     }
                     Event::Commands(commands) => {
                         self.catalogs
                             .apply_commands(provider, account.clone(), session, commands);
+                        if remote {
+                            events.push(placed(None));
+                        }
                     }
                     Event::Usage(windows) => {
-                        self.record_usage(provider, account.as_ref(), windows, cx)
+                        self.record_usage(
+                            route.machine.as_ref(),
+                            provider,
+                            account.as_ref(),
+                            windows,
+                            cx,
+                        );
+                        if remote {
+                            events.push(placed(None));
+                        }
                     }
                     Event::McpStatus(servers) => {
                         self.record_mcp_status(provider, account.as_ref(), session, servers, cx)
@@ -2311,6 +2387,7 @@ impl AppState {
         }
         self.watch_links();
         self.receive_placed(reports, events, cx);
+        self.settle_pending(cx);
         self.pump_setups(cx);
         self.pump_orchestrator(cx);
         let reads = std::mem::take(&mut *self.recovery_reads.lock().unwrap());
@@ -2507,6 +2584,7 @@ impl AppState {
             let Some(event) = event else {
                 continue;
             };
+            let event = self.answer_send(session, event);
             match event {
                 Event::HistoryRead { ticket, result } => {
                     self.finish_recovery(session, ticket, result, cx);
@@ -2654,13 +2732,15 @@ impl AppState {
         }
     }
 
-    /// The latest usage readings of `provider`'s `account`; `None` is the default.
+    /// The latest usage readings of `provider`'s `account` on `machine`; `None` is
+    /// the default account, and this machine.
     pub(crate) fn usage(
         &self,
+        machine: Option<&MachineId>,
         provider: Provider,
         account: Option<&AccountId>,
     ) -> Option<&AccountUsage> {
-        self.usage.get(&usage_key(provider, account))
+        self.usage.get(&usage_key(machine, provider, account))
     }
 
     /// Keeps what a session of the account reported about its MCP servers, in place
@@ -2744,12 +2824,13 @@ impl AppState {
     /// run, and the account's next report saves every window again.
     fn record_usage(
         &mut self,
+        machine: Option<&MachineId>,
         provider: Provider,
         account: Option<&AccountId>,
         windows: Vec<LimitWindow>,
         cx: &mut Context<Self>,
     ) {
-        let key = usage_key(provider, account);
+        let key = usage_key(machine, provider, account);
         let usage = self.usage.entry(key.clone()).or_default();
         usage.record(windows, now_ms());
         let mut saves = self.usage_saves.lock().unwrap();
@@ -2820,6 +2901,34 @@ impl AppState {
         crate::machines::offline_reason(machine.label(), &status)
     }
 
+    /// For a session whose machine isn't connected, why its messages still sending
+    /// wait, and the machine's name: "Couldn't reach desk", or while the first link
+    /// of this run starts, "Connecting to desk".
+    pub(crate) fn unreached(&self, session: u64) -> Option<(String, String)> {
+        let (machine, status) = self.session_machine(session)?;
+        let label = machine.label().to_owned();
+        let reason = match status {
+            LinkStatus::Connected => return None,
+            LinkStatus::Connecting => format!("Connecting to {label}"),
+            LinkStatus::Reconnecting | LinkStatus::Failed(_) => format!("Couldn't reach {label}"),
+        };
+        Some((reason, label))
+    }
+
+    /// For a session whose turn runs on a machine that can't be reached now, the line
+    /// that says so. The turn ends when the machine says how it went, never before.
+    pub(crate) fn turn_waits(&self, session: u64) -> Option<String> {
+        let (machine, status) = self.session_machine(session)?;
+        if status == LinkStatus::Connected {
+            return None;
+        }
+        let running = self.conversations.get(&session).is_some_and(|c| c.running)
+            || self
+                .session(session)
+                .is_some_and(|s| s.last_turn() == Some(keystone_core::LastTurn::Running));
+        running.then(|| format!("Waiting for {} to say how this turn went", machine.label()))
+    }
+
     /// What the host said about itself when `machine` last connected.
     pub(crate) fn machine_welcome(&self, machine: &MachineId) -> Option<remote::Welcome> {
         self.links.get(machine)?.welcome()
@@ -2842,7 +2951,7 @@ impl AppState {
     /// A link to `destination` with a connection for each provider and account the
     /// machine's sessions run on, Claude on its default login included, each of which
     /// wakes the pump on every event and state change. Each is registered before the
-    /// link can receive a frame, so no event of theirs waits unclaimed.
+    /// link starts, so no event of theirs waits unclaimed.
     fn open_link(
         &self,
         destination: &str,
@@ -2869,7 +2978,21 @@ impl AppState {
                 routes.push(route);
             }
         }
-        let link = Link::with_cursors(self.transport(destination)?, client.to_owned(), saved);
+        // The host names the machine as the app does, by its label.
+        let name = machine
+            .and_then(|id| self.store.workspace().machine(id))
+            .map_or(destination, keystone_core::Machine::label)
+            .to_owned();
+        let link = Link::prepared(
+            self.transport(destination)?,
+            client.to_owned(),
+            saved,
+            Some(name),
+        );
+        #[cfg(test)]
+        if let Some(pause) = self.test_route_pause {
+            std::thread::sleep(pause);
+        }
         let connections = routes
             .into_iter()
             .filter_map(|(provider, account)| {
@@ -2887,6 +3010,8 @@ impl AppState {
                 }
             })
             .collect();
+        // Only now does the link read, with every route it can hear from registered.
+        link.start();
         Ok((link, connections))
     }
 
@@ -3047,33 +3172,43 @@ impl AppState {
     /// Puts what its machine's host last reported about `session` into its
     /// conversation, once the host has reported and the history has loaded. A report
     /// that arrives during the load is applied when the load ends.
+    /// Until the host has reported, as while its machine can't be reached, the turn a
+    /// restart left open says only that Keystone was closed during it: it went on
+    /// there, and the machine says how it ends.
     fn apply_host_state(&mut self, session: u64) {
         let Some(machine) = self.session(session).and_then(|s| s.machine()).cloned() else {
             return;
         };
+        let label = self
+            .store
+            .workspace()
+            .machine(&machine)
+            .map_or_else(|| machine.to_string(), |m| m.label().to_owned());
+        let note = format!("{REMOTE_CLOSED} {label}.");
         if self
             .links
             .get(&machine)
             .is_none_or(|link| link.reports() == 0)
         {
+            if let Some(conversation) = self.conversations.get_mut(&session)
+                && !conversation.is_loading()
+            {
+                conversation.closed_elsewhere(note);
+                self.commit(session);
+            }
             return;
         }
         let Some(connection) = self.session_remote(session) else {
             return;
         };
         let (running, waiting) = (connection.is_running(session), connection.waiting(session));
-        let label = self
-            .store
-            .workspace()
-            .machine(&machine)
-            .map_or_else(|| machine.to_string(), |m| m.label().to_owned());
         let Some(conversation) = self.conversations.get_mut(&session) else {
             return;
         };
         if conversation.is_loading() {
             return;
         }
-        conversation.host_state(running, waiting, format!("{REMOTE_CLOSED} {label}."));
+        conversation.host_state(running, waiting, note);
         self.commit(session);
     }
 
@@ -4408,8 +4543,11 @@ impl AppState {
             return Sent::No;
         }
         // The provider and account are fixed from the first message on. Saved before the
-        // message goes, so a crash after this leaves them fixed rather than free.
-        if !session.started()
+        // message goes, so a crash after this leaves them fixed rather than free. A
+        // message to another machine fixes them only once its host takes it.
+        let remote = matches!(place, Place::Remote(..));
+        if !remote
+            && !session.started()
             && let Err(error) = self.store.lock_model(id)
         {
             self.conversation(id).error = Some(format!(
@@ -4445,6 +4583,52 @@ impl AppState {
             self.refresh(cx);
             return Sent::No;
         }
+        // A message to another machine is saved as pending first, under the ID its
+        // host's answer will name, so it is answered after a relaunch too. It isn't a
+        // turn until the host takes it.
+        let again = if kind == SendKind::Again {
+            match self.resending.clone() {
+                Some(send) if remote => Some(send),
+                _ => return Sent::No,
+            }
+        } else {
+            None
+        };
+        let message = match &again {
+            Some(send) => send.clone(),
+            None => self.conversation(id).new_message_id(),
+        };
+        if remote {
+            let saved = match &again {
+                // Pending again under its own ID, which the host's answer will name.
+                Some(send) => match self.store.resend_send(id, send) {
+                    Ok(applied) if applied.value.is_some() => Ok(()),
+                    Ok(_) => return Sent::No,
+                    Err(error) => Err(error),
+                },
+                None => self
+                    .store
+                    .record_pending_send(
+                        id,
+                        keystone_core::PendingSend {
+                            id: message.clone(),
+                            text: text.clone(),
+                            attachments: draft.attachments.clone(),
+                            refused: false,
+                            ran: false,
+                        },
+                        now_ms(),
+                    )
+                    .map(|_| ()),
+            };
+            if let Err(error) = saved {
+                self.conversation(id).error = Some(format!("Not sent: {error}"));
+                self.commit(id);
+                self.publish(cx);
+                return Sent::No;
+            }
+            self.asked.insert(message.clone());
+        }
         // The saves above must be on disk before the provider can see the message, and
         // so must any that an earlier refused send left queued. A failure to start the
         // provider arrives later as an error in this conversation. A refusal comes now,
@@ -4452,6 +4636,7 @@ impl AppState {
         // and tried again once they are.
         if !self.store.is_durable(self.store.revision()) {
             if matches!(kind, SendKind::Result | SendKind::Scheduled) {
+                self.unsend(id, remote.then_some(&message), again.is_some());
                 return Sent::Later;
             }
             self.store.retry();
@@ -4460,6 +4645,7 @@ impl AppState {
                 .wait(self.store.revision(), keystone_core::WRITER_WAIT)
             {
                 let error = error.map(|error| error.to_string()).unwrap_or_default();
+                self.unsend(id, remote.then_some(&message), again.is_some());
                 self.conversation(id).error = Some(
                     format!("Not sent. Could not finish saving changes. {error}")
                         .trim_end()
@@ -4490,6 +4676,9 @@ impl AppState {
                 {
                     connection.set_fork(id, point.clone());
                 }
+                if remote {
+                    connection.tag_send(id, &message);
+                }
                 match caller {
                     Some(caller) => connection.send_from(
                         id,
@@ -4515,6 +4704,7 @@ impl AppState {
             Err(error) => Err(error),
         };
         if let Err(reason) = sent {
+            self.unsend(id, remote.then_some(&message), again.is_some());
             // Shown in the session's transcript, where a draft save cannot clear it.
             self.conversation(id).error = Some(reason);
             self.commit(id);
@@ -4525,10 +4715,22 @@ impl AppState {
             self.attachments.touch(attachment);
         }
         self.setup_sent(id);
-        self.conversation(id)
-            .push_sent(&text, draft.attachments.clone());
+        if again.is_some() {
+            // Its bubble, with its images, is already there: it reads as sending again.
+            self.conversation(id).send_again(&message);
+        } else {
+            self.conversation(id)
+                .push_message(crate::conversation::Sent {
+                    id: message,
+                    text: text.clone(),
+                    attachments: draft.attachments.clone(),
+                    sending: remote,
+                });
+        }
         self.commit(id);
-        let _ = self.store.record_message(id, &text, now_ms());
+        if !remote {
+            let _ = self.store.record_message(id, &text, now_ms());
+        }
         if kind == SendKind::Draft {
             let _ = self.store.set_draft(id, String::new());
             if !draft.attachments.is_empty() {
@@ -4537,6 +4739,199 @@ impl AppState {
         }
         self.refresh(cx);
         Sent::Yes
+    }
+
+    /// Saves what the machine said about a message sent to it: taken, it is the
+    /// session's running turn and fixes its provider and login; refused, the session
+    /// stays as it was, the message stays in its bubble to be sent again, and a refused
+    /// login says how to go on. Returns the event to show.
+    fn answer_send(&mut self, session: u64, event: Event) -> Event {
+        match event {
+            Event::Taken { send } => {
+                let _ = self.store.take_send(session, &send);
+                self.changes.sidebar = true;
+                Event::Taken { send }
+            }
+            Event::NotSent {
+                send,
+                message,
+                login,
+            } => {
+                let _ = self.store.refuse_send(session, &send);
+                self.changes.sidebar = true;
+                let unfixed = self.session(session).is_some_and(|s| !s.started());
+                let message = if login && unfixed {
+                    format!("{message}. {WAY_OUT}")
+                } else {
+                    message
+                };
+                Event::NotSent {
+                    send,
+                    message,
+                    login,
+                }
+            }
+            event => event,
+        }
+    }
+
+    /// Undoes the saving of a message that never went: a new one is forgotten, and one
+    /// sent again is refused as it was, still in its bubble to be sent again.
+    fn unsend(&mut self, session: u64, send: Option<&String>, again: bool) {
+        let Some(send) = send else {
+            return;
+        };
+        let _ = if again {
+            self.store.refuse_send(session, send)
+        } else {
+            self.store.withdraw_send(session, send)
+        };
+    }
+
+    /// The message its machine refused as `send`, if the session holds one.
+    pub(crate) fn refused_send(
+        &self,
+        session: u64,
+        send: &str,
+    ) -> Option<keystone_core::PendingSend> {
+        self.session(session)?
+            .pending()
+            .iter()
+            .find(|p| p.id == send && p.refused)
+            .cloned()
+    }
+
+    /// Sends the message its machine refused as `send` again, under that same ID, with
+    /// its text and images, through the login the session has now. The host runs a
+    /// refused message as new and answers one it took with its recorded `ok`, running
+    /// nothing, so pressing it can never run a message twice. The draft is untouched.
+    pub(crate) fn send_again(&mut self, session: u64, send: &str, cx: &mut Context<Self>) -> bool {
+        let Some(refused) = self.refused_send(session, send) else {
+            return false;
+        };
+        self.resending = Some(send.to_owned());
+        let sent = self.send_message_from(
+            ComposerDraft {
+                session,
+                text: refused.text,
+                attachments: refused.attachments,
+            },
+            None,
+            SendKind::Again,
+            cx,
+        );
+        self.resending = None;
+        sent == Sent::Yes
+    }
+
+    /// Takes the message its machine refused as `send` out of its bubble into the empty
+    /// composer, text and images, to write a new message from. Its bubble reads
+    /// "Edited". `composer_empty` is what the composer on screen holds, which the saved
+    /// draft can lag behind; with anything in it this does nothing.
+    pub(crate) fn edit_refused(
+        &mut self,
+        session: u64,
+        send: &str,
+        composer_empty: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.phase != Phase::Running || !composer_empty {
+            return false;
+        }
+        let Some(refused) = self.refused_send(session, send) else {
+            return false;
+        };
+        if self.store.withdraw_send(session, send).is_err() {
+            return false;
+        }
+        let _ = self.store.set_draft(session, refused.text);
+        let _ = self
+            .store
+            .set_draft_attachments(session, refused.attachments);
+        self.changes.drafts.push(session);
+        self.conversation(session).edited(send);
+        self.commit(session);
+        self.changes.sidebar = true;
+        self.refresh(cx);
+        true
+    }
+
+    /// Asks each machine what became of the messages its sessions sent before this
+    /// launch and still have pending, once it is connected. Only the machine says a
+    /// message wasn't sent: while it can't be reached, a message stays pending, its
+    /// bubble says so, and it is asked about when the machine is reached, in this run
+    /// or a later one. The user may [`AppState::discard_send`] it meanwhile.
+    fn settle_pending(&mut self, _cx: &mut Context<Self>) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        self.watch_links();
+        let waiting: Vec<_> = self
+            .store
+            .workspace()
+            .sessions()
+            .iter()
+            .filter_map(|s| {
+                let machine = s.machine()?.clone();
+                let sends: Vec<String> = s
+                    .pending()
+                    .iter()
+                    .filter(|send| !send.refused && !self.asked.contains(&send.id))
+                    .map(|send| send.id.clone())
+                    .collect();
+                (!sends.is_empty())
+                    .then(|| (s.id(), machine, s.provider(), s.account().cloned(), sends))
+            })
+            .collect();
+        for (session, machine, provider, account, sends) in waiting {
+            // Made whatever the link's state, so its connecting wakes the app to ask.
+            if self
+                .remote_connection(&machine, provider, account.as_ref())
+                .is_err()
+                || self.links.get(&machine).map(Link::status) != Some(LinkStatus::Connected)
+            {
+                continue;
+            }
+            let key = (machine, provider, account);
+            for send in sends {
+                if self.remote[&key].recall(session, &send).is_ok() {
+                    self.asked.insert(send);
+                }
+            }
+        }
+    }
+
+    /// Gives up the message the session sent as `send` while its machine can't say what
+    /// became of it, so the session is free again: it leaves the session's pending
+    /// messages, its call is never sent again, and its bubble reads as discarded. The
+    /// machine may already have run it, so its text doesn't go back to the draft; if
+    /// the machine's journal shows it ran, its turn shows and its bubble reads as sent.
+    pub(crate) fn discard_send(&mut self, session: u64, send: &str, cx: &mut Context<Self>) {
+        if self.phase != Phase::Running {
+            return;
+        }
+        let Some(saved) = self.session(session) else {
+            return;
+        };
+        let (machine, provider, account) = match saved.machine() {
+            Some(machine) => (machine.clone(), saved.provider(), saved.account().cloned()),
+            None => return,
+        };
+        if !saved.pending().iter().any(|p| p.id == send && !p.refused) {
+            return;
+        }
+        let _ = self.store.withdraw_send(session, send);
+        self.asked.insert(send.to_owned());
+        if self
+            .remote_connection(&machine, provider, account.as_ref())
+            .is_ok()
+        {
+            self.remote[&(machine, provider, account)].abandon(send);
+        }
+        self.conversation(session).discard(send);
+        self.commit(session);
+        self.changes.sidebar = true;
+        self.refresh(cx);
     }
 
     pub(crate) fn stop_turn(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -4803,14 +5198,21 @@ fn real_path(path: &std::path::Path) -> PathBuf {
     keystone_core::lexical(&joined)
 }
 
-/// Where an account's usage is saved: the provider and the account ID, or `default`.
-fn usage_key(provider: Provider, account: Option<&AccountId>) -> String {
+/// Where an account's usage is saved: the provider and the account ID, or `default`,
+/// after `machine/<id>/` for an account on another machine, whose default login is
+/// not this machine's.
+fn usage_key(
+    machine: Option<&MachineId>,
+    provider: Provider,
+    account: Option<&AccountId>,
+) -> String {
     let provider = match provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
     };
+    let machine = machine.map_or_else(String::new, |id| format!("machine/{id}/"));
     format!(
-        "{provider}/{}",
+        "{machine}{provider}/{}",
         account.map_or(AccountId::DEFAULT, AccountId::as_str)
     )
 }

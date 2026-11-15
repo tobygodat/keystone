@@ -48,6 +48,10 @@ pub struct RowControls {
     pub result: Option<SharedString>,
     /// A message row's Fork from here control.
     pub fork: Option<ForkControl>,
+    /// A message still sending whose machine isn't connected: what to say and Discard.
+    pub unreached: Option<UnreachedControl>,
+    /// A message its machine refused: Send again and Edit.
+    pub refused: Option<RefusedControl>,
     /// The Restore to here control on the last reply of a turn with a checkpoint.
     pub restore: Option<RestoreControl>,
     /// A finished reply's Second opinion control: its selector and what it does.
@@ -130,6 +134,25 @@ fn restore_button(index: usize, control: RestoreControl, quiet: bool, cx: &App) 
             )
         })
         .into_any_element()
+}
+
+/// A message still sending to a machine that isn't connected: why it still waits, and
+/// Discard, which gives it up so the session is free again.
+pub struct UnreachedControl {
+    /// Such as "Couldn't reach desk".
+    pub reason: String,
+    /// The machine's name, for the warning that it may already have run the message.
+    pub machine: String,
+    pub on_discard: ClickHandler,
+}
+
+/// A message its machine refused, still in its bubble: Send again sends it under its
+/// own ID; Edit takes it into the empty composer to write a new one.
+pub struct RefusedControl {
+    pub on_send_again: ClickHandler,
+    pub on_edit: ClickHandler,
+    /// Why Edit can't run now, such as the composer holding text.
+    pub edit_blocked: Option<&'static str>,
 }
 
 pub struct ForkControl {
@@ -626,6 +649,8 @@ pub fn row(
     cx: &App,
 ) -> AnyElement {
     let RowControls {
+        unreached,
+        refused,
         action,
         selected,
         activity,
@@ -686,14 +711,120 @@ pub fn row(
                         .when_some(fork, |d, fork| d.child(fork_button(index, fork, &action))),
                 )
                 .child(
-                    div()
-                        .max_w(px(620.))
-                        .px_3()
-                        .py_2()
-                        .rounded(radius::ROW)
-                        .bg(colors.element_filled)
-                        .text_color(colors.text_strong)
-                        .child(marked(item.text.clone(), 0)),
+                    v_flex()
+                        .items_end()
+                        .gap_1()
+                        .child(
+                            div()
+                                .max_w(px(620.))
+                                .px_3()
+                                .py_2()
+                                .rounded(radius::ROW)
+                                .bg(colors.element_filled)
+                                // A message its machine refused never reached the agent.
+                                .text_color(
+                                    if matches!(
+                                        item.status,
+                                        ItemStatus::Failed | crate::conversation::EDITED
+                                    ) {
+                                        colors.text_muted
+                                    } else {
+                                        colors.text_strong
+                                    },
+                                )
+                                .child(marked(item.text.clone(), 0)),
+                        )
+                        .when(item.status == ItemStatus::Failed, |d| {
+                            d.child(
+                                h_flex()
+                                    .automation_id(format!("not-sent-{index}"))
+                                    .gap_2()
+                                    .child(
+                                        Label::new("Not sent")
+                                            .size(TextSize::Sm)
+                                            .color(Color::Muted),
+                                    )
+                                    .when_some(refused, |d, refused| {
+                                        let edit = Button::new(("edit-message", index), "Edit")
+                                            .style(ButtonStyle::Subtle)
+                                            .size(ButtonSize::Compact)
+                                            .debug_selector(move || format!("edit-message-{index}"))
+                                            .disabled(refused.edit_blocked.is_some())
+                                            .tooltip(Tooltip::text(
+                                                "Write a new message from this one",
+                                            ))
+                                            .on_click(refused.on_edit);
+                                        // A disabled button shows no tooltip, so the
+                                        // reason sits on its wrapper.
+                                        let edit = div()
+                                            .id(("edit-message-why", index))
+                                            .when_some(refused.edit_blocked, |d, why| {
+                                                d.tooltip(Tooltip::text(why).builder())
+                                            })
+                                            .child(edit);
+                                        d.child(
+                                            Button::new(("send-again", index), "Send again")
+                                                .style(ButtonStyle::Subtle)
+                                                .size(ButtonSize::Compact)
+                                                .debug_selector(move || {
+                                                    format!("send-again-{index}")
+                                                })
+                                                .tooltip(Tooltip::text(
+                                                    "Send this message again, as it is",
+                                                ))
+                                                .on_click(refused.on_send_again),
+                                        )
+                                        .child(edit)
+                                    }),
+                            )
+                        })
+                        // Taken out of its bubble to write a new message from.
+                        .when(item.status == crate::conversation::EDITED, |d| {
+                            d.child(
+                                div().automation_id(format!("edited-{index}")).child(
+                                    Label::new("Edited").size(TextSize::Sm).color(Color::Muted),
+                                ),
+                            )
+                        })
+                        // Sent to another machine, whose host hasn't answered yet.
+                        .when(item.status == ItemStatus::InProgress, |d| match unreached {
+                            None => d.child(div().automation_id(format!("sending-{index}")).child(
+                                Label::new("Sending").size(TextSize::Sm).color(Color::Muted),
+                            )),
+                            Some(unreached) => d.child(
+                                h_flex()
+                                    .automation_id(format!("unreached-{index}"))
+                                    .gap_2()
+                                    .child(
+                                        Label::new(unreached.reason)
+                                            .size(TextSize::Sm)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        Button::new(("discard-message", index), "Discard")
+                                            .style(ButtonStyle::Subtle)
+                                            .size(ButtonSize::Compact)
+                                            .debug_selector(move || {
+                                                format!("discard-message-{index}")
+                                            })
+                                            .tooltip(Tooltip::text(format!(
+                                                "{} may already have run it",
+                                                unreached.machine
+                                            )))
+                                            .on_click(unreached.on_discard),
+                                    ),
+                            ),
+                        })
+                        // Given up while its machine couldn't say what became of it.
+                        .when(item.status == ItemStatus::Interrupted, |d| {
+                            d.child(
+                                div().automation_id(format!("discarded-{index}")).child(
+                                    Label::new("Discarded")
+                                        .size(TextSize::Sm)
+                                        .color(Color::Muted),
+                                ),
+                            )
+                        }),
                 )
                 .into_any_element(),
             ItemKind::AgentMessage => {

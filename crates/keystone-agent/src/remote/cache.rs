@@ -18,8 +18,13 @@ const MAX_IMAGE: u64 = 64 * 1024 * 1024;
 const KEEP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How long a cut-off upload's part stays.
 const KEEP_PART: Duration = Duration::from_secs(24 * 60 * 60);
+/// The most every unfinished upload together may hold, so cut-off uploads can't fill
+/// the disk.
+const MAX_PARTS: u64 = 4 * MAX_IMAGE;
 
-pub(crate) const GONE: &str = "An image in this message isn't in the machine's cache any more, so the message wasn't sent. Send it again";
+/// What [`Cache::image`] says of an image it doesn't hold; the daemon names the
+/// machine in its place when it refuses the message.
+pub(crate) const GONE: &str = "An image in this message is no longer in the machine's cache";
 
 pub(crate) struct Cache {
     dir: PathBuf,
@@ -38,6 +43,21 @@ fn extension(media_type: &str) -> Option<&'static str> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The SHA-256 of the file at `path`, read in pieces.
+fn file_hash(path: &std::path::Path) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut reading = File::open(path)?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = reading.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex(&hasher.finalize()))
 }
 
 fn check_hash(sha256: &str) -> Result<(), String> {
@@ -70,8 +90,9 @@ impl Cache {
     }
 
     /// Writes part of an image at `offset`. The part that ends the image is checked
-    /// against its hash before the image is kept. An image already kept takes no
-    /// part again.
+    /// against its hash before the image is kept. An image already kept, whose bytes
+    /// still match its hash, takes no part again; one that no longer matches is
+    /// dropped and taken again.
     pub fn put(
         &self,
         attached: &Attached,
@@ -83,16 +104,27 @@ impl Cache {
         if size > MAX_IMAGE {
             return Err(format!("A {size} byte image is over the machine's limit"));
         }
-        if file.exists() {
+        if self.kept(&file, &attached.sha256) {
             return Ok(());
         }
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
             .map_err(|e| format!("An image part isn't base64: {e}"))?;
-        let end = offset + bytes.len() as u64;
-        if bytes.len() > CHUNK || end > size || (bytes.is_empty() && size > 0) {
+        let end = offset.checked_add(bytes.len() as u64);
+        if bytes.len() > CHUNK || end.is_none_or(|end| end > size) || (bytes.is_empty() && size > 0)
+        {
             return Err("An image part doesn't fit its image".into());
         }
+        let end = end.expect("checked above");
         let part = self.dir.join(format!("{}.part", attached.sha256));
+        if offset == 0 {
+            self.prune_parts(&part);
+        }
+        if self.parts_size(&part).saturating_add(bytes.len() as u64) > MAX_PARTS {
+            return Err(
+                "Too many unfinished image uploads wait on the machine. Send the message again later"
+                    .into(),
+            );
+        }
         let mut options = File::options();
         options.write(true).create(true).mode(0o600);
         if offset == 0 {
@@ -117,26 +149,72 @@ impl Cache {
         if end < size {
             return Ok(());
         }
-        let mut hasher = Sha256::new();
-        let mut reading = File::open(&part).map_err(|e| e.to_string())?;
-        let mut buffer = vec![0u8; 64 * 1024];
-        loop {
-            let read = reading.read(&mut buffer).map_err(|e| e.to_string())?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        if hex(&hasher.finalize()) != attached.sha256 {
+        if file_hash(&part).map_err(|e| e.to_string())? != attached.sha256 {
             let _ = fs::remove_file(&part);
             return Err("An image's bytes don't match its hash, so it wasn't kept".into());
         }
         fs::rename(&part, &file).map_err(|e| format!("Could not keep an image: {e}"))
     }
 
+    /// Whether `file` is kept and its bytes still match `sha256`. One that doesn't
+    /// match, rewritten or damaged, is removed, so it reads as missing and is
+    /// uploaded again.
+    fn kept(&self, file: &std::path::Path, sha256: &str) -> bool {
+        match file_hash(file) {
+            Ok(found) if found == sha256 => true,
+            Ok(_) => {
+                let _ = fs::remove_file(file);
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// What every unfinished upload but `except` holds.
+    fn parts_size(&self, except: &std::path::Path) -> u64 {
+        fs::read_dir(&self.dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().extension().is_some_and(|e| e == "part"))
+                    .filter(|entry| entry.path() != except)
+                    .filter_map(|entry| entry.metadata().ok())
+                    .map(|metadata| metadata.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Removes parts of uploads cut off more than [`KEEP_PART`] ago, but `except`.
+    fn prune_parts(&self, except: &std::path::Path) {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        let now = SystemTime::now();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == except || path.extension().is_none_or(|e| e != "part") {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > KEEP_PART);
+            if old {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
     /// The kept image `attached` names, for a provider to read, marked as used now.
+    /// One whose bytes no longer match its hash is removed and reads as missing.
     pub fn image(&self, attached: &Attached) -> Result<Image, String> {
         let path = self.file(attached)?;
+        if !self.kept(&path, &attached.sha256) {
+            return Err(GONE.to_owned());
+        }
         let file = File::options()
             .write(true)
             .open(&path)
@@ -206,6 +284,54 @@ mod tests {
         assert!(kept.path.to_string_lossy().ends_with(".png"));
         cache.put(&image, 10, 0, &b64(b"x")).unwrap();
         assert_eq!(std::fs::read(&kept.path).unwrap(), bytes, "kept once");
+    }
+
+    #[test]
+    fn a_kept_image_whose_bytes_changed_is_dropped_and_taken_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path().join("attachments")).unwrap();
+        let bytes = b"the real picture";
+        let image = attached(bytes);
+        cache
+            .put(&image, bytes.len() as u64, 0, &b64(bytes))
+            .unwrap();
+        let kept = cache.image(&image).unwrap().path;
+        std::fs::write(&kept, b"something else").unwrap();
+        assert_eq!(cache.image(&image).unwrap_err(), GONE);
+        assert!(!kept.exists(), "the tampered file is gone");
+        std::fs::write(&kept, b"tampered again").unwrap();
+        cache
+            .put(&image, bytes.len() as u64, 0, &b64(bytes))
+            .unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), bytes, "taken again whole");
+        assert_eq!(cache.image(&image).unwrap().path, kept);
+    }
+
+    #[test]
+    fn a_part_past_the_end_of_numbers_or_of_the_parts_bound_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path().join("attachments")).unwrap();
+        let image = attached(b"abcd");
+        assert!(
+            cache.put(&image, 4, u64::MAX, &b64(b"ab")).is_err(),
+            "no overflow"
+        );
+        // Cut-off uploads that already hold the bound leave no room for another.
+        let filler = std::fs::File::create(
+            dir.path()
+                .join(format!("attachments/{}.part", "f".repeat(64))),
+        )
+        .unwrap();
+        filler.set_len(MAX_PARTS).unwrap();
+        let refused = cache.put(&image, 4, 0, &b64(b"abcd")).unwrap_err();
+        assert!(refused.contains("Too many unfinished"), "{refused}");
+        let old = SystemTime::now() - KEEP_PART - Duration::from_secs(60);
+        filler.set_modified(old).unwrap();
+        cache.put(&image, 4, 0, &b64(b"abcd")).unwrap();
+        assert!(
+            cache.image(&image).is_ok(),
+            "a stale part went with the next upload"
+        );
     }
 
     #[test]

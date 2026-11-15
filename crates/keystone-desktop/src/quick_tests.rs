@@ -338,7 +338,7 @@ fn each_project_gets_its_own_catalog_when_one_is_chosen_while_another_loads(
             [first, view.catalog_key().unwrap()]
         })
         .unwrap();
-    assert_ne!(keys[0].directory, keys[1].directory);
+    assert_ne!(keys[0].place, keys[1].place);
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         cx.run_until_parked();

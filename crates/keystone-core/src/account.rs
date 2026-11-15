@@ -113,6 +113,14 @@ impl Account {
     pub(crate) fn set_label(&mut self, label: String) {
         self.label = label;
     }
+
+    /// Moves a login on another machine to `home` there. The store allows it only
+    /// while no session has sent with it.
+    pub(crate) fn set_remote_home(&mut self, home: &RemoteFolder) {
+        if self.machine.is_some() {
+            self.home = PathBuf::from(home.wire());
+        }
+    }
 }
 
 /// `home` made absolute: a leading `~` becomes `user_home`, since child processes
@@ -157,14 +165,27 @@ pub fn lexical(path: &Path) -> PathBuf {
     normal
 }
 
-/// Whether two homes would share files: the same folder, or one inside the other.
+/// Whether two homes would share files: the same folder, or one inside the other. On
+/// macOS, whose volumes usually ignore case, they are compared case-folded, so
+/// `~/.CODEX` is `~/.codex` there; that refuses more, never less.
 pub fn homes_overlap(a: &Path, b: &Path) -> bool {
+    homes_overlap_folding(a, b, cfg!(target_os = "macos"))
+}
+
+/// [`homes_overlap`], case-folded when `fold` is set.
+pub fn homes_overlap_folding(a: &Path, b: &Path, fold: bool) -> bool {
+    if fold {
+        let folded = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
+        let (a, b) = (folded(a), folded(b));
+        return a.starts_with(&b) || b.starts_with(&a);
+    }
     a.starts_with(b) || b.starts_with(a)
 }
 
 /// [`homes_overlap`] for two folders on another machine, by their text alone, since
-/// only that machine can resolve them.
+/// only that machine can resolve them, and case-folded, since it may be a Mac.
 pub fn remote_homes_overlap(a: &RemoteFolder, b: &RemoteFolder) -> bool {
+    let (a, b) = (a.wire().to_lowercase(), b.wire().to_lowercase());
     let within = |inner: &str, outer: &str| {
         inner == outer
             || outer == "/"
@@ -172,7 +193,7 @@ pub fn remote_homes_overlap(a: &RemoteFolder, b: &RemoteFolder) -> bool {
                 .strip_prefix(outer)
                 .is_some_and(|r| r.starts_with('/'))
     };
-    within(a.wire(), b.wire()) || within(b.wire(), a.wire())
+    within(&a, &b) || within(&b, &a)
 }
 
 /// A slug for `label` that no account in `taken` uses and that is never
@@ -236,6 +257,31 @@ mod tests {
         assert!(expand_home("/", None).is_err());
         assert!(expand_home("/a/..", None).is_err());
         assert!(expand_home("", None).is_err());
+    }
+
+    #[test]
+    fn a_case_insensitive_volume_compares_homes_case_folded() {
+        let default = Path::new("/Users/dev/.codex");
+        let shouting = Path::new("/Users/Toby/.CODEX/work");
+        assert!(homes_overlap_folding(shouting, default, true));
+        assert!(homes_overlap_folding(
+            default,
+            Path::new("/USERS/TOBY/.CODEX"),
+            true
+        ));
+        assert!(
+            !homes_overlap_folding(shouting, default, false),
+            "case counts elsewhere"
+        );
+        assert!(
+            !homes_overlap_folding(Path::new("/Users/dev/.codex-work"), default, true),
+            "a shared prefix is still not inside"
+        );
+        assert_eq!(
+            homes_overlap(shouting, default),
+            cfg!(target_os = "macos"),
+            "folded on macOS only"
+        );
     }
 
     #[test]

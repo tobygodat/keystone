@@ -19,6 +19,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// ID prefix for a sent message shown before the provider echoes it.
 const LOCAL: &str = "local:";
+/// How an error line about a message that wasn't sent begins.
+const NOT_SENT: &str = "Not sent.";
+/// The status of a message its machine refused that the user took out of its bubble to
+/// edit into a new one: a message the user declined to send again as it was.
+pub const EDITED: ItemStatus = ItemStatus::Declined;
+/// How many sent messages the provider's copies are matched against by ID.
+const ECHOES_KEPT: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
@@ -157,6 +164,16 @@ pub struct Conversation {
     uncertain_tail: bool,
     /// The row restore added to say Keystone closed mid-turn, replaced by recovery.
     closed_marker: Option<usize>,
+    /// Messages sent to another machine that it took, oldest first, until the
+    /// provider's copy of each replaces its row ([`Conversation::position_for`]).
+    echo_due: Vec<String>,
+    /// Messages the app sent whose rows the provider's copies replaced. An answer to
+    /// one logged after its copy finds no row to replace, and adds none.
+    echoed: HashSet<String>,
+    /// Where a copy that replaced a message outside the current turn's rows went, by
+    /// the copy's ID, so its later events, such as its completion after its start,
+    /// find that row rather than adding another.
+    echo_at: HashMap<String, usize>,
     /// While restore applies saved recovery batches: the log position each row came
     /// from, so a batch only touches rows logged before it.
     origins: Option<Vec<usize>>,
@@ -211,8 +228,18 @@ impl Default for Run {
     }
 }
 
+/// A message the app sent, as the transcript shows it.
+pub struct Sent {
+    /// Its row's ID, which a message to another machine is also sent under.
+    pub id: String,
+    pub text: String,
+    pub attachments: Vec<keystone_core::Attachment>,
+    /// Sent to another machine whose host hasn't answered yet.
+    pub sending: bool,
+}
+
 enum Pending {
-    Local(String, Vec<keystone_core::Attachment>),
+    Local(Sent),
     Note(String),
     Event(Event),
 }
@@ -344,7 +371,7 @@ impl Conversation {
         self.changed.extend(0..self.rows.len());
         for pending in pending {
             match pending {
-                Pending::Local(text, attachments) => self.push_sent(&text, attachments),
+                Pending::Local(sent) => self.push_message(sent),
                 Pending::Note(text) => self.push_note(text),
                 Pending::Event(event) => {
                     self.apply(event);
@@ -471,11 +498,25 @@ impl Conversation {
                 (None, _) => next,
             };
             let mut ended = false;
+            // The provider's copy of a message the app sent may come in a later run,
+            // when a machine replays its turn, and before the machine's answer to a
+            // message still sending: only a message it took is ever copied.
+            if let Entry::Item { item, .. } = &entry
+                && item.id.starts_with(LOCAL)
+                && item.kind == ItemKind::UserMessage
+                && matches!(
+                    item.status,
+                    ItemStatus::Completed | ItemStatus::InProgress | ItemStatus::Interrupted
+                )
+            {
+                self.expect_echo(item.id.clone());
+            }
             let row = match entry {
                 Entry::TurnStarted => {
                     open_turn = true;
                     None
                 }
+                Entry::Item { item, .. } if self.echoed.contains(&item.id) => None,
                 Entry::Item { item, .. } => match self.position_for(&item) {
                     Some(index) => {
                         // A gap marker saved again may stand for an earlier lost entry.
@@ -630,6 +671,8 @@ impl Conversation {
         self.uncertain_tail = (open_turn || last_local) && !settled || exited;
         self.recovery = review.map(Recovery::Review);
         self.turn_start = self.rows.len();
+        // Restore orders rows by place, so the places noted while it ran mean nothing.
+        self.echo_at.clear();
     }
 
     /// The provider exited during a turn: its outcome is unknown until recovery reads
@@ -638,6 +681,16 @@ impl Conversation {
     fn provider_exited(&mut self) {
         self.uncertain_tail = true;
         self.write(Entry::ProviderExited, true);
+    }
+
+    /// The turn a restart left open ran on another machine that hasn't reported yet:
+    /// its marker says it went on there, not that it stopped, while
+    /// [`Conversation::host_state`] still waits for the machine's report.
+    pub fn closed_elsewhere(&mut self, note: String) {
+        if let Some(marker) = self.closed_marker {
+            self.rows[marker] = Row::Note(note);
+            self.mark(marker);
+        }
     }
 
     /// What the machine running a session on another machine reports about it, after
@@ -1034,28 +1087,113 @@ impl Conversation {
         self.push_sent(text, Vec::new());
     }
 
+    /// Shows whether the host took the message the app saved as `send`, in the log
+    /// too: its row is logged again under its ID, which replaces it on restore. Only
+    /// that message is marked, whichever order the answers come in.
+    /// Marks the message sent as `send` with `status`, returning the status it had.
+    fn answer_sent(&mut self, send: &str, status: ItemStatus) -> Option<ItemStatus> {
+        let index = self
+            .rows
+            .iter()
+            .rposition(|row| matches!(row, Row::Item(item) if item.id == send))?;
+        let Row::Item(item) = &mut self.rows[index] else {
+            return None;
+        };
+        let was = item.status;
+        if was == status {
+            return Some(was);
+        }
+        item.status = status;
+        let item = item.clone();
+        self.changed.insert(index);
+        self.log_item(index, item);
+        Some(was)
+    }
+
+    /// Shows the message the app sent as `send` as discarded: given up while its machine
+    /// couldn't say what became of it, so its outcome is unknown. The machine may have
+    /// run it, so the provider's copy of it still replaces it.
+    pub fn discard(&mut self, send: &str) {
+        let _ = self.answer_sent(send, ItemStatus::Interrupted);
+        self.expect_echo(send.to_owned());
+    }
+
+    /// Shows the refused message the app sent as `send` as sending again, under its ID,
+    /// as a new message to another machine reads until its host answers.
+    pub fn send_again(&mut self, send: &str) {
+        let _ = self.answer_sent(send, ItemStatus::InProgress);
+        if self
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with(NOT_SENT))
+        {
+            self.error = None;
+        }
+        self.running = true;
+    }
+
+    /// Shows the refused message the app sent as `send` as taken out to edit. If its
+    /// host's record later shows it ran, a `Taken` still marks it sent.
+    pub fn edited(&mut self, send: &str) {
+        let _ = self.answer_sent(send, EDITED);
+        if self
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with(NOT_SENT))
+        {
+            self.error = None;
+        }
+    }
+
+    /// A new ID for a message this run sends: unique across restarts, since a
+    /// reloaded log already holds earlier ones.
+    pub fn new_message_id(&self) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("{LOCAL}{nanos}-{}", self.rows.len())
+    }
+
     /// Shows and logs a sent message at once. Steers are not always echoed back, so
     /// the message is logged now; the provider's copy replaces it if one arrives. The
     /// images sent with it follow in a row of their own, which the log holds as
     /// references, not bytes.
     pub fn push_sent(&mut self, text: &str, attachments: Vec<keystone_core::Attachment>) {
+        let id = self.new_message_id();
+        self.push_message(Sent {
+            id,
+            text: text.to_owned(),
+            attachments,
+            sending: false,
+        });
+    }
+
+    /// Shows and logs `sent`, which reads as sending until its machine answers when
+    /// `sending` is set.
+    pub fn push_message(&mut self, sent: Sent) {
         if let Some(pending) = &mut self.pending {
-            pending.push(Pending::Local(text.to_owned(), attachments));
+            pending.push(Pending::Local(sent));
             // The message has already gone to the provider, so the turn is running
             // now, and Stop is offered before the history arrives.
             self.running = true;
             self.error = None;
             return;
         }
-        // Unique across restarts: a reloaded log already holds earlier local IDs.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
+        let Sent {
+            id,
+            text,
+            attachments,
+            sending,
+        } = sent;
         let item = Item {
-            id: format!("{LOCAL}{nanos}-{}", self.rows.len()),
+            id,
             kind: ItemKind::UserMessage,
-            text: text.to_owned(),
-            status: ItemStatus::Completed,
+            text,
+            status: if sending {
+                ItemStatus::InProgress
+            } else {
+                ItemStatus::Completed
+            },
         };
         if !self.running {
             self.turn_start = self.rows.len();
@@ -1147,7 +1285,15 @@ impl Conversation {
             Event::Catalog(_) | Event::Commands(_) | Event::Usage(_) | Event::McpStatus(_) => {}
             Event::TurnStarted => {
                 self.running = true;
-                self.error = None;
+                // A refusal stays readable through another message's turn, which can
+                // start just after it; the user's next send clears it.
+                if !self
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with(NOT_SENT))
+                {
+                    self.error = None;
+                }
                 self.write(Entry::TurnStarted, false);
             }
             Event::ItemStarted(item) => {
@@ -1260,6 +1406,45 @@ impl Conversation {
                 self.turn_start = self.rows.len();
             }
             Event::Warning { message } => self.error = Some(message),
+            // The host's record wins: a message shown as not sent or discarded that it
+            // took reads sent, and a "Not sent" line about it goes.
+            Event::Taken { send } => {
+                let was = self.answer_sent(&send, ItemStatus::Completed);
+                if matches!(was, Some(ItemStatus::Failed | EDITED))
+                    && self
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with(NOT_SENT))
+                {
+                    self.error = None;
+                }
+                self.expect_echo(send);
+            }
+            // The machine refused the message before any provider saw it: its bubble
+            // says so, and the app puts the draft back. The turn is over only when no
+            // message sent since it began is waiting or was taken. A message the host's
+            // record already shows taken stays sent.
+            Event::NotSent { send, message, .. } => {
+                let taken = self.rows.iter().any(|row| {
+                    matches!(row, Row::Item(item) if item.id == send && item.status == ItemStatus::Completed)
+                });
+                if taken {
+                    return None;
+                }
+                let _ = self.answer_sent(&send, ItemStatus::Failed);
+                self.error = Some(format!("{NOT_SENT} {message}"));
+                let live = self.rows[self.turn_start..].iter().any(|row| match row {
+                    Row::Item(item) => {
+                        item.kind != ItemKind::UserMessage || item.status != ItemStatus::Failed
+                    }
+                    Row::Attachments(_) | Row::Note(_) => false,
+                    _ => true,
+                });
+                if !live {
+                    self.running = false;
+                    self.turn_start = self.rows.len();
+                }
+            }
             Event::ProviderNotice { message } => self.provider_notice = message,
             // Recovery's control events belong to the app, never to the transcript.
             Event::RecoveryNeeded => self.provider_exited(),
@@ -1361,7 +1546,11 @@ impl Conversation {
             .enumerate()
             .map(|(index, row)| (start + index, row))
             .filter_map(|(index, row)| match row {
-                Row::Item(item) if item.status == ItemStatus::InProgress => {
+                // A message still being sent isn't the turn's: its machine answers it.
+                Row::Item(item)
+                    if item.status == ItemStatus::InProgress
+                        && !(item.kind == ItemKind::UserMessage && item.id.starts_with(LOCAL)) =>
+                {
                     item.status = ItemStatus::Interrupted;
                     Some((index, item.clone()))
                 }
@@ -1475,8 +1664,10 @@ impl Conversation {
         self.changed.insert(index);
     }
 
+    /// A row an earlier run added, answered or replaced by its copy in this one, is
+    /// found again by its ID or as that copy, not by its place.
     fn seq(&self, index: usize) -> u64 {
-        (index - self.run_start) as u64
+        index.saturating_sub(self.run_start) as u64
     }
 
     fn log_item(&mut self, index: usize, item: Item) {
@@ -1489,18 +1680,79 @@ impl Conversation {
         self.writes.push(Write { entry, sync });
     }
 
-    /// The row for `item`: the same ID, or the local copy of the same user message.
-    fn position_for(&self, item: &Item) -> Option<usize> {
-        self.position(&item.id).or_else(|| {
+    /// The row for `item`: the same ID, or the local copy of the same user message. A
+    /// message the app sent keeps its ID in any run, since no other row ever has it,
+    /// so an answer to it logged after a relaunch replaces it there.
+    fn position_for(&mut self, item: &Item) -> Option<usize> {
+        let index = self.position_of(item)?;
+        if !item.id.starts_with(LOCAL)
+            && let Row::Item(local) = &self.rows[index]
+            && local.id.starts_with(LOCAL)
+        {
+            self.echoed.insert(local.id.clone());
+        }
+        Some(index)
+    }
+
+    fn position_of(&mut self, item: &Item) -> Option<usize> {
+        // A message the app sent is only ever its own row: another it sent with the
+        // same text is another message.
+        if item.id.starts_with(LOCAL) {
+            return self
+                .rows
+                .iter()
+                .rposition(|row| matches!(row, Row::Item(local) if local.id == item.id));
+        }
+        if let Some(&index) = self.echo_at.get(&item.id)
+            && matches!(self.rows.get(index), Some(Row::Item(row)) if row.id == item.id)
+        {
+            return Some(index);
+        }
+        let found = self.position(&item.id).or_else(|| {
             (item.kind == ItemKind::UserMessage).then(|| {
                 self.rows[self.turn_start..]
                     .iter()
                     .position(|row| {
-                        matches!(row, Row::Item(local) if local.id.starts_with(LOCAL) && local.text == item.text)
+                        // A message its machine refused never reached the provider, so
+                        // no copy of the provider's is it.
+                        matches!(row, Row::Item(local) if local.id.starts_with(LOCAL)
+                            && local.text == item.text
+                            && !matches!(local.status, ItemStatus::Failed | EDITED))
                     })
                     .map(|index| self.turn_start + index)
             })?
-        })
+        });
+        if found.is_some() || item.kind != ItemKind::UserMessage {
+            return found;
+        }
+        // The provider's copy of a message another machine took replaces the oldest
+        // such message with its text, wherever its turn's rows begin: a steer the
+        // machine took during one turn can run as the next, and a turn the machine
+        // replays after a relaunch is in another run.
+        let (due, index) = self.echo_due.iter().enumerate().find_map(|(due, id)| {
+            // A message its machine refused never reached the provider, so no copy is it.
+            let index = self.rows.iter().rposition(|row| {
+                matches!(row, Row::Item(local) if local.id == *id
+                    && local.text == item.text
+                    && !matches!(local.status, ItemStatus::Failed | EDITED))
+            })?;
+            Some((due, index))
+        })?;
+        // Copies come in the order their messages were taken, so one older than this
+        // never comes: a steer isn't always copied back.
+        self.echo_due.drain(..=due);
+        self.echo_at.insert(item.id.clone(), index);
+        Some(index)
+    }
+
+    /// Notes that the message the app sent as `send` reached its provider, so the
+    /// provider's copy of it may still come ([`Conversation::position_for`]).
+    fn expect_echo(&mut self, send: String) {
+        if !self.echo_due.contains(&send) {
+            self.echo_due.push(send);
+        }
+        let excess = self.echo_due.len().saturating_sub(ECHOES_KEPT);
+        self.echo_due.drain(..excess);
     }
 
     fn position(&self, id: &str) -> Option<usize> {
@@ -2932,6 +3184,252 @@ mod tests {
                 "Another"
             ]
         );
+    }
+
+    #[test]
+    fn a_message_still_being_sent_outlasts_another_turns_end_and_a_restart() {
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        live.push_message(super::Sent {
+            id: "local:1-0".into(),
+            text: "Sent to desk".into(),
+            attachments: Vec::new(),
+            sending: true,
+        });
+        log.save(&mut live);
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::TurnStarted,
+                Event::TurnCompleted {
+                    status: TurnStatus::Completed,
+                    error: None,
+                    stopped: false,
+                },
+            ],
+        );
+        let sending = |rows: &[Row]| matches!(&rows[0], Row::Item(item) if item.status == ItemStatus::InProgress);
+        assert!(sending(&live.rows), "{:?}", live.rows);
+        let mut reloaded = log.restore();
+        assert!(sending(&reloaded.rows), "{:?}", reloaded.rows);
+        reloaded.apply(Event::NotSent {
+            send: "local:1-0".into(),
+            message: "refused".into(),
+            login: false,
+        });
+        log.save(&mut reloaded);
+        let again = log.restore();
+        assert_eq!(again.rows.len(), 1, "answered in place: {:?}", again.rows);
+        assert!(matches!(&again.rows[0], Row::Item(item) if item.status == ItemStatus::Failed));
+    }
+
+    /// The host's record wins over the app's answer either way round: a message shown
+    /// "Not sent" that the host took reads sent and its "Not sent" line goes, and a
+    /// refusal that comes after the host's record of it changes nothing.
+    #[test]
+    fn the_hosts_record_of_a_message_wins_over_a_refusal() {
+        let sent = |id: &str| super::Sent {
+            id: id.into(),
+            text: format!("message {id}"),
+            attachments: Vec::new(),
+            sending: true,
+        };
+        let status = |c: &Conversation| match &c.rows[0] {
+            Row::Item(item) => item.status,
+            row => panic!("{row:?}"),
+        };
+        let refused = |id: &str| Event::NotSent {
+            send: id.into(),
+            message: "refused".into(),
+            login: false,
+        };
+        let taken = |id: &str| Event::Taken { send: id.into() };
+
+        let mut refused_first = Conversation::default();
+        refused_first.push_message(sent("local:1-0"));
+        refused_first.apply(refused("local:1-0"));
+        assert_eq!(status(&refused_first), ItemStatus::Failed);
+        assert!(refused_first.error.is_some());
+        refused_first.apply(taken("local:1-0"));
+        assert_eq!(status(&refused_first), ItemStatus::Completed);
+        assert_eq!(refused_first.error, None);
+
+        let mut taken_first = Conversation::default();
+        taken_first.push_message(sent("local:2-0"));
+        taken_first.apply(taken("local:2-0"));
+        taken_first.apply(refused("local:2-0"));
+        assert_eq!(status(&taken_first), ItemStatus::Completed);
+        assert_eq!(taken_first.error, None);
+
+        let mut discarded = Conversation::default();
+        discarded.push_message(sent("local:3-0"));
+        discarded.discard("local:3-0");
+        assert_eq!(status(&discarded), ItemStatus::Interrupted);
+        discarded.apply(taken("local:3-0"));
+        discarded.apply(Event::TurnStarted);
+        discarded.apply(Event::ItemCompleted(user("u3", "message local:3-0")));
+        assert_eq!(discarded.rows.len(), 1, "{:?}", discarded.rows);
+        assert_eq!(status(&discarded), ItemStatus::Completed);
+    }
+
+    /// Two taken messages with the same text, the first of which never ran: the
+    /// provider's copy of the second replaces the second, live and after a restart,
+    /// and both messages still show.
+    #[test]
+    fn a_copy_replaces_its_own_message_among_two_with_its_text() {
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        for id in ["local:1-0", "local:2-1"] {
+            live.push_message(super::Sent {
+                id: id.into(),
+                text: "hello long".into(),
+                attachments: Vec::new(),
+                sending: true,
+            });
+            live.apply(Event::Taken { send: id.into() });
+        }
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::TurnStarted,
+                Event::ItemCompleted(user("u2", "hello long")),
+                Event::TurnCompleted {
+                    status: TurnStatus::Completed,
+                    error: None,
+                    stopped: false,
+                },
+            ],
+        );
+        let ids = |rows: &[Row]| -> Vec<String> {
+            rows.iter()
+                .filter_map(|row| match row {
+                    Row::Item(item) if item.kind == ItemKind::UserMessage => Some(item.id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(ids(&live.rows).len(), 2, "{:?}", live.rows);
+        assert_eq!(
+            ids(&log.restore().rows).len(),
+            2,
+            "{:?}",
+            log.restore().rows
+        );
+    }
+
+    /// A message sent again after its turn ended, whose copy comes as a start and then
+    /// a completion, as Codex sends it: both land on its own row, and it shows once.
+    #[test]
+    fn a_copy_started_and_completed_outside_the_turn_shows_once() {
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        live.push_message(super::Sent {
+            id: "local:1-0".into(),
+            text: "hello there".into(),
+            attachments: Vec::new(),
+            sending: true,
+        });
+        live.apply(Event::NotSent {
+            send: "local:1-0".into(),
+            message: "refused".into(),
+            login: true,
+        });
+        live.send_again("local:1-0");
+        let mut started = user("u1", "hello there");
+        started.status = ItemStatus::InProgress;
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::Taken {
+                    send: "local:1-0".into(),
+                },
+                Event::TurnStarted,
+                Event::ItemStarted(started),
+                Event::ItemCompleted(user("u1", "hello there")),
+                completed(),
+            ],
+        );
+        let users = |rows: &[Row]| -> Vec<(String, ItemStatus)> {
+            rows.iter()
+                .filter_map(|row| match row {
+                    Row::Item(item) if item.kind == ItemKind::UserMessage => {
+                        Some((item.id.clone(), item.status))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(users(&live.rows), [("u1".into(), ItemStatus::Completed)]);
+        assert_eq!(
+            users(&log.restore().rows),
+            [("u1".into(), ItemStatus::Completed)]
+        );
+    }
+
+    #[test]
+    fn a_taken_messages_copy_replayed_after_a_restart_replaces_it() {
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        live.push_message(super::Sent {
+            id: "local:7-0".into(),
+            text: "Taken before the quit".into(),
+            attachments: Vec::new(),
+            sending: true,
+        });
+        live.apply(Event::Taken {
+            send: "local:7-0".into(),
+        });
+        log.save(&mut live);
+        let mut reloaded = log.restore();
+        let echoed = user("u7", "Taken before the quit");
+        feed(
+            &mut reloaded,
+            &mut log,
+            [Event::TurnStarted, Event::ItemCompleted(echoed.clone())],
+        );
+        let messages = |rows: &[Row]| {
+            rows.iter()
+                .filter(|row| matches!(row, Row::Item(item) if item.kind == ItemKind::UserMessage))
+                .count()
+        };
+        assert_eq!(messages(&reloaded.rows), 1, "{:?}", reloaded.rows);
+        assert_eq!(
+            messages(&log.restore().rows),
+            1,
+            "and once after the next restart"
+        );
+    }
+
+    /// A log where the provider's copy of a message still sending came before the
+    /// message's own answer, in a later run, restores as that one message.
+    #[test]
+    fn a_copy_logged_before_its_messages_answer_restores_once() {
+        let sent = |status| keystone_agent::Item {
+            id: "local:9-0".into(),
+            kind: ItemKind::UserMessage,
+            text: "Answered late".into(),
+            status,
+        };
+        let entry = |item, run| Entry::Item {
+            item,
+            seq: Some(0),
+            run: Some(run),
+        };
+        let log = Log(vec![
+            entry(sent(ItemStatus::InProgress), 1),
+            Entry::TurnStarted,
+            entry(user("u9", "Answered late"), 2),
+            entry(sent(ItemStatus::Completed), 2),
+        ]);
+        let restored = log.restore();
+        let messages: Vec<_> = restored
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) if item.kind == ItemKind::UserMessage => Some(item.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages, ["u9"]);
     }
 
     #[test]

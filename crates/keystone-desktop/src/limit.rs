@@ -111,7 +111,7 @@ impl Keystone {
             })
             .find(|(provider, account)| {
                 state
-                    .usage(*provider, account.as_ref())
+                    .usage(None, *provider, account.as_ref())
                     .is_none_or(|usage| usage.full_until(now).is_none())
             })
             .map(|(provider, account)| {
@@ -156,7 +156,7 @@ impl Keystone {
         let source = state.session(session);
         let scheduled = source.and_then(|s| s.continue_at());
         let reading = source
-            .and_then(|s| state.usage(s.provider(), s.account()))
+            .and_then(|s| state.usage(s.machine(), s.provider(), s.account()))
             .and_then(|usage| refusing_window(usage, limit.label.as_deref(), now));
         let reset = reset_at(limit, reading);
         let at = |ms: u64| clock(LocalTime::at(now), LocalTime::at(ms));

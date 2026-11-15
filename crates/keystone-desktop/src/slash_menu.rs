@@ -283,12 +283,10 @@ impl Keystone {
                 Some(presentation::ConversationFolder::LegacyMissing) => {
                     "Choose a conversation folder to list commands.".to_owned()
                 }
-                Some(presentation::ConversationFolder::Remote(machine, _)) => format!(
-                    "Commands on {} aren't listed yet.",
-                    state.machine_label(&machine)
-                ),
+                // A folder here or on another machine has a catalog, which lists them.
                 Some(
                     presentation::ConversationFolder::Recorded(_)
+                    | presentation::ConversationFolder::Remote(..)
                     | presentation::ConversationFolder::Unsupported,
                 )
                 | None => "Commands unavailable for this folder.".to_owned(),

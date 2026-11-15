@@ -1288,12 +1288,17 @@ fn write_projection(
     Ok(())
 }
 
-/// Forgets every provider's usage readings for account `id`.
+/// Forgets every provider's usage readings for account `id`, here and, for a login on
+/// another machine, under `machine/<machine>/`. Account IDs are slugs, so none holds a
+/// GLOB character.
 fn clear_usage(tx: &rusqlite::Transaction<'_>, id: &str) -> io::Result<()> {
     for provider in ["claude", "codex"] {
         tx.execute(
-            "DELETE FROM metadata WHERE key=?1",
-            [format!("{USAGE_PREFIX}{provider}/{id}")],
+            "DELETE FROM metadata WHERE key=?1 OR key GLOB ?2",
+            [
+                format!("{USAGE_PREFIX}{provider}/{id}"),
+                format!("{USAGE_PREFIX}machine/*/{provider}/{id}"),
+            ],
         )
         .map_err(sql_error)?;
     }

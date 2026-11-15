@@ -450,7 +450,27 @@ fn a_login_on_another_machine_serves_only_that_machines_sessions() {
         .add_remote_account(Provider::Codex, "Inner", &desk, &nested)
         .unwrap_err()
         .to_string();
-    assert!(refused.contains("already used by the account"), "{refused}");
+    assert_eq!(
+        refused,
+        "/home/dev/.claude-work/inner overlaps /home/dev/.claude-work, the folder of the account \u{201c}Work\u{201d}; each account needs a folder of its own"
+    );
+    let cased = RemoteFolder::new("/home/dev/.Claude-Work").unwrap();
+    let refused = store
+        .add_remote_account(Provider::Codex, "Cased", &desk, &cased)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("overlaps /home/dev/.claude-work"),
+        "{refused}"
+    );
+    let same = store
+        .add_remote_account(Provider::Codex, "Same", &desk, &home)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        same.contains("is already used by the account \u{201c}Work\u{201d}"),
+        "{same}"
+    );
     let root = RemoteFolder::new("/").unwrap();
     assert!(
         store
@@ -508,4 +528,164 @@ fn a_login_on_another_machine_serves_only_that_machines_sessions() {
         1,
         "unlinking forgets the machine's logins"
     );
+}
+
+/// A login on another machine can move to another folder until one of its sessions
+/// has sent with it, and never onto another login's folder there.
+#[test]
+fn a_login_moves_to_another_folder_until_a_session_sends_with_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = Store::open(directory.path().join("state.json")).unwrap();
+    let desk = store.link_machine("desk", "client".into()).unwrap().value;
+    let folder = |path: &str| RemoteFolder::new(path).unwrap();
+    let work = store
+        .add_remote_account(Provider::Codex, "Work", &desk, &folder("/home/t/.codex"))
+        .unwrap()
+        .value;
+    store
+        .add_remote_account(Provider::Codex, "Other", &desk, &folder("/home/t/other"))
+        .unwrap();
+    let session = store
+        .create_remote_showing(&desk, &folder("/srv/app"), 1, WindowId::FIRST, None)
+        .unwrap()
+        .value;
+    store
+        .set_provider_account(session, Provider::Codex, Some(work.clone()))
+        .unwrap();
+    store
+        .set_remote_account_home(&work, &folder("/home/t/codex-work"))
+        .unwrap();
+    let moved = store
+        .workspace()
+        .account(&work)
+        .unwrap()
+        .remote_home()
+        .unwrap()
+        .1;
+    assert_eq!(moved, folder("/home/t/codex-work"));
+    assert!(
+        store
+            .set_remote_account_home(&work, &folder("/home/T/OTHER/inner"))
+            .is_err(),
+        "another login's folder, in any case"
+    );
+    assert!(store.set_remote_account_home(&work, &folder("/")).is_err());
+    store.lock_model(session).unwrap();
+    let fixed = store
+        .set_remote_account_home(&work, &folder("/home/t/elsewhere"))
+        .unwrap_err()
+        .to_string();
+    assert!(fixed.contains("has sent with this login"), "{fixed}");
+}
+
+/// A message sent to another machine is pending, saved, and neither a turn nor fixing
+/// the session until the host answers. Taken, it is the running turn and fixes the
+/// provider and account in one save. Refused, the session is as it was, and refused
+/// messages come back together in the order they were sent, once none still waits.
+#[test]
+fn a_pending_send_is_a_turn_only_once_its_host_takes_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.json");
+    let mut store = Store::open(&path).unwrap();
+    let desk = store.link_machine("desk", "client".into()).unwrap().value;
+    let folder = RemoteFolder::new("/srv/app").unwrap();
+    let session = store
+        .create_remote_showing(&desk, &folder, 1, WindowId::FIRST, None)
+        .unwrap()
+        .value;
+    let saved = |store: &Store| {
+        let s = store
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| s.id() == session)
+            .unwrap()
+            .clone();
+        let pending: Vec<_> = s.pending().iter().map(|p| p.id.clone()).collect();
+        (s.started(), s.last_turn(), pending)
+    };
+    let send = |id: &str| PendingSend {
+        id: id.into(),
+        text: format!("message {id}"),
+        attachments: Vec::new(),
+        refused: false,
+        ran: false,
+    };
+    for id in ["a", "b", "c"] {
+        store.record_pending_send(session, send(id), 2).unwrap();
+    }
+    store.flush().unwrap();
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        saved(&reopened),
+        (false, None, vec!["a".into(), "b".into(), "c".into()]),
+        "pending across a relaunch, and nothing fixed"
+    );
+    store.refuse_send(session, "b").unwrap();
+    store.refuse_send(session, "a").unwrap();
+    assert_eq!(
+        saved(&store),
+        (false, None, vec!["a".into(), "b".into(), "c".into()]),
+        "refused messages stay, to be sent again"
+    );
+    store.take_send(session, "c").unwrap();
+    store.flush().unwrap();
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        saved(&reopened),
+        (true, Some(LastTurn::Running), vec!["a".into(), "b".into()])
+    );
+    // Sent again under its ID, a refused message is pending once more, with its text.
+    let again = store.resend_send(session, "b").unwrap().value.unwrap();
+    assert_eq!(
+        (again.id.as_str(), again.text.as_str(), again.refused),
+        ("b", "message b", false)
+    );
+    assert!(
+        store.resend_send(session, "b").unwrap().value.is_none(),
+        "only a refused one"
+    );
+    assert!(
+        store.resend_send(session, "c").unwrap().value.is_none(),
+        "c was taken"
+    );
+    store.withdraw_send(session, "a").unwrap();
+    assert_eq!(saved(&store).2, vec!["b".to_owned()]);
+}
+
+/// A message withdrawn while its machine was out of reach that the machine's record
+/// shows it took still fixes the session's provider and login, but its turn's own
+/// events, not the record, make the session Running.
+#[test]
+fn a_discarded_message_the_host_took_fixes_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+    let desk = store.link_machine("desk", "client".into()).unwrap().value;
+    let folder = RemoteFolder::new("/srv/app").unwrap();
+    let session = store
+        .create_remote_showing(&desk, &folder, 1, WindowId::FIRST, None)
+        .unwrap()
+        .value;
+    let pending = PendingSend {
+        id: "a".into(),
+        text: "message a".into(),
+        attachments: Vec::new(),
+        refused: false,
+        ran: false,
+    };
+    store.record_pending_send(session, pending, 2).unwrap();
+    store.withdraw_send(session, "a").unwrap();
+    let saved = |store: &Store| {
+        let s = store
+            .workspace()
+            .sessions()
+            .iter()
+            .find(|s| s.id() == session)
+            .unwrap()
+            .clone();
+        (s.started(), s.last_turn(), s.pending().len())
+    };
+    assert_eq!(saved(&store), (false, None, 0), "discarded: free to move");
+    store.take_send(session, "a").unwrap();
+    assert_eq!(saved(&store), (true, None, 0));
 }

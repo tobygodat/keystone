@@ -45,7 +45,8 @@ impl Alert {
                 TurnStatus::Completed => Self::TurnFinished,
                 TurnStatus::Interrupted | TurnStatus::Failed => Self::TurnFailed,
             }),
-            Event::Failed { .. } => Some(Self::TurnFailed),
+            // A message its machine refused never ran, which reads as a failure.
+            Event::Failed { .. } | Event::NotSent { .. } => Some(Self::TurnFailed),
             _ => None,
         }
     }

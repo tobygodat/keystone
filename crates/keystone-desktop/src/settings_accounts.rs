@@ -18,6 +18,9 @@ use keystone_ui::text_input::{InputMode, SelectAll, TextInput};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+/// Why a login's folder can no longer change.
+const FOLDER_FIXED: &str = "Folder fixed: a session has sent with this login";
+
 const PROVIDERS: [Provider; 2] = [Provider::Claude, Provider::Codex];
 
 /// The section's own state, kept while the settings page is open.
@@ -33,6 +36,9 @@ pub(crate) struct AccountsPage {
     /// The account being renamed in place, and its field.
     renaming: Option<AccountId>,
     rename: Entity<TextInput>,
+    /// The login whose folder is being changed in place, and its field.
+    refolding: Option<AccountId>,
+    refolder: Entity<TextInput>,
     /// The row whose sign-in command was just copied, shown with a check.
     copied: Option<String>,
     /// Focus for each row's buttons, made as rows first render.
@@ -57,6 +63,8 @@ impl AccountsPage {
             add: cx.focus_handle().tab_stop(true),
             renaming: None,
             rename: field("Account name", cx),
+            refolding: None,
+            refolder: field("Folder on that machine", cx),
             copied: None,
             stops: RefCell::default(),
         }
@@ -85,6 +93,8 @@ struct Row<'a> {
     account: Option<&'a Account>,
     machine: Option<String>,
     sessions: usize,
+    /// Whether a session has sent with it, which fixes a login's folder.
+    fixed: bool,
 }
 
 /// How a row names an account: its label, and for a login on another machine, which
@@ -108,21 +118,24 @@ impl Keystone {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let workspace = self.state.read(cx).store().workspace();
-        let added: Vec<(Account, usize, Option<String>)> = workspace
+        let added: Vec<(Account, usize, bool, Option<String>)> = workspace
             .accounts()
             .iter()
             .map(|account| {
-                let sessions = workspace
-                    .sessions()
-                    .iter()
-                    .filter(|s| s.account() == Some(account.id()))
-                    .count();
+                let using = || {
+                    workspace
+                        .sessions()
+                        .iter()
+                        .filter(|s| s.account() == Some(account.id()))
+                };
+                let sessions = using().count();
+                let fixed = using().any(keystone_core::Session::started);
                 let machine = account.machine().map(|id| {
                     workspace
                         .machine(id)
                         .map_or_else(|| id.to_string(), |m| m.label().to_owned())
                 });
-                (account.clone(), sessions, machine)
+                (account.clone(), sessions, fixed, machine)
             })
             .collect();
         let groups: Vec<_> = PROVIDERS
@@ -133,13 +146,15 @@ impl Keystone {
                     account: None,
                     machine: None,
                     sessions: 0,
+                    fixed: false,
                 })
                 .chain(added.iter().filter(|(a, ..)| a.provider() == provider).map(
-                    |(account, sessions, machine)| Row {
+                    |(account, sessions, fixed, machine)| Row {
                         provider,
                         account: Some(account),
                         machine: machine.clone(),
                         sessions: *sessions,
+                        fixed: *fixed,
                     },
                 ))
                 .map(|row| self.account_row(&page.accounts, row, cx))
@@ -173,6 +188,7 @@ impl Keystone {
             account,
             machine,
             sessions,
+            fixed,
         } = row;
         let key = account.map_or_else(
             || format!("{}-default", provider_slug(provider)),
@@ -220,6 +236,7 @@ impl Keystone {
             }))
         };
         let renaming = account.is_some_and(|a| page.renaming.as_ref() == Some(a.id()));
+        let refolding = account.is_some_and(|a| page.refolding.as_ref() == Some(a.id()));
         let title: AnyElement = if renaming {
             let submit = self.scoped_listener(cx, |this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
@@ -262,6 +279,29 @@ impl Keystone {
                 .into_any_element()
         };
         let mut actions = h_flex().flex_none().gap_1().child(copy);
+        // A login on another machine can move to another folder until a session sends
+        // with it, so one the machine refused can be fixed in place.
+        if let Some(account) = account.filter(|a| a.machine().is_some()) {
+            let id = account.id().clone();
+            let button = IconButton::new(format!("account-folder-{key}"), IconName::Folder)
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Compact)
+                .disabled(fixed)
+                .track_focus(&page.stop(&format!("folder-{key}"), cx))
+                .debug_selector(|| format!("account-folder-{key}"))
+                .aria_label(if fixed { FOLDER_FIXED } else { "Change folder" })
+                .tooltip(Tooltip::text("Change folder"))
+                .on_click(self.scoped_listener(cx, move |this, _, window, cx| {
+                    this.start_account_refolder(&id, window, cx)
+                }));
+            // A disabled button shows no tooltip, so the reason sits on its wrapper.
+            actions = actions.child(
+                div()
+                    .id(format!("account-folder-why-{key}"))
+                    .when(fixed, |d| d.tooltip(Tooltip::text(FOLDER_FIXED).builder()))
+                    .child(button),
+            );
+        }
         if let Some(account) = account {
             let (rename_id, remove_id) = (account.id().clone(), account.id().clone());
             actions = actions
@@ -306,13 +346,34 @@ impl Keystone {
                     .min_w_0()
                     .gap(px(2.))
                     .child(title)
-                    .child(
+                    .child(if refolding {
+                        let submit =
+                            self.scoped_listener(cx, |this, event: &KeyDownEvent, window, cx| {
+                                match event.keystroke.key.as_str() {
+                                    "enter" => this.confirm_account_refolder(window, cx),
+                                    "escape" => this.cancel_account_refolder(window, cx),
+                                    _ => return,
+                                }
+                                cx.stop_propagation();
+                            });
+                        div()
+                            .px(px(8.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(cx.theme().colors.border_focused)
+                            .bg(cx.theme().colors.background)
+                            .automation_id("account-folder-field")
+                            .on_key_down(submit)
+                            .child(page.refolder.clone())
+                            .into_any_element()
+                    } else {
                         Label::new(detail)
                             .size(TextSize::Sm)
                             .color(Color::Muted)
                             .mono()
-                            .truncate(),
-                    )
+                            .truncate()
+                            .into_any_element()
+                    })
                     .child(self.usage_line(&key, provider, account.map(Account::id), cx)),
             )
             .child(actions)
@@ -494,6 +555,66 @@ impl Keystone {
         });
         rename.focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    fn start_account_refolder(
+        &mut self,
+        id: &AccountId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(home) = self
+            .state
+            .read(cx)
+            .store()
+            .workspace()
+            .account(id)
+            .and_then(|a| a.remote_home())
+            .map(|(_, home)| home.wire().to_owned())
+        else {
+            return;
+        };
+        let Some(page) = self.accounts_page() else {
+            return;
+        };
+        page.refolding = Some(id.clone());
+        let field = page.refolder.clone();
+        field.update(cx, |input, cx| {
+            input.set_value(home, cx);
+            input.select_all(&SelectAll, window, cx);
+        });
+        field.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_account_refolder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.accounts_page() else {
+            return;
+        };
+        let Some(id) = page.refolding.take() else {
+            return;
+        };
+        let stop = page.stop(&format!("folder-{id}"), cx);
+        window.focus(&stop, cx);
+        cx.notify();
+    }
+
+    fn confirm_account_refolder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = &self.settings else { return };
+        let Some(id) = page.accounts.refolding.clone() else {
+            return;
+        };
+        let folder = page.accounts.refolder.read(cx).value().to_owned();
+        match self.state.update(cx, |state, cx| {
+            state.set_remote_account_home(&id, &folder, cx)
+        }) {
+            Ok(_) => {
+                self.error = None;
+                self.cancel_account_refolder(window, cx);
+            }
+            Err(error) => self.error = Some(format!("Folder not changed. {error}")),
+        }
+        self.refresh(cx);
     }
 
     fn cancel_account_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {

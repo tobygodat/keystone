@@ -197,6 +197,10 @@ fn desk(state: &AppState) -> MachineId {
 fn linking_saves_a_machine_only_once_its_host_answers(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let state = runtime(dir.path(), cx);
+    let too_new = format!(
+        "speaks protocol 99, and Keystone needs {}",
+        remote::PROTOCOL
+    );
     let failures = [
         (
             shell("echo 'dev@desk: Permission denied (publickey).' >&2; exit 255"),
@@ -220,7 +224,7 @@ fn linking_saves_a_machine_only_once_its_host_answers(cx: &mut gpui::TestAppCont
             shell(
                 "read hello; echo '{\"t\":\"welcome\",\"protocol\":99,\"version\":\"9.0.0\",\"os\":\"linux\",\"arch\":\"x86_64\",\"hostname\":\"desk\",\"providers\":[],\"oldest\":0,\"latest\":0}'; sleep 5",
             ),
-            "speaks protocol 99, and Keystone needs 3",
+            too_new.as_str(),
         ),
         (
             shell(
@@ -321,17 +325,21 @@ fn no_local_folder_check_sees_a_remote_sessions_folder(cx: &mut gpui::TestAppCon
         ended(state, first)
     });
     assert!(send(&state, second, "hello", cx), "taken here, unchecked");
-    let refused = format!("{missing} isn't a folder on this machine");
+    let refused = format!("Not sent. {missing} isn't a folder on desk");
     wait_until(cx, &state, "the host to refuse B's folder", |state| {
-        state.conversations[&second].rows.iter().any(
-            |row| matches!(row, Row::TurnEnded { error: Some(error), .. } if *error == refused),
-        ) || state.conversations[&second].error.as_deref() == Some(refused.as_str())
+        state.conversations[&second].error.as_deref() == Some(refused.as_str())
     });
 
     state.read_with(cx, |state, _| {
         for session in [first, second] {
             assert!(state.checkpoints(session).is_none(), "no checkpoint read");
-            assert!(state.catalog_key(session, Provider::Claude).is_none());
+            // Its catalog is the machine's, asked there.
+            assert!(matches!(
+                state
+                    .catalog_key(session, Provider::Claude)
+                    .map(|key| key.place),
+                Some(CatalogPlace::Remote(..))
+            ));
             assert!(state.conversations[&session].recovery.is_none());
         }
         assert!(!state.has_running_session(Provider::Claude, None, true));
@@ -832,20 +840,29 @@ fn saved_turns(state_dir: &Path, session: u64) -> (Vec<usize>, usize) {
         .filter(|entry| matches!(entry, keystone_agent::log::Entry::TurnEnded { .. }))
         .count();
     // Claude's own copy of each message, which comes early in its turn from the
-    // host, beside the copy the app saved as it sent it.
-    let messages = |local: bool| {
-        entries
-            .iter()
-            .filter(|entry| {
-                matches!(entry, keystone_agent::log::Entry::Item { item, .. }
-                    if item.kind == ItemKind::UserMessage
-                        && item.id.starts_with("local:") == local)
-            })
-            .count()
-    };
+    // host, beside the copy the app saved as it sent it. The app's copy is logged
+    // again under its ID once the host takes it, which replaces it on restore.
+    let messages: Vec<&keystone_agent::Item> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            keystone_agent::log::Entry::Item { item, .. } if item.kind == ItemKind::UserMessage => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect();
+    let echoes = messages
+        .iter()
+        .filter(|item| !item.id.starts_with("local:"))
+        .count();
+    let sent: std::collections::BTreeSet<_> = messages
+        .iter()
+        .filter(|item| item.id.starts_with("local:"))
+        .map(|item| &item.id)
+        .collect();
     assert_eq!(
-        messages(false),
-        messages(true),
+        echoes,
+        sent.len(),
         "each sent message's echo is saved once: {entries:?}"
     );
     (replies, ends)
@@ -1685,4 +1702,2043 @@ fn the_next_launch_catches_up_a_codex_turn_on_the_machine(cx: &mut gpui::TestApp
         let text = agent_text(state, session);
         assert_eq!(text.matches("Scripted Codex reply").count(), 1, "{text}");
     });
+}
+
+/// A message the machine refuses because its image is gone from the host's cache stays
+/// in its bubble, "Not sent", and the composer is never filled. Send again sends it
+/// under its own ID, uploading the image again, and it runs once.
+#[gpui::test]
+fn a_refused_message_with_an_image_sent_again_uploads_it_and_runs_once(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let receipts = tempfile::tempdir().unwrap();
+    let sent = receipts.path().join("sent");
+    let state = runtime(dir.path(), cx);
+    assert_eq!(link(&state, teed(&host.argv(), &sent), "desk", cx), None);
+    let work = folder(&[]);
+    let session = new_remote(&state, work.path(), cx);
+    let picture = state.read_with(cx, |state, _| {
+        state
+            .attachments
+            .import_bytes(
+                b"\x89PNG\r\n\x1a\na picture the host loses",
+                "picture.png".into(),
+            )
+            .unwrap()
+    });
+    let uploads = || {
+        std::fs::read_to_string(&sent)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(r#""op":"put_attachment""#))
+            .count()
+    };
+    let replies = |n: usize| {
+        move |state: &AppState| {
+            agent_text(state, session)
+                .matches("Claude test reply")
+                .count()
+                == n
+                && !state.conversations[&session].running
+        }
+    };
+    assert!(send_images(
+        &state,
+        session,
+        "first",
+        vec![picture.clone()],
+        cx
+    ));
+    wait_until(cx, &state, "the first reply", replies(1));
+    std::fs::remove_file(
+        host.0
+            .path()
+            .join(format!("attachments/{}.png", picture.sha256)),
+    )
+    .unwrap();
+
+    assert!(send_images(
+        &state,
+        session,
+        "second",
+        vec![picture.clone()],
+        cx
+    ));
+    wait_until(cx, &state, "the refusal", |state| {
+        state.conversations[&session]
+            .error
+            .as_deref()
+            .is_some_and(|error| {
+                error == "Not sent. An image in this message is no longer on desk. Send it again to upload it"
+            })
+    });
+    let refused = state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(saved.draft().is_empty(), "the composer is never filled");
+        assert!(saved.draft_attachments().is_empty());
+        let refused = saved.pending().iter().find(|p| p.refused).unwrap().clone();
+        assert_eq!(refused.attachments, [picture.clone()]);
+        let conversation = &state.conversations[&session];
+        assert!(!conversation.running);
+        let last = conversation.rows.iter().rev().find_map(|row| match row {
+            Row::Item(item) if item.kind == ItemKind::UserMessage => Some(item.clone()),
+            _ => None,
+        });
+        let last = last.unwrap();
+        assert_eq!(
+            (last.text.as_str(), last.status),
+            ("second", keystone_agent::ItemStatus::Failed),
+            "its bubble says it wasn't sent"
+        );
+        assert_eq!(last.id, refused.id);
+        refused.id
+    });
+
+    // Send again: the same message, under its own ID.
+    assert!(state.update(cx, |state, cx| state.send_again(session, &refused, cx)));
+    wait_until(cx, &state, "the retry's reply", replies(2));
+    assert_eq!(uploads(), 2, "the retry sent the image again");
+    assert_eq!(
+        std::fs::read_to_string(&sent)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(&format!(r#""send":"{refused}""#)))
+            .count(),
+        2,
+        "both sends carried the one ID"
+    );
+    assert_eq!(
+        std::fs::read_to_string(work.path().join(".fake-claude-messages"))
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "only the two that went reached Claude"
+    );
+
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(saved.pending().is_empty());
+        let second: Vec<_> = bubbles(state, session)
+            .into_iter()
+            .filter(|(text, _)| text == "second")
+            .collect();
+        assert_eq!(
+            second,
+            [("second".into(), keystone_agent::ItemStatus::Completed)]
+        );
+    });
+
+    // After a relaunch the message reads as sent, once.
+    quit(state, false, cx);
+    let state = relaunch(dir.path(), &host, cx);
+    state.update(cx, |state, _| state.ensure_history(session));
+    wait_until(cx, &state, "the history", |state| {
+        state
+            .conversations
+            .get(&session)
+            .is_some_and(|c| !c.is_loading())
+    });
+    state.read_with(cx, |state, _| {
+        let failed: Vec<&str> = state.conversations[&session]
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) if item.status == keystone_agent::ItemStatus::Failed => {
+                    Some(item.text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(failed.is_empty(), "{failed:?}");
+    });
+}
+
+/// A session on another machine lists that machine's models for its provider and
+/// login, from the host's catalog, and runs the one chosen. The machine's usage is
+/// kept as that login's on that machine, never as this machine's.
+#[gpui::test]
+fn a_remote_session_lists_its_machines_models_and_runs_the_chosen_one(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let state = runtime(dir.path(), cx);
+    assert_eq!(link(&state, host.argv(), "desk", cx), None);
+    let work = folder(&[]);
+    let claude = new_remote(&state, work.path(), cx);
+    let codex = new_remote(&state, work.path(), cx);
+    let home = host.0.path().join("logins/codex-work");
+    let login = state.update(cx, |state, cx| {
+        let machine = desk(state);
+        let login = state
+            .add_remote_account(
+                Provider::Codex,
+                "Work",
+                home.to_str().unwrap(),
+                &machine,
+                cx,
+            )
+            .unwrap()
+            .value;
+        state
+            .set_provider_account(codex, Provider::Codex, Some(login.clone()), cx)
+            .unwrap();
+        state.request_catalog(claude, Provider::Claude, cx);
+        state.request_catalog(codex, Provider::Codex, cx);
+        login
+    });
+    let models = |state: &AppState, session: u64, provider: Provider| -> Vec<String> {
+        match state.model_selection(session, provider).choices {
+            Choices::Ready(models) => models.iter().map(|m| m.model.clone()).collect(),
+            _ => Vec::new(),
+        }
+    };
+    wait_until(cx, &state, "both machines' catalogs", |state| {
+        !models(state, claude, Provider::Claude).is_empty()
+            && !models(state, codex, Provider::Codex).is_empty()
+    });
+    state.read_with(cx, |state, _| {
+        let listed = models(state, claude, Provider::Claude);
+        assert!(listed.contains(&"fake-haiku".to_owned()), "{listed:?}");
+        let listed = models(state, codex, Provider::Codex);
+        assert!(listed.contains(&"fake-fast".to_owned()), "{listed:?}");
+        assert!(
+            state.claude.is_empty() && state.codex.is_empty(),
+            "nothing asked here"
+        );
+    });
+    state.update(cx, |state, cx| {
+        let choose = |model: &str| ModelChoice {
+            model: Some(model.into()),
+            ..ModelChoice::default()
+        };
+        state.set_choice(claude, choose("fake-haiku"), cx).unwrap();
+        state.set_choice(codex, choose("fake-fast"), cx).unwrap();
+    });
+    assert!(send(&state, claude, "which model", cx));
+    assert!(send(&state, codex, "which model, usage 85", cx));
+    wait_until(cx, &state, "both replies", |state| {
+        ended(state, claude) && ended(state, codex)
+    });
+    state.read_with(cx, |state, _| {
+        let text = agent_text(state, claude);
+        assert!(text.contains("**Model:** `fake-haiku`"), "{text}");
+        let text = agent_text(state, codex);
+        assert!(text.contains("**Model:** `fake-fast`"), "{text}");
+        let machine = desk(state);
+        let usage = state.usage(Some(&machine), Provider::Codex, Some(&login));
+        assert!(
+            usage.is_some_and(|u| !u.readings.is_empty()),
+            "the machine's usage is kept"
+        );
+        assert!(state.usage(None, Provider::Codex, Some(&login)).is_none());
+        assert!(
+            state.usage(None, Provider::Codex, None).is_none(),
+            "never as this machine's"
+        );
+    });
+}
+
+/// A login whose home the machine refuses, here a folder inside desk's default
+/// `~/.codex`, leaves no dead end. The refusal says how to go on, the session's
+/// provider and login can be chosen again, and Send again sends the same message, under
+/// its own ID, through the other login, once. Moving the refused login to a folder of
+/// its own makes it work too.
+#[gpui::test]
+fn a_session_whose_login_the_machine_refused_picks_another_and_sends(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let state = runtime(dir.path(), cx);
+    assert_eq!(link(&state, host.argv(), "desk", cx), None);
+    let default = host.0.path().join(".codex");
+    std::fs::create_dir_all(default.join("sub")).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let session = new_remote(&state, work.path(), cx);
+    let (sneaky, own) = state.update(cx, |state, cx| {
+        let machine = desk(state);
+        let mut add = |label: &str, home: &Path| {
+            state
+                .add_remote_account(Provider::Codex, label, home.to_str().unwrap(), &machine, cx)
+                .unwrap()
+                .value
+        };
+        let sneaky = add("Sneaky", &default.join("sub"));
+        let own = add("Own", &host.0.path().join("logins/own"));
+        state
+            .set_provider_account(session, Provider::Codex, Some(sneaky.clone()), cx)
+            .unwrap();
+        (sneaky, own)
+    });
+    assert!(send(&state, session, "hello there", cx));
+    wait_until(cx, &state, "the refusal", |state| {
+        state.conversations[&session]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("Not sent."))
+    });
+    state.read_with(cx, |state, _| {
+        let error = state.conversations[&session].error.clone().unwrap();
+        assert!(error.contains("overlaps desk's default home"), "{error}");
+        assert!(error.ends_with(WAY_OUT), "{error}");
+        let saved = state.session(session).unwrap();
+        assert!(!saved.started(), "a refused send fixes nothing");
+        assert_eq!(saved.last_turn(), None, "and starts no turn");
+        assert!(saved.draft().is_empty(), "the composer is never filled");
+        assert!(!state.model_selection(session, Provider::Codex).started);
+    });
+    let refused = state.read_with(cx, |state, _| {
+        state.session(session).unwrap().pending()[0].id.clone()
+    });
+
+    // Another login, then Send again: the same message goes, once.
+    state.update(cx, |state, cx| {
+        state
+            .set_provider_account(session, Provider::Codex, Some(own.clone()), cx)
+            .unwrap();
+        assert!(state.send_again(session, &refused, cx));
+    });
+    wait_until(cx, &state, "the reply on the other login", |state| {
+        ended(state, session)
+    });
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(saved.started());
+        assert_eq!(saved.account(), Some(&own));
+        assert!(saved.pending().is_empty());
+        assert_eq!(
+            bubbles(state, session),
+            [("hello there".into(), keystone_agent::ItemStatus::Completed)]
+        );
+        let text = agent_text(state, session);
+        assert_eq!(text.matches("You wrote: hello there").count(), 1, "{text}");
+        assert!(state.conversations[&session].error.is_none());
+    });
+
+    // The refused login, given its own folder, goes too.
+    let second = new_remote(&state, work.path(), cx);
+    let moved = host.0.path().join("logins/sneaky");
+    state.update(cx, |state, cx| {
+        state
+            .set_provider_account(second, Provider::Codex, Some(sneaky.clone()), cx)
+            .unwrap();
+        state
+            .set_remote_account_home(&sneaky, moved.to_str().unwrap(), cx)
+            .unwrap();
+    });
+    assert!(send(&state, second, "hello again", cx));
+    wait_until(cx, &state, "the reply on the moved login", |state| {
+        ended(state, second)
+    });
+    assert!(moved.is_dir(), "the host made the new folder");
+    assert_eq!(
+        std::fs::read_dir(&default).unwrap().count(),
+        1,
+        "nothing was made in desk's default home"
+    );
+    let refused = state.update(cx, |state, cx| {
+        state
+            .set_remote_account_home(&sneaky, "/somewhere/else", cx)
+            .unwrap_err()
+    });
+    assert!(refused.contains("has sent with this login"), "{refused}");
+}
+
+/// A send the machine refused leaves the session as if it never started a turn: its
+/// saved last turn isn't Running after a relaunch, and a journal replaced later finds
+/// no turn of it to end.
+#[gpui::test]
+fn a_refused_send_leaves_no_turn_running_across_a_relaunch_and_a_new_journal(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let state = runtime(dir.path(), cx);
+    assert_eq!(link(&state, host.argv(), "desk", cx), None);
+    let missing = format!("/nonexistent/keystone-refused-{}", std::process::id());
+    let session = state.update(cx, |state, cx| {
+        let folder = RemoteFolder::new(&missing).unwrap();
+        state
+            .create_remote(&desk(state), &folder, WindowId::FIRST, None, cx)
+            .unwrap()
+            .value
+    });
+    assert!(send(&state, session, "hello", cx));
+    wait_until(cx, &state, "the refusal", |state| {
+        state.conversations[&session]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("Not sent."))
+    });
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert_eq!(saved.last_turn(), None);
+        assert!(!saved.started());
+    });
+    quit(state, false, cx);
+    wipe_journal(&host);
+    let state = launch_linked(dir.path(), host.argv(), session, cx);
+    for _ in 0..20 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert_ne!(saved.last_turn(), Some(keystone_core::LastTurn::Running));
+        let lost = state.conversations[&session].rows.iter().any(|row| {
+            matches!(row, Row::TurnEnded { error: Some(error), .. } if error.contains("lost its record"))
+        });
+        assert!(!lost, "no turn of a refused message is ended as lost");
+    });
+}
+
+/// The routes of a machine's sessions are registered before its link reads anything.
+/// Its host's first frame is a Codex event, and the app's saves are blocked: the
+/// event must hold the acknowledgement back until it is saved, which only a route
+/// registered on arrival does. Started before the routes, the link acknowledges it at
+/// once, and a kill then would lose it.
+#[gpui::test]
+fn a_links_routes_are_registered_before_it_reads_its_first_frame(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::remote::frame::{self, Frame, Routed, Welcome};
+    let dir = tempfile::tempdir().unwrap();
+    let session = {
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        let desk = store.link_machine("desk", "client-1".into()).unwrap().value;
+        let folder = RemoteFolder::new("/srv/app").unwrap();
+        let session = store
+            .create_remote_showing(&desk, &folder, 1, WindowId::FIRST, None)
+            .unwrap()
+            .value;
+        store.set_provider(session, Provider::Codex).unwrap();
+        store.flush().unwrap();
+        session
+    };
+    let script = tempfile::tempdir().unwrap();
+    let frames = [
+        Frame::Welcome(Welcome {
+            protocol: remote::PROTOCOL,
+            version: "test".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            hostname: "desk".into(),
+            providers: Vec::new(),
+            oldest: 1,
+            latest: 1,
+            journal: "journal-1".into(),
+        }),
+        Frame::Event(Routed {
+            seq: 1,
+            provider: Provider::Codex,
+            account: None,
+            session,
+            event: Event::ItemCompleted(keystone_agent::Item {
+                id: "reply-1".into(),
+                kind: ItemKind::AgentMessage,
+                text: "a reply the host kept".into(),
+                status: keystone_agent::ItemStatus::Completed,
+            }),
+        }),
+        Frame::Synced { seq: 1 },
+        Frame::Sessions {
+            sessions: Vec::new(),
+        },
+    ];
+    let text: Vec<u8> = frames
+        .iter()
+        .flat_map(|frame| frame::encode(frame).unwrap())
+        .collect();
+    std::fs::write(script.path().join("frames"), text).unwrap();
+    let sent = script.path().join("sent");
+    let argv = vec![
+        "sh".into(),
+        "-c".into(),
+        r#"cat "$0/frames"; exec cat >> "$0/sent""#.into(),
+        script.path().into(),
+    ];
+    let acked = |sent: &Path| {
+        std::fs::read_to_string(sent)
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line.contains(r#""t":"ack""#) && line.contains(r#""seq":1"#))
+    };
+    let state = runtime(dir.path(), cx);
+    let lock = rusqlite::Connection::open(dir.path().join("workspace.sqlite3")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    state.update(cx, |state, _| {
+        state.test_transport = Some(argv);
+        state.test_route_pause = Some(Duration::from_millis(500));
+    });
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        state.read_with(cx, |state, _| state.links.len() == 1),
+        "the machine's link was made"
+    );
+    assert!(
+        !acked(&sent),
+        "nothing acknowledged the event before it was saved"
+    );
+    lock.execute_batch("ROLLBACK").unwrap();
+    drop(lock);
+    wait_until(cx, &state, "the saved event's acknowledgement", |_| {
+        acked(&sent)
+    });
+}
+
+/// A steer sent while the first message is still in flight joins its way back: the
+/// machine refuses both, the later first, and the session is as before either, free to
+/// pick another login, with no turn running and both messages in their bubbles.
+#[gpui::test]
+fn a_steer_in_flight_on_a_refused_login_leaves_the_session_movable(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::remote::frame::{self, Frame, Outcome, Welcome};
+    let dir = tempfile::tempdir().unwrap();
+    let session = {
+        let mut store = Store::open(dir.path().join("workspace.json")).unwrap();
+        let desk = store.link_machine("desk", "client-1".into()).unwrap().value;
+        let folder = RemoteFolder::new("/srv/app").unwrap();
+        let session = store
+            .create_remote_showing(&desk, &folder, 1, WindowId::FIRST, None)
+            .unwrap()
+            .value;
+        store.flush().unwrap();
+        session
+    };
+    let script = tempfile::tempdir().unwrap();
+    let write = |name: &str, frames: &[Frame]| {
+        let text: Vec<u8> = frames
+            .iter()
+            .flat_map(|frame| frame::encode(frame).unwrap())
+            .collect();
+        std::fs::write(script.path().join(name), text).unwrap();
+    };
+    write(
+        "welcome",
+        &[
+            Frame::Welcome(Welcome {
+                protocol: remote::PROTOCOL,
+                version: "test".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                hostname: "desk".into(),
+                providers: Vec::new(),
+                oldest: 0,
+                latest: 0,
+                journal: "journal-1".into(),
+            }),
+            Frame::Synced { seq: 0 },
+            Frame::Sessions {
+                sessions: Vec::new(),
+            },
+        ],
+    );
+    for id in 1..=40 {
+        write(
+            &format!("reply-{id}"),
+            &[Frame::Reply {
+                id,
+                outcome: Outcome::Login(
+                    "The account \u{201c}Sneaky\u{201d} overlaps desk's default home".into(),
+                ),
+            }],
+        );
+    }
+    // Answers the two sends once both have arrived, the steer first.
+    let script_text = r#"read -r hello; cat "$0/welcome"
+ids=""
+while read -r line; do
+  case "$line" in
+    *'"t":"call"'*'"op":"send"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+      ids="$id $ids"
+      set -- $ids
+      if [ "$#" -ge 2 ]; then for id in $ids; do cat "$0/reply-$id"; done; fi;;
+  esac
+done"#;
+    let argv = vec![
+        "sh".into(),
+        "-c".into(),
+        script_text.into(),
+        script.path().into(),
+    ];
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| state.test_transport = Some(argv));
+    wait_until(cx, &state, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|link| link.status() == remote::Status::Connected)
+    });
+    state.update(cx, |state, cx| {
+        let draft = |text: &str| ComposerDraft {
+            session,
+            text: text.into(),
+            attachments: Vec::new(),
+        };
+        assert!(state.send_message(draft("first message"), cx));
+        assert!(state.runs_turn(session), "the next message steers");
+        assert!(state.send_message(draft("a steer"), cx));
+    });
+    wait_until(cx, &state, "both refusals", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().len() == 2 && s.pending().iter().all(|p| p.refused))
+    });
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(saved.draft().is_empty(), "the composer is never filled");
+        assert!(!saved.started(), "the session can pick another login");
+        assert_eq!(saved.last_turn(), None, "no turn runs");
+        let error = state.conversations[&session].error.clone().unwrap();
+        assert!(error.ends_with(WAY_OUT), "{error}");
+        let refused: Vec<_> = state.conversations[&session]
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) if item.kind == ItemKind::UserMessage => {
+                    Some((item.text.as_str(), item.status))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refused,
+            [
+                ("first message", keystone_agent::ItemStatus::Failed),
+                ("a steer", keystone_agent::ItemStatus::Failed)
+            ],
+            "both bubbles read \"Not sent\""
+        );
+    });
+}
+
+/// A machine scripted in `sh`, for answers in orders no real host gives. Once the app
+/// says hello it sends `welcome`, then runs a script over the app's lines, with this
+/// folder of frame files as `$0`; `$id` is a call's number, read with [`CALL_ID`].
+struct Scripted(tempfile::TempDir);
+
+/// Sets `id` to the number of the call on `$line`.
+const CALL_ID: &str =
+    r#"id=$(printf '%s' "$line" | sed -n 's/^{"t":"call","id":\([0-9]*\).*/\1/p')"#;
+
+impl Scripted {
+    fn new() -> Self {
+        use keystone_agent::remote::frame::{Frame, Welcome};
+        let scripted = Self(tempfile::tempdir().unwrap());
+        scripted.write(
+            "welcome",
+            &[
+                Frame::Welcome(Welcome {
+                    protocol: remote::PROTOCOL,
+                    version: "test".into(),
+                    os: "linux".into(),
+                    arch: "x86_64".into(),
+                    hostname: "desk".into(),
+                    providers: Vec::new(),
+                    oldest: 0,
+                    latest: 0,
+                    journal: "journal-1".into(),
+                }),
+                Frame::Synced { seq: 0 },
+                Frame::Sessions {
+                    sessions: Vec::new(),
+                },
+            ],
+        );
+        scripted
+    }
+
+    fn write(&self, name: &str, frames: &[keystone_agent::remote::frame::Frame]) {
+        let text: Vec<u8> = frames
+            .iter()
+            .flat_map(|frame| keystone_agent::remote::frame::encode(frame).unwrap())
+            .collect();
+        std::fs::write(self.0.path().join(name), text).unwrap();
+    }
+
+    /// Writes `<name>-<id>` for every call number a test may use, from `frames`.
+    fn each(&self, name: &str, frames: impl Fn(u64) -> Vec<keystone_agent::remote::frame::Frame>) {
+        for id in 1..=60 {
+            self.write(&format!("{name}-{id}"), &frames(id));
+        }
+    }
+
+    /// Welcomes the app with a journal whose newest place is `latest`, as a host does
+    /// that journaled events in an earlier run.
+    fn welcome_at(&self, latest: u64) {
+        use keystone_agent::remote::frame::{Frame, Welcome};
+        self.write(
+            "welcome",
+            &[Frame::Welcome(Welcome {
+                protocol: remote::PROTOCOL,
+                version: "test".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                hostname: "desk".into(),
+                providers: Vec::new(),
+                oldest: 0,
+                latest,
+                journal: "journal-1".into(),
+            })],
+        );
+    }
+
+    /// A transport that can't reach the machine while `flag` exists, as `ssh` exits
+    /// when the network is down, and otherwise runs `script` as [`Scripted::argv`] does.
+    fn argv_unless(&self, flag: &Path, script: &str) -> Vec<std::ffi::OsString> {
+        let script = format!(
+            "if [ -e \"$1\" ]; then echo 'ssh: connect to host desk port 22: Network is unreachable' >&2; exit 255; fi\nread -r hello; cat \"$0/welcome\"\n{script}"
+        );
+        vec![
+            "sh".into(),
+            "-c".into(),
+            script.into(),
+            self.0.path().into(),
+            flag.into(),
+        ]
+    }
+
+    /// Every line the app sent, in order.
+    fn lines(&self) -> String {
+        std::fs::read_to_string(self.0.path().join("lines")).unwrap_or_default()
+    }
+
+    fn argv(&self, script: &str) -> Vec<std::ffi::OsString> {
+        let script = format!("read -r hello; cat \"$0/welcome\"\n{script}");
+        vec![
+            "sh".into(),
+            "-c".into(),
+            script.into(),
+            self.0.path().into(),
+        ]
+    }
+}
+
+fn reply(
+    id: u64,
+    outcome: keystone_agent::remote::frame::Outcome,
+) -> keystone_agent::remote::frame::Frame {
+    keystone_agent::remote::frame::Frame::Reply { id, outcome }
+}
+
+/// The frames of a host that took call `id`, which carried `text`: its reply, then the
+/// turn's start and the provider's copy of the message, at `seq` and after.
+fn taken(id: u64, session: u64, seq: u64, text: &str) -> Vec<keystone_agent::remote::frame::Frame> {
+    use keystone_agent::remote::frame::{Frame, Outcome, Routed};
+    let event = |seq, event| {
+        Frame::Event(Routed {
+            seq,
+            provider: Provider::Claude,
+            account: None,
+            session,
+            event,
+        })
+    };
+    vec![
+        reply(id, Outcome::Ok(())),
+        event(seq, Event::TurnStarted),
+        event(
+            seq + 1,
+            Event::ItemCompleted(keystone_agent::Item {
+                id: format!("echo-{text}"),
+                kind: ItemKind::UserMessage,
+                text: text.into(),
+                status: keystone_agent::ItemStatus::Completed,
+            }),
+        ),
+    ]
+}
+
+/// A session on the linked machine "desk", saved before the app starts.
+fn remote_session(dir: &Path) -> u64 {
+    let mut store = Store::open(dir.join("workspace.json")).unwrap();
+    let desk = store.link_machine("desk", "client-1".into()).unwrap().value;
+    let folder = RemoteFolder::new("/srv/app").unwrap();
+    let session = store
+        .create_remote_showing(&desk, &folder, 1, WindowId::FIRST, None)
+        .unwrap()
+        .value;
+    store.flush().unwrap();
+    session
+}
+
+fn connected(state: &Entity<AppState>, cx: &mut gpui::TestAppContext) {
+    wait_until(cx, state, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|link| link.status() == LinkStatus::Connected)
+    });
+}
+
+/// Each user message's text and status, in order.
+fn bubbles(state: &AppState, session: u64) -> Vec<(String, keystone_agent::ItemStatus)> {
+    state.conversations[&session]
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Item(item) if item.kind == ItemKind::UserMessage => {
+                Some((item.text.clone(), item.status))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A message sent with a picture and a second sent while the first is in flight: the
+/// host refuses one and takes the other, in either order. Each answer marks its own
+/// message, the taken one shows once, and the refused one's text and picture come back.
+fn one_refused_one_taken(first_refused: bool, cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::{Completed, Failed};
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    let gone = "An image in this message is no longer on desk. Send it again to upload it";
+    host.each("refuse", |id| vec![reply(id, Outcome::Err(gone.into()))]);
+    host.each("take-first", |id| {
+        taken(id, session, 1, "first, with a picture")
+    });
+    host.each("take-second", |id| taken(id, session, 1, "a steer"));
+    let (first, second) = if first_refused {
+        ("refuse", "take-second")
+    } else {
+        ("take-first", "refuse")
+    };
+    let script = format!(
+        r#"n=0
+while read -r line; do
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      n=$((n+1))
+      if [ "$n" -eq 1 ]; then one=$id; fi
+      if [ "$n" -eq 2 ]; then cat "$0/{first}-$one"; cat "$0/{second}-$id"; fi;;
+  esac
+done"#
+    );
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(host.argv(&script))
+    });
+    connected(&state, cx);
+    let picture = state.update(cx, |state, cx| {
+        let picture = state
+            .attachments
+            .import_bytes(b"\x89PNG\r\n\x1a\nfirst picture", "first.png".into())
+            .unwrap();
+        assert!(state.send_message(
+            ComposerDraft {
+                session,
+                text: "first, with a picture".into(),
+                attachments: vec![picture.clone()],
+            },
+            cx
+        ));
+        assert!(send_now(state, session, "a steer", cx));
+        picture
+    });
+    wait_until(cx, &state, "both answers", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().iter().all(|p| p.refused))
+            && bubbles(state, session)
+                .iter()
+                .all(|(_, status)| *status != keystone_agent::ItemStatus::InProgress)
+            // The taken message's turn has started: its copy replaced its bubble.
+            && state.conversations[&session].rows.iter().any(
+                |row| matches!(row, Row::Item(item) if item.id.starts_with("echo-")),
+            )
+    });
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(saved.started(), "the taken message fixes the session");
+        let error = state.conversations[&session].error.clone();
+        assert_eq!(
+            error.as_deref(),
+            Some(format!("Not sent. {gone}").as_str()),
+            "the refusal's reason outlasts the other message's turn start"
+        );
+        assert_eq!(saved.last_turn(), Some(keystone_core::LastTurn::Running));
+        let shown = bubbles(state, session);
+        if first_refused {
+            assert_eq!(
+                shown,
+                [
+                    ("first, with a picture".into(), Failed),
+                    ("a steer".into(), Completed)
+                ]
+            );
+            assert!(saved.draft().is_empty() && saved.draft_attachments().is_empty());
+            let refused = &saved.pending()[0];
+            assert_eq!(
+                (refused.text.as_str(), refused.refused),
+                ("first, with a picture", true)
+            );
+            assert_eq!(refused.attachments, [picture]);
+        } else {
+            assert_eq!(
+                shown,
+                [
+                    ("first, with a picture".into(), Completed),
+                    ("a steer".into(), Failed)
+                ]
+            );
+            assert!(saved.draft().is_empty() && saved.draft_attachments().is_empty());
+            let refused = &saved.pending()[0];
+            assert_eq!((refused.text.as_str(), refused.refused), ("a steer", true));
+        }
+    });
+}
+
+fn send_now(state: &mut AppState, session: u64, text: &str, cx: &mut Context<AppState>) -> bool {
+    state.send_message(
+        ComposerDraft {
+            session,
+            text: text.into(),
+            attachments: Vec::new(),
+        },
+        cx,
+    )
+}
+
+#[gpui::test]
+fn a_refused_message_then_a_taken_steer_mark_their_own_bubbles(cx: &mut gpui::TestAppContext) {
+    one_refused_one_taken(true, cx);
+}
+
+#[gpui::test]
+fn a_taken_message_then_a_refused_steer_mark_their_own_bubbles(cx: &mut gpui::TestAppContext) {
+    one_refused_one_taken(false, cx);
+}
+
+/// Three messages in flight, answered out of order: the third refused, the first
+/// taken, the second refused. Each bubble shows its own answer and the composer is
+/// never filled. Each refused one's Send again works on its own, under its own ID.
+#[gpui::test]
+fn three_messages_answered_out_of_order_each_show_their_own_answer(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::{Completed, Failed};
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    host.each("take", |id| taken(id, session, 1, "one"));
+    host.each("again-three", |id| taken(id, session, 3, "three"));
+    host.each("again-two", |id| taken(id, session, 5, "two"));
+    let script = format!(
+        r#"n=0
+while read -r line; do
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      n=$((n+1))
+      eval "call$n=$id"
+      if [ "$n" -eq 3 ]; then cat "$0/refuse-$call3"; cat "$0/take-$call1"; cat "$0/refuse-$call2"; fi
+      if [ "$n" -eq 4 ]; then cat "$0/again-three-$id"; fi
+      if [ "$n" -eq 5 ]; then cat "$0/again-two-$id"; fi;;
+  esac
+done"#
+    );
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(host.argv(&script))
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| {
+        for text in ["one", "two", "three"] {
+            assert!(send_now(state, session, text, cx));
+        }
+    });
+    wait_until(cx, &state, "three answers", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().iter().all(|p| p.refused))
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            bubbles(state, session),
+            [
+                ("one".into(), Completed),
+                ("two".into(), Failed),
+                ("three".into(), Failed)
+            ]
+        );
+        let saved = state.session(session).unwrap();
+        assert!(saved.draft().is_empty(), "the composer is never filled");
+        assert!(saved.started());
+    });
+    let ids = state.read_with(cx, |state, _| {
+        let pending = state.session(session).unwrap().pending().to_vec();
+        assert_eq!(pending.len(), 2);
+        (pending[0].id.clone(), pending[1].id.clone())
+    });
+    // Each refused message sent again on its own: "three" first, then "two".
+    state.update(cx, |state, cx| {
+        assert!(state.send_again(session, &ids.1, cx))
+    });
+    wait_until(cx, &state, "three taken", |state| {
+        bubbles(state, session)[2] == ("three".into(), Completed)
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(bubbles(state, session)[1], ("two".into(), Failed));
+    });
+    state.update(cx, |state, cx| {
+        assert!(state.send_again(session, &ids.0, cx))
+    });
+    wait_until(cx, &state, "two taken", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().is_empty())
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            bubbles(state, session),
+            [
+                ("one".into(), Completed),
+                ("two".into(), Completed),
+                ("three".into(), Completed)
+            ]
+        );
+    });
+}
+
+/// Two messages sent to a machine that hasn't answered when the app quits. They are
+/// saved as pending, not as a turn, and the next launch asks the machine about each.
+/// Returns the session and the data folder.
+fn quit_with_two_pending(cx: &mut gpui::TestAppContext) -> (u64, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let silent = Scripted::new();
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(silent.argv("while read -r line; do :; done"));
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| {
+        assert!(send_now(state, session, "r1", cx));
+        assert!(send_now(state, session, "r2", cx));
+    });
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert_eq!(saved.pending().len(), 2);
+        assert!(
+            !saved.started(),
+            "nothing is fixed before the machine answers"
+        );
+        assert_eq!(saved.last_turn(), None, "and no turn runs");
+    });
+    quit(state, false, cx);
+    (session, dir)
+}
+
+/// The script of a machine that answers each `recall` from `<name>-<id>`.
+fn recalling(name: &str) -> String {
+    format!(
+        r#"while read -r line; do
+  case "$line" in
+    *'"op":"recall"'*)
+      {CALL_ID}
+      cat "$0/{name}-$id";;
+  esac
+done"#
+    )
+}
+
+/// Two messages pending across a relaunch on a login the machine refuses: the next
+/// launch asks about them, both read "Not sent" and stay in their bubbles, out of the
+/// draft, and the session can move to another login, with the way out shown.
+#[gpui::test]
+fn two_pending_messages_a_machine_refused_stay_in_their_bubbles_after_a_relaunch(
+    cx: &mut gpui::TestAppContext,
+) {
+    use keystone_agent::ItemStatus::Failed;
+    use keystone_agent::remote::frame::Outcome;
+    let (session, dir) = quit_with_two_pending(cx);
+    let host = Scripted::new();
+    let refused = "The account \u{201c}Sneaky\u{201d} overlaps desk's default home";
+    host.each("login", |id| {
+        vec![reply(id, Outcome::Login(refused.into()))]
+    });
+    let state = launch_linked(dir.path(), host.argv(&recalling("login")), session, cx);
+    wait_until(cx, &state, "both answers", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().iter().all(|p| p.refused))
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            bubbles(state, session),
+            [("r1".into(), Failed), ("r2".into(), Failed)]
+        );
+        let saved = state.session(session).unwrap();
+        assert!(!saved.started());
+        assert_eq!(saved.last_turn(), None);
+        assert!(saved.draft().is_empty(), "the composer is never filled");
+        assert_eq!(
+            saved.pending().len(),
+            2,
+            "both wait in their bubbles to be sent again"
+        );
+        assert!(!state.model_selection(session, saved.provider()).started);
+        let error = state.conversations[&session].error.clone().unwrap();
+        assert!(error.ends_with(WAY_OUT), "{error}");
+    });
+}
+
+/// A message pending across a relaunch that the machine took: the next launch learns
+/// so, and it is the session's running turn, with its provider and login fixed.
+#[gpui::test]
+fn a_pending_message_the_machine_took_runs_after_a_relaunch(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let silent = Scripted::new();
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(silent.argv("while read -r line; do :; done"));
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| {
+        assert!(send_now(state, session, "taken", cx))
+    });
+    quit(state, false, cx);
+    let host = Scripted::new();
+    host.each("ok", |id| vec![reply(id, Outcome::Ok(()))]);
+    let state = launch_linked(dir.path(), host.argv(&recalling("ok")), session, cx);
+    wait_until(cx, &state, "the answer", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().iter().all(|p| p.refused))
+    });
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(saved.started());
+        assert_eq!(saved.last_turn(), Some(keystone_core::LastTurn::Running));
+        assert_eq!(
+            bubbles(state, session),
+            [("taken".into(), keystone_agent::ItemStatus::Completed)]
+        );
+        assert!(saved.draft().is_empty());
+    });
+}
+
+/// A message pending across a relaunch that never reached the machine, which has no
+/// record of it: it reads "Not sent" and stays in its bubble, to be sent again.
+#[gpui::test]
+fn a_pending_message_the_machine_never_received_is_not_sent(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::remote::frame::Outcome;
+    let (session, dir) = quit_with_two_pending(cx);
+    let host = Scripted::new();
+    host.each("none", |id| vec![reply(id, Outcome::Unrecorded)]);
+    let state = launch_linked(dir.path(), host.argv(&recalling("none")), session, cx);
+    wait_until(cx, &state, "both answers", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().iter().all(|p| p.refused))
+    });
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(!saved.started());
+        assert!(saved.draft().is_empty(), "the composer is never filled");
+        assert_eq!(
+            saved.pending().len(),
+            2,
+            "both wait in their bubbles to be sent again"
+        );
+        let error = state.conversations[&session].error.clone().unwrap();
+        assert!(error.contains("never received"), "{error}");
+    });
+}
+
+/// The routed frame of `event` at place `seq` for `session` on Claude's default login.
+fn routed(seq: u64, session: u64, event: Event) -> keystone_agent::remote::frame::Frame {
+    keystone_agent::remote::frame::Frame::Event(keystone_agent::remote::frame::Routed {
+        seq,
+        provider: Provider::Claude,
+        account: None,
+        session,
+        event,
+    })
+}
+
+fn echo(text: &str) -> Event {
+    Event::ItemCompleted(keystone_agent::Item {
+        id: format!("echo-{text}"),
+        kind: ItemKind::UserMessage,
+        text: text.into(),
+        status: keystone_agent::ItemStatus::Completed,
+    })
+}
+
+fn turn_end() -> Event {
+    Event::TurnCompleted {
+        status: keystone_agent::TurnStatus::Completed,
+        error: None,
+        stopped: false,
+    }
+}
+
+/// The frames a host replays for the message `send` it took in an earlier run, from
+/// place `seq`: its journaled `Taken`, then the turn whole.
+fn ran(
+    session: u64,
+    seq: u64,
+    send: &str,
+    text: &str,
+) -> Vec<keystone_agent::remote::frame::Frame> {
+    use keystone_agent::remote::frame::Frame;
+    vec![
+        routed(seq, session, Event::Taken { send: send.into() }),
+        routed(seq + 1, session, Event::TurnStarted),
+        routed(seq + 2, session, echo(text)),
+        routed(seq + 3, session, turn_end()),
+        Frame::Synced { seq: seq + 3 },
+        Frame::Sessions {
+            sessions: Vec::new(),
+        },
+    ]
+}
+
+/// A message sent to a machine whose answer never came back before the app quit.
+/// Returns the session, the data folder and the message's ID.
+fn quit_with_one_pending(
+    text: &str,
+    cx: &mut gpui::TestAppContext,
+) -> (u64, tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let silent = Scripted::new();
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(silent.argv("while read -r line; do :; done"));
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| assert!(send_now(state, session, text, cx)));
+    let send = state.read_with(cx, |state, _| {
+        state.session(session).unwrap().pending()[0].id.clone()
+    });
+    quit(state, false, cx);
+    (session, dir, send)
+}
+
+/// A relaunch whose machine can't be reached while `flag` exists, with `session`'s
+/// history loaded once the link has tried and failed.
+fn launch_unreached(
+    dir: &Path,
+    argv: Vec<std::ffi::OsString>,
+    session: u64,
+    cx: &mut gpui::TestAppContext,
+) -> Entity<AppState> {
+    let state = runtime(dir, cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(argv);
+        state.ensure_history(session);
+    });
+    wait_until(cx, &state, "the link to fail", move |state| {
+        state
+            .unreached(session)
+            .is_some_and(|(reason, _)| reason == "Couldn't reach desk")
+            && state
+                .conversations
+                .get(&session)
+                .is_some_and(|c| !c.is_loading())
+    });
+    // Past the 30 s an earlier build waited before it counted a message as not sent.
+    cx.executor().advance_clock(Duration::from_secs(35));
+    cx.run_until_parked();
+    state
+}
+
+/// The check's sequence: the machine took a message, the app quit before the answer
+/// came, the next launch can't reach the machine, and then it can. The message waits,
+/// out of the draft, while the machine is out of reach, and its outcome comes from the
+/// machine: one bubble, sent, and no second run.
+#[gpui::test]
+fn a_taken_message_waits_out_an_unreachable_machine_and_settles_from_its_record(
+    cx: &mut gpui::TestAppContext,
+) {
+    use keystone_agent::ItemStatus::{Completed, InProgress};
+    use keystone_agent::remote::frame::Outcome;
+    let (session, dir, send) = quit_with_one_pending("taken while away", cx);
+    let host = Scripted::new();
+    host.welcome_at(4);
+    host.write("replay", &ran(session, 1, &send, "taken while away"));
+    host.each("ok", |id| vec![reply(id, Outcome::Ok(()))]);
+    let script = format!(
+        r#"cat "$0/replay"
+while read -r line; do
+  printf '%s\n' "$line" >> "$0/lines"
+  case "$line" in
+    *'"op":"recall"'*)
+      {CALL_ID}
+      cat "$0/ok-$id";;
+  esac
+done"#
+    );
+    let down = dir.path().join("down");
+    std::fs::write(&down, "").unwrap();
+    let state = launch_unreached(dir.path(), host.argv_unless(&down, &script), session, cx);
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert_eq!(saved.pending().len(), 1, "the message still waits");
+        assert!(saved.draft().is_empty(), "and its text isn't in the draft");
+        assert_eq!(saved.last_turn(), None);
+        assert_eq!(
+            bubbles(state, session),
+            [("taken while away".into(), InProgress)]
+        );
+        assert!(state.conversations[&session].error.is_none());
+    });
+    std::fs::remove_file(&down).unwrap();
+    wait_until(cx, &state, "the machine's answer", |state| {
+        state.session(session).is_some_and(|s| {
+            s.pending().iter().all(|p| p.refused)
+                && s.last_turn() == Some(keystone_core::LastTurn::Finished)
+        })
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            bubbles(state, session),
+            [("taken while away".into(), Completed)]
+        );
+        let saved = state.session(session).unwrap();
+        assert!(saved.started());
+        assert!(saved.draft().is_empty());
+        assert!(state.conversations[&session].error.is_none());
+    });
+    assert!(
+        !host.lines().contains(r#""op":"send""#),
+        "the message never went again: {}",
+        host.lines()
+    );
+}
+
+/// Discard on a message whose machine can't be reached frees the session without
+/// resending or touching the draft. When the machine is reached and shows the message
+/// ran, its turn shows and the bubble reads sent.
+#[gpui::test]
+fn a_discarded_message_the_machine_ran_shows_its_turn(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::{Completed, Interrupted};
+    let (session, dir, send) = quit_with_one_pending("discarded", cx);
+    let host = Scripted::new();
+    host.welcome_at(4);
+    host.write("replay", &ran(session, 1, &send, "discarded"));
+    let script = r#"cat "$0/replay"
+while read -r line; do printf '%s\n' "$line" >> "$0/lines"; done"#;
+    let down = dir.path().join("down");
+    std::fs::write(&down, "").unwrap();
+    let state = launch_unreached(dir.path(), host.argv_unless(&down, script), session, cx);
+    state.update(cx, |state, cx| state.discard_send(session, &send, cx));
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(saved.pending().is_empty());
+        assert!(!saved.started(), "the session is free to move");
+        assert!(saved.draft().is_empty());
+        assert_eq!(bubbles(state, session), [("discarded".into(), Interrupted)]);
+    });
+    std::fs::remove_file(&down).unwrap();
+    wait_until(cx, &state, "the machine's record", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.last_turn() == Some(keystone_core::LastTurn::Finished))
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(bubbles(state, session), [("discarded".into(), Completed)]);
+        assert!(state.session(session).unwrap().started());
+    });
+    assert!(!host.lines().contains(r#""op":"send""#), "{}", host.lines());
+    assert!(
+        !host.lines().contains(r#""op":"recall""#),
+        "{}",
+        host.lines()
+    );
+}
+
+/// A turn running at quit whose machine can't be reached at the next launch, its
+/// message's answer not yet back: the turn isn't ended as failed. The session says it
+/// waits for the machine, and the machine's record ends the turn once it is reached.
+#[gpui::test]
+fn a_running_turn_waits_out_an_unreachable_machine_and_finishes(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let first = Scripted::new();
+    first.write(
+        "start",
+        &[
+            routed(1, session, Event::TurnStarted),
+            routed(2, session, echo("long turn")),
+        ],
+    );
+    // The turn starts, and the answer to its message is still on its way at quit.
+    let script = r#"while read -r line; do
+  case "$line" in
+    *'"op":"send"'*) cat "$0/start";;
+  esac
+done"#;
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(first.argv(script))
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| {
+        assert!(send_now(state, session, "long turn", cx))
+    });
+    wait_until(cx, &state, "the turn to run", |state| {
+        state.session(session).is_some_and(|s| {
+            s.pending().len() == 1 && s.last_turn() == Some(keystone_core::LastTurn::Running)
+        })
+    });
+    quit(state, false, cx);
+
+    let host = Scripted::new();
+    host.welcome_at(3);
+    host.write(
+        "end",
+        &[
+            routed(3, session, turn_end()),
+            keystone_agent::remote::frame::Frame::Synced { seq: 3 },
+            keystone_agent::remote::frame::Frame::Sessions {
+                sessions: Vec::new(),
+            },
+        ],
+    );
+    let down = dir.path().join("down");
+    std::fs::write(&down, "").unwrap();
+    host.each("ok", |id| {
+        vec![reply(id, keystone_agent::remote::frame::Outcome::Ok(()))]
+    });
+    let script = format!("cat \"$0/end\"\n{}", recalling("ok"));
+    let state = launch_unreached(dir.path(), host.argv_unless(&down, &script), session, cx);
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert_eq!(saved.last_turn(), Some(keystone_core::LastTurn::Running));
+        assert!(failed_ends(dir.path(), session).is_empty());
+        assert_eq!(
+            state.turn_waits(session).as_deref(),
+            Some("Waiting for desk to say how this turn went")
+        );
+        // The open turn says it went on there, never that it stopped.
+        let rows = &state.conversations[&session].rows;
+        assert!(
+            !rows.iter().any(|row| matches!(row, Row::TurnEnded { .. })),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                Row::Note(note) if note == "Keystone was closed during this turn on desk."
+            )),
+            "{rows:?}"
+        );
+    });
+    std::fs::remove_file(&down).unwrap();
+    wait_until(cx, &state, "the turn's end", |state| {
+        state.session(session).is_some_and(|s| {
+            s.pending().iter().all(|p| p.refused)
+                && s.last_turn() == Some(keystone_core::LastTurn::Finished)
+        })
+    });
+    state.read_with(cx, |state, _| {
+        assert!(state.turn_waits(session).is_none());
+        assert!(!state.conversations[&session].running);
+    });
+    assert!(failed_ends(dir.path(), session).is_empty());
+}
+
+/// The machine refused a message, and then its events show it ran: the bubble marked
+/// "Not sent" reads sent, in place, once, the "Not sent" line goes, and nothing is
+/// left to send again.
+#[gpui::test]
+fn a_message_shown_not_sent_that_ran_is_corrected_in_place(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::{Completed, Failed};
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    let mut later = ran(session, 1, "SENDID", "ran anyway");
+    later.truncate(4);
+    host.write("later", &later);
+    let script = format!(
+        r#"while read -r line; do
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      send=$(printf '%s' "$line" | sed -n 's/.*"send":"\([^"]*\)".*/\1/p')
+      cat "$0/refuse-$id"
+      until [ -e "$0/go" ]; do sleep 0.05; done
+      sed "s/SENDID/$send/" "$0/later";;
+  esac
+done"#
+    );
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(host.argv(&script))
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| {
+        assert!(send_now(state, session, "ran anyway", cx))
+    });
+    wait_until(cx, &state, "the refusal", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().iter().all(|p| p.refused))
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(bubbles(state, session), [("ran anyway".into(), Failed)]);
+        assert!(state.session(session).unwrap().draft().is_empty());
+    });
+    std::fs::write(host.0.path().join("go"), "").unwrap();
+    wait_until(cx, &state, "the turn the machine ran", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.last_turn() == Some(keystone_core::LastTurn::Finished))
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(bubbles(state, session), [("ran anyway".into(), Completed)]);
+        let saved = state.session(session).unwrap();
+        assert!(saved.started());
+        assert!(saved.pending().is_empty(), "nothing is left to send again");
+        assert!(state.conversations[&session].error.is_none());
+    });
+}
+
+/// A message the machine took during a turn that runs as the next one: the provider's
+/// copy of it replaces its own bubble, after the first turn's end, so each message
+/// shows once.
+#[gpui::test]
+fn a_steer_taken_in_one_turn_and_run_in_the_next_shows_once(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::Completed;
+    use keystone_agent::remote::frame::{Frame, Outcome, Routed};
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    let event = |seq, event| {
+        Frame::Event(Routed {
+            seq,
+            provider: Provider::Claude,
+            account: None,
+            session,
+            event,
+        })
+    };
+    let end = || Event::TurnCompleted {
+        status: keystone_agent::TurnStatus::Completed,
+        error: None,
+        stopped: false,
+    };
+    let echo = |text: &str| {
+        Event::ItemCompleted(keystone_agent::Item {
+            id: format!("echo-{text}"),
+            kind: ItemKind::UserMessage,
+            text: text.into(),
+            status: Completed,
+        })
+    };
+    host.each("first", |id| taken(id, session, 1, "first"));
+    host.each("second", |id| {
+        vec![
+            reply(id, Outcome::Ok(())),
+            event(3, end()),
+            event(4, Event::TurnStarted),
+            event(5, echo("second")),
+            event(6, end()),
+        ]
+    });
+    let script = format!(
+        r#"n=0
+while read -r line; do
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      n=$((n+1))
+      if [ "$n" -eq 1 ]; then cat "$0/first-$id"; fi
+      if [ "$n" -eq 2 ]; then cat "$0/second-$id"; fi;;
+  esac
+done"#
+    );
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(host.argv(&script))
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| {
+        assert!(send_now(state, session, "first", cx))
+    });
+    wait_until(cx, &state, "the first turn", |state| {
+        state.session(session).is_some_and(|s| s.started())
+    });
+    state.update(cx, |state, cx| {
+        assert!(send_now(state, session, "second", cx))
+    });
+    wait_until(cx, &state, "the second turn's end", |state| {
+        state.session(session).is_some_and(|s| {
+            s.pending().iter().all(|p| p.refused)
+                && s.last_turn() == Some(keystone_core::LastTurn::Finished)
+        })
+    });
+    state.read_with(cx, |state, _| {
+        assert_eq!(
+            bubbles(state, session),
+            [("first".into(), Completed), ("second".into(), Completed)]
+        );
+    });
+}
+
+/// A message pending across a relaunch whose turn the machine replays before it
+/// answers the recall: the turn's end stands, the session isn't left working, and the
+/// provider's copy replaces the message's bubble, so it shows once.
+#[gpui::test]
+fn a_turn_replayed_before_its_message_is_answered_ends_and_shows_once(
+    cx: &mut gpui::TestAppContext,
+) {
+    use keystone_agent::remote::frame::{Frame, Outcome, Routed};
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let silent = Scripted::new();
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(silent.argv("while read -r line; do :; done"));
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| {
+        assert!(send_now(state, session, "replayed", cx))
+    });
+    quit(state, false, cx);
+
+    let host = Scripted::new();
+    let event = |seq, event| {
+        Frame::Event(Routed {
+            seq,
+            provider: Provider::Claude,
+            account: None,
+            session,
+            event,
+        })
+    };
+    host.write(
+        "turn",
+        &[
+            event(1, Event::TurnStarted),
+            event(
+                2,
+                Event::ItemCompleted(keystone_agent::Item {
+                    id: "echo-replayed".into(),
+                    kind: ItemKind::UserMessage,
+                    text: "replayed".into(),
+                    status: keystone_agent::ItemStatus::Completed,
+                }),
+            ),
+            event(
+                3,
+                Event::TurnCompleted {
+                    status: keystone_agent::TurnStatus::Completed,
+                    error: None,
+                    stopped: false,
+                },
+            ),
+        ],
+    );
+    host.each("ok", |id| vec![reply(id, Outcome::Ok(()))]);
+    let script = format!("cat \"$0/turn\"\n{}", recalling("ok"));
+    let state = launch_linked(dir.path(), host.argv(&script), session, cx);
+    wait_until(cx, &state, "the answer", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().iter().all(|p| p.refused))
+    });
+    state.read_with(cx, |state, _| {
+        let saved = state.session(session).unwrap();
+        assert!(saved.started());
+        assert_eq!(saved.last_turn(), Some(keystone_core::LastTurn::Finished));
+        assert_eq!(
+            bubbles(state, session),
+            [("replayed".into(), keystone_agent::ItemStatus::Completed)]
+        );
+    });
+}
+
+/// A window on `session`, selected, whose machine is reached through `argv`, with its
+/// composer focused.
+fn window<'a>(
+    dir: &Path,
+    session: u64,
+    argv: Vec<std::ffi::OsString>,
+    cx: &'a mut gpui::TestAppContext,
+) -> (Entity<crate::Keystone>, &'a mut gpui::VisualTestContext) {
+    let mut store = Store::open(dir.join("workspace.json")).unwrap();
+    store.select(session).unwrap();
+    cx.update(|cx| {
+        keystone_ui::init(cx);
+        crate::bind_keys(cx);
+    });
+    cx.executor().allow_parking();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(store, cx);
+            state.test_transport = Some(argv);
+            state.ensure_history(session);
+            state
+        });
+        crate::Keystone::new(state, false, window, cx)
+    });
+    view.update_in(cx, |this, window, cx| {
+        this.composer.focus_handle(cx).focus(window, cx)
+    });
+    cx.run_until_parked();
+    (view, cx)
+}
+
+/// Runs the window with real time passing until `done` holds.
+#[track_caller]
+fn wait_window(
+    cx: &mut gpui::VisualTestContext,
+    view: &Entity<crate::Keystone>,
+    what: &str,
+    done: impl Fn(&AppState) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        cx.run_until_parked();
+        if view.read_with(cx, |view, cx| done(view.state.read(cx))) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn composer(view: &Entity<crate::Keystone>, cx: &mut gpui::VisualTestContext) -> String {
+    view.read_with(cx, |view, cx| view.composer.read(cx).value().to_owned())
+}
+
+fn press(cx: &mut gpui::VisualTestContext, selector: String) {
+    let bounds = cx
+        .debug_bounds(Box::leak(selector.clone().into_boxed_str()))
+        .unwrap_or_else(|| panic!("{selector} not rendered"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+}
+
+/// The row of the message the app sent as `send`.
+fn row_of(state: &AppState, session: u64, send: &str) -> usize {
+    state.conversations[&session]
+        .rows
+        .iter()
+        .position(|row| matches!(row, Row::Item(item) if item.id == send))
+        .unwrap()
+}
+
+fn statuses(
+    view: &Entity<crate::Keystone>,
+    session: u64,
+    cx: &mut gpui::VisualTestContext,
+) -> Vec<(String, keystone_agent::ItemStatus)> {
+    view.read_with(cx, |view, cx| bubbles(view.state.read(cx), session))
+}
+
+/// The check's sequence: the machine refuses a message, then its record shows it ran.
+/// The composer was never filled, so pressing Send on what it holds sends nothing, the
+/// message runs once, and its bubble reads sent.
+#[gpui::test]
+fn a_refused_message_that_ran_never_fills_the_composer(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::{Completed, Failed};
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    let mut later = ran(session, 1, "SENDID", "ran anyway");
+    later.truncate(4);
+    host.write("later", &later);
+    let script = format!(
+        r#"while read -r line; do
+  printf '%s\n' "$line" >> "$0/lines"
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      send=$(printf '%s' "$line" | sed -n 's/.*"send":"\([^"]*\)".*/\1/p')
+      cat "$0/refuse-$id"
+      until [ -e "$0/go" ]; do sleep 0.05; done
+      sed "s/SENDID/$send/" "$0/later";;
+  esac
+done"#
+    );
+    let (view, cx) = window(dir.path(), session, host.argv(&script), cx);
+    wait_window(cx, &view, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|l| l.status() == LinkStatus::Connected)
+    });
+    cx.simulate_input("ran anyway");
+    cx.simulate_keystrokes("secondary-enter");
+    wait_window(cx, &view, "the refusal", |state| {
+        bubbles(state, session) == [("ran anyway".into(), Failed)]
+    });
+    assert_eq!(composer(&view, cx), "", "the composer is never filled");
+    std::fs::write(host.0.path().join("go"), "").unwrap();
+    wait_window(cx, &view, "the machine's record", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.last_turn() == Some(keystone_core::LastTurn::Finished))
+    });
+    assert_eq!(composer(&view, cx), "");
+    // The user presses Send on whatever the composer holds: nothing.
+    cx.simulate_keystrokes("secondary-enter");
+    cx.run_until_parked();
+    assert_eq!(
+        statuses(&view, session, cx),
+        [("ran anyway".into(), Completed)]
+    );
+    assert_eq!(
+        host.lines().matches(r#""op":"send""#).count(),
+        1,
+        "it ran once"
+    );
+}
+
+/// Send again on a message its machine had in fact taken, though the app was told it
+/// wasn't: the machine answers `ok` from its record and runs nothing, and the bubble
+/// reads sent. The composer is never filled.
+#[gpui::test]
+fn send_again_on_a_message_the_machine_took_runs_nothing(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::{Completed, Failed};
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    host.each("recorded", |id| vec![reply(id, Outcome::Ok(()))]);
+    let script = format!(
+        r#"n=0
+while read -r line; do
+  printf '%s\n' "$line" >> "$0/lines"
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      n=$((n+1))
+      if [ "$n" -eq 1 ]; then cat "$0/refuse-$id"; else cat "$0/recorded-$id"; fi;;
+  esac
+done"#
+    );
+    let (view, cx) = window(dir.path(), session, host.argv(&script), cx);
+    wait_window(cx, &view, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|l| l.status() == LinkStatus::Connected)
+    });
+    cx.simulate_input("taken after all");
+    cx.simulate_keystrokes("secondary-enter");
+    wait_window(cx, &view, "the refusal", |state| {
+        bubbles(state, session) == [("taken after all".into(), Failed)]
+    });
+    let (send, row) = view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        let send = state.session(session).unwrap().pending()[0].id.clone();
+        let row = row_of(state, session, &send);
+        (send, row)
+    });
+    press(cx, format!("send-again-{row}"));
+    wait_window(cx, &view, "the recorded ok", |state| {
+        bubbles(state, session) == [("taken after all".into(), Completed)]
+    });
+    assert_eq!(composer(&view, cx), "");
+    let lines = host.lines();
+    assert_eq!(
+        lines.matches(&format!(r#""send":"{send}""#)).count(),
+        2,
+        "sent again under its own ID: {lines}"
+    );
+    view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        assert!(state.session(session).unwrap().pending().is_empty());
+        assert!(state.session(session).unwrap().started());
+        assert!(
+            !state.conversations[&session]
+                .rows
+                .iter()
+                .any(|row| matches!(
+                    row,
+                    Row::Item(item) if item.kind == ItemKind::AgentMessage
+                )),
+            "nothing ran"
+        );
+    });
+}
+
+/// Two messages the machine refused: each one's Send again sends that one alone,
+/// under its own ID, and the composer is never filled.
+#[gpui::test]
+fn each_refused_messages_send_again_works_on_its_own(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::{Completed, Failed};
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    host.each("second", |id| taken(id, session, 1, "second"));
+    host.each("first", |id| taken(id, session, 3, "first"));
+    let script = format!(
+        r#"n=0
+while read -r line; do
+  printf '%s\n' "$line" >> "$0/lines"
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      n=$((n+1))
+      if [ "$n" -le 2 ]; then cat "$0/refuse-$id"; fi
+      if [ "$n" -eq 3 ]; then cat "$0/second-$id"; fi
+      if [ "$n" -eq 4 ]; then cat "$0/first-$id"; fi;;
+  esac
+done"#
+    );
+    let (view, cx) = window(dir.path(), session, host.argv(&script), cx);
+    wait_window(cx, &view, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|l| l.status() == LinkStatus::Connected)
+    });
+    for text in ["first", "second"] {
+        cx.simulate_input(text);
+        cx.simulate_keystrokes("secondary-enter");
+        wait_window(cx, &view, "the refusal", |state| {
+            bubbles(state, session).last() == Some(&(text.into(), Failed))
+        });
+    }
+    assert_eq!(composer(&view, cx), "");
+    let ids = view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        let pending = state.session(session).unwrap().pending();
+        assert_eq!(pending.len(), 2);
+        (pending[0].id.clone(), pending[1].id.clone())
+    });
+    let row = view.read_with(cx, |view, cx| row_of(view.state.read(cx), session, &ids.1));
+    press(cx, format!("send-again-{row}"));
+    wait_window(cx, &view, "second taken", |state| {
+        bubbles(state, session) == [("first".into(), Failed), ("second".into(), Completed)]
+    });
+    let row = view.read_with(cx, |view, cx| row_of(view.state.read(cx), session, &ids.0));
+    press(cx, format!("send-again-{row}"));
+    wait_window(cx, &view, "first taken", |state| {
+        bubbles(state, session) == [("first".into(), Completed), ("second".into(), Completed)]
+    });
+    assert_eq!(composer(&view, cx), "");
+    let lines = host.lines();
+    for id in [&ids.0, &ids.1] {
+        assert_eq!(
+            lines.matches(&format!(r#""send":"{id}""#)).count(),
+            2,
+            "{lines}"
+        );
+    }
+}
+
+/// Edit takes a refused message's text into an empty composer and marks its bubble
+/// "Edited"; with text in the composer it is off, says why, and changes nothing.
+#[gpui::test]
+fn edit_fills_only_an_empty_composer(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::Failed;
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    let script = format!(
+        r#"while read -r line; do
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      cat "$0/refuse-$id";;
+  esac
+done"#
+    );
+    let (view, cx) = window(dir.path(), session, host.argv(&script), cx);
+    wait_window(cx, &view, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|l| l.status() == LinkStatus::Connected)
+    });
+    cx.simulate_input("fix the typo");
+    cx.simulate_keystrokes("secondary-enter");
+    wait_window(cx, &view, "the refusal", |state| {
+        bubbles(state, session) == [("fix the typo".into(), Failed)]
+    });
+    let row = view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        let send = state.session(session).unwrap().pending()[0].id.clone();
+        row_of(state, session, &send)
+    });
+    // With something in the composer, Edit is off and changes nothing.
+    cx.simulate_input("something else");
+    cx.run_until_parked();
+    press(cx, format!("edit-message-{row}"));
+    assert_eq!(composer(&view, cx), "something else");
+    assert_eq!(
+        statuses(&view, session, cx),
+        [("fix the typo".into(), Failed)]
+    );
+    view.read_with(cx, |view, cx| {
+        assert_eq!(
+            view.state
+                .read(cx)
+                .session(session)
+                .unwrap()
+                .pending()
+                .len(),
+            1
+        );
+    });
+    // Emptied, Edit fills it and marks the bubble.
+    view.update_in(cx, |view, _, cx| {
+        view.composer
+            .update(cx, |input, cx| input.set_value(String::new(), cx))
+    });
+    cx.run_until_parked();
+    press(cx, format!("edit-message-{row}"));
+    assert_eq!(composer(&view, cx), "fix the typo");
+    assert_eq!(
+        statuses(&view, session, cx),
+        [("fix the typo".into(), crate::conversation::EDITED)]
+    );
+    view.read_with(cx, |view, cx| {
+        assert!(
+            view.state
+                .read(cx)
+                .session(session)
+                .unwrap()
+                .pending()
+                .is_empty()
+        );
+    });
+    assert!(
+        cx.debug_bounds(Box::leak(format!("edit-message-{row}").into_boxed_str()))
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds(Box::leak(format!("send-again-{row}").into_boxed_str()))
+            .is_none()
+    );
 }

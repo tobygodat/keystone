@@ -31,6 +31,9 @@ pub const NOT_CONNECTED: &str = "The machine isn't connected, so the message was
 const GAP: &str = "Part of this session's transcript was lost: the machine couldn't keep all of it until Keystone received it";
 const INSTALL: &str = "cargo install --locked --path crates/keystone-agent --bin keystone-host";
 const NO_ANSWER: &str = "The machine didn't answer. Check that it is on and reachable over SSH.";
+/// Why a message the app sent before it last quit counts as not sent: the host never
+/// received it.
+const UNRECORDED: &str = "The machine never received this message";
 
 /// Where a link stands. Every state change wakes each of its connections.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,8 +80,21 @@ pub struct Link {
 pub(crate) struct Shared {
     argv: Vec<OsString>,
     client: String,
+    /// What the app calls the machine, which the host names in what it says.
+    name: Option<String>,
     state: Mutex<State>,
     changed: Condvar,
+}
+
+/// How a call failed, as its reply says.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum How {
+    /// Refused before it ran.
+    Refused,
+    /// Refused before it ran, for the account's login.
+    Login,
+    /// The host lost track of it, so it may or may not have run.
+    MayHaveRun,
 }
 
 /// Where a call's error reply shows: in `session` of `route`.
@@ -89,9 +105,14 @@ pub(crate) struct Then {
 }
 
 pub(crate) enum Kind {
-    /// As a local send that fails after it was accepted: a warning while a turn runs,
-    /// else a failure.
-    Send,
+    /// The message the app saved as `send`, carrying the images with these hashes.
+    /// Its answer names it: [`Event::Taken`], or [`Event::NotSent`] since nothing
+    /// reached the provider and the app can offer it again. A refusal uploads the images
+    /// again with the next message, since the host may have refused it for want of one.
+    Send { send: String, images: Vec<String> },
+    /// What became of the message the app saved as this, in an earlier run. Answered as
+    /// that message's own call would have been.
+    Recall(String),
     /// As a failed catalog.
     Catalog,
     /// Part of the image with this hash: as a warning, and the image is uploaded
@@ -156,9 +177,11 @@ struct State {
     silenced: bool,
     /// How many `sessions` reports the host has sent this link.
     reports: u64,
-    /// The images, by hash, this link has sent to the host it was welcomed by, so a
-    /// message that carries one again names it without sending its bytes again.
+    /// The images, by hash, this link has sent to the host since its last welcome, so
+    /// a message that carries one again names it without sending its bytes again.
     uploaded: BTreeSet<String>,
+    /// Set once [`Link::start`] started the link's thread.
+    started: bool,
 }
 
 impl Link {
@@ -172,9 +195,24 @@ impl Link {
     /// session, as the log holds them at launch. A cursor in a journal other than the
     /// one the host welcomes the link with counts for nothing.
     pub fn with_cursors(argv: Vec<OsString>, client: String, saved: HashMap<u64, Place>) -> Self {
+        let link = Self::prepared(argv, client, saved, None);
+        link.start();
+        link
+    }
+
+    /// As [`Link::with_cursors`], but reads nothing until [`Link::start`], so every
+    /// connection can register first and no event arrives on a route with none.
+    /// `name` is what the app calls the machine, which the host uses when it names it.
+    pub fn prepared(
+        argv: Vec<OsString>,
+        client: String,
+        saved: HashMap<u64, Place>,
+        name: Option<String>,
+    ) -> Self {
         let shared = Arc::new(Shared {
             argv,
             client,
+            name,
             state: Mutex::new(State {
                 status: Status::Connecting,
                 closed: false,
@@ -200,17 +238,23 @@ impl Link {
                 silenced: false,
                 reports: 0,
                 uploaded: BTreeSet::new(),
+                started: false,
             }),
             changed: Condvar::new(),
         });
-        {
-            let shared = shared.clone();
-            thread::Builder::new()
-                .name("remote-link".into())
-                .spawn(move || shared.supervise())
-                .expect("spawn the link thread");
-        }
         Self { shared }
+    }
+
+    /// Starts reaching the machine. Only the first call does anything.
+    pub fn start(&self) {
+        if std::mem::replace(&mut self.shared.state().started, true) {
+            return;
+        }
+        let shared = self.shared.clone();
+        thread::Builder::new()
+            .name("remote-link".into())
+            .spawn(move || shared.supervise())
+            .expect("spawn the link thread");
     }
 
     pub fn status(&self) -> Status {
@@ -449,6 +493,7 @@ impl Shared {
             after,
             journal,
             seen,
+            name: self.name.clone(),
         };
         let (out, queue) = mpsc::channel();
         let _ = out.send(frame::encode(&hello).expect("hello fits a frame"));
@@ -619,6 +664,9 @@ impl Shared {
         let wakes = {
             let mut state = self.state();
             let changed = state.adopt(&welcome.journal, welcome.latest);
+            // A daemon that started again may have dropped an image, so each is sent
+            // again before a message names it.
+            state.uploaded.clear();
             state.linked = true;
             for call in state.calls.values() {
                 let _ = out.send(call.line.clone());
@@ -696,8 +744,13 @@ impl Shared {
                 return;
             };
             let wake = match outcome {
-                Outcome::Ok(()) => None,
+                Outcome::Ok(()) => state.taken(pending.then),
                 Outcome::Err(message) => state.failed(pending.then, message),
+                Outcome::Login(message) => state.failed_as(pending.then, message, How::Login),
+                Outcome::Unknown(message) => {
+                    state.failed_as(pending.then, message, How::MayHaveRun)
+                }
+                Outcome::Unrecorded => state.failed(pending.then, UNRECORDED.into()),
             };
             state.ack(false);
             wake
@@ -784,6 +837,18 @@ impl Shared {
             wake();
         }
         Ok(())
+    }
+
+    /// Drops the calls still waiting for an answer that carry the message `send` or ask
+    /// after it, so no reconnect sends them again: the user gave the message up. One
+    /// the host already has is answered by its own record, as its journal says.
+    pub(crate) fn abandon(&self, send: &str) {
+        let mut state = self.state();
+        state.calls.retain(|_, pending| match &pending.then.kind {
+            Kind::Send { send: s, .. } | Kind::Recall(s) => s != send,
+            Kind::Catalog | Kind::Upload(_) | Kind::Other => true,
+        });
+        state.ack(false);
     }
 
     /// Adds an event of the app's own, outside the host's sequence.
@@ -918,8 +983,6 @@ impl State {
         if behind {
             self.saved.clear();
         }
-        // Another journal is another host folder, whose cache may not hold them.
-        self.uploaded.clear();
         self.saved.retain(|_, place| place.journal == journal);
         self.journal = Some(journal);
         self.received = 0;
@@ -996,7 +1059,6 @@ impl State {
         target.wake.as_ref().map(|(_, wake)| wake.clone())
     }
 
-    /// Shows a call's error in its session, and returns the wake to run.
     /// Numbers a call and queues it. One too large to send shows in its session as an
     /// error reply would.
     fn queue(&mut self, op: Op, then: Then, login: Option<&Login>) -> Option<Wake> {
@@ -1019,9 +1081,35 @@ impl State {
         }
     }
 
+    /// Says that the host took the message a call carried, and returns the wake to run.
+    fn taken(&mut self, then: Then) -> Option<Wake> {
+        match then.kind {
+            Kind::Send { send, .. } | Kind::Recall(send) => {
+                self.push(then.route, then.session, Event::Taken { send })
+            }
+            Kind::Catalog | Kind::Upload(_) | Kind::Other => None,
+        }
+    }
+
+    /// Shows the error of a call that didn't run in its session, and returns the wake
+    /// to run.
     fn failed(&mut self, then: Then, message: String) -> Option<Wake> {
-        if let Kind::Upload(sha256) = &then.kind {
-            self.uploaded.remove(sha256);
+        self.failed_as(then, message, How::Refused)
+    }
+
+    /// Shows a call's error in its session, as `how` it failed, and returns the wake to
+    /// run.
+    fn failed_as(&mut self, then: Then, message: String, how: How) -> Option<Wake> {
+        match &then.kind {
+            Kind::Upload(sha256) => {
+                self.uploaded.remove(sha256);
+            }
+            Kind::Send { images, .. } => {
+                for sha256 in images {
+                    self.uploaded.remove(sha256);
+                }
+            }
+            Kind::Catalog | Kind::Recall(_) | Kind::Other => {}
         }
         let running = self
             .routes
@@ -1030,8 +1118,24 @@ impl State {
             .is_some_and(|session| session.running);
         let event = match then.kind {
             Kind::Catalog => Event::Catalog(Catalog::Failed(message)),
-            Kind::Send if !running => Event::Failed { message },
-            Kind::Send | Kind::Upload(_) | Kind::Other => Event::Warning { message },
+            // A call the host lost track of may have run, so it isn't offered again.
+            // A message the host lost track of may have run, so it is taken, and it
+            // ends a turn that hadn't started; it is never offered again as unsent.
+            Kind::Send { send, .. } | Kind::Recall(send) if how == How::MayHaveRun => {
+                let wake = self.push(then.route.clone(), then.session, Event::Taken { send });
+                let event = if running {
+                    Event::Warning { message }
+                } else {
+                    Event::Failed { message }
+                };
+                return self.push(then.route, then.session, event).or(wake);
+            }
+            Kind::Send { send, .. } | Kind::Recall(send) => Event::NotSent {
+                send,
+                message,
+                login: how == How::Login,
+            },
+            Kind::Upload(_) | Kind::Other => Event::Warning { message },
         };
         self.push(then.route, then.session, event)
     }

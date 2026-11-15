@@ -595,13 +595,14 @@ crates/keystone-agent/src/remote/attach.rs
 
 crates/keystone-agent/src/remote/cache.rs
 	A {size} byte image is over the machine's limit
-	An image in this message isn't in the machine's cache any more, so the message wasn't sent. Send it again
+	An image in this message is no longer in the machine's cache
 	An image part doesn't fit its image
 	An image part isn't base64: {e}
 	An image's bytes don't match its hash, so it wasn't kept
 	An image's upload was cut off. Send the message again to send it whole
 	Could not keep an image: {e}
 	Could not save an image: {e}
+	Too many unfinished image uploads wait on the machine. Send the message again later
 	{sha256:?} isn't a SHA-256
 	{} isn't an image type Keystone sends
 
@@ -623,6 +624,7 @@ crates/keystone-agent/src/remote/journal.rs
 	Could not open {}: {e}
 	call {id} was already answered
 	journal: call {id}: {e}
+	journal: message {send}: {e}
 	journal: {e}
 	keystone-host left out an event it couldn't send: {reason}
 	keystone-host restarted, so the turn ended
@@ -643,6 +645,7 @@ crates/keystone-agent/src/remote/link.rs
 	ServerAliveInterval=5
 	The machine didn't answer. Check that it is on and reachable over SSH.
 	The machine isn't connected, so the message wasn't sent
+	The machine never received this message
 	The machine's host key changed since you last connected, so SSH refused it. Keystone won't connect until you have checked why and fixed known_hosts yourself.
 	The machine's keystone-host {} speaks protocol {}, and Keystone needs {PROTOCOL}. Install the matching version there: {INSTALL}
 	cargo install --locked --path crates/keystone-agent --bin keystone-host
@@ -681,18 +684,21 @@ crates/keystone-agent/src/remote/reap.rs
 crates/keystone-agent/src/remote/serve.rs
 	--version did not answer
 	--version failed with {}
+	An image in this message is no longer on {machine}. Send it again to upload it
 	An image went with this message as a file here, so it wasn't sent
 	Claude Code
 	Claude Code's history is read from its files, not asked of the host
 	Codex
 	Could not find keystone-host itself: {e}
 	Could not listen on {}: {e}
-	Could not make {}: {e}
+	Could not make {} on {machine}: {e}
+	Could not open {} on {machine}: {e}
 	Could not open {}: {e}
 	KEYSTONE_HOST_QUEUE_LIMIT must be at least {QUEUE_FLOOR} bytes, not {queue_limit}
-	The account “{}” needs a full path on this machine, not {}
-	The account “{}” uses {}, which overlaps this machine's default home {}. Give it a folder of its own
-	The app didn't say where this account keeps its files on this machine
+	The account “{label}” can't use {}, which is the whole of {machine}'s disk
+	The account “{label}” needs a full path on {machine} without . or .. in it, not {}
+	The account “{label}” uses {}, which overlaps {machine}'s default home {}
+	The app didn't say where this account keeps its files
 	The machine can't save events, and so many wait to be saved that it starts no more turns until it can
 	The machine can't stop processes {} of this session's last run, so the session can't go on until they exit
 	The machine can't stop the processes of this session's last run, so the session can't go on until they exit
@@ -700,6 +706,7 @@ crates/keystone-agent/src/remote/serve.rs
 	The machine is still stopping the processes of this session's last run, so it can't start another turn yet
 	The machine lost track of this call when keystone-host stopped, so it may or may not have run
 	The watcher of this session's last run stopped unexpectedly, so processes its {} (process {pid}) started may still be running
+	This login's folder changed, so the turn on the old one ended
 	a client id must be 1 to 256 bytes
 	closing a link that sent an unexpected frame: {frame:?}
 	closing a link that went silent
@@ -708,8 +715,10 @@ crates/keystone-agent/src/remote/serve.rs
 	disconnecting a link that fell {behind} bytes behind; it catches up from the journal
 	exiting idle with {unsaved} events the journal never took; the next daemon ends any turn they leave running
 	journal: appends fail (test fault)
+	keystone-host couldn't read what became of this message: {error}
 	keystone-host couldn't record this call, so it didn't run it: {error}
 	keystone-host couldn't watch {}, so it stopped it: {e}
+	keystone-host let go of its provider, so the turn ended
 	not on PATH
 	protocol {protocol} is needed, this host speaks {PROTOCOL} (keystone-host {})
 	session {session} still waits for processes {pids:?} of its last run
@@ -721,10 +730,10 @@ crates/keystone-agent/src/remote/serve.rs
 	{BACKLOGGED} ({error})
 	{UNSAVED} ({error})
 	{bytes} bytes of events wait for the journal, so no turn starts until it takes them ({error})
-	{cwd} isn't a folder on this machine
+	{cwd} isn't a folder on {machine}
 	{error}; events wait for the journal
 	{name} must be a whole number, not {value:?}
-	{} isn't a folder on this machine
+	{} isn't a folder on {machine}
 
 crates/keystone-agent/src/version.rs
 	 (Claude Code)
@@ -870,6 +879,8 @@ crates/keystone-core/src/lib.rs
 	Second opinion: {}
 	The account folder cannot be the filesystem root.
 	Use your own Codex or Claude Code configuration
+	a message is still being sent with this provider and account
+	a session has sent with this login, so its folder stays; start a new login for another folder
 	a session on another machine can't be forked yet
 	a session on another machine can't be handed off yet
 	a title cannot be blank
@@ -887,6 +898,7 @@ crates/keystone-core/src/lib.rs
 	invalid or duplicate prompt ID
 	invalid or duplicate session ID
 	next session ID must be positive
+	only a login on another machine can move to another folder
 	selected session does not exist
 	session ID exhausted
 	session ID space exhausted
@@ -903,11 +915,12 @@ crates/keystone-core/src/lib.rs
 	unknown session ID {session}
 	unknown session ID {source}
 	unsupported state version {} (expected {FORMAT_VERSION})
+	{home} is already used by the account “{label}”; each account needs a folder of its own
+	{home} overlaps {theirs}, the folder of the account “{label}”; each account needs a folder of its own
 	{users} session{} run{} on this machine; it stays until none does
 	{users} session{} use{} this account; it stays until no session does
 	{} ({kind})
 	{} is already linked
-	{} is already used by the account “{}”; each account needs a folder of its own
 	{} overlaps {}, which a provider's own setup or another account uses; choose a separate folder
 	“Default” names each provider's own setup; choose another name
 
@@ -989,12 +1002,14 @@ crates/keystone-desktop/src/app_state.rs
 	Choices need this conversation's saved folder, which this version cannot use.
 	Choose a conversation folder to load choices.
 	Claude Code's config folder is unknown: HOME is not set
+	Connecting to {label}
 	Continue was not cancelled. {error}
 	Continue was not scheduled. {error}
 	Continue was not sent.
 	Could not create {}. {error}
 	Could not save conversation logs before closing. {error}
 	Could not use {}. {error}
+	Couldn't reach {label}
 	Draft not saved. {error}
 	Keystone could not read this conversation's history
 	Keystone is already exiting.
@@ -1004,7 +1019,6 @@ crates/keystone-desktop/src/app_state.rs
 	Keystone kept it: the conversation could not be saved: {error}
 	Keystone kept it: {reason}
 	Keystone was closed during this turn on
-	Models on other machines aren't listed yet, so the session uses its default.
 	Not imported. {error}
 	Not kept: {error}.
 	Not quit. {reason}
@@ -1029,6 +1043,7 @@ crates/keystone-desktop/src/app_state.rs
 	Not sent: {} could not be opened in Keystone's data folder: {error}. Remove it and attach it again.
 	Not sent: {} is no longer in Keystone's data folder. Remove it and attach it again.
 	Note not saved. {error}
+	Pick another login in the model menu, then press Send again, or give this login its own folder in Settings → Accounts.
 	Saved, but not confirmed on disk. {error}
 	Session {session}: log entries were lost
 	Session {session}: {entries} lost (log budget exceeded).
@@ -1038,6 +1053,7 @@ crates/keystone-desktop/src/app_state.rs
 	The scheduled continue will retry shortly. {error}
 	The widget's answer was not sent.
 	This conversation is not being saved. {error}
+	Waiting for {} to say how this turn went
 	Your usage limit has reset. Continue where you left off, without repeating work that is already done.
 	could not start reading: {error}
 	it did not load during the shutdown attempt; restart to retry history loading
@@ -1051,6 +1067,7 @@ crates/keystone-desktop/src/app_state.rs
 	this session's account is not set up
 	{REMOTE_CLOSED} {label}.
 	{lost} log entries were
+	{message}. {WAY_OUT}
 	{} is already linked.
 	{} is not a folder.
 
@@ -1281,6 +1298,8 @@ crates/keystone-desktop/src/conversation.rs
 	Answer the widget before settling this session.
 	Could not read this conversation's history: {error}.
 	Keystone closed during this turn
+	Not sent.
+	{NOT_SENT} {message}
 
 crates/keystone-desktop/src/customization.rs
 	Add changes
@@ -1857,6 +1876,7 @@ crates/keystone-desktop/src/main.rs
 	Worktree missing
 	Worktree name
 	Write a draft…
+	Your draft isn't empty. Send or clear it to edit this message.
 	keystone
 	{name} asks to run
 	{name} asks to run · {} more waiting
@@ -2142,11 +2162,15 @@ crates/keystone-desktop/src/settings_accounts.rs
 	Account not renamed. {error}
 	Add
 	Add an account
+	Change folder
 	Copied
 	Copy sign-in command
 	Copy the sign-in command to run on {machine}
 	Default
 	Folder
+	Folder fixed: a session has sent with this login
+	Folder not changed. {error}
+	Folder on that machine
 	In use
 	Name
 	Remove (folder stays on disk)
@@ -2302,7 +2326,6 @@ crates/keystone-desktop/src/setup.rs
 
 crates/keystone-desktop/src/slash_menu.rs
 	Choose a conversation folder to list commands.
-	Commands on {} aren't listed yet.
 	Commands unavailable for this folder.
 	Copied
 	Copy terminal command
@@ -2358,6 +2381,10 @@ crates/keystone-desktop/src/transcript.rs
 	Copy result
 	Declined
 	Denied: {action}
+	Discard
+	Discarded
+	Edit
+	Edited
 	Exit {code}
 	Expand
 	Failed
@@ -2370,6 +2397,7 @@ crates/keystone-desktop/src/transcript.rs
 	No lines changed.
 	No part of the provider's record matches this transcript, so nothing was added.
 	Not run
+	Not sent
 	Nothing more was recovered.
 	Older messages weren't imported.
 	Only part of a long history was checked.
@@ -2382,6 +2410,9 @@ crates/keystone-desktop/src/transcript.rs
 	Result from
 	Running
 	Second opinion…
+	Send again
+	Send this message again, as it is
+	Sending
 	Stopped
 	The file is empty.
 	The last saved record was cut off and left out.
@@ -2394,6 +2425,7 @@ crates/keystone-desktop/src/transcript.rs
 	This edit is too long to keep whole. The rest isn't shown.
 	Usage limit reached
 	View this turn's changes
+	Write a new message from this one
 	Your last message is not in the provider's record, so it may not have been delivered.
 	activity {name}
 	command output
@@ -2421,6 +2453,7 @@ crates/keystone-desktop/src/transcript.rs
 	{text}: {error}
 	{} could not be read.
 	{} earlier in the provider's record {} not match this transcript and {} left out.
+	{} may already have run it
 	{} no recorded result. Any approval that was waiting has expired.
 	{} of unsupported kinds were skipped.
 	{} the provider's copy; Keystone's copy was kept.

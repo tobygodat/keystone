@@ -5,7 +5,7 @@
 //! `--quick` asks the running app over the same socket to show its windows.
 
 use crate::app_state::Phase;
-use crate::model_selector::{self, CatalogKey, Choices, Selection};
+use crate::model_selector::{self, CatalogKey, CatalogPlace, Choices, Selection};
 use crate::{AppState, ComposerDraft, DesktopApp};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedSender;
@@ -325,7 +325,7 @@ impl QuickComposer {
         Some(CatalogKey {
             provider: self.provider,
             account: self.account.clone(),
-            directory: WorkingDirectory::new(self.project.as_ref()?.path()).ok()?,
+            place: CatalogPlace::Local(WorkingDirectory::new(self.project.as_ref()?.path()).ok()?),
         })
     }
 

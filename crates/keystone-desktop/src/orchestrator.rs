@@ -591,7 +591,7 @@ impl AppState {
                         let (models, status) = match self.catalogs.choices(&CatalogKey {
                             provider,
                             account: self.catalog_account(caller.session, provider),
-                            directory: project.clone(),
+                            place: CatalogPlace::Local(project.clone()),
                         }) {
                             Choices::Ready(models) => (
                                 models.iter().map(|m| json!({"id":m.model,"label":m.label})).collect::<Vec<_>>(),

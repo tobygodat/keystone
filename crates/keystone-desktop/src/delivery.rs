@@ -72,6 +72,11 @@ pub(crate) fn unsaved_results(workspace: &keystone_core::Workspace) -> HashMap<u
         .filter(|d| *d.state() == DeliveryState::Working)
         .filter_map(|d| {
             let session = workspace.sessions().iter().find(|s| s.id() == d.child())?;
+            // A message its machine hasn't answered starts the turn whose end is the
+            // result.
+            if session.pending().iter().any(|send| !send.refused) {
+                return None;
+            }
             let outcome = match session.last_turn()? {
                 keystone_core::LastTurn::Finished => Outcome::Finished,
                 keystone_core::LastTurn::Failed => Outcome::Failed("its turn failed".into()),

@@ -1,7 +1,7 @@
 use super::*;
 use crate::arrangement_editor::Action;
 use crate::customization_agent::{Outcome, Proposal};
-use crate::model_selector::{CatalogKey, Choices};
+use crate::model_selector::{CatalogKey, CatalogPlace, Choices};
 use crate::view_state::ViewKey;
 use gpui::{ListOffset, TestAppContext, VisualTestContext, px};
 use keystone_agent::Event;
@@ -1131,7 +1131,7 @@ fn the_model_menu_fits_a_400px_window_and_keeps_its_columns_when_wide(cx: &mut T
             let key = CatalogKey {
                 provider: Provider::Codex,
                 account: None,
-                directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+                place: CatalogPlace::Local(WorkingDirectory::new(&dir.path().join("a")).unwrap()),
             };
             this.state
                 .update(cx, |state, _cx| state.test_catalogs_mut().clear(&key));
@@ -1249,7 +1249,7 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
         let key = CatalogKey {
             provider: Provider::Claude,
             account: None,
-            directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+            place: CatalogPlace::Local(WorkingDirectory::new(&dir.path().join("a")).unwrap()),
         };
         this.state
             .update(cx, |state, _cx| state.test_catalogs_mut().ask(key, 2));
@@ -1313,7 +1313,7 @@ fn a_catalog_arriving_mid_click_keeps_the_provider_row_under_the_pointer(cx: &mu
     let key = |provider| CatalogKey {
         provider,
         account: None,
-        directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+        place: CatalogPlace::Local(WorkingDirectory::new(&dir.path().join("a")).unwrap()),
     };
     view.update(cx, |this, cx| {
         this.state.update(cx, |state, _cx| {
@@ -1380,7 +1380,7 @@ fn the_model_menu_opens_on_a_chosen_model_below_the_fold(cx: &mut TestAppContext
     let key = |provider| CatalogKey {
         provider,
         account: None,
-        directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+        place: CatalogPlace::Local(WorkingDirectory::new(&dir.path().join("a")).unwrap()),
     };
     view.update(cx, |this, cx| {
         this.state.update(cx, |state, cx| {
@@ -1466,7 +1466,7 @@ fn an_error_arriving_mid_click_keeps_the_menus_under_the_pointer(cx: &mut TestAp
                 CatalogKey {
                     provider: Provider::Codex,
                     account: None,
-                    directory: directory.clone(),
+                    place: CatalogPlace::Local(directory.clone()),
                 },
                 1,
             );
@@ -1581,7 +1581,7 @@ fn the_model_choices_keep_one_height_and_retry_stays_in_view(cx: &mut TestAppCon
     let key = |provider| CatalogKey {
         provider,
         account: None,
-        directory: WorkingDirectory::new(&dir.path().join("a")).unwrap(),
+        place: CatalogPlace::Local(WorkingDirectory::new(&dir.path().join("a")).unwrap()),
     };
     let show = |catalog: Option<keystone_agent::Catalog>, cx: &mut VisualTestContext| {
         view.update(cx, |this, cx| {

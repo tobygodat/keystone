@@ -78,7 +78,7 @@ fn send(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext, text: &str) {
 
 fn five_hour(view: &Entity<Keystone>, cx: &mut gpui::VisualTestContext) -> Option<f64> {
     view.read_with(cx, |view, cx| {
-        let usage = view.state.read(cx).usage(Provider::Claude, None)?;
+        let usage = view.state.read(cx).usage(None, Provider::Claude, None)?;
         usage
             .readings
             .iter()
@@ -148,7 +148,7 @@ fn the_footer_meter_shows_only_above_the_threshold_and_the_reading_survives_a_re
     let observed = five.observed_at;
     let reopened = vcx.update(|_, cx| cx.new(|cx| AppState::new(Store::open(&path).unwrap(), cx)));
     let restored = reopened.read_with(vcx, |state, _| {
-        state.usage(Provider::Claude, None).cloned().unwrap()
+        state.usage(None, Provider::Claude, None).cloned().unwrap()
     });
     assert_eq!(restored.readings[0].observed_at, observed);
     assert_eq!(restored.readings[0].window.used_percent, 85.0);

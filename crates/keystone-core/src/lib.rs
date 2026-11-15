@@ -38,7 +38,7 @@ mod windows;
 pub mod worktree;
 mod writer;
 
-pub use account::{Account, AccountId, expand_home, homes_overlap, lexical};
+pub use account::{Account, AccountId, expand_home, homes_overlap, homes_overlap_folding, lexical};
 pub use attachment::Attachment;
 pub use composition::{
     Axis, Child, Component, Composition, Edit, Node, NodePath, Place, Problem, SavedComposition,
@@ -268,8 +268,34 @@ pub struct Session {
     /// second opinion by this flag and read its link from `handed_off_from`.
     #[serde(default, skip_serializing_if = "is_default")]
     second_opinion: bool,
+    /// Messages sent to the session's machine that its host hasn't answered, oldest
+    /// first. None is a turn yet: the host's answer to each decides, after a relaunch
+    /// too ([`Store::take_send`], [`Store::refuse_send`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending: Vec<PendingSend>,
     #[serde(flatten)]
     unknown: Map<String, Value>,
+}
+
+/// A message sent to a session on another machine that its host hasn't answered. It
+/// shows as sending, and neither starts a turn nor fixes the session's provider and
+/// account until the host takes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSend {
+    /// The ID the app saved the message under, which the host's answer names.
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    /// The host refused it before it ran. It stays, with its text and images, until it
+    /// is sent again under its ID, taken out to edit, or the host's record shows it ran.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub refused: bool,
+    /// A turn started after it was sent, so the host took a message, and its turn's
+    /// state is the turn's own: an answer that arrives after the turn, as one asked
+    /// for after a relaunch does, never makes it Running again.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub ran: bool,
 }
 
 /// Where a provider can fork a conversation natively: its own conversation ID, and its
@@ -394,6 +420,7 @@ impl Session {
             fork_point: None,
             second_opinion_on: None,
             second_opinion: false,
+            pending: Vec::new(),
             unknown: Map::new(),
         }
     }
@@ -541,6 +568,12 @@ impl Session {
 
     pub fn last_turn(&self) -> Option<LastTurn> {
         self.last_turn
+    }
+
+    /// Messages sent to the session's machine that its host hasn't answered, oldest
+    /// first.
+    pub fn pending(&self) -> &[PendingSend] {
+        &self.pending
     }
 
     /// Never earlier than the last change, so a clock set back still clears it.
@@ -1512,6 +1545,90 @@ impl Store {
         })
     }
 
+    /// Records a message sent to a session on another machine, which isn't a turn
+    /// until its host takes it ([`Store::take_send`]): it titles a session that still
+    /// has its placeholder title, as [`Store::record_message`] does, but neither starts
+    /// a turn nor fixes the provider and account.
+    pub fn record_pending_send(
+        &mut self,
+        id: u64,
+        send: PendingSend,
+        now: u64,
+    ) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            if session.title_source == TitleSource::Placeholder
+                && let Some(title) = message_title(&send.text)
+            {
+                session.title = title;
+                session.title_source = TitleSource::FirstMessage;
+            }
+            session.updated_at = Some(now);
+            session.pending.push(send);
+        })
+    }
+
+    /// The host took the message `send`: in one save it is the session's running turn
+    /// and fixes its provider and account. A message no longer pending, refused or
+    /// discarded earlier, still fixes them, since the host's record says it ran; its
+    /// turn's own events say when it runs.
+    pub fn take_send(&mut self, id: u64, send: &str) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            session.model_locked = Some(true);
+            if let Some(at) = session.pending.iter().position(|p| p.id == send) {
+                let taken = session.pending.remove(at);
+                if !taken.ran {
+                    session.last_turn = Some(LastTurn::Running);
+                    session.continue_at = None;
+                }
+            }
+        })
+    }
+
+    /// The host refused the message `send` before any provider saw it, so it is not a
+    /// send: the session stays as it was. The message stays saved, refused, with its
+    /// text and images, so it can be sent again ([`Store::resend_send`]).
+    pub fn refuse_send(&mut self, id: u64, send: &str) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            if let Some(pending) = session.pending.iter_mut().find(|p| p.id == send) {
+                pending.refused = true;
+                pending.ran = false;
+            }
+        })
+    }
+
+    /// Forgets the pending message `send`: discarded, or taken out to edit.
+    pub fn withdraw_send(&mut self, id: u64, send: &str) -> StoreResult<Applied<()>> {
+        self.update_session(id, |session| {
+            session.pending.retain(|p| p.id != send);
+        })
+    }
+
+    /// Sends the refused message `send` again, under its ID: it is pending once more,
+    /// waiting for the host's answer. Returns it, or `None` when no refused message has
+    /// that ID.
+    pub fn resend_send(
+        &mut self,
+        id: u64,
+        send: &str,
+    ) -> StoreResult<Applied<Option<PendingSend>>> {
+        let mut again = None;
+        let applied = self.update_session(id, |session| {
+            if let Some(pending) = session
+                .pending
+                .iter_mut()
+                .find(|p| p.id == send && p.refused)
+            {
+                pending.refused = false;
+                pending.ran = false;
+                again = Some(pending.clone());
+            }
+        })?;
+        Ok(Applied {
+            value: again,
+            revision: applied.revision,
+        })
+    }
+
     /// Records a turn the provider started on its own, such as one opened by a steer
     /// that arrived after the previous turn ended.
     /// A new turn, whoever started it, replaces any continue the user scheduled.
@@ -1519,6 +1636,9 @@ impl Store {
         self.update_session(id, |session| {
             session.last_turn = Some(LastTurn::Running);
             session.continue_at = None;
+            for send in session.pending.iter_mut().filter(|send| !send.refused) {
+                send.ran = true;
+            }
         })
     }
 
@@ -1843,10 +1963,13 @@ impl Store {
                 on == machine && account::remote_homes_overlap(&other, home)
             })
         }) {
-            return Err(invalid(format!(
-                "{} is already used by the account \u{201c}{}\u{201d}; each account needs a folder of its own",
+            let theirs = other
+                .remote_home()
+                .map(|(_, theirs)| theirs.wire().to_owned());
+            return Err(invalid(folder_taken(
                 home.wire(),
-                other.label()
+                theirs.as_deref().unwrap_or_default(),
+                other.label(),
             ))
             .into());
         }
@@ -1870,6 +1993,63 @@ impl Store {
             value: id,
             revision: applied.revision,
         })
+    }
+
+    /// Moves a login on another machine to `home`, a folder there, while none of its
+    /// sessions has a message the machine took: until then nothing of it ran, so no
+    /// transcript lives in the old folder. The new home must not overlap another
+    /// login's on the same machine, and may not be the filesystem root.
+    pub fn set_remote_account_home(
+        &mut self,
+        id: &AccountId,
+        home: &RemoteFolder,
+    ) -> StoreResult<Applied<()>> {
+        let Some(account) = self.workspace.account(id) else {
+            return Err(invalid(format!("unknown account {id}")).into());
+        };
+        let Some(machine) = account.machine().cloned() else {
+            return Err(
+                invalid("only a login on another machine can move to another folder").into(),
+            );
+        };
+        if self
+            .workspace
+            .sessions
+            .iter()
+            .any(|session| session.account.as_ref() == Some(id) && session.started())
+        {
+            return Err(invalid(
+                "a session has sent with this login, so its folder stays; start a new login for another folder",
+            )
+            .into());
+        }
+        if home.wire() == "/" {
+            return Err(invalid("The account folder cannot be the filesystem root.").into());
+        }
+        if let Some(other) = self.workspace.accounts.iter().find(|other| {
+            other.id() != id
+                && other.remote_home().is_some_and(|(on, theirs)| {
+                    *on == machine && account::remote_homes_overlap(&theirs, home)
+                })
+        }) {
+            let theirs = other
+                .remote_home()
+                .map(|(_, theirs)| theirs.wire().to_owned());
+            return Err(invalid(folder_taken(
+                home.wire(),
+                theirs.as_deref().unwrap_or_default(),
+                other.label(),
+            ))
+            .into());
+        }
+        let mut next = self.workspace.clone();
+        if let Some(account) = next.accounts.iter_mut().find(|account| account.id() == id) {
+            account.set_remote_home(home);
+        }
+        if next == self.workspace {
+            return Ok(self.unchanged());
+        }
+        Ok(self.commit(next, self.next_id))
     }
 
     /// Gives an account a new label. Its ID and home never change.
@@ -2045,10 +2225,11 @@ impl Store {
                 .home()
                 .is_some_and(|other| homes_overlap(other, home))
         }) {
-            return Err(invalid(format!(
-                "{} is already used by the account \u{201c}{}\u{201d}; each account needs a folder of its own",
-                home.display(),
-                other.label()
+            let theirs = other.home().map(|theirs| theirs.display().to_string());
+            return Err(invalid(folder_taken(
+                &home.display().to_string(),
+                theirs.as_deref().unwrap_or_default(),
+                other.label(),
             ))
             .into());
         }
@@ -2276,16 +2457,22 @@ impl Store {
         id: u64,
         change: impl FnOnce(&mut Session),
     ) -> StoreResult<Applied<()>> {
-        let started = self
+        let session = self
             .workspace
             .sessions
             .iter()
             .find(|session| session.id == id)
-            .ok_or_else(|| invalid(format!("unknown session ID {id}")))?
-            .started();
-        if started {
+            .ok_or_else(|| invalid(format!("unknown session ID {id}")))?;
+        if session.started() {
             return Err(
                 invalid("the provider and account are fixed once a session has sent").into(),
+            );
+        }
+        // A message its machine hasn't answered goes with the provider and account it
+        // was sent with, so they stay until it is taken or refused.
+        if session.pending.iter().any(|send| !send.refused) {
+            return Err(
+                invalid("a message is still being sent with this provider and account").into(),
             );
         }
         self.update_session(id, change)
@@ -2411,6 +2598,20 @@ enum Opening<'a> {
     ),
     Launched(u64),
     Unselected,
+}
+
+/// Why `home` can't be an account's folder when the account `label`'s folder `theirs`
+/// overlaps it: the same folder, or one inside the other or differing only in case.
+fn folder_taken(home: &str, theirs: &str, label: &str) -> String {
+    if home == theirs {
+        format!(
+            "{home} is already used by the account \u{201c}{label}\u{201d}; each account needs a folder of its own"
+        )
+    } else {
+        format!(
+            "{home} overlaps {theirs}, the folder of the account \u{201c}{label}\u{201d}; each account needs a folder of its own"
+        )
+    }
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

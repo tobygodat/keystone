@@ -9,7 +9,8 @@ use crate::idle::IdleCandidate;
 use crate::{Approval, ApprovalState, Command, Connection, Event, Image, Wake};
 use keystone_core::{ForkPoint, ModelChoice, Provider};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 const NO_IMAGES: &str = "An image can go to a session on another machine only with a message";
 const UNREAD: &str =
@@ -20,6 +21,8 @@ pub struct RemoteConnection {
     route: Route,
     login: Option<Login>,
     registration: u64,
+    /// Each session's next message's ID, from [`Connection::tag_send`].
+    tags: Mutex<HashMap<u64, String>>,
 }
 
 impl RemoteConnection {
@@ -42,7 +45,27 @@ impl RemoteConnection {
             route,
             login,
             registration,
+            tags: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Gives up the message the app saved as `send`: its call, if still unanswered, is
+    /// never sent again. What the host already ran still arrives from its journal.
+    pub fn abandon(&self, send: &str) {
+        self.link.abandon(send);
+    }
+
+    /// Asks the machine what became of the message the app saved as `send`, sent in
+    /// an earlier run whose call this link doesn't have. The answer arrives as that
+    /// message's would: [`Event::Taken`], or [`Event::NotSent`] for one refused or never
+    /// received. Refuses at once while the machine isn't connected.
+    pub fn recall(&self, session: u64, send: &str) -> Result<(), &'static str> {
+        let op = Op::Recall {
+            session,
+            send: send.to_owned(),
+        };
+        let then = self.then(session, Kind::Recall(send.to_owned()));
+        self.link.call(op, then, self.login.as_ref(), true)
     }
 
     /// Reads Codex's stored history of `thread`, which arrives as
@@ -121,11 +144,12 @@ impl Connection for RemoteConnection {
     }
 
     /// Returns once the call is queued, without waiting for the host. While the machine
-    /// isn't connected it refuses at once, so the draft stays. A refusal from the host,
-    /// such as a steer Claude can't take now, or an answer saying the message may not
-    /// have run, arrives later in the session: as a warning while a turn runs, else as
-    /// a failure, the way a local send reports a message that fails after it was taken.
-    /// Each image goes by its hash, after its bytes when this link hasn't sent them.
+    /// isn't connected it refuses at once, so the draft stays. The host's answer arrives
+    /// later in the session and names the message by the ID [`Connection::tag_send`]
+    /// gave it: [`Event::Taken`], or [`Event::NotSent`] for one it refused before any
+    /// provider saw it. One it may have run is taken, then fails a turn that hadn't
+    /// started or warns in one that had. Each image goes by its hash, after its bytes
+    /// when this link hasn't sent them.
     fn send(
         &self,
         session: u64,
@@ -136,6 +160,13 @@ impl Connection for RemoteConnection {
         text: String,
         images: Vec<Image>,
     ) -> Result<(), &'static str> {
+        // Taken first, so a send that fails here never leaves it for the next message.
+        let send = self
+            .tags
+            .lock()
+            .unwrap()
+            .remove(&session)
+            .unwrap_or_else(super::new_client_id);
         let mut attached = Vec::with_capacity(images.len());
         for image in images {
             let bytes = match &image.base64 {
@@ -157,6 +188,7 @@ impl Connection for RemoteConnection {
         }
         let op = Op::Send {
             session,
+            send: send.clone(),
             cwd: cwd.to_owned(),
             resume: resume.map(str::to_owned),
             choice: choice.clone(),
@@ -164,7 +196,17 @@ impl Connection for RemoteConnection {
             text,
             images: attached.iter().map(|(image, _)| image.clone()).collect(),
         };
-        let then = self.then(session, Kind::Send);
+        let hashes = attached
+            .iter()
+            .map(|(image, _)| image.sha256.clone())
+            .collect();
+        let then = self.then(
+            session,
+            Kind::Send {
+                send,
+                images: hashes,
+            },
+        );
         if attached.is_empty() {
             self.link.call(op, then, self.login.as_ref(), true)
         } else {
@@ -191,6 +233,10 @@ impl Connection for RemoteConnection {
 
     /// Forks are off for sessions on another machine.
     fn set_fork(&self, _session: u64, _point: ForkPoint) {}
+
+    fn tag_send(&self, session: u64, send: &str) {
+        self.tags.lock().unwrap().insert(session, send.to_owned());
+    }
 
     /// Never runs `job`: its work, such as a checkpoint, reads the session's folder,
     /// which is on the other machine.
