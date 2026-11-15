@@ -299,7 +299,7 @@ Slice 4 (TOB-320) runs Codex on the host, runs a session as any login the user a
 7. **Orchestrator MCP tools for remote sessions.**
 8. **Installing the host from Keystone, and Tailscale suggestions.**
 
-TOB-306 is done when slice 2 is proven. Slices 3 to 8 get their own Linear issues.
+TOB-306 is done when slice 2 is proven. Slices 3 to 8 get their own issues.
 
 ## Testing
 
@@ -308,4 +308,4 @@ TOB-306 is done when slice 2 is proven. Slices 3 to 8 get their own Linear issue
 - Slice 4's second round: `remote_host.rs` refuses three symlink homes that reach the default home, naming the machine, runs one through a safe symlink on its real path, and uploads an image again after the host deleted it and after it changed. `remote_tests.rs` brings a refused message back to the composer and sends it on the first retry, and lists a Claude and a Codex session's models from the machine and runs the chosen one. `cache.rs` tests a rewritten image, an offset past the end of numbers and the parts bound.
 - Slice 4's tests: `remote_host.rs` runs a Codex turn across a dropped link, Codex's history and import calls, a login's own home for Claude and Codex and one refused for overlapping the default home, and an image uploaded once in two parts and sent twice by hash. `remote_tests.rs` runs a Codex session on a login on the machine that sends one image twice, with its home made only there and its bytes uploaded once, and a Codex turn caught up at the next launch. `machines_tests.rs` checks that a login is offered only to its machine's sessions, and that attaching refuses a relative path and a file that isn't an image.
 - `crates/keystone-desktop/src/remote_tests.rs` drives the app's `AppState` against the real `keystone-host attach` and the scripted Claude: linking and each failure, the folder gate, a turn across a dropped link, Quit and the next launch's catch-up, an approval waiting through Quit, the machine's Quit setting against a quit the user didn't choose, and an app process killed after it received a turn and before it saved it. `tests/remote_host.rs` checks that the host trims only up to what every session saved, with two sessions on one machine where one saves slowly, and that a relaunched link drops events its sessions saved.
-- The proof for slice 2 uses two real machines: the Mac and the Linux desktop on the tailnet. It links the Linux machine, runs a Claude session there, and turns off Wi-Fi during a turn. When Wi-Fi comes back, the turn's events are all there, in order, once.
+- The proof for slice 2 uses two real machines: a Mac and a Linux desktop on one tailnet. It links the Linux machine, runs a Claude session there, and turns off Wi-Fi during a turn. When Wi-Fi comes back, the turn's events are all there, in order, once.

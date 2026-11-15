@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-BASE = pathlib.Path(os.environ.get("KEYSTONE_PROBE_DIR", pathlib.Path.home() / ".cache/keystone/keystone-show-ui-probe"))
+BASE = pathlib.Path(os.environ.get("KEYSTONE_PROBE_DIR", pathlib.Path.home() / ".cache/keystone/show-ui-probe"))
 BASE.mkdir(mode=0o700, parents=True, exist_ok=True)
 ROOT = pathlib.Path(tempfile.mkdtemp(prefix="private-", dir=BASE))
 os.chmod(ROOT, 0o700)

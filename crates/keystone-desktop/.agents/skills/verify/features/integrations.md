@@ -34,5 +34,5 @@ Each MCP server row has a switch (`<row>-switch`), Edit (`<row>-edit`) and Remov
 ## Gotchas
 
 - Status comes only from sessions that ran in this project's folder; a session started in a subfolder is not counted. Keystone never starts a provider or an MCP server to ask, so a server shows "Not running" until a session of that account starts here, and again once every such session has stopped.
-- `codex mcp add` and `codex mcp remove` rewrite every `[mcp_servers]` table: Codex 0.163.0 drops the comments inside them and writes `20` as `20.0` (probe on desk, 2026-10-25). The scripted Codex does not, so a native run cannot show this.
+- `codex mcp add` and `codex mcp remove` rewrite every `[mcp_servers]` table: Codex 0.163.0 drops the comments inside them and writes `20` as `20.0` (probe on a Linux desktop, 2026-10-25). The scripted Codex does not, so a native run cannot show this.
 - Claude sends `system/init` only once a turn starts, so a server that was pending then may show "Starting" until the next turn.

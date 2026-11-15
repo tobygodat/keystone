@@ -16,14 +16,6 @@ The model choices keep one height whatever the catalog holds: six and a half row
 
 If catalog discovery fails, **Provider default** remains available. **Retry** requests the catalog again and stays in view below the message, which scrolls when it is long. A failed first launch still fixes the session's choice. Start a new session to choose another provider or model.
 
-![The native model menu with Claude Code selected](https://github.com/tobygodat/keystone/blob/pr-assets/TOB-32/model-menu.png?raw=true)
-
-![The native Codex session after the selected model replies](https://github.com/tobygodat/keystone/blob/pr-assets/TOB-32/model-reported.png?raw=true)
-
-[Watch the native restart and model-choice recording](https://github.com/tobygodat/keystone/blob/pr-assets/TOB-32/model-selector.webm).
-
-![The full requested-model tooltip after restart](https://github.com/tobygodat/keystone/blob/pr-assets/TOB-32/model-tooltip.png?raw=true)
-
 ## Verification
 
 The final native run used the actual GPUI binary on a private 1280 by 900 desktop at Default density. Both scripted providers received the chosen model and reported it in their replies. The saved workspace confirmed the requested model, the draft, and the lock before and after restart. Provider changes reset the model and preserved the draft. Catalog failure, recovery through Retry, Escape, Send, Ctrl+Enter, and the read-only state were exercised.

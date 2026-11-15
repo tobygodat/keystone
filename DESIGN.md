@@ -189,4 +189,4 @@ The tree's structure, a tree state that owns the rows beside a styled `Tree` ele
 
 ## Known limits
 
-Known limits are Linear issues: the `Label::truncate` ellipsis workaround and click-only copy on Wayland are in TOB-212, and text size, font and System theme gaps are in TOB-216. The visual direction behind these rules is [ADR 0011](docs/adr/0011-quiet-ink.md), which supersedes [ADR 0009](docs/adr/0009-visual-direction.md), and the component choices are [ADR 0008](docs/adr/0008-ui-component-choices.md).
+Known limits are tracked as issues: the `Label::truncate` ellipsis workaround and click-only copy on Wayland are in TOB-212, and text size, font and System theme gaps are in TOB-216. The visual direction behind these rules is [ADR 0011](docs/adr/0011-quiet-ink.md), which supersedes [ADR 0009](docs/adr/0009-visual-direction.md), and the component choices are [ADR 0008](docs/adr/0008-ui-component-choices.md).

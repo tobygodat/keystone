@@ -4,7 +4,7 @@ Status: Accepted, 2026-10-17. Recorded as an ADR 2026-10-27 from `docs/design/po
 
 ## Context
 
-The first styling pass used a navy palette with tinted surfaces and warm text. The polish brief set the contract for the next pass, against the Paper file [Keystone | Product design](). Screenshots of its boards are in `docs/design/product-design/`.
+The first styling pass used a navy palette with tinted surfaces and warm text. The polish brief set the contract for the next pass, against the Paper design file "Keystone | Product design", which isn't public. Screenshots of its boards are in `docs/design/product-design/`.
 
 ## Decision
 

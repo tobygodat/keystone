@@ -12,7 +12,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-BASE = pathlib.Path(os.environ.get("KEYSTONE_PROBE_DIR", pathlib.Path.home() / ".cache/keystone/keystone-mcp-probe"))
+BASE = pathlib.Path(os.environ.get("KEYSTONE_PROBE_DIR", pathlib.Path.home() / ".cache/keystone/mcp-probe"))
 BASE.mkdir(mode=0o700, parents=True, exist_ok=True)
 TOKEN = secrets.token_hex(24)
 ROOT = pathlib.Path(tempfile.mkdtemp(prefix="private-", dir=BASE))

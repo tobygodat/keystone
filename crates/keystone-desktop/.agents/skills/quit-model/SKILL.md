@@ -51,7 +51,7 @@ Read every TLC result with the `/statechart` skill. It turns each violation into
 For each step of a failing path, find the code in the coverage table and check that the code can really take that step in that order:
 
 - **A real bug:** every step is something the code does. Report it in the code's words, one step per line, naming the function that takes each step. Do not change the rule or weaken the model to make it pass, and do not change product code unless asked.
-  - In committed code, file it in Linear.
+  - In committed code, file it as an issue.
   - In a change under review, the change breaks the rule: say so, with the path, and don't call it ready to merge. If the rule itself is meant to change, that is the user's decision, and the rule, its sentence here, and the docs that promise it change together.
   - Whoever fixes it can replay the path as a GPUI test (`#[gpui::test]`, see `docs/CONVENTIONS.md`). Desktop GPUI tests such as `windows_tests.rs` compile only with `--features ui-tests`; without it, `cargo test -p keystone-desktop` runs none of them and still passes.
 - **A modeling error:** a step the code cannot take, such as an action firing while the code would refuse it, or two steps that are one update in the code. Fix the model to match the code, cite the code in a comment, and rerun.

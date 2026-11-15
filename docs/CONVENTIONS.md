@@ -35,7 +35,7 @@ There is no release pipeline. Linux users build from source, and the macOS bundl
 - A module's tests live beside it in `<module>_tests.rs`, or in a `tests` submodule for small ones. Integration tests are in each crate's `tests/`. Recorded provider transcripts are in `crates/keystone-agent/tests/fixtures/`.
 - Colors only in `crates/keystone-ui/src/theme.rs`, and shortcut hints only through `keystone_ui::shortcut_text("secondary-…")`. `check.sh` enforces both. The rest of the UI rules are in `DESIGN.md`.
 - Interactive components accept `debug_selector`, and native verification finds elements by name, so give new controls stable names.
-- Docs: `AGENTS.md` for agent rules, `PRODUCT.md` for the product, `DESIGN.md` for the visual system, this file and `ARCHITECTURE.md` for the code, `docs/adr/` for decisions, `docs/design/` for subsystem references. Work and bugs go in Linear, not in the repo.
+- Docs: `AGENTS.md` for agent rules, `PRODUCT.md` for the product, `DESIGN.md` for the visual system, this file and `ARCHITECTURE.md` for the code, `docs/adr/` for decisions, `docs/design/` for subsystem references. Work and bugs go in GitHub issues, not in the repo.
 
 ## Errors
 

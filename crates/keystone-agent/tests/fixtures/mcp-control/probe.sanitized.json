@@ -2,7 +2,7 @@
   "provenance": {
     "claudeVersion": "2.1.301",
     "codexVersion": "0.163.0",
-    "fullWireFixture": "~/.cache/keystone/work/KEY-34/probes/private-pz8hl637/wire.sanitized.json",
+    "fullWireFixture": "/home/user/.cache/keystone/mcp-probe/private-pz8hl637/wire.sanitized.json",
     "notes": [
       "Captured CLI frames and MCP requests; no user messages or inference requests.",
       "Codex resume uses a synthetic session_meta-only rollout in an isolated CODEX_HOME.",

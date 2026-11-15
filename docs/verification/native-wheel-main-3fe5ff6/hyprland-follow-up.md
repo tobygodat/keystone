@@ -1,6 +1,6 @@
 # Supporting-compositor follow-up: safe app input unavailable
 
-This records the earlier read-only phase under a Captain precaution, not a user requirement. The Captain subsequently authorized temporary foreground focus for one disposable test. See the [integration follow-up](files40-integration.md) for that attempt's guarded abort and final focus/pointer restoration; the historical restriction below is not a permanent product blocker.
+This records the earlier read-only phase under a coordinating agent's precaution, not a user requirement. The coordinating agent subsequently authorized temporary foreground focus for one disposable test. See the [integration follow-up](files40-integration.md) for that attempt's guarded abort and final focus/pointer restoration; the historical restriction below is not a permanent product blocker.
 
 Read-only discovery on 2026-10-19 confirmed the device's existing Hyprland 0.56.2 compositor, commit `efb50993780079460b0cbed1363e2166a2de1d9f`. Its active output was 1920×1080 at scale 1. The exact main app binary still had SHA256 `bdfa7f74fbf4efb2cba4a88eee7c54b98df9ede80c55cb4ee67deeeb164d3558`. No disposable app was launched in this follow-up, and no compositor state or configuration was changed.
 

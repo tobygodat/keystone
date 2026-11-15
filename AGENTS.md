@@ -2,12 +2,11 @@
 
 A native Rust and GPUI desktop workspace for running Claude Code and Codex sessions side by side, for developers who use both.
 
-- Linear: the issue tracker Every change starts from an issue there.
-- Notion: 
+- Issues: https://github.com/tobygodat/keystone/issues. Every change starts from an issue there.
 
 ## Read first
 
-1. The Linear issue you're working on.
+1. The issue you're working on.
 2. `docs/ARCHITECTURE.md` for where things live.
 3. `docs/CONVENTIONS.md` before you add a file or a test.
 4. `PRODUCT.md` and `DESIGN.md` before you change anything a user sees.
@@ -41,4 +40,4 @@ Put cargo on `PATH` first: `export PATH=$HOME/.cargo/bin:$PATH`.
 - After changing how a remote session's events are received, drained, saved, acknowledged or replayed, follow the cursor-model skill (`crates/keystone-desktop/.agents/skills/cursor-model/SKILL.md`). `check.sh --drift` there says whether a change touches the code it models.
 - After changing how a checkpoint restore moves files, writes its journal, undoes, or puts back an unfinished restore, follow the restore-model skill (`crates/keystone-agent/.agents/skills/restore-model/SKILL.md`). `check.sh --drift` there says whether a change touches the code it models.
 - Each worktree keeps its own `target/`. Don't share one or point another worktree at it.
-- Remaining work and known bugs go in Linear, not in repo files.
+- Remaining work and known bugs go in GitHub issues, not in repo files.

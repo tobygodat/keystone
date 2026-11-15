@@ -1,6 +1,6 @@
 {
   "observed_at": "2026-10-19T05:22:49Z",
-  "scope": "No user messages or inference; redacted connect-only probes on desk. Turn recordings remain Claude 2.1.300 and Codex 0.162.1.",
+  "scope": "No user messages or inference; redacted connect-only probes on a Linux desktop. Turn recordings remain Claude 2.1.300 and Codex 0.162.1.",
   "claude": {
     "version_stdout": "2.1.301 (Claude Code)",
     "frames": [

@@ -25,5 +25,5 @@ Never let a run reach the user's speakers. The driver points every run's `PULSE_
 
 ## Not covered
 
-- Whether the sound is audible and pleasant. Toby checks that once on his own desktop.
+- Whether the sound is audible and pleasant. A person checks that once on a real desktop.
 - paplay and afplay invocations, and the fallback from a failing or waiting player, are proven by unit tests, not native runs. Real paplay and pw-play runs are not verified.

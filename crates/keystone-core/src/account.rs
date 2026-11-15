@@ -262,11 +262,11 @@ mod tests {
     #[test]
     fn a_case_insensitive_volume_compares_homes_case_folded() {
         let default = Path::new("/Users/dev/.codex");
-        let shouting = Path::new("/Users/Toby/.CODEX/work");
+        let shouting = Path::new("/Users/Dev/.CODEX/work");
         assert!(homes_overlap_folding(shouting, default, true));
         assert!(homes_overlap_folding(
             default,
-            Path::new("/USERS/TOBY/.CODEX"),
+            Path::new("/USERS/DEV/.CODEX"),
             true
         ));
         assert!(

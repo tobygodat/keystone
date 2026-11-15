@@ -30,4 +30,4 @@ Make a disposable fixture repository with one commit and a temp bare remote (`gi
 - In a main-checkout session send `orchestrator test: launch in <worktree path>` (the scripted Claude calls `session_launch` with that `cwd`): a child session records the worktree. `orchestrator test: launch in <unrelated folder>` is refused, and `orchestrator test: launch in new worktree <name>` is refused unless the caller works in a worktree.
 - Quit and `launch`: rows keep their branches; the removed one shows missing and Send keeps the draft. Kill the app with SIGKILL and `launch`: the surviving worktree session still shows its branch and its provider restarts in the worktree.
 
-The scripted journey is `handoffs/archive-journey.py` in the Captain Drive.
+The script used for the original proof is not published; follow the steps above.

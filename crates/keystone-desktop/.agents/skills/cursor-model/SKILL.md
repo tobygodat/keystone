@@ -36,7 +36,7 @@ bash crates/keystone-desktop/.agents/skills/cursor-model/check.sh
 It needs `mise` and, on the first run, the network: it fetches TLC 1.7.4 (checksum-pinned) into `~/.cache/keystone/` and Java through `mise` (`java@temurin-21`), as the quit and restore models do. It keeps TLC's state files under `~/.cache/keystone/` too, since they don't fit a small `/tmp`. It runs twenty-one TLC jobs in parallel in about 2 minutes, prints one line per run, and exits 0 only when every result matches what it expected:
 
 - `code` runs: each rule on the code as it is, under each set of bounds. All must hold.
-- `finding` runs: a known way the code breaks a rule, filed in Linear. It must keep breaking until the issue is fixed; then its line becomes a `code` line.
+- `finding` runs: a known way the code breaks a rule, filed as an issue. It must keep breaking until the issue is fixed; then its line becomes a `code` line.
 - `can fail` runs: each rule with a deliberate break (`Mutation` in the model). Each must break. If one holds, the rule has stopped checking anything.
   - `ack-on-drain` acknowledges what a connection drained rather than what was saved. That is how the app worked before TOB-319, and `NothingLost` catches it.
   - `cursor-apart` saves a session's cursor in a transaction of its own, before its rows. A kill between the two leaves a cursor ahead of the rows, and `NothingLost` catches it.
@@ -56,7 +56,7 @@ Read every TLC result with the `/statechart` skill when you can. It turns a viol
 
 For each step of a failing path, find the code in the coverage table and check that the code really takes that step in that order:
 
-- **A real bug:** every step is something the code does. Report it in the code's words, one step per line, naming the function that takes each step. Do not weaken the rule or the model to make it pass. In committed code, file it in Linear. In a change under review, the change breaks the rule: say so, with the path, and don't call it ready to merge. `remote_tests.rs` (`a_kill_between_receiving_and_saving_loses_nothing`) shows how to replay a path with a real kill.
+- **A real bug:** every step is something the code does. Report it in the code's words, one step per line, naming the function that takes each step. Do not weaken the rule or the model to make it pass. In committed code, file it as an issue. In a change under review, the change breaks the rule: say so, with the path, and don't call it ready to merge. `remote_tests.rs` (`a_kill_between_receiving_and_saving_loses_nothing`) shows how to replay a path with a real kill.
 - **A modeling error:** a step the code cannot take, or two steps that are one in the code. Fix the model to match the code, cite the code in a comment, and rerun.
 
 TLC errors other than a violation (parse errors, `TypeOK` failing) are always modeling errors. Deadlock checking is off (`-deadlock`): once every event is saved and acknowledged nothing more happens, which is correct.

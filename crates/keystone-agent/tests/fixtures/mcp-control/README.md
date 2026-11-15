@@ -17,6 +17,6 @@ a synthetic session_meta-only rollout in its disposable CODEX_HOME. It proves
 resume configuration and MCP connection, not real-conversation resumption.
 
 Run `python3 scripts/probe-orchestrator.py --claude /path/to/claude --codex
-/path/to/codex`. Output is kept under `~/.cache/keystone/work/keystone-mcp-probe/` by default,
+/path/to/codex`. Output is kept under `~/.cache/keystone/mcp-probe/` by default,
 or the `KEYSTONE_PROBE_DIR` directory. No installed app or saved provider sessions
 are touched. The fixture records protocol observations, not model behavior.

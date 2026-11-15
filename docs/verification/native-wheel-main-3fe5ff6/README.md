@@ -31,21 +31,17 @@ The native fixture had 80 labeled synthetic turns, loaded only after Ctrl+Q exit
 - Completion with composer focus remained unread: `updated_at=1792385003238`, `viewed_at=1792384984272`. Clicking the earlier pane still did not acknowledge it. Clicking latest pane 3 advanced `viewed_at` to `1792385003812` and changed the sidebar out of Needs action.
 - The 3,009-character, 70-line composer draft moved from lines 62–69 to 44–51 after six upward notches, then to 53–60 after three downward notches. Both transcript panes retained their exact offsets, and the persisted draft remained byte-for-byte identical.
 
-![Independent earlier pane offsets]()
-
-[Completed but unread]() and [focused latest acknowledged]() preserve the visible states. [Composer upward]() and [downward]() preserve the separate long-draft path.
+Screenshots of the completed-but-unread and focused-latest-acknowledged states preserve the visible states. Composer upward and downward preserve the separate long-draft path.
 
 ## Keyboard Jump: application gap, not a driver pass
 
-With pane 0 earlier, native Tab followed by Enter and Space left Jump to latest visible and retained the earlier rows. [The screenshot]() shows transcript focus rather than a focused Jump button. Source corroborates the failed route: `main.rs:2052–2089` builds the button without `track_focus`; `keystone-ui/src/button.rs` defaults `focus` to `None` and adds keyboard/focus behavior only when explicitly tracked. No Jump command exists in the current shared command table. This does not claim exhaustive physical-keyboard accessibility coverage.
+With pane 0 earlier, native Tab followed by Enter and Space left Jump to latest visible and retained the earlier rows. Its screenshot shows transcript focus rather than a focused Jump button. Source corroborates the failed route: `main.rs:2052–2089` builds the button without `track_focus`; `keystone-ui/src/button.rs` defaults `focus` to `None` and adds keyboard/focus behavior only when explicitly tracked. No Jump command exists in the current shared command table. This does not claim exhaustive physical-keyboard accessibility coverage.
 
 The bounded follow-up belongs with TOB-30: retain occurrence-scoped Jump focus, add it to a coherent keyboard route with visible focus and Enter/Space activation, and prove the intended pane jumps without acknowledging an earlier unfocused occurrence. No app source was changed in this driver PR.
 
 ## Maximize: unsupported on isolated Sway 1.12
 
 The app's own container was made floating through only the run's unique Sway IPC socket. Before maximize, after maximize, and after the second restore-attempt click, its outer rect was `(250,100,1100,800)`, inner rect `(1,1,1098,798)`, `floating=user_on`, `fullscreen_mode=0`. The output remained `HEADLESS-1`, `(0,0,1600,1000)`, scale 1. These are all retained in the [receipt](receipt.json).
-
-![Floating window after maximize request]()
 
 The app emitted `xdg_toplevel.set_maximized()` for both clicks. Sway replied at the unchanged 1098×798 size. Its [1.12 request handler](https://github.com/swaywm/sway/blob/1.12/sway/desktop/xdg_shell.c) only schedules a configure, without applying maximize; initial WM capabilities advertise only fullscreen. GPUI toggles based on the compositor-confirmed maximized state, so the second click correctly remains a maximize request when Sway never maximized. There is no basis to label this an app restore defect.
 
@@ -59,6 +55,6 @@ Both final-run app launches quit through native Ctrl+Q with exit code 0. Stop re
 
 The final automated script's five-second long-draft persistence wait expired before autosave completed. The failed log is retained. A fresh state read then found the exact full draft, and continuation on the same instance passed composer wheel, unchanged draft/pane, graceful quit and cleanup assertions without retyping. This is not an all-green single-script claim or a save-latency performance claim. The earlier exploratory run and initial build-placement failure are retained too.
 
-Full raw runs, PNGs, action/stderr logs, manifests, build/test output, replay helper and the failed/continued script logs are preserved for the Captain in `handoffs/archive-native-evidence.tar.gz`. Raw run names are `verify-20261019T003927-1392691` and final `verify-20261019T004311-1400861`.
+Full raw runs, PNGs, action/stderr logs, manifests, build/test output, replay helper and the failed/continued script logs are kept in an unpublished evidence archive. Raw run names are `verify-20261019T003927-1392691` and final `verify-20261019T004311-1400861`.
 
 TOB-31 should remain In Progress. After authorized integration of #40/#41, rebuild exact combined main and repeat the relevant two-pane/composer/unread smoke. Keyboard Jump needs its separate application fix; maximize retains this explicit Sway limitation unless a supporting isolated compositor is tested. No real provider integration, physical wheel device, IME, other compositor or performance acceptance is claimed.

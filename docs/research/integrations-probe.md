@@ -1,6 +1,6 @@
 # MCP servers, skills and plugins: where the tested CLIs keep them (TOB-68 probe)
 
-Run on desk on 2026-10-21 with Claude Code 2.1.301 and Codex 0.163.0, by
+Run on a Linux desktop on 2026-10-21 with Claude Code 2.1.301 and Codex 0.163.0, by
 `scripts/probe-integrations.py`. Raw output: [integrations-probe.json](integrations-probe.json).
 
 No inference: each CLI ran under `unshare -rn` (no network) with a fresh `HOME`, a fixture
@@ -71,7 +71,7 @@ raw output keeps them because Claude's `mcp_status` echoes them (see below).
 
 ## Config commands (TOB-69 probe, 2026-10-25)
 
-Run on desk with the same CLIs, under `unshare -rn` with a fresh `HOME`, fixture
+Run on the same desktop with the same CLIs, under `unshare -rn` with a fresh `HOME`, fixture
 `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, and a fixture git project as the working directory.
 
 - `claude mcp add-json -s user|local|project <name> <json>` writes the entry as given;

@@ -6,7 +6,7 @@ Status: Accepted, 2026-11-02 (TOB-295). Supersedes parts of ADR 0001, listed bel
 
 [ADR 0001](0001-product-scope.md) deferred the integrated terminal and remote control through Tailscale. It removed scheduled tasks, the built-in file editor, the local Git diff viewer and the browser preview panel. It never mentioned a device panel. Its rule is that nothing outside its lists gets built without a new ADR.
 
-Toby has decided to bring these seven features into Keystone, porting them from T3 Code (`~/t3code`, read-only). Each one has a build issue blocked by this ADR: TOB-301 to TOB-307. The rest of ADR 0001 stands.
+Toby has decided to bring these seven features into Keystone, porting them from T3 Code (a read-only checkout of `pingdotgg/t3code`). Each one has a build issue blocked by this ADR: TOB-301 to TOB-307. The rest of ADR 0001 stands.
 
 ## Decision
 

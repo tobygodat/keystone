@@ -3,6 +3,7 @@ name = "keystone-ui"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 gpui = { package = "gpui-pre", git = "https://github.com/tobygodat/tGPUI", rev = "59c962b4207236d1e99840399be25d1c52a469f7" }

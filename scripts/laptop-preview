@@ -6,7 +6,7 @@
 # `waypipe ssh` doesn't work over Tailscale SSH: it creates forwarded Unix sockets as root with
 # mode 0600, so the desktop's waypipe server can't open them. A localhost TCP forward works.
 set -euo pipefail
-host=${KEYSTONE_PREVIEW_HOST:-tobygodat@desk}
+host=${KEYSTONE_PREVIEW_HOST:?Set KEYSTONE_PREVIEW_HOST to the SSH destination of the desktop, such as you@desktop}
 remote=${KEYSTONE_PREVIEW_REMOTE:-'~/keystone/scripts/preview-serve'}
 port=$((20000 + RANDOM % 20000))
 sock=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/keystone-preview-XXXXXX.sock")

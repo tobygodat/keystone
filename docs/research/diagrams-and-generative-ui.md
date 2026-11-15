@@ -54,7 +54,7 @@ OpenAI shipped Intelligent UI with GPT-6 on 2026-10-07 ([TechCrunch](https://tec
 
 Keystone does not control the model, so the agent has to ask for UI through a tool.
 
-[PR #23](https://github.com/tobygodat/keystone/pull/23) is related but separate. There, a user describes a change to Keystone's own layout and a provider proposes it. Here, an agent puts widgets inside its reply.
+An earlier pull request is related but separate. There, a user describes a change to Keystone's own layout and a provider proposes it. Here, an agent puts widgets inside its reply.
 
 ## Both CLIs accept tools hosted by Keystone
 

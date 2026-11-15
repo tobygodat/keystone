@@ -97,7 +97,7 @@ def answer(home, args):
         print(json.dumps({'squashMergeAllowed': True, 'mergeCommitAllowed': True,
                           'rebaseMergeAllowed': False}))
     elif args[:1] == ['api'] and 'user' in args:
-        print('toby')
+        print('octocat')
     elif args[:1] == ['api'] and 'PUT' in args:
         (home / 'stage').write_text('merged\n')
         print(json.dumps({'merged': True}))

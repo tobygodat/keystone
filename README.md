@@ -45,7 +45,7 @@ You can watch the app on another Wayland machine while it builds and runs on thi
 scripts/laptop-preview
 ```
 
-It connects to `tobygodat@desk` over SSH and runs `~/keystone/scripts/preview.py` there under waypipe. Set `KEYSTONE_PREVIEW_HOST` for another host. Plain `waypipe ssh` fails over Tailscale SSH, which creates forwarded sockets as root, so the script forwards a localhost TCP port and bridges it with socat on both ends.
+Set `KEYSTONE_PREVIEW_HOST` to the desktop's SSH destination, such as `you@desktop`. The script connects there over SSH and runs `~/keystone/scripts/preview.py` under waypipe. Plain `waypipe ssh` fails over Tailscale SSH, which creates forwarded sockets as root, so the script forwards a localhost TCP port and bridges it with socat on both ends.
 
 The window opens on the laptop. `scripts/preview.py` follows the worktree that changed most recently, uncommitted edits included, so it shows whichever agent is working right now. It prints a line when it switches. After a change has been quiet for about 3 seconds, it rebuilds at low priority in `~/.cache/keystone-preview/target`, so it never waits on an agent's cargo lock, and restarts the app. A failed build leaves the last good app running and prints the errors. Pass a branch name or worktree path to pin one worktree, for example `scripts/laptop-preview my-branch`. `--once` builds and runs without following changes.
 
@@ -57,4 +57,4 @@ The composer supports multiline drafts. Enter and Shift+Enter insert a new line.
 
 ## Develop
 
-Keystone is a Rust workspace on a pinned GPUI fork. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) maps the code, [docs/CONVENTIONS.md](docs/CONVENTIONS.md) covers building, checks and native verification, and [AGENTS.md](AGENTS.md) lists the checks a change must pass. [PRODUCT.md](PRODUCT.md) says what Keystone is for, and [DESIGN.md](DESIGN.md) holds the visual system. Planned work and known bugs are in [Linear](the issue tracker).
+Keystone is a Rust workspace on a pinned GPUI fork. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) maps the code, [docs/CONVENTIONS.md](docs/CONVENTIONS.md) covers building, checks and native verification, and [AGENTS.md](AGENTS.md) lists the checks a change must pass. [PRODUCT.md](PRODUCT.md) says what Keystone is for, and [DESIGN.md](DESIGN.md) holds the visual system. Planned work and known bugs are in [GitHub issues](https://github.com/tobygodat/keystone/issues).

@@ -1,6 +1,6 @@
 # File mentions: do the tested CLIs expand `@path`? (TOB-62 probe)
 
-Run on desk on 2026-10-21 with Claude Code 2.1.301 and Codex 0.163.0, by
+Run on a Linux desktop on 2026-10-21 with Claude Code 2.1.301 and Codex 0.163.0, by
 `scripts/probe-file-mentions.py`. Raw output: [file-mentions-probe.json](file-mentions-probe.json).
 
 No inference: the whole probe ran under `unshare -rn`, whose only network is a private

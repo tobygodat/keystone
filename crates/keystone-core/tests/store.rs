@@ -698,10 +698,7 @@ fn machines_and_their_sessions_survive_restart_without_any_local_folder() {
     let path = dir.path().join("workspace.sqlite3");
     let mut store = Store::open(&path).unwrap();
     assert!(store.link_machine("-oProxyCommand=x", "c1".into()).is_err());
-    let desk = store
-        .link_machine(" dev@Desk ", "c1".into())
-        .unwrap()
-        .value;
+    let desk = store.link_machine(" dev@Desk ", "c1".into()).unwrap().value;
     assert!(store.link_machine("dev@Desk", "c2".into()).is_err());
     let lab = store.link_machine("desk", "c2".into()).unwrap().value;
     assert_eq!((desk.as_str(), lab.as_str()), ("desk", "desk-2"));

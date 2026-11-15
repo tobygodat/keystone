@@ -23,7 +23,7 @@ Run all commands from the workspace root.
 
 ## Known findings
 
-Four runs break on the code at the sync commit. Each is a real path, filed in Linear (TOB-352, TOB-353). The model's paths `x`, `y` and `r` stand for `d/x` (deleted, the only file in folder `d`), `n/y` (added, in a folder `n` that does not exist yet) and `r` (replaced).
+Four runs break on the code at the sync commit. Each is a real path, filed as issues (TOB-352, TOB-353). The model's paths `x`, `y` and `r` stand for `d/x` (deleted, the only file in folder `d`), `n/y` (added, in a folder `n` that does not exist yet) and `r` (replaced).
 
 **`PutBackRestoresFolders`: a folder made but not yet recorded stays (TOB-352).**
 
@@ -101,7 +101,7 @@ Read every TLC result with the `/statechart` skill. It turns each violation into
 In a trace, `pc` is where Keystone is (the labels match the coverage table), `tree` and `aside` say what stands at each path (`orig`, `ckpt` or `user`, numbered), and `journal` is what the journal file holds. For each step of a failing path, find the code in the coverage table and check that the code can really take that step in that order:
 
 - **A real bug:** every step is something the code does. Report it in the code's words, as in the known findings above. Do not change the rule or weaken the model to make it pass, and do not change product code unless asked.
-  - In committed code, file it in Linear.
+  - In committed code, file it as an issue.
   - In a change under review, the change breaks the rule: say so, with the path, and don't call it ready to merge. If the rule itself is meant to change, that is the user's decision, and the rule, its sentence here and the doc comments that promise it change together.
   - Whoever fixes it can replay the path as a test in `checkpoint.rs`'s `tests` module. The put-back tests there stop a restore with `crash_mid_restore` (a panic in `keep`, once every file is placed), then cut the journal short or move files by hand to stand for a crash at an earlier step, as `a_replaced_file_placed_as_the_crash_came_gets_its_original_back` does.
 - **A modeling error:** a step the code cannot take, such as a `Fail` where the code has no call that can fail, a user write while Keystone moves files in a `Races = FALSE` run, or two steps that are one call in the code. Fix the model to match the code, cite the code in a comment, and rerun.
