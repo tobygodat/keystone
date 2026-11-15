@@ -417,11 +417,12 @@ pub(super) fn inventory(host: &LocalHost, until: Deadline) -> (Vec<Device>, Plat
 /// The console port for an emulator this host launches: the highest one adb lists
 /// nothing at, no emulator this host launched still holds, and nothing listens on, with
 /// the adb port above it. An emulator started without a port takes the lowest free one,
-/// so one the user starts at the same moment doesn't race Keystone's for it.
-fn free_port(host: &LocalHost, running: &Running) -> Result<u16, DeviceError> {
+/// so one the user starts at the same moment doesn't race Keystone's for it. `launched`
+/// is the host's map, held locked until the launch is in it, so two starts on separate
+/// lanes can't both choose the same port.
+fn free_port(launched: &HashMap<String, Launch>, running: &Running) -> Result<u16, DeviceError> {
     let free =
         |port: u16| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok();
-    let launched = host.launched.lock().unwrap();
     let taken = (launched.values())
         .filter(|launch| launch.exit.get().is_none())
         .map(|launch| &launch.serial)
@@ -446,7 +447,11 @@ fn free_port(host: &LocalHost, running: &Running) -> Result<u16, DeviceError> {
 /// call and Keystone and adb lists it at a serial Keystone knows. Its output goes to a
 /// file, whose last line says why it exited if it does.
 fn launch(host: &LocalHost, avd: &str, running: &Running) -> Result<(), DeviceError> {
-    let port = free_port(host, running)?.to_string();
+    let program = emulator(host)?;
+    // Held from choosing the port until the launch is recorded: another lane's start
+    // reads the map to know which ports are taken.
+    let mut launched = host.launched.lock().unwrap();
+    let port = free_port(&launched, running)?.to_string();
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let log_path = std::env::temp_dir().join(format!(
         "keystone-emulator-{}-{}-{avd}.log",
@@ -455,7 +460,7 @@ fn launch(host: &LocalHost, avd: &str, running: &Running) -> Result<(), DeviceEr
     ));
     let log = std::fs::File::create(&log_path)
         .map_err(|e| DeviceError::Failed(format!("Couldn't start the emulator: {e}")))?;
-    let mut command = crate::git::program(&emulator(host)?, &std::env::temp_dir());
+    let mut command = crate::git::program(&program, &std::env::temp_dir());
     command
         .args([
             "-avd",
@@ -480,10 +485,8 @@ fn launch(host: &LocalHost, avd: &str, running: &Running) -> Result<(), DeviceEr
         stopping: Arc::default(),
         serial: format!("emulator-{port}"),
     };
-    host.launched
-        .lock()
-        .unwrap()
-        .insert(avd.to_owned(), launch.clone());
+    launched.insert(avd.to_owned(), launch.clone());
+    drop(launched);
     let Launch { child, exit, .. } = launch;
     std::thread::spawn(move || {
         let status = loop {

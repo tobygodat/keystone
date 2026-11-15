@@ -1463,3 +1463,59 @@ fn an_image_that_names_its_avd_later_leaves_the_three_call_path_at_once() {
     host.screenshot(&pixel, soon()).unwrap();
     assert_eq!(calls() - before, 1, "it names its AVD now, so one call");
 }
+
+#[test]
+fn starts_on_separate_lanes_at_once_take_separate_ports() {
+    // Each lane chooses a port from what the host has launched. Until a launch is
+    // recorded another lane can't see its port, so the choice and the record are one
+    // step under the host's lock.
+    for _ in 0..10 {
+        let fakes = Fakes::new();
+        let adb = fakes.script(
+            "adb",
+            r#"case "$*" in "devices -l") printf 'List of devices attached\n\n'; exit 0 ;; esac; exit 1"#,
+        );
+        let emulator = fakes.script(
+            "emulator",
+            r#"if [ "$1" = -list-avds ]; then printf 'A1\nA2\nA3\nA4\n'; exit 0; fi
+prev=; for a; do if [ "$prev" = -port ]; then echo "$2 $a" >> "$D/ports"; fi; prev=$a; done
+exec sleep 5"#,
+        );
+        let host = std::sync::Arc::new(LocalHost::new(Tools {
+            adb: Some(adb),
+            emulator: Some(emulator),
+            ..Tools::default()
+        }));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let starts: Vec<_> = ["A1", "A2", "A3", "A4"]
+            .into_iter()
+            .map(|avd| {
+                let (host, barrier) = (host.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let id: DeviceId = format!("android:{avd}").parse().unwrap();
+                    barrier.wait();
+                    host.start(&id, soon())
+                })
+            })
+            .collect();
+        for start in starts {
+            assert_eq!(start.join().unwrap(), Ok(Start::Started));
+        }
+        eventually("every emulator was given its port", || {
+            std::fs::read_to_string(fakes.path("ports"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+                == 4
+        });
+        let ports = std::fs::read_to_string(fakes.path("ports")).unwrap();
+        let mut seen: Vec<&str> = ports
+            .lines()
+            .map(|line| line.split(' ').nth(1).unwrap())
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 4, "two starts took one port:\n{ports}");
+        host.stop();
+    }
+}
