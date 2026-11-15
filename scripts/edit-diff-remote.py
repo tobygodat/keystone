@@ -35,7 +35,7 @@ while [ "$#" -gt 0 ]; do
 done
 shift
 exec env -i HOME={home} KEYSTONE_HOST_DIR={hostdir} KEYSTONE_CLAUDE_PATH={claude} \\
-    KEYSTONE_FAKE_CLAUDE_DELAY_MS=2 PATH=/usr/bin:/bin sh -c "$*"
+    KEYSTONE_CODEX_PATH={codex} KEYSTONE_FAKE_CLAUDE_DELAY_MS=2 PATH=/usr/bin:/bin sh -c "$*"
 '''
 
 
@@ -66,11 +66,13 @@ def main():
     (home / '.profile').write_text(f'export PATH={home}/bin:$PATH\n')
     ssh = bin_dir / 'ssh'
     ssh.write_text(SSH.format(home=home, hostdir=hostdir,
-                              claude=ROOT / 'target/debug/keystone-fake-claude'))
+                              claude=ROOT / 'target/debug/keystone-fake-claude',
+                              codex=ROOT / 'target/debug/keystone-fake-codex'))
     ssh.chmod(0o755)
     env = {
         'PATH': f'{bin_dir}:{os.environ["PATH"]}',
         'KEYSTONE_CLAUDE_PATH': str(ROOT / 'target/debug/keystone-fake-claude'),
+        'KEYSTONE_CODEX_PATH': str(ROOT / 'target/debug/keystone-fake-codex'),
         'KEYSTONE_FAKE_CLAUDE_DELAY_MS': '2',
         'KEYSTONE_PROJECT_DIR': str(j.project),
         'CLAUDE_CONFIG_DIR': str(j.scratch / 'claude'),

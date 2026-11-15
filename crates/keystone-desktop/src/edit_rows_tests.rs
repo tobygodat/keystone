@@ -69,7 +69,7 @@ fn relaunch<'a>(
     let store = Store::open(path).unwrap();
     let (restored, cx) = cx.add_window_view(|window, cx| {
         Keystone::new(
-            cx.new(|cx| crate::AppState::new(store, cx)),
+            cx.new(|cx| crate::AppState::new(store, cx).with_test_programs(crate::test_support::scripted())),
             false,
             window,
             cx,
@@ -581,7 +581,7 @@ fn long_edit_session<'a>(
     });
     cx.executor().allow_parking();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        Keystone::new(cx.new(|cx| crate::AppState::new(store, cx)), false, window, cx)
+        Keystone::new(cx.new(|cx| crate::AppState::new(store, cx).with_test_programs(crate::test_support::scripted())), false, window, cx)
     });
     wait_until(cx, &view, |view, cx| {
         view.state.read(cx).conversations().get(&1).is_some_and(|c| !c.is_loading() && c.rows.len() > 60)

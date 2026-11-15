@@ -6,12 +6,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The binary `name` that cargo built for this workspace, such as `keystone-fake-claude`.
+/// Turns off this process's search of `PATH` for provider CLIs
+/// (`crate::provider_search`).
 ///
 /// Cargo puts built binaries in `target/<profile>` and runs a test binary from a folder
 /// below it. How far below changed in Cargo 1.100 (`deps/` before, `build/<package>/<hash>/out/`
 /// after) and is not a stable interface, so this takes the nearest folder above the test
 /// binary that holds `name`.
 pub fn built_binary(name: &str) -> PathBuf {
+    // A test that runs scripted providers never runs the real ones (TOB-363).
+    crate::provider_search::refuse();
     let exe = std::env::current_exe().unwrap();
     exe.ancestors()
         .skip(1)

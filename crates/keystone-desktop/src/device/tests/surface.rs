@@ -82,8 +82,8 @@ fn surface(
     host: &Arc<FakeHost>,
     cx: &mut TestAppContext,
 ) -> (&'static mut gpui::VisualTestContext, Entity<AppState>) {
+    use crate::open_windows;
     use crate::windows::open;
-    use crate::{install_app_state, open_windows};
     let path = directory.join("workspace.json");
     let mut store = Store::open(&path).unwrap();
     let project = WorkingDirectory::new(directory).unwrap();
@@ -98,7 +98,11 @@ fn surface(
     let state = cx.update(|cx| {
         keystone_ui::init(cx);
         crate::bind_keys(cx);
-        let state: Entity<AppState> = install_app_state(Store::open(&path).unwrap(), cx);
+        let state: Entity<AppState> = crate::test_support::install(
+            Store::open(&path).unwrap(),
+            crate::test_support::no_providers(),
+            cx,
+        );
         state.update(cx, |state, _| state.devices = Devices::new(fake));
         for (id, placement) in state.read(cx).store().workspace().preferences().windows() {
             open(state.clone(), id, placement, true, false, cx).unwrap();

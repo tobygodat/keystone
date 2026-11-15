@@ -66,3 +66,8 @@ jobs:
       - name: scripts/check.sh ui (headless)
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         run: bash scripts/check.sh ui
+
+      # Every test again, with failing claude and codex first on PATH (TOB-363).
+      - name: scripts/check.sh providers (no test runs a provider from PATH)
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: bash scripts/check.sh providers

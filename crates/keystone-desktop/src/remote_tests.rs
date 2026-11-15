@@ -1042,9 +1042,10 @@ fn a_journal_wiped_while_linked_ends_the_running_turn_once(cx: &mut gpui::TestAp
 /// machine's SSH name at another machine while the app is linked.
 fn switchable_argv(file: &Path) -> Vec<std::ffi::OsString> {
     shell(&format!(
-        "dir=$(cat '{}'); exec env KEYSTONE_HOST_DIR=\"$dir\" HOME=\"$dir\" KEYSTONE_CLAUDE_PATH='{}' '{}' attach",
+        "dir=$(cat '{}'); exec env KEYSTONE_HOST_DIR=\"$dir\" HOME=\"$dir\" KEYSTONE_CLAUDE_PATH='{}' KEYSTONE_CODEX_PATH='{}' '{}' attach",
         file.display(),
         binary("keystone-fake-claude").display(),
+        binary("keystone-fake-codex").display(),
         binary("keystone-host").display()
     ))
 }

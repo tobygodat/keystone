@@ -1,6 +1,6 @@
 use super::*;
+use crate::open_windows;
 use crate::windows::open;
-use crate::{install_app_state, open_windows};
 use gpui::{Entity, TestAppContext, VisualTestContext};
 use keystone_core::{ProjectId, Store, WindowId, WorkingDirectory};
 use std::path::Path;
@@ -63,7 +63,7 @@ fn launch_in<'a>(
     cx.update(|cx| {
         keystone_ui::init(cx);
         crate::bind_keys(cx);
-        let state = install_app_state(store, cx);
+        let state = crate::test_support::install(store, crate::test_support::no_providers(), cx);
         for (id, placement) in state.read(cx).store().workspace().preferences().windows() {
             open(state.clone(), id, placement, true, false, cx).unwrap();
         }

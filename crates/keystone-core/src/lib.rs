@@ -24,6 +24,7 @@ mod prompt;
 #[cfg(test)]
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
+pub mod provider_search;
 mod pull_request;
 mod save;
 mod schedule;

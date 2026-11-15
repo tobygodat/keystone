@@ -858,7 +858,10 @@ mod ui_tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::no_providers())
+                }),
                 false,
                 window,
                 cx,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{AppState, Keystone, install_app_state, open_windows};
+use crate::{AppState, Keystone, open_windows};
 use gpui::{AppContext, Entity, Modifiers, TestAppContext, VisualTestContext};
 use keystone_agent::{Approval, Event, RequestId, TurnStatus};
 use keystone_core::{Notifications, Provider, Sounds, Store, WindowId, WorkingDirectory};
@@ -53,7 +53,7 @@ fn launch(path: &Path, player: bool, cx: &mut TestAppContext) -> Entity<AppState
     let state = cx.update(|cx| {
         keystone_ui::init(cx);
         crate::bind_keys(cx);
-        let state = install_app_state(store, cx);
+        let state = crate::test_support::install(store, crate::test_support::no_providers(), cx);
         if player {
             give_player(cx);
         }
@@ -286,7 +286,14 @@ fn open_settings<'a>(
     });
     cx.executor().allow_parking();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        let view = Keystone::new(cx.new(|cx| AppState::new(store, cx)), false, window, cx);
+        let view = Keystone::new(
+            cx.new(|cx| {
+                AppState::new(store, cx).with_test_programs(crate::test_support::no_providers())
+            }),
+            false,
+            window,
+            cx,
+        );
         view.focus.focus(window, cx);
         view
     });

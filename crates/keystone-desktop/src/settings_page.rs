@@ -962,7 +962,10 @@ mod tests {
         cx.executor().allow_parking();
         cx.add_window_view(|window, cx| {
             let view = Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,

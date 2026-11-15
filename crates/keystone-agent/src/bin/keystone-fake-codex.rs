@@ -455,7 +455,7 @@ fn main() {
                 .append(true)
                 .open(path)
         {
-            let _ = writeln!(log, "{method}");
+            let _ = log.write_all(format!("{method}\n").as_bytes());
         }
         if let Some(path) = std::env::var_os("KEYSTONE_FAKE_CODEX_THREAD_LOG")
             && let Some(thread) = params["threadId"].as_str()
@@ -464,7 +464,7 @@ fn main() {
                 .append(true)
                 .open(path)
         {
-            let _ = writeln!(log, "{method} {thread}");
+            let _ = log.write_all(format!("{method} {thread}\n").as_bytes());
         }
         let reply = |result: Value| emit(&out, json!({"id": id, "result": result}));
         match method {

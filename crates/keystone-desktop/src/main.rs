@@ -53,6 +53,8 @@ mod settings_shortcuts;
 mod slash_menu;
 mod sounds;
 mod terminal;
+#[cfg(all(test, feature = "ui-tests"))]
+mod test_support;
 mod transcript;
 mod transcript_keyboard;
 mod usage;
@@ -5523,7 +5525,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -5951,7 +5956,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -6002,7 +6010,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -6099,7 +6110,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -6199,7 +6213,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -6298,7 +6315,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -6399,7 +6419,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -6699,7 +6722,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -6965,7 +6991,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -7030,7 +7059,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -7116,7 +7148,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -7168,7 +7203,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -7224,7 +7262,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -7285,7 +7326,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -7468,7 +7512,10 @@ mod tests {
         cx.executor().allow_parking();
         cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -7826,7 +7873,10 @@ mod tests {
         cx.executor().allow_parking();
         let (restored, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8231,17 +8281,15 @@ mod tests {
         keystone_core::test_support::built_binary(name)
     }
 
-    /// Points Keystone at the scripted Codex. The variables are process-wide, so every
+    /// Sets the scripted Codex's switches. The variables are process-wide, so every
     /// test that sets them holds this lock until it ends, and one test's switches
-    /// never reach a process another test starts.
+    /// never reach a process another test starts. The program itself comes from
+    /// `AppState::test_programs`.
     pub(crate) fn codex_env() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // SAFETY: set under the lock, before any thread that reads them starts.
-        unsafe {
-            std::env::set_var("KEYSTONE_CODEX_PATH", fake("keystone-fake-codex"));
-            std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "2");
-        }
+        unsafe { std::env::set_var("KEYSTONE_FAKE_CODEX_DELAY_MS", "2") };
         guard
     }
 
@@ -8290,7 +8338,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8416,7 +8467,10 @@ mod tests {
         cx.executor().allow_parking();
         let (restored, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8442,11 +8496,8 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let _env = codex_env();
-        // SAFETY: the same values every Claude test sets, under the Codex lock.
-        unsafe {
-            std::env::set_var("KEYSTONE_CLAUDE_PATH", fake("keystone-fake-claude"));
-            std::env::set_var("KEYSTONE_FAKE_CLAUDE_DELAY_MS", "2");
-        }
+        // SAFETY: the same value every Claude test sets, under the Codex lock.
+        unsafe { std::env::set_var("KEYSTONE_FAKE_CLAUDE_DELAY_MS", "2") };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let store = Store::open(&path).unwrap();
@@ -8457,7 +8508,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8509,7 +8563,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8639,11 +8696,8 @@ mod tests {
     #[gpui::test]
     fn the_model_button_keeps_its_label_and_the_hint_gives_way(cx: &mut gpui::TestAppContext) {
         let _env = codex_env();
-        // SAFETY: the same values every Claude test sets, under the Codex lock.
-        unsafe {
-            std::env::set_var("KEYSTONE_CLAUDE_PATH", fake("keystone-fake-claude"));
-            std::env::set_var("KEYSTONE_FAKE_CLAUDE_DELAY_MS", "2");
-        }
+        // SAFETY: the same value every Claude test sets, under the Codex lock.
+        unsafe { std::env::set_var("KEYSTONE_FAKE_CLAUDE_DELAY_MS", "2") };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
         let (view, cx) = open_window(&path, cx);
@@ -8698,7 +8752,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8792,7 +8849,10 @@ mod tests {
         cx.executor().allow_parking();
         let (restored, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8818,12 +8878,9 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workspace.json");
-        // SAFETY: only this test reads these variables, and it sets them before any
-        // thread that could read them starts.
-        unsafe {
-            std::env::set_var("KEYSTONE_CLAUDE_PATH", fake("keystone-fake-claude"));
-            std::env::set_var("KEYSTONE_FAKE_CLAUDE_DELAY_MS", "2");
-        }
+        // SAFETY: only this test reads this variable, and it sets it before any thread
+        // that could read it starts.
+        unsafe { std::env::set_var("KEYSTONE_FAKE_CLAUDE_DELAY_MS", "2") };
         let store = Store::open(&path).unwrap();
         cx.update(|cx| {
             keystone_ui::init(cx);
@@ -8832,7 +8889,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8928,7 +8988,10 @@ mod tests {
         cx.executor().allow_parking();
         let (restored, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -8967,7 +9030,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9044,7 +9110,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9109,7 +9178,10 @@ mod tests {
         cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9152,7 +9224,10 @@ mod tests {
         cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9189,7 +9264,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9231,7 +9309,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9284,7 +9365,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9344,7 +9428,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9420,7 +9507,10 @@ mod tests {
         cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9459,7 +9549,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9493,7 +9586,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9639,7 +9735,10 @@ mod tests {
         cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9677,7 +9776,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9713,7 +9815,10 @@ mod tests {
         cx.update(keystone_ui::init);
         let (_, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -9861,7 +9966,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -10267,7 +10375,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -10362,7 +10473,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -10433,7 +10547,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -10518,7 +10635,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -10799,7 +10919,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -10876,7 +10999,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -10917,7 +11043,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -10962,7 +11091,10 @@ mod tests {
         cx.executor().allow_parking();
         let (_view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -11130,7 +11262,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,
@@ -11682,7 +11817,10 @@ mod tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::scripted())
+                }),
                 false,
                 window,
                 cx,

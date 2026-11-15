@@ -18,7 +18,7 @@ Put cargo on `PATH` first: `export PATH=$HOME/.cargo/bin:$PATH`.
 
 - `cargo test --workspace --locked`. Plain `cargo test` runs only `keystone-core`.
 - `cargo clippy --workspace --locked` exits 0.
-- `bash scripts/check.sh` for formatting, the color and shortcut checks, and the UI string inventory. Add `bash scripts/check.sh ui` when the desktop or `keystone-ui` changed.
+- `bash scripts/check.sh` for formatting, the color and shortcut checks, and the UI string inventory. Add `bash scripts/check.sh ui` when the desktop or `keystone-ui` changed, and `bash scripts/check.sh providers` when a change starts provider processes or adds tests that do.
 - Prove the change in the real app: `cargo run -p keystone-desktop --locked` with `KEYSTONE_STATE_PATH` set to a scratch file, or drive it headless through the verify skill (`crates/keystone-desktop/.agents/skills/verify/SKILL.md`). Do what a user would do and attach screenshots to the PR for any visible change:
   - Create a Claude session (Ctrl+N), type a draft, quit with Ctrl+Q, relaunch: the session and its draft come back.
   - For a changed surface, click through it with the mouse as well as its shortcut, and check the screenshot, not only the named element.

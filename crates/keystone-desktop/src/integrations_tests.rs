@@ -88,7 +88,14 @@ fn open<'a>(
     });
     cx.executor().allow_parking();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        let view = Keystone::new(cx.new(|cx| AppState::new(store, cx)), false, window, cx);
+        let view = Keystone::new(
+            cx.new(|cx| {
+                AppState::new(store, cx).with_test_programs(crate::test_support::no_providers())
+            }),
+            false,
+            window,
+            cx,
+        );
         view.focus.focus(window, cx);
         view
     });

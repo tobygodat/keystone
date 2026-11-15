@@ -291,10 +291,13 @@ fn store(kind: &str, message: Value, uuid: Option<&str>) -> String {
         .append(true)
         .open(&store.path)
     {
+        // One write for the lot, so a reader never sees part of a record.
+        let mut lines = String::new();
         for copied in std::mem::take(&mut store.copied) {
-            let _ = writeln!(file, "{copied}");
+            lines.push_str(&format!("{copied}\n"));
         }
-        let _ = writeln!(file, "{record}");
+        lines.push_str(&format!("{record}\n"));
+        let _ = file.write_all(lines.as_bytes());
     }
     store.last = Some(uuid.clone());
     uuid
@@ -576,13 +579,15 @@ fn main() {
         .append(true)
         .open(".fake-claude-pids")
     {
-        let _ = writeln!(pids, "{}", std::process::id());
+        let _ = pids.write_all(format!("{}\n", std::process::id()).as_bytes());
     }
     let argv_log = std::env::var_os("KEYSTONE_FAKE_CLAUDE_ARGV_LOG")
         .map_or_else(|| PathBuf::from(".fake-claude-argv"), PathBuf::from);
     let open = std::fs::OpenOptions::new().append(true).open(&argv_log);
     if let Ok(mut argv) = open {
-        let _ = writeln!(argv, "{}", json!(args[1..]));
+        // One write per line: `writeln!` writes the text and its newline apart, and
+        // a test reading the log between them would see half a line.
+        let _ = argv.write_all(format!("{}\n", json!(args[1..])).as_bytes());
     }
     let launch_mode = args
         .iter()
@@ -741,7 +746,7 @@ fn main() {
             .append(true)
             .open(".fake-claude-children")
     {
-        let _ = writeln!(children, "{}", child.id());
+        let _ = children.write_all(format!("{}\n", child.id()).as_bytes());
     }
     let worker = {
         let (out, shared, session) = (out.clone(), shared.clone(), session.clone());
@@ -1025,7 +1030,7 @@ fn main() {
                     .append(true)
                     .open(".fake-claude-messages")
                 {
-                    let _ = writeln!(messages, "{}", json!(text));
+                    let _ = messages.write_all(format!("{}\n", json!(text)).as_bytes());
                 }
                 if let Some(frames) = setting("turn-frames") {
                     for frame in serde_json::from_str::<Vec<Value>>(&frames).unwrap() {

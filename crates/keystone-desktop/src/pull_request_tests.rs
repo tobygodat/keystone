@@ -1,6 +1,6 @@
 use super::*;
 use crate::windows::open;
-use crate::{AppState, install_app_state, open_windows, request_quit};
+use crate::{AppState, open_windows, request_quit};
 use gpui::{AnyWindowHandle, Entity, TestAppContext, VisualTestContext};
 use keystone_core::{Provider, Store, WorkingDirectory};
 use std::fs;
@@ -40,17 +40,59 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(output.status.success(), "git {args:?}: {output:?}");
 }
 
+/// Shell lines for a stand-in `gh` that record this call in `.git/fake-gh-argv`: each
+/// argument on a line, then for a `pr` call its standard input when `stdin` is set,
+/// then `---`. The record is built first and appended with one write, so a test that
+/// reads the log while gh still runs never sees part of it.
+pub(crate) fn gh_record(stdin: bool) -> String {
+    let input = if stdin {
+        "[ \"$1\" = pr ] && { cat; echo; }; "
+    } else {
+        ""
+    };
+    format!(
+        "record=$(for a in \"$@\"; do printf '%s\\n' \"$a\"; done; {input}printf x)\n\
+         printf '%s---\\n' \"${{record%x}}\" >> .git/fake-gh-argv\n"
+    )
+}
+
+/// The calls a stand-in `gh` recorded in `repo` with [`gh_record`]. Fails the test if
+/// the log stops partway through a record, instead of letting it match the part
+/// written so far.
+pub(crate) fn gh_calls(repo: &std::path::Path) -> String {
+    let log = std::fs::read_to_string(repo.join(".git/fake-gh-argv")).unwrap_or_default();
+    if let Err(partial) = whole_records(&log) {
+        panic!("a gh call's record was read before it was whole: {partial:?} in\n{log}");
+    }
+    log
+}
+
+/// `Err` with the record that has no `---` line yet, if the log ends partway through one.
+fn whole_records(log: &str) -> Result<(), &str> {
+    let tail = log.rsplit_once("---\n").map_or(log, |(_, tail)| tail);
+    if tail.is_empty() { Ok(()) } else { Err(tail) }
+}
+
+#[test]
+fn a_gh_record_cut_short_is_refused() {
+    assert_eq!(whole_records(""), Ok(()));
+    assert_eq!(whole_records("pr\nview\n---\napi\n---\n"), Ok(()));
+    assert_eq!(whole_records("pr\ncreate\n---\npr\n"), Err("pr\n"));
+    assert_eq!(whole_records("pr\nview"), Err("pr\nview"));
+}
+
 /// A gh for `repo` that records each call, one argument per line and `---` after
-/// each, and answers from the stage named in `.git/stage`: `view-<stage>.json` and
-/// `comments-<stage>.json`. A merge records itself and moves the stage to `merged`.
+/// each, with one write ([`gh_record`]), and answers from the stage named in
+/// `.git/stage`: `view-<stage>.json` and `comments-<stage>.json`. A merge records
+/// itself and moves the stage to `merged`.
 fn script_gh(repo: &Path) {
     let path = repo.join(".git/fake-gh");
     keystone_core::test_support::write_executable(
         &path,
-        r#"#!/bin/sh
-for a in "$@"; do printf '%s\n' "$a"; done >> .git/fake-gh-argv
-echo --- >> .git/fake-gh-argv
-stage=$(cat .git/stage)
+        &[
+            "#!/bin/sh\n",
+            &gh_record(false),
+            r#"stage=$(cat .git/stage)
 case "$1 $2" in
   "pr view")
     if [ "$3" = --json ]; then
@@ -72,6 +114,8 @@ case "$1 $2" in
     esac ;;
 esac
 "#,
+        ]
+        .concat(),
     );
 }
 
@@ -129,7 +173,7 @@ fn stage(repo: &Path, stage: &str) {
 }
 
 fn calls(repo: &Path) -> String {
-    fs::read_to_string(repo.join(".git/fake-gh-argv")).unwrap_or_default()
+    gh_calls(repo)
 }
 
 /// Session 1 in the repository and 2 in `other`, with the first window showing 1.
@@ -155,7 +199,8 @@ fn launch(path: &Path, cx: &mut TestAppContext) -> (Entity<Keystone>, AnyWindowH
     cx.update(|cx| {
         keystone_ui::init(cx);
         crate::bind_keys(cx);
-        let state: Entity<AppState> = install_app_state(store, cx);
+        let state: Entity<AppState> =
+            crate::test_support::install(store, crate::test_support::no_providers(), cx);
         for (id, placement) in state.read(cx).store().workspace().preferences().windows() {
             open(state.clone(), id, placement, true, false, cx).unwrap();
         }

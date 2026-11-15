@@ -479,6 +479,9 @@ crates/keystone-agent/src/diff.rs
 	rename to 
 	so this diff is partial and will not apply as it is.
 
+crates/keystone-agent/src/find.rs
+	\nA test tried to find `{name}` on PATH, which would start the user's real {name} (TOB-363). Name a scripted provider before anything asks for one: in keystone-desktop, `AppState::test_programs` from `test_support`; elsewhere, the path of keystone-fake-claude or keystone-fake-codex.\nThread: {}\n{}\n
+
 crates/keystone-agent/src/git.rs
 	Cancelled.
 	Couldn't run git: {error}

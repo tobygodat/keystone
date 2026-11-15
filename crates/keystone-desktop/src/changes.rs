@@ -1879,7 +1879,10 @@ mod ui_tests {
         cx.executor().allow_parking();
         let (view, cx) = cx.add_window_view(|window, cx| {
             Keystone::new(
-                cx.new(|cx| crate::AppState::new(store, cx)),
+                cx.new(|cx| {
+                    crate::AppState::new(store, cx)
+                        .with_test_programs(crate::test_support::no_providers())
+                }),
                 false,
                 window,
                 cx,
@@ -2519,15 +2522,17 @@ mod ui_tests {
         });
     }
 
-    /// This repository's gh: it records each call's arguments, one per line, then
-    /// runs `script`. It replaces the old script by renaming over it, as a gh call
-    /// still running it would make writing to it fail.
+    /// This repository's gh: it records each call's arguments, one per line, with one
+    /// write (`pull_request::tests::gh_record`), then runs `script`. It replaces the
+    /// old script by renaming over it, as a gh call still running it would make
+    /// writing to it fail.
     fn script_gh(repo: &Path, script: &str) {
         let path = repo.join(".git/fake-gh.new");
         keystone_core::test_support::write_executable(
             &path,
             format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> .git/fake-gh-argv\n[ \"$1\" = pr ] && {{ cat; echo; }} >> .git/fake-gh-argv\necho --- >> .git/fake-gh-argv\n{script}"
+                "#!/bin/sh\n{}{script}",
+                crate::pull_request::tests::gh_record(true)
             ),
         );
         fs::rename(&path, repo.join(".git/fake-gh")).unwrap();
@@ -2638,7 +2643,7 @@ mod ui_tests {
             settled_all(&view, cx)
                 && panel(&view, cx).read_with(cx, |panel, _| panel.form.is_none())
         });
-        let argv = fs::read_to_string(repo.join(".git/fake-gh-argv")).unwrap();
+        let argv = crate::pull_request::tests::gh_calls(repo);
         let create = "pr\ncreate\n--title\nPush from Changes\n--body-file\n-\n--base\nmain\n--draft\nAdds a push button.\n---\n";
         assert!(argv.starts_with(create), "{argv}");
         assert!(

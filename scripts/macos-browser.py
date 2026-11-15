@@ -111,6 +111,7 @@ class Run:
         })
         if not self.agent:
             env['KEYSTONE_CLAUDE_PATH'] = str(self.binary.parent / 'keystone-fake-claude')
+            env['KEYSTONE_CODEX_PATH'] = str(self.binary.parent / 'keystone-fake-codex')
         return env
 
     def step(self, name, ok, detail=''):

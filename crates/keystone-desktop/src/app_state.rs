@@ -287,7 +287,9 @@ pub(crate) struct AppState {
     pub(crate) test_claude_home: Option<PathBuf>,
     #[cfg(test)]
     pub(crate) save_calls: usize,
-    /// The `codex` and `claude` every new connection runs, in place of the ones found.
+    /// The `codex` and `claude` every new connection runs, from `crate::test_support`.
+    /// A test build reads no `KEYSTONE_*_PATH` and starts no connection without these,
+    /// so it never runs the CLIs on `PATH` (TOB-363).
     #[cfg(test)]
     pub(crate) test_programs: Option<(PathBuf, PathBuf)>,
     /// The command every new link runs in place of `ssh`, such as `keystone-host
@@ -298,10 +300,6 @@ pub(crate) struct AppState {
     /// tell whether the link started reading before them.
     #[cfg(test)]
     pub(crate) test_route_pause: Option<std::time::Duration>,
-    /// Whether a test put its own Claude connection in place, which runs the program
-    /// it names. A connection started without one runs the `claude` on `PATH`.
-    #[cfg(test)]
-    test_claude_installed: bool,
     /// Whether turns take checkpoints. Off in tests unless one turns it on, so a test
     /// whose session works in this repository never writes refs into it.
     #[cfg(test)]
@@ -494,9 +492,15 @@ impl AppState {
     pub(crate) fn test_claude(&self) -> Option<&ClaudeConnection> {
         self.claude.values().next()
     }
+    /// This state with `programs` for every new connection, as `(codex, claude)`; see
+    /// `crate::test_support`.
+    #[cfg(all(test, feature = "ui-tests"))]
+    pub(crate) fn with_test_programs(mut self, programs: (PathBuf, PathBuf)) -> Self {
+        self.test_programs = Some(programs);
+        self
+    }
     #[cfg(test)]
     pub(crate) fn test_set_claude(&mut self, value: Option<ClaudeConnection>) {
-        self.test_claude_installed = value.is_some();
         match value {
             Some(value) => self.claude.insert(None, value),
             None => self.claude.remove(&None),
@@ -1803,6 +1807,9 @@ impl AppState {
     }
 
     pub(crate) fn new(mut store: Store, cx: &mut Context<Self>) -> Self {
+        // A test never searches `PATH` for a provider, even past `test_programs`.
+        #[cfg(test)]
+        keystone_agent::find::refuse_path_search();
         let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
         cx.spawn(async move |this, cx| {
             while wake_rx.next().await.is_some() {
@@ -1941,8 +1948,6 @@ impl AppState {
             test_transport: None,
             #[cfg(test)]
             test_route_pause: None,
-            #[cfg(test)]
-            test_claude_installed: false,
             #[cfg(test)]
             test_checkpoints: false,
             notifier: Default::default(),
@@ -2124,18 +2129,8 @@ impl AppState {
     }
 
     /// Asks Claude's catalog so the model chip can name what the session's default model
-    /// runs as before the first message. A test build asks only once a scripted Claude
-    /// is in place, so it never starts the one on `PATH`. A connection that another
-    /// request already started is not enough: without a scripted program, it runs the
-    /// `claude` on `PATH` (TOB-363).
+    /// runs as before the first message.
     pub(crate) fn name_default_model(&mut self, session: u64, cx: &mut Context<Self>) {
-        #[cfg(test)]
-        if self.test_programs.is_none()
-            && std::env::var_os("KEYSTONE_CLAUDE_PATH").is_none()
-            && !self.test_claude_installed
-        {
-            return;
-        }
         self.request_catalog(session, Provider::Claude, cx);
     }
 
@@ -3504,15 +3499,16 @@ impl AppState {
         let profile = self.profile(provider, account)?;
         let wake = self.wake.clone();
         let key = account.cloned();
-        #[allow(unused_mut)]
-        let (mut codex, mut claude) = (
+        #[cfg(not(test))]
+        let (codex, claude) = (
             std::env::var_os("KEYSTONE_CODEX_PATH").map(PathBuf::from),
             std::env::var_os("KEYSTONE_CLAUDE_PATH").map(PathBuf::from),
         );
+        // A test names its programs on its own state. The variables are process-wide,
+        // so one test's would reach another that set none, depending on the order the
+        // tests ran in.
         #[cfg(test)]
-        if let Some((test_codex, test_claude)) = &self.test_programs {
-            (codex, claude) = (Some(test_codex.clone()), Some(test_claude.clone()));
-        }
+        let (codex, claude) = self.test_programs_for(provider, &key);
         let connection: &dyn Connection = match provider {
             Provider::Codex => self.codex.entry(key).or_insert_with(|| {
                 CodexConnection::with_profile(codex, env!("CARGO_PKG_VERSION"), profile, wake)
@@ -3532,6 +3528,36 @@ impl AppState {
             connection.set_mcp(orchestrator.server.issuer());
         }
         Ok(connection)
+    }
+
+    /// The programs a test named for new connections. Fails the test that is about to
+    /// start a connection without them, which would search `PATH` and run the user's
+    /// real CLI (TOB-363). A connection the test already put in place for the account is
+    /// fine: it runs what the test named. `keystone_agent::find::program` refuses the
+    /// search too, but on the connection's own thread, where it can only stop the whole
+    /// test process.
+    #[cfg(test)]
+    fn test_programs_for(
+        &self,
+        provider: Provider,
+        key: &Option<AccountId>,
+    ) -> (Option<PathBuf>, Option<PathBuf>) {
+        let running = match provider {
+            Provider::Codex => self.codex.contains_key(key),
+            Provider::Claude => self.claude.contains_key(key),
+        };
+        assert!(
+            running || self.test_programs.is_some(),
+            "this test started a {provider} connection without naming its programs, so it \
+             would run the {provider} on PATH (TOB-363). Set `AppState::test_programs` \
+             before anything asks for a catalog or starts a session: \
+             `test_support::scripted()` for the scripted providers, or \
+             `test_support::no_providers()` when the test never talks to one"
+        );
+        match &self.test_programs {
+            Some((codex, claude)) => (Some(codex.clone()), Some(claude.clone())),
+            None => (None, None),
+        }
     }
 
     /// Idle eviction for new Claude connections. Off: no Claude profile has a proven

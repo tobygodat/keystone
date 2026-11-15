@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Keystone, close_window, install_app_state, open_windows};
+use crate::{Keystone, close_window, open_windows};
 use gpui::{AnyWindowHandle, Focusable, TestAppContext, VisualTestContext, WeakEntity};
 use keystone_agent::{Choice, Event, Field, Question};
 use keystone_core::{Attention, Provider, Store, WindowId, WorkingDirectory};
@@ -17,7 +17,7 @@ fn launch(dir: &Path, cx: &mut TestAppContext) -> Entity<AppState> {
     let state = cx.update(|cx| {
         keystone_ui::init(cx);
         crate::bind_keys(cx);
-        let state = install_app_state(store, cx);
+        let state = crate::test_support::install(store, crate::test_support::no_providers(), cx);
         for (id, placement) in state.read(cx).store().workspace().preferences().windows() {
             crate::windows::open(state.clone(), id, placement, true, false, cx).unwrap();
         }

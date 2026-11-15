@@ -24,9 +24,8 @@ pub fn record(images: &[Value]) -> String {
             .append(true)
             .open(path)
     {
-        for image in images {
-            let _ = writeln!(file, "{image}");
-        }
+        let lines: String = images.iter().map(|image| format!("{image}\n")).collect();
+        let _ = file.write_all(lines.as_bytes());
     }
     let named: Vec<String> = images
         .iter()

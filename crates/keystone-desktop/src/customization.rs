@@ -6,11 +6,10 @@ use gpui::{
     prelude::*, px,
 };
 use keystone_core::{
-    Axis, Component, Composition, Edit, Node, NodePath, Place, SavedComposition, Size,
+    Axis, Component, Composition, Edit, Node, NodePath, Place, Provider, SavedComposition, Size,
 };
 use keystone_ui::prelude::*;
 use std::num::NonZeroU16;
-use std::path::PathBuf;
 
 gpui::actions!(
     customize,
@@ -175,7 +174,7 @@ impl Keystone {
     ) {
         for effect in effects {
             match effect {
-                Effect::Ask(ask) => self.customize_agent().ask(ask),
+                Effect::Ask(ask) => self.customize_agent(cx).ask(ask),
                 Effect::Cancel(request) => {
                     if let Some(agent) = &self.customize_agent {
                         agent.cancel(request);
@@ -223,17 +222,13 @@ impl Keystone {
             }
         }
     }
-    fn customize_agent(&mut self) -> &Agent {
+    fn customize_agent(&mut self, cx: &App) -> &Agent {
         let wake = self.customize_wake.clone();
-        self.customize_agent.get_or_insert_with(|| {
-            Agent::new(
-                Programs {
-                    claude: std::env::var_os("KEYSTONE_CLAUDE_PATH").map(PathBuf::from),
-                },
-                REQUEST_TIMEOUT,
-                wake,
-            )
-        })
+        // A test build never reads `KEYSTONE_CLAUDE_PATH` here: another test may have set
+        // it, and without one the helper would run the `claude` on `PATH` (TOB-363).
+        let claude = self.state.read(cx).provider_program(Provider::Claude);
+        self.customize_agent
+            .get_or_insert_with(|| Agent::new(Programs { claude }, REQUEST_TIMEOUT, wake))
     }
     pub(crate) fn receive_customization(&mut self) -> bool {
         let Some(agent) = &self.customize_agent else {
