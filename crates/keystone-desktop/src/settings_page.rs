@@ -1229,12 +1229,15 @@ mod tests {
             "Codex has no account added"
         );
         click(cx, "account-claude-work");
-        let saved_account = || {
+        // A change is saved off the UI thread, so wait for the writer before reading the
+        // file back.
+        let saved_account = |view: &Entity<Keystone>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, cx| view.state.read(cx).store().flush().unwrap());
             Store::open(&path).unwrap().workspace().sessions()[0]
                 .account()
                 .map(|a| a.to_string())
         };
-        assert_eq!(saved_account().as_deref(), Some("claude-work"));
+        assert_eq!(saved_account(&view, cx).as_deref(), Some("claude-work"));
         view.read_with(cx, |view, cx| {
             let selection = view.model_selection(1, keystone_core::Provider::Claude, cx);
             assert_eq!(selection.account.map(|a| a.as_str()), Some("claude-work"));
@@ -1253,7 +1256,7 @@ mod tests {
                 .unwrap_err();
             assert!(refused.to_string().contains("fixed once"), "{refused}");
         });
-        assert_eq!(saved_account().as_deref(), Some("claude-work"));
+        assert_eq!(saved_account(&view, cx).as_deref(), Some("claude-work"));
     }
 
     #[gpui::test]
@@ -1495,6 +1498,7 @@ mod tests {
         view.read_with(cx, |view, cx| {
             assert_eq!(view.composer.read(cx).value(), DRAFT)
         });
+        view.read_with(cx, |view, cx| view.state.read(cx).store().flush().unwrap());
         assert_eq!(
             Store::open(&path).unwrap().workspace().sessions()[0].draft(),
             DRAFT
