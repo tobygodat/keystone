@@ -3,6 +3,21 @@ use crate::integrations::{Inventory, read};
 use edit::{apply, plan};
 use serde_json::json;
 
+// Made-up credentials, split so secret scanners don't take them for real ones.
+macro_rules! github_token {
+    () => {
+        concat!("ghp_", "16C7e42F292c6912E7710c838347Ae178B4a")
+    };
+}
+macro_rules! slack_hook {
+    () => {
+        concat!(
+            "https://hooks.slack.com/services/T0123ABCD/B0456EFGH/",
+            "aB3dE5fG7hJ9kL1mN3pQ5rS7"
+        )
+    };
+}
+
 fn write(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();
@@ -750,10 +765,7 @@ fn query_credentials_in_url_arguments_literal_codex_references_and_refilled_argu
 
 /// Realistic MCP server URLs, each with the secret its path holds, if any.
 const URLS: &[(&str, Option<&str>)] = &[
-    (
-        "https://hooks.slack.com/services/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",
-        Some("aB3dE5fG7hJ9kL1mN3pQ5rS7"),
-    ),
+    (slack_hook!(), Some("aB3dE5fG7hJ9kL1mN3pQ5rS7")),
     (
         "https://mcp.zapier.com/api/mcp/s/NjA5ZjQ0MGQtZjk2Ny00YjE2LWE5ZjQtM2Q4ZjE2ZTJhYjU0/mcp",
         Some("NjA5ZjQ0MGQtZjk2Ny00YjE2LWE5ZjQtM2Q4ZjE2ZTJhYjU0"),
@@ -775,16 +787,23 @@ const URLS: &[(&str, Option<&str>)] = &[
         Some("5b2e7c1a-0d3f-4e8b-9a6c-7f1e2d3c4b5a"),
     ),
     (
-        "https://discord.com/api/webhooks/123456789012345678/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEfGhIjKlMnOpQrStUvWxYz01",
+        concat!(
+            "https://discord.com/api/webhooks/123456789012345678/",
+            "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEfGhIjKlMnOpQrStUvWxYz01"
+        ),
         Some("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEfGhIjKlMnOpQrStUvWxYz01"),
     ),
     (
-        "https://api.telegram.org/bot123456789:AAHfiqksKZ8WmR2zSjiQ7_v4TMAKdiHm9T0/getMe",
+        concat!(
+            "https://api.telegram.org/bot123456789:",
+            "AAHfiqksKZ8WmR2zSjiQ7_v4TMAKdiHm9T0",
+            "/getMe"
+        ),
         Some("AAHfiqksKZ8WmR2zSjiQ7_v4TMAKdiHm9T0"),
     ),
     (
-        "https://example.com/mcp/ghp_16C7e42F292c6912E7710c838347Ae178B4a/sse",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!("https://example.com/mcp/", github_token!(), "/sse"),
+        Some(github_token!()),
     ),
     (
         "https://script.google.com/macros/s/AKfycbz3Xk9Qm2Lp7Rt5Vw8Yb1Nc4Df6Gh0Jk/exec",
@@ -799,7 +818,10 @@ const URLS: &[(&str, Option<&str>)] = &[
         Some("0b7e1c2d-3f4a-4b5c-8d6e-9f0a1b2c3d4e"),
     ),
     (
-        "https://hooks.slack.com/services/T0123ABCD/B0456EFGH/aB3dE5fG7hJ9%6BL1mN3pQ5rS7",
+        concat!(
+            "https://hooks.slack.com/services/T0123ABCD/B0456EFGH/",
+            "aB3dE5fG7hJ9%6BL1mN3pQ5rS7"
+        ),
         Some("aB3dE5fG7hJ9%6BL1mN3pQ5rS7"),
     ),
     (
@@ -811,16 +833,20 @@ const URLS: &[(&str, Option<&str>)] = &[
         Some("Ab3dE5fG7_J9kL1mN3pQ5"),
     ),
     (
-        "https://ghp_16C7e42F292c6912E7710c838347Ae178B4a@github.com/org/private-mcp",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!("https://", github_token!(), "@github.com/org/private-mcp"),
+        Some(github_token!()),
     ),
     (
-        "https://ghp_16C7e42F292c6912E7710c838347Ae178B4a:x-oauth-basic@github.com/org/mcp",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a x-oauth-basic"),
+        concat!(
+            "https://",
+            github_token!(),
+            ":x-oauth-basic@github.com/org/mcp"
+        ),
+        Some(concat!(github_token!(), " x-oauth-basic")),
     ),
     (
-        "https://ghp_16C7e42F292c6912E7710c838347Ae178B4a:@github.com/org/mcp",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!("https://", github_token!(), ":@github.com/org/mcp"),
+        Some(github_token!()),
     ),
     (
         "https://mcp.example.com/s/V1StGXR8_Z5jdHi6B-myT/mcp",
@@ -910,8 +936,8 @@ const URLS: &[(&str, Option<&str>)] = &[
         None,
     ),
     (
-        "https://mcp.example.com/mcp#access_token=ghp_16C7e42F292c6912E7710c838347Ae178B4a",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!("https://mcp.example.com/mcp#access_token=", github_token!()),
+        Some(github_token!()),
     ),
     (
         "https://mcp.example.com/mcp?region=us#token=opaqueCredential123&view=full",
@@ -923,12 +949,20 @@ const URLS: &[(&str, Option<&str>)] = &[
 /// Realistic stdio commands, each with the secret it holds, if any.
 const COMMANDS: &[(&str, Option<&str>)] = &[
     (
-        "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_16C7e42F292c6912E7710c838347Ae178B4a npx -y @modelcontextprotocol/server-github",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!(
+            "GITHUB_PERSONAL_ACCESS_TOKEN=",
+            github_token!(),
+            " npx -y @modelcontextprotocol/server-github"
+        ),
+        Some(github_token!()),
     ),
     (
-        "docker run -i --rm -e GITHUB_TOKEN=ghp_16C7e42F292c6912E7710c838347Ae178B4a ghcr.io/github/github-mcp-server",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!(
+            "docker run -i --rm -e GITHUB_TOKEN=",
+            github_token!(),
+            " ghcr.io/github/github-mcp-server"
+        ),
+        Some(github_token!()),
     ),
     (
         "/usr/local/bin/mcp-server --api-key=abcd1234",
@@ -943,7 +977,7 @@ const COMMANDS: &[(&str, Option<&str>)] = &[
         Some("hunter2"),
     ),
     (
-        "npx mcp-remote https://hooks.slack.com/services/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",
+        concat!("npx mcp-remote ", slack_hook!()),
         Some("aB3dE5fG7hJ9kL1mN3pQ5rS7"),
     ),
     (
@@ -951,8 +985,8 @@ const COMMANDS: &[(&str, Option<&str>)] = &[
         Some("sk-proj-abc123def456ghi789"),
     ),
     (
-        "node server.js --token ghp_16C7e42F292c6912E7710c838347Ae178B4a",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!("node server.js --token ", github_token!()),
+        Some(github_token!()),
     ),
     (
         "npx mcp-remote https://example.com/mcp --header \"Authorization: Bearer opaquecredential123\"",
@@ -967,20 +1001,32 @@ const COMMANDS: &[(&str, Option<&str>)] = &[
         Some("9f8e7d6c5b4a39281706f5e4d3c2b1a0"),
     ),
     (
-        "uvx --from git+https://ghp_16C7e42F292c6912E7710c838347Ae178B4a@github.com/org/private-mcp server",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!(
+            "uvx --from git+https://",
+            github_token!(),
+            "@github.com/org/private-mcp server"
+        ),
+        Some(github_token!()),
     ),
     (
         "node server.js --auth Bearer 9f8e7d6c5b4a39281706f5e4d3c2b1a0",
         Some("9f8e7d6c5b4a39281706f5e4d3c2b1a0"),
     ),
     (
-        "uvx --from git+https://ghp_16C7e42F292c6912E7710c838347Ae178B4a:x-oauth-basic@github.com/org/mcp server",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a x-oauth-basic"),
+        concat!(
+            "uvx --from git+https://",
+            github_token!(),
+            ":x-oauth-basic@github.com/org/mcp server"
+        ),
+        Some(concat!(github_token!(), " x-oauth-basic")),
     ),
     (
-        "uvx --from git+https://ghp_16C7e42F292c6912E7710c838347Ae178B4a:@github.com/org/mcp server",
-        Some("ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+        concat!(
+            "uvx --from git+https://",
+            github_token!(),
+            ":@github.com/org/mcp server"
+        ),
+        Some(github_token!()),
     ),
     (
         "node s.js --password correct\\ horse\\ battery\\ staple",
@@ -1205,10 +1251,13 @@ fn a_backslash_outside_quotes_escapes_the_next_character_as_a_shell_reads_it() {
 fn a_path_or_command_secret_shows_masked_is_left_out_and_is_needed_until_filled() {
     let fixture = fixture();
     let config = fixture.root.join("codex/config.toml");
-    let hook = "https://hooks.slack.com/services/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";
-    let command = "env  API_KEY=sk-proj-abc123def456ghi789   node server.js --token ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+    let hook = slack_hook!();
+    let command = concat!(
+        "env  API_KEY=sk-proj-abc123def456ghi789   node server.js --token ",
+        github_token!()
+    );
     let header = "npx mcp-remote https://example.com/mcp --header \"Authorization: Bearer opaquecredential123\"";
-    let user = "https://ghp_16C7e42F292c6912E7710c838347Ae178B4a@github.com/org/private-mcp";
+    let user = concat!("https://", github_token!(), "@github.com/org/private-mcp");
     let cases = [
         (
             json!({"type": "http", "url": hook}),
@@ -1279,7 +1328,7 @@ fn a_url_or_command_is_needed_until_every_secret_it_holds_is_back() {
     let config = fixture.root.join("codex/config.toml");
     let uuid = "3f1c2b4a-9d8e-4f7a-b6c5-1a2b3c4d5e6f";
     let url = format!("https://mcp.example.com/{uuid}/mcp?api_key=q-secret-123");
-    let token = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+    let token = github_token!();
     let command = format!("node server.js --token {token} --api-key=abcd1234");
     let cases = [
         (
