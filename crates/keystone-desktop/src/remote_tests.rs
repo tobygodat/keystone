@@ -669,7 +669,10 @@ fn the_app_a_kill_test_kills(cx: &mut gpui::TestAppContext) {
     wait_until(cx, &state, "the turn to stream", |state| {
         agent_text(state, session).contains("word1")
     });
-    std::fs::write(state_dir.join("streaming"), session.to_string()).unwrap();
+    // Written whole, since the test that kills this app reads it once it exists.
+    let partial = state_dir.join("streaming.partial");
+    std::fs::write(&partial, session.to_string()).unwrap();
+    std::fs::rename(&partial, state_dir.join("streaming")).unwrap();
     loop {
         cx.run_until_parked();
         if state.read_with(cx, |state, _| ended(state, session)) {
@@ -1008,7 +1011,10 @@ fn the_app_a_streaming_kill_test_kills(cx: &mut gpui::TestAppContext) {
             .value
     });
     assert!(send(&state, session, "hello long", cx));
-    std::fs::write(state_dir.join("streaming"), session.to_string()).unwrap();
+    // Written whole, since the test that kills this app reads it once it exists.
+    let partial = state_dir.join("streaming.partial");
+    std::fs::write(&partial, session.to_string()).unwrap();
+    std::fs::rename(&partial, state_dir.join("streaming")).unwrap();
     loop {
         cx.run_until_parked();
         std::thread::sleep(Duration::from_millis(10));

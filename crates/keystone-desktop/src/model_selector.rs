@@ -30,8 +30,8 @@ const MENU_INSET: Pixels = px(26.);
 /// keeps at most a third of its height for them, and for the providers and accounts.
 const CHOICE_ROWS: f32 = 6.5;
 
-/// The rows of height the effort and speed column may take: two titles, a Default and
-/// six levels, and a Default and two speeds.
+/// The rows of height the effort and speed column keeps, whatever the catalog holds:
+/// two titles, a Default and six levels, and a Default and two speeds.
 const OPTION_ROWS: f32 = 13.;
 
 /// What is known about one catalog in this run of the app.
@@ -922,7 +922,10 @@ fn options_column(
         .pl(px(8.))
         // Every level and speed fits without scrolling in a usual window: the menu
         // opens upward from the composer, so it can take more height than the models.
-        .max_h((row_height * OPTION_ROWS).min(viewport.height * 0.6))
+        // The height is kept whatever the column holds, as the models' is: the menu
+        // grows upward, so a catalog arriving with efforts would otherwise move every
+        // row under the pointer.
+        .h((row_height * OPTION_ROWS).min(viewport.height * 0.6))
         .overflow_y_scroll();
     if !matches!(selection.choices, Choices::Ready(_)) {
         return column;
