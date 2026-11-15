@@ -245,7 +245,18 @@ fn the_shell_environment_leaves_out_keystone_and_multiplexer_variables(cx: &mut 
     let cx = visual(handle, cx);
     cx.simulate_keystrokes("secondary-j");
     let file = dir.path().join("env.txt");
-    run(cx, &format!("env > {}", file.display()));
+    // `wait_for_file` returns once the file has text, so write it whole: a reader could
+    // otherwise see `env`'s output cut off partway.
+    let partial = dir.path().join("env.partial");
+    run(
+        cx,
+        &format!(
+            "env > {} && mv {} {}",
+            partial.display(),
+            partial.display(),
+            file.display()
+        ),
+    );
     let env = wait_for_file(&file);
     let names: Vec<&str> = env
         .lines()

@@ -1307,7 +1307,8 @@ fn long_model_labels_and_reports_never_refit_the_layout(cx: &mut TestAppContext)
 }
 
 /// A catalog that lands while the menu is open moves no provider row: a press on
-/// Claude Code that the catalog's arrival splits still chooses Claude Code.
+/// Claude Code that the catalog's arrival splits still chooses Claude Code. Its default
+/// model lists efforts and speeds, which fill the column beside the models.
 #[gpui::test]
 fn a_catalog_arriving_mid_click_keeps_the_provider_row_under_the_pointer(cx: &mut TestAppContext) {
     let (dir, view, cx) = open(cx, true);
@@ -1346,11 +1347,20 @@ fn a_catalog_arriving_mid_click_keeps_the_provider_row_under_the_pointer(cx: &mu
                         .map(|model| keystone_agent::ModelInfo {
                             model: model.into(),
                             label: model.into(),
-                            resolved: None,
+                            resolved: Some(model.into()),
+                            efforts: ["minimal", "low", "medium", "high", "xhigh", "max"]
+                                .map(String::from)
+                                .into(),
+                            speeds: ["standard", "fast"]
+                                .map(|speed| keystone_agent::Speed {
+                                    value: speed.into(),
+                                    label: speed.into(),
+                                })
+                                .into(),
                             ..Default::default()
                         })
                         .into(),
-                    default_model: None,
+                    default_model: Some("one".into()),
                 },
             )
         });
@@ -1358,6 +1368,8 @@ fn a_catalog_arriving_mid_click_keeps_the_provider_row_under_the_pointer(cx: &mu
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("model-five").is_some());
+    assert!(cx.debug_bounds("effort-max").is_some());
+    assert!(cx.debug_bounds("speed-fast").is_some());
     assert_eq!(cx.debug_bounds("provider-claude"), Some(claude));
     cx.simulate_event(gpui::MouseUpEvent {
         position: claude.center(),
