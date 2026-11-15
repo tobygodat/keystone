@@ -33,7 +33,7 @@ const INSTALL: &str = "cargo install --locked --path crates/keystone-agent --bin
 const NO_ANSWER: &str = "The machine didn't answer. Check that it is on and reachable over SSH.";
 /// Why a message the app sent before it last quit counts as not sent: the host never
 /// received it.
-const UNRECORDED: &str = "The machine never received this message";
+const UNRECORDED: &str = "The machine has no record of this message, so it may already have run";
 
 /// Where a link stands. Every state change wakes each of its connections.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +95,10 @@ pub(crate) enum How {
     Login,
     /// The host lost track of it, so it may or may not have run.
     MayHaveRun,
+    /// The host has no record of the message at all: it never arrived, or its record
+    /// is gone with a replaced journal or past the newest records kept, so it may
+    /// already have run.
+    Unrecorded,
 }
 
 /// Where a call's error reply shows: in `session` of `route`.
@@ -750,7 +754,9 @@ impl Shared {
                 Outcome::Unknown(message) => {
                     state.failed_as(pending.then, message, How::MayHaveRun)
                 }
-                Outcome::Unrecorded => state.failed(pending.then, UNRECORDED.into()),
+                Outcome::Unrecorded => {
+                    state.failed_as(pending.then, UNRECORDED.into(), How::Unrecorded)
+                }
             };
             state.ack(false);
             wake
@@ -1134,6 +1140,7 @@ impl State {
                 send,
                 message,
                 login: how == How::Login,
+                unrecorded: how == How::Unrecorded,
             },
             Kind::Upload(_) | Kind::Other => Event::Warning { message },
         };

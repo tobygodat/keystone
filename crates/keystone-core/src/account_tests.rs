@@ -609,6 +609,7 @@ fn a_pending_send_is_a_turn_only_once_its_host_takes_it() {
         text: format!("message {id}"),
         attachments: Vec::new(),
         refused: false,
+        unrecorded: false,
         ran: false,
     };
     for id in ["a", "b", "c"] {
@@ -621,8 +622,8 @@ fn a_pending_send_is_a_turn_only_once_its_host_takes_it() {
         (false, None, vec!["a".into(), "b".into(), "c".into()]),
         "pending across a relaunch, and nothing fixed"
     );
-    store.refuse_send(session, "b").unwrap();
-    store.refuse_send(session, "a").unwrap();
+    store.refuse_send(session, "b", false).unwrap();
+    store.refuse_send(session, "a", false).unwrap();
     assert_eq!(
         saved(&store),
         (false, None, vec!["a".into(), "b".into(), "c".into()]),
@@ -671,6 +672,7 @@ fn a_discarded_message_the_host_took_fixes_the_session() {
         text: "message a".into(),
         attachments: Vec::new(),
         refused: false,
+        unrecorded: false,
         ran: false,
     };
     store.record_pending_send(session, pending, 2).unwrap();

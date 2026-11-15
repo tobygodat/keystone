@@ -1845,6 +1845,7 @@ fn a_refused_message_with_an_image_sent_again_uploads_it_and_runs_once(
         let failed: Vec<&str> = state.conversations[&session]
             .rows
             .iter()
+            .filter(|row| crate::conversation::visible(row))
             .filter_map(|row| match row {
                 Row::Item(item) if item.status == keystone_agent::ItemStatus::Failed => {
                     Some(item.text.as_str())
@@ -2477,11 +2478,12 @@ fn connected(state: &Entity<AppState>, cx: &mut gpui::TestAppContext) {
     });
 }
 
-/// Each user message's text and status, in order.
+/// Each user message's text and status, in the order they show.
 fn bubbles(state: &AppState, session: u64) -> Vec<(String, keystone_agent::ItemStatus)> {
     state.conversations[&session]
         .rows
         .iter()
+        .filter(|row| crate::conversation::visible(row))
         .filter_map(|row| match row {
             Row::Item(item) if item.kind == ItemKind::UserMessage => {
                 Some((item.text.clone(), item.status))
@@ -2620,7 +2622,8 @@ fn a_taken_message_then_a_refused_steer_mark_their_own_bubbles(cx: &mut gpui::Te
 
 /// Three messages in flight, answered out of order: the third refused, the first
 /// taken, the second refused. Each bubble shows its own answer and the composer is
-/// never filled. Each refused one's Send again works on its own, under its own ID.
+/// never filled. Each refused one's Send again works on its own, under its own ID, and
+/// moves it to the end, where its reply follows it.
 #[gpui::test]
 fn three_messages_answered_out_of_order_each_show_their_own_answer(cx: &mut gpui::TestAppContext) {
     use keystone_agent::ItemStatus::{Completed, Failed};
@@ -2699,13 +2702,14 @@ done"#
             .session(session)
             .is_some_and(|s| s.pending().is_empty())
     });
+    // Each moved to the end as it was sent again, so its reply follows it.
     state.read_with(cx, |state, _| {
         assert_eq!(
             bubbles(state, session),
             [
                 ("one".into(), Completed),
-                ("two".into(), Completed),
-                ("three".into(), Completed)
+                ("three".into(), Completed),
+                ("two".into(), Completed)
             ]
         );
     });
@@ -2831,8 +2835,9 @@ fn a_pending_message_the_machine_took_runs_after_a_relaunch(cx: &mut gpui::TestA
     });
 }
 
-/// A message pending across a relaunch that never reached the machine, which has no
-/// record of it: it reads "Not sent" and stays in its bubble, to be sent again.
+/// A message pending across a relaunch that the machine has no record of: it reads
+/// "Not sent", saying it may already have run, and stays in its bubble, to be sent
+/// again.
 #[gpui::test]
 fn a_pending_message_the_machine_never_received_is_not_sent(cx: &mut gpui::TestAppContext) {
     use keystone_agent::remote::frame::Outcome;
@@ -2855,7 +2860,9 @@ fn a_pending_message_the_machine_never_received_is_not_sent(cx: &mut gpui::TestA
             "both wait in their bubbles to be sent again"
         );
         let error = state.conversations[&session].error.clone().unwrap();
-        assert!(error.contains("never received"), "{error}");
+        assert!(error.contains("may already have run"), "{error}");
+        // Send again's tooltip says so too, from what is saved.
+        assert!(saved.pending().iter().all(|p| p.unrecorded));
     });
 }
 
@@ -3639,8 +3646,9 @@ done"#
     });
     let row = view.read_with(cx, |view, cx| row_of(view.state.read(cx), session, &ids.0));
     press(cx, format!("send-again-{row}"));
+    // Sent again last, it shows last, where its reply follows it.
     wait_window(cx, &view, "first taken", |state| {
-        bubbles(state, session) == [("first".into(), Completed), ("second".into(), Completed)]
+        bubbles(state, session) == [("second".into(), Completed), ("first".into(), Completed)]
     });
     assert_eq!(composer(&view, cx), "");
     let lines = host.lines();
@@ -3740,5 +3748,343 @@ done"#
     assert!(
         cx.debug_bounds(Box::leak(format!("send-again-{row}").into_boxed_str()))
             .is_none()
+    );
+}
+
+/// Presses and releases each key, as the transcript's row actions act on release.
+fn keys(cx: &mut gpui::VisualTestContext, strokes: &str) {
+    for stroke in strokes.split_whitespace() {
+        cx.simulate_keystrokes(stroke);
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse(stroke).unwrap(),
+        });
+        cx.run_until_parked();
+    }
+}
+
+/// A machine that refuses the first message and takes every later one, logging the
+/// app's lines, for a session it ran nothing in before.
+fn refuse_then_take(session: u64) -> (Scripted, String) {
+    use keystone_agent::remote::frame::Outcome;
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    host.each("take", |id| taken(id, session, 1, "by keyboard"));
+    let script = format!(
+        r#"n=0
+while read -r line; do
+  printf '%s\n' "$line" >> "$0/lines"
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      n=$((n+1))
+      if [ "$n" -eq 1 ]; then cat "$0/refuse-$id"; else cat "$0/take-$id"; fi;;
+  esac
+done"#
+    );
+    (host, script)
+}
+
+/// Send again is reached from the keyboard: into the transcript, to the refused
+/// message, Tab past its Copy to Send again, and Enter (on release) sends it again,
+/// under its ID, to the end.
+#[gpui::test]
+fn send_again_is_reached_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::{Completed, Failed};
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let (host, script) = refuse_then_take(session);
+    let (view, cx) = window(dir.path(), session, host.argv(&script), cx);
+    wait_window(cx, &view, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|l| l.status() == LinkStatus::Connected)
+    });
+    cx.simulate_input("by keyboard");
+    cx.simulate_keystrokes("secondary-enter");
+    wait_window(cx, &view, "the refusal", |state| {
+        bubbles(state, session) == [("by keyboard".into(), Failed)]
+    });
+    let send = view.read_with(cx, |view, cx| {
+        view.state.read(cx).session(session).unwrap().pending()[0]
+            .id
+            .clone()
+    });
+    keys(cx, "secondary-shift-t end tab tab enter");
+    wait_window(cx, &view, "sent again", |state| {
+        bubbles(state, session) == [("by keyboard".into(), Completed)]
+    });
+    let lines = host.lines();
+    assert_eq!(
+        lines.matches(&format!(r#""send":"{send}""#)).count(),
+        2,
+        "{lines}"
+    );
+    assert_eq!(composer(&view, cx), "");
+}
+
+/// Edit is reached from the keyboard too: Copy, Send again, then Edit; Enter takes the
+/// refused message into the empty composer.
+#[gpui::test]
+fn edit_is_reached_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::Failed;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let (host, script) = refuse_then_take(session);
+    let (view, cx) = window(dir.path(), session, host.argv(&script), cx);
+    wait_window(cx, &view, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|l| l.status() == LinkStatus::Connected)
+    });
+    cx.simulate_input("edit by keyboard");
+    cx.simulate_keystrokes("secondary-enter");
+    wait_window(cx, &view, "the refusal", |state| {
+        bubbles(state, session) == [("edit by keyboard".into(), Failed)]
+    });
+    keys(cx, "secondary-shift-t end tab tab tab enter");
+    assert_eq!(composer(&view, cx), "edit by keyboard");
+    assert_eq!(
+        statuses(&view, session, cx),
+        [("edit by keyboard".into(), crate::conversation::EDITED)]
+    );
+}
+
+/// Discard is reached from the keyboard: a message whose machine can't be reached,
+/// Tab past its Copy to Discard, and Enter gives it up.
+#[gpui::test]
+fn discard_is_reached_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::Interrupted;
+    let (session, dir, _) = quit_with_one_pending("discard by keyboard", cx);
+    let host = Scripted::new();
+    let down = dir.path().join("down");
+    std::fs::write(&down, "").unwrap();
+    let (view, cx) = window(
+        dir.path(),
+        session,
+        host.argv_unless(&down, "while read -r line; do :; done"),
+        cx,
+    );
+    wait_window(cx, &view, "the link to fail", |state| {
+        state.unreached(session).is_some() && !state.conversations[&session].is_loading()
+    });
+    keys(cx, "secondary-shift-t end tab tab enter");
+    assert_eq!(
+        statuses(&view, session, cx),
+        [("discard by keyboard".into(), Interrupted)]
+    );
+    view.read_with(cx, |view, cx| {
+        assert!(
+            view.state
+                .read(cx)
+                .session(session)
+                .unwrap()
+                .pending()
+                .is_empty()
+        );
+    });
+}
+
+/// While its machine can't be reached, Send again is off, for the reason the composer's
+/// Send gives, and the keyboard skips it; Edit still works.
+#[gpui::test]
+fn send_again_is_off_while_the_machine_cant_be_reached(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::ItemStatus::Failed;
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    let script = format!(
+        r#"while read -r line; do
+  printf '%s\n' "$line" >> "$0/lines"
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      cat "$0/refuse-$id";;
+  esac
+done"#
+    );
+    let state = runtime(dir.path(), cx);
+    state.update(cx, |state, _| {
+        state.test_transport = Some(host.argv(&script))
+    });
+    connected(&state, cx);
+    state.update(cx, |state, cx| {
+        assert!(send_now(state, session, "while away", cx))
+    });
+    wait_until(cx, &state, "the refusal", |state| {
+        bubbles(state, session) == [("while away".into(), Failed)]
+    });
+    quit(state, false, cx);
+    let down = dir.path().join("down");
+    std::fs::write(&down, "").unwrap();
+    let (view, cx) = window(dir.path(), session, host.argv_unless(&down, &script), cx);
+    wait_window(cx, &view, "the link to fail", |state| {
+        state.offline(session).is_some() && !state.conversations[&session].is_loading()
+    });
+    let (row, send) = view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        let send = state.session(session).unwrap().pending()[0].id.clone();
+        (row_of(state, session, &send), send)
+    });
+    view.read_with(cx, |view, cx| {
+        let reason = view.state.read(cx).offline(session).unwrap();
+        assert!(reason.contains("desk"), "{reason}");
+        assert_eq!(
+            view.message_actions(session, row, cx),
+            [view_state::CopyTarget::EditMessage],
+            "the keyboard skips Send again"
+        );
+    });
+    press(cx, format!("send-again-{row}"));
+    let refused = view.update(cx, |view, cx| {
+        view.state
+            .update(cx, |state, cx| state.send_again(session, &send, cx))
+    });
+    assert!(!refused, "it doesn't send");
+    assert_eq!(
+        statuses(&view, session, cx),
+        [("while away".into(), Failed)]
+    );
+    assert_eq!(host.lines().matches(r#""op":"send""#).count(), 1);
+}
+
+/// A refused message with an image has its "Not sent" line, with Send again and Edit,
+/// under the image, not between the bubble and it.
+#[gpui::test]
+fn a_refused_messages_status_sits_under_its_image(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    let script = format!(
+        r#"while read -r line; do
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      cat "$0/refuse-$id";;
+  esac
+done"#
+    );
+    let (view, cx) = window(dir.path(), session, host.argv(&script), cx);
+    wait_window(cx, &view, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|l| l.status() == LinkStatus::Connected)
+    });
+    view.update(cx, |view, cx| {
+        view.state.update(cx, |state, cx| {
+            let picture = state
+                .attachments
+                .import_bytes(b"\x89PNG\r\n\x1a\nunder the image", "picture.png".into())
+                .unwrap();
+            assert!(state.send_message(
+                ComposerDraft {
+                    session,
+                    text: "with a picture".into(),
+                    attachments: vec![picture],
+                },
+                cx
+            ));
+        })
+    });
+    wait_window(cx, &view, "the refusal", |state| {
+        state
+            .session(session)
+            .is_some_and(|s| s.pending().iter().all(|p| p.refused))
+    });
+    cx.run_until_parked();
+    let row = view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        row_of(
+            state,
+            session,
+            &state.session(session).unwrap().pending()[0].id,
+        )
+    });
+    let image = cx
+        .debug_bounds(Box::leak(
+            format!("sent-attachments-{}", row + 1).into_boxed_str(),
+        ))
+        .expect("the image row");
+    let again = cx
+        .debug_bounds(Box::leak(format!("send-again-{row}").into_boxed_str()))
+        .expect("Send again");
+    assert!(
+        again.top() >= image.bottom(),
+        "Send again {again:?} is under the image {image:?}"
+    );
+}
+
+/// A message taken out to edit whose machine then shows it ran says so, in one muted
+/// line.
+#[gpui::test]
+fn an_edited_message_that_ran_says_so(cx: &mut gpui::TestAppContext) {
+    use keystone_agent::remote::frame::Outcome;
+    let dir = tempfile::tempdir().unwrap();
+    let session = remote_session(dir.path());
+    let host = Scripted::new();
+    host.each("refuse", |id| {
+        vec![reply(id, Outcome::Err("refused".into()))]
+    });
+    let mut later = ran(session, 1, "SENDID", "ran anyway");
+    later.truncate(4);
+    host.write("later", &later);
+    let script = format!(
+        r#"while read -r line; do
+  case "$line" in
+    *'"op":"send"'*)
+      {CALL_ID}
+      send=$(printf '%s' "$line" | sed -n 's/.*"send":"\([^"]*\)".*/\1/p')
+      cat "$0/refuse-$id"
+      until [ -e "$0/go" ]; do sleep 0.05; done
+      sed "s/SENDID/$send/" "$0/later";;
+  esac
+done"#
+    );
+    let (view, cx) = window(dir.path(), session, host.argv(&script), cx);
+    wait_window(cx, &view, "the link", |state| {
+        state
+            .links
+            .values()
+            .any(|l| l.status() == LinkStatus::Connected)
+    });
+    cx.simulate_input("ran anyway");
+    cx.simulate_keystrokes("secondary-enter");
+    wait_window(cx, &view, "the refusal", |state| {
+        bubbles(state, session) == [("ran anyway".into(), keystone_agent::ItemStatus::Failed)]
+    });
+    let row = view.read_with(cx, |view, cx| {
+        let state = view.state.read(cx);
+        row_of(
+            state,
+            session,
+            &state.session(session).unwrap().pending()[0].id,
+        )
+    });
+    press(cx, format!("edit-message-{row}"));
+    assert_eq!(composer(&view, cx), "ran anyway");
+    assert!(
+        cx.debug_bounds(Box::leak(format!("ran-after-all-{row}").into_boxed_str()))
+            .is_none()
+    );
+    std::fs::write(host.0.path().join("go"), "").unwrap();
+    wait_window(cx, &view, "the machine's record", |state| {
+        state.conversations[&session].ran_after_edit.contains(&row)
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(Box::leak(format!("ran-after-all-{row}").into_boxed_str()))
+            .is_some()
     );
 }

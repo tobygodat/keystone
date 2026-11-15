@@ -3041,10 +3041,43 @@ impl Keystone {
                 };
                 // A message its machine refused can be sent again under its ID, or taken
                 // out to edit into the empty composer.
-                let refused = match row {
+                // The message whose status line this row draws: its own, or, on an
+                // image row, the message the images went with, so the line sits under
+                // them.
+                let message = match row {
                     Row::Item(item)
                         if item.kind == ItemKind::UserMessage
-                            && item.status == keystone_agent::ItemStatus::Failed
+                            && !matches!(
+                                conversation.rows.get(index + 1),
+                                Some(Row::Attachments(a)) if !a.is_empty()
+                            ) =>
+                    {
+                        Some((index, item))
+                    }
+                    Row::Attachments(_) => match index
+                        .checked_sub(1)
+                        .and_then(|before| conversation.rows.get(before))
+                    {
+                        Some(Row::Item(item)) if item.kind == ItemKind::UserMessage => {
+                            Some((index - 1, item))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let status = message
+                    .map(|(at, item)| transcript::MessageStatus {
+                        status: item.status,
+                        index: at,
+                        ran_after_all: conversation.ran_after_edit.contains(&at),
+                    })
+                    // A message that went shows nothing more.
+                    .filter(|s| {
+                        s.status != keystone_agent::ItemStatus::Completed || s.ran_after_all
+                    });
+                let refused = match message.map(|(_, item)| item) {
+                    Some(item)
+                        if item.status == keystone_agent::ItemStatus::Failed
                             && self
                                 .state
                                 .read(cx)
@@ -3052,6 +3085,17 @@ impl Keystone {
                                 .is_some() =>
                     {
                         let (again, edit) = (item.id.clone(), item.id.clone());
+                        let state = self.state.read(cx);
+                        let unrecorded = state
+                            .refused_send(session, &item.id)
+                            .is_some_and(|p| p.unrecorded)
+                            .then(|| {
+                                state
+                                    .session_machine(session)
+                                    .map(|(m, _)| m.label().to_owned())
+                            })
+                            .flatten();
+                        let send_again_blocked = state.offline(session);
                         Some(transcript::RefusedControl {
                             on_send_again: Box::new(self.scoped_listener(
                                 cx,
@@ -3067,38 +3111,36 @@ impl Keystone {
                                     this.edit_refused(session, &edit, window, cx)
                                 },
                             )),
+                            send_again_blocked,
                             edit_blocked: (!self.composer_empty(session, cx))
                                 .then_some(EDIT_BLOCKED),
+                            unrecorded,
                         })
                     }
                     _ => None,
                 };
                 // A message still sending while its machine can't be reached can be
                 // given up, which frees the session.
-                let unreached = match row {
-                    Row::Item(item)
-                        if item.kind == ItemKind::UserMessage
-                            && item.status == keystone_agent::ItemStatus::InProgress =>
-                    {
-                        self.state
-                            .read(cx)
-                            .unreached(session)
-                            .map(|(reason, machine)| {
-                                let send = item.id.clone();
-                                transcript::UnreachedControl {
-                                    reason,
-                                    machine,
-                                    on_discard: Box::new(self.scoped_listener(
-                                        cx,
-                                        move |this, _, _, cx| {
-                                            this.state.update(cx, |state, cx| {
-                                                state.discard_send(session, &send, cx)
-                                            });
-                                        },
-                                    )),
-                                }
-                            })
-                    }
+                let unreached = match message.map(|(_, item)| item) {
+                    Some(item) if item.status == keystone_agent::ItemStatus::InProgress => self
+                        .state
+                        .read(cx)
+                        .unreached(session)
+                        .map(|(reason, machine)| {
+                            let send = item.id.clone();
+                            transcript::UnreachedControl {
+                                reason,
+                                machine,
+                                on_discard: Box::new(self.scoped_listener(
+                                    cx,
+                                    move |this, _, _, cx| {
+                                        this.state.update(cx, |state, cx| {
+                                            state.discard_send(session, &send, cx)
+                                        });
+                                    },
+                                )),
+                            }
+                        }),
                     _ => None,
                 };
                 let fork = fork::forkable(row).then(|| transcript::ForkControl {
@@ -3162,6 +3204,7 @@ impl Keystone {
                         fork,
                         unreached,
                         refused,
+                        status,
                         restore,
                         second_opinion,
                         edit_folder: matches!(

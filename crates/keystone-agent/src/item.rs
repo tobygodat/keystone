@@ -183,6 +183,9 @@ pub enum Event {
         /// with its own folder, would go.
         #[serde(default)]
         login: bool,
+        /// The machine has no record of the message, so it may already have run.
+        #[serde(default)]
+        unrecorded: bool,
     },
     /// Something went wrong that does not end the turn, such as a rejected steer.
     Warning {

@@ -56,13 +56,18 @@ fn copy_actions<'a>(
     row: &'a Row,
     document: Option<&'a Document>,
     open_edit: bool,
+    message: &[CopyTarget],
 ) -> Vec<(CopyTarget, &'a str)> {
     let Row::Item(item) = row else {
-        return Vec::new();
+        // An image row holds its message's Send again, Edit and Discard.
+        return message.iter().map(|target| (*target, "")).collect();
     };
     let mut actions = Vec::new();
     match &item.kind {
-        ItemKind::UserMessage => actions.push((CopyTarget::Row, item.text.as_str())),
+        ItemKind::UserMessage => {
+            actions.push((CopyTarget::Row, item.text.as_str()));
+            actions.extend(message.iter().map(|target| (*target, item.text.as_str())));
+        }
         ItemKind::AgentMessage => {
             if item.status != ItemStatus::InProgress {
                 actions.push((CopyTarget::Row, item.text.as_str()));
@@ -412,7 +417,46 @@ impl Keystone {
             }
             _ => false,
         };
-        read(&copy_actions(row, document.as_deref(), open_edit))
+        let message = self.message_actions(key.session, index, cx);
+        read(&copy_actions(row, document.as_deref(), open_edit, &message))
+    }
+
+    /// The Send again, Edit and Discard controls row `index` draws and that can run now:
+    /// a message's own, or, on its image row, the message's.
+    pub(crate) fn message_actions(&self, session: u64, index: usize, cx: &App) -> Vec<CopyTarget> {
+        let state = self.state.read(cx);
+        let Some(rows) = state.conversations().get(&session).map(|c| &c.rows) else {
+            return Vec::new();
+        };
+        let item = match rows.get(index) {
+            Some(Row::Item(item))
+                if item.kind == ItemKind::UserMessage
+                    && !matches!(rows.get(index + 1), Some(Row::Attachments(a)) if !a.is_empty()) =>
+            {
+                item
+            }
+            Some(Row::Attachments(_)) => match index.checked_sub(1).and_then(|i| rows.get(i)) {
+                Some(Row::Item(item)) if item.kind == ItemKind::UserMessage => item,
+                _ => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        };
+        let mut actions = Vec::new();
+        match item.status {
+            ItemStatus::Failed if state.refused_send(session, &item.id).is_some() => {
+                if state.offline(session).is_none() {
+                    actions.push(CopyTarget::SendAgain);
+                }
+                if self.composer_empty(session, cx) {
+                    actions.push(CopyTarget::EditMessage);
+                }
+            }
+            ItemStatus::InProgress if state.unreached(session).is_some() => {
+                actions.push(CopyTarget::Discard);
+            }
+            _ => {}
+        }
+        actions
     }
 
     /// The row of the widget whose control has focus.
@@ -608,7 +652,7 @@ impl Keystone {
             }
             chosen => chosen.map(|(_, text)| text),
         };
-        if let Some(text) = text {
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
         self.presentation.current.views.note_focus(key);

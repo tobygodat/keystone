@@ -644,8 +644,8 @@ crates/keystone-agent/src/remote/link.rs
 	ServerAliveCountMax=3
 	ServerAliveInterval=5
 	The machine didn't answer. Check that it is on and reachable over SSH.
+	The machine has no record of this message, so it may already have run
 	The machine isn't connected, so the message wasn't sent
-	The machine never received this message
 	The machine's host key changed since you last connected, so SSH refused it. Keystone won't connect until you have checked why and fixed known_hosts yourself.
 	The machine's keystone-host {} speaks protocol {}, and Keystone needs {PROTOCOL}. Install the matching version there: {INSTALL}
 	cargo install --locked --path crates/keystone-agent --bin keystone-host
@@ -1299,6 +1299,8 @@ crates/keystone-desktop/src/conversation.rs
 	Could not read this conversation's history: {error}.
 	Keystone closed during this turn
 	Not sent.
+	Sent again
+	This message ran after all.
 	{NOT_SENT} {message}
 
 crates/keystone-desktop/src/customization.rs
@@ -2449,6 +2451,7 @@ crates/keystone-desktop/src/transcript.rs
 	{count} tool calls have
 	{count} {many}
 	{files} files
+	{machine} has no record of it, so it may already have run. This sends it again.
 	{more} more lines
 	{text}: {error}
 	{} could not be read.

@@ -770,6 +770,7 @@ fn a_message_its_machine_refused_notifies_as_a_failed_turn() {
         send: "local:1-0".into(),
         message: "/srv/app isn't a folder on desk".into(),
         login: false,
+        unrecorded: false,
     };
     assert_eq!(Alert::of(&refused), Some(Alert::TurnFailed));
 }

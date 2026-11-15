@@ -52,6 +52,9 @@ pub struct RowControls {
     pub unreached: Option<UnreachedControl>,
     /// A message its machine refused: Send again and Edit.
     pub refused: Option<RefusedControl>,
+    /// A message's status line, drawn in this row: the message's own, or its image
+    /// row's when it has images, so the line sits under them.
+    pub status: Option<MessageStatus>,
     /// The Restore to here control on the last reply of a turn with a checkpoint.
     pub restore: Option<RestoreControl>,
     /// A finished reply's Second opinion control: its selector and what it does.
@@ -151,8 +154,157 @@ pub struct UnreachedControl {
 pub struct RefusedControl {
     pub on_send_again: ClickHandler,
     pub on_edit: ClickHandler,
+    /// Why Send again can't run now: the machine isn't connected, as the composer's
+    /// Send says.
+    pub send_again_blocked: Option<String>,
     /// Why Edit can't run now, such as the composer holding text.
     pub edit_blocked: Option<&'static str>,
+    /// The machine had no record of the message, so it may already have run.
+    pub unrecorded: Option<String>,
+}
+
+/// A message's status line: what became of it, and what can be done about it.
+pub struct MessageStatus {
+    pub status: ItemStatus,
+    /// The message's row, which names its controls.
+    pub index: usize,
+    /// It was taken out to edit, and its machine's record shows it ran.
+    pub ran_after_all: bool,
+}
+
+/// A row action Button that the keyboard's row cursor can focus, and that says why it is
+/// off on a wrapper, since a disabled Button shows no tooltip.
+fn row_action(
+    button: Button,
+    target: CopyTarget,
+    why_off: Option<SharedString>,
+    id: (&'static str, usize),
+    action: &Option<(CopyTarget, FocusHandle)>,
+) -> AnyElement {
+    let button = button.disabled(why_off.is_some()).when_some(
+        action.as_ref().filter(|(t, _)| *t == target),
+        |button, (_, focus)| button.track_focus(focus).reveal_on_focus(),
+    );
+    div()
+        .id(id)
+        .when_some(why_off, |d, why| d.tooltip(Tooltip::text(why).builder()))
+        .child(button)
+        .into_any_element()
+}
+
+fn message_status(
+    status: MessageStatus,
+    unreached: Option<UnreachedControl>,
+    refused: Option<RefusedControl>,
+    action: &Option<(CopyTarget, FocusHandle)>,
+) -> AnyElement {
+    let MessageStatus {
+        status,
+        index,
+        ran_after_all,
+    } = status;
+    let muted = |text: SharedString| Label::new(text).size(TextSize::Sm).color(Color::Muted);
+    let line = match status {
+        // Its machine refused it: it can go again as it is, or be written anew.
+        ItemStatus::Failed => Some(
+            h_flex()
+                .automation_id(format!("not-sent-{index}"))
+                .gap_2()
+                .child(muted("Not sent".into()))
+                .when_some(refused, |d, refused| {
+                    let again = Button::new(("send-again", index), "Send again")
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .debug_selector(move || format!("send-again-{index}"))
+                        .tooltip(Tooltip::text(match &refused.unrecorded {
+                            Some(machine) => format!(
+                                "{machine} has no record of it, so it may already have run. This sends it again."
+                            ),
+                            None => "Send this message again, as it is".into(),
+                        }))
+                        .on_click(refused.on_send_again);
+                    let edit = Button::new(("edit-message", index), "Edit")
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .debug_selector(move || format!("edit-message-{index}"))
+                        .tooltip(Tooltip::text("Write a new message from this one"))
+                        .on_click(refused.on_edit);
+                    d.child(row_action(
+                        again,
+                        CopyTarget::SendAgain,
+                        refused.send_again_blocked.map(SharedString::from),
+                        ("send-again-why", index),
+                        action,
+                    ))
+                    .child(row_action(
+                        edit,
+                        CopyTarget::EditMessage,
+                        refused.edit_blocked.map(SharedString::from),
+                        ("edit-message-why", index),
+                        action,
+                    ))
+                })
+                .into_any_element(),
+        ),
+        // Taken out of its bubble to write a new message from.
+        crate::conversation::EDITED => Some(
+            div()
+                .automation_id(format!("edited-{index}"))
+                .child(muted("Edited".into()))
+                .into_any_element(),
+        ),
+        // Sent to another machine, whose host hasn't answered yet.
+        ItemStatus::InProgress => Some(match unreached {
+            None => div()
+                .automation_id(format!("sending-{index}"))
+                .child(muted("Sending".into()))
+                .into_any_element(),
+            Some(unreached) => {
+                let discard = Button::new(("discard-message", index), "Discard")
+                    .style(ButtonStyle::Subtle)
+                    .size(ButtonSize::Compact)
+                    .debug_selector(move || format!("discard-message-{index}"))
+                    .tooltip(Tooltip::text(format!(
+                        "{} may already have run it",
+                        unreached.machine
+                    )))
+                    .on_click(unreached.on_discard);
+                h_flex()
+                    .automation_id(format!("unreached-{index}"))
+                    .gap_2()
+                    .child(muted(unreached.reason.into()))
+                    .child(row_action(
+                        discard,
+                        CopyTarget::Discard,
+                        None,
+                        ("discard-message-why", index),
+                        action,
+                    ))
+                    .into_any_element()
+            }
+        }),
+        // Given up while its machine couldn't say what became of it.
+        ItemStatus::Interrupted => Some(
+            div()
+                .automation_id(format!("discarded-{index}"))
+                .child(muted("Discarded".into()))
+                .into_any_element(),
+        ),
+        _ => None,
+    };
+    v_flex()
+        .items_end()
+        .gap_1()
+        .children(line)
+        .when(ran_after_all, |d| {
+            d.child(
+                div()
+                    .automation_id(format!("ran-after-all-{index}"))
+                    .debug_selector(move || format!("ran-after-all-{index}"))
+                    .child(muted(crate::conversation::RAN_AFTER_ALL.into())),
+            )
+        })
+        .into_any_element()
 }
 
 pub struct ForkControl {
@@ -651,6 +803,7 @@ pub fn row(
     let RowControls {
         unreached,
         refused,
+        status,
         action,
         selected,
         activity,
@@ -734,96 +887,9 @@ pub fn row(
                                 )
                                 .child(marked(item.text.clone(), 0)),
                         )
-                        .when(item.status == ItemStatus::Failed, |d| {
-                            d.child(
-                                h_flex()
-                                    .automation_id(format!("not-sent-{index}"))
-                                    .gap_2()
-                                    .child(
-                                        Label::new("Not sent")
-                                            .size(TextSize::Sm)
-                                            .color(Color::Muted),
-                                    )
-                                    .when_some(refused, |d, refused| {
-                                        let edit = Button::new(("edit-message", index), "Edit")
-                                            .style(ButtonStyle::Subtle)
-                                            .size(ButtonSize::Compact)
-                                            .debug_selector(move || format!("edit-message-{index}"))
-                                            .disabled(refused.edit_blocked.is_some())
-                                            .tooltip(Tooltip::text(
-                                                "Write a new message from this one",
-                                            ))
-                                            .on_click(refused.on_edit);
-                                        // A disabled button shows no tooltip, so the
-                                        // reason sits on its wrapper.
-                                        let edit = div()
-                                            .id(("edit-message-why", index))
-                                            .when_some(refused.edit_blocked, |d, why| {
-                                                d.tooltip(Tooltip::text(why).builder())
-                                            })
-                                            .child(edit);
-                                        d.child(
-                                            Button::new(("send-again", index), "Send again")
-                                                .style(ButtonStyle::Subtle)
-                                                .size(ButtonSize::Compact)
-                                                .debug_selector(move || {
-                                                    format!("send-again-{index}")
-                                                })
-                                                .tooltip(Tooltip::text(
-                                                    "Send this message again, as it is",
-                                                ))
-                                                .on_click(refused.on_send_again),
-                                        )
-                                        .child(edit)
-                                    }),
-                            )
-                        })
-                        // Taken out of its bubble to write a new message from.
-                        .when(item.status == crate::conversation::EDITED, |d| {
-                            d.child(
-                                div().automation_id(format!("edited-{index}")).child(
-                                    Label::new("Edited").size(TextSize::Sm).color(Color::Muted),
-                                ),
-                            )
-                        })
-                        // Sent to another machine, whose host hasn't answered yet.
-                        .when(item.status == ItemStatus::InProgress, |d| match unreached {
-                            None => d.child(div().automation_id(format!("sending-{index}")).child(
-                                Label::new("Sending").size(TextSize::Sm).color(Color::Muted),
-                            )),
-                            Some(unreached) => d.child(
-                                h_flex()
-                                    .automation_id(format!("unreached-{index}"))
-                                    .gap_2()
-                                    .child(
-                                        Label::new(unreached.reason)
-                                            .size(TextSize::Sm)
-                                            .color(Color::Muted),
-                                    )
-                                    .child(
-                                        Button::new(("discard-message", index), "Discard")
-                                            .style(ButtonStyle::Subtle)
-                                            .size(ButtonSize::Compact)
-                                            .debug_selector(move || {
-                                                format!("discard-message-{index}")
-                                            })
-                                            .tooltip(Tooltip::text(format!(
-                                                "{} may already have run it",
-                                                unreached.machine
-                                            )))
-                                            .on_click(unreached.on_discard),
-                                    ),
-                            ),
-                        })
-                        // Given up while its machine couldn't say what became of it.
-                        .when(item.status == ItemStatus::Interrupted, |d| {
-                            d.child(
-                                div().automation_id(format!("discarded-{index}")).child(
-                                    Label::new("Discarded")
-                                        .size(TextSize::Sm)
-                                        .color(Color::Muted),
-                                ),
-                            )
+                        // A message with images shows its status under them instead.
+                        .when_some(status, |d, status| {
+                            d.child(message_status(status, unreached, refused, &action))
                         }),
                 )
                 .into_any_element(),
@@ -1176,12 +1242,19 @@ pub fn row(
             crate::widget::SurfaceView::new(surface.clone(), widget.expect("widget controls"))
                 .into_any_element()
         }
-        Row::Attachments(attachments) => crate::attachments::sent(
-            index,
-            attachments,
-            previews.map(|previews| previews.open),
-            cx,
-        ),
+        Row::Attachments(attachments) => v_flex()
+            .items_end()
+            .gap_1()
+            .child(crate::attachments::sent(
+                index,
+                attachments,
+                previews.map(|previews| previews.open),
+                cx,
+            ))
+            .when_some(status, |d, status| {
+                d.child(message_status(status, unreached, refused, &action))
+            })
+            .into_any_element(),
         Row::Decision { action, .. } => Label::new(format!("Denied: {action}"))
             .size(TextSize::Ui)
             .color(Color::Muted)

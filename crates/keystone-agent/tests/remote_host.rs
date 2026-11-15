@@ -3630,7 +3630,7 @@ fn a_message_from_an_earlier_run_is_recalled_by_its_id() {
     );
     assert_eq!(
         recalled[2],
-        "not sent m-never: The machine never received this message"
+        "not sent m-never: The machine has no record of this message, so it may already have run"
     );
 
     client.events.clear();

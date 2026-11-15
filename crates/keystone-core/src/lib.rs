@@ -291,6 +291,10 @@ pub struct PendingSend {
     /// is sent again under its ID, taken out to edit, or the host's record shows it ran.
     #[serde(default, skip_serializing_if = "is_default")]
     pub refused: bool,
+    /// Refused because the host had no record of it: its journal was replaced, or the
+    /// record is past the newest kept, so it may already have run.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub unrecorded: bool,
     /// A turn started after it was sent, so the host took a message, and its turn's
     /// state is the turn's own: an answer that arrives after the turn, as one asked
     /// for after a relaunch does, never makes it Running again.
@@ -1587,11 +1591,17 @@ impl Store {
     /// The host refused the message `send` before any provider saw it, so it is not a
     /// send: the session stays as it was. The message stays saved, refused, with its
     /// text and images, so it can be sent again ([`Store::resend_send`]).
-    pub fn refuse_send(&mut self, id: u64, send: &str) -> StoreResult<Applied<()>> {
+    pub fn refuse_send(
+        &mut self,
+        id: u64,
+        send: &str,
+        unrecorded: bool,
+    ) -> StoreResult<Applied<()>> {
         self.update_session(id, |session| {
             if let Some(pending) = session.pending.iter_mut().find(|p| p.id == send) {
                 pending.refused = true;
                 pending.ran = false;
+                pending.unrecorded = unrecorded;
             }
         })
     }

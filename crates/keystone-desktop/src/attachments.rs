@@ -644,6 +644,7 @@ pub(crate) fn sent(
         .unwrap_or_default();
     h_flex()
         .automation_id(SharedString::from(format!("sent-attachments-{index}")))
+        .debug_selector(move || format!("sent-attachments-{index}"))
         .justify_end()
         .flex_wrap()
         .gap(px(6.))

@@ -4615,6 +4615,7 @@ impl AppState {
                             text: text.clone(),
                             attachments: draft.attachments.clone(),
                             refused: false,
+                            unrecorded: false,
                             ran: false,
                         },
                         now_ms(),
@@ -4756,8 +4757,9 @@ impl AppState {
                 send,
                 message,
                 login,
+                unrecorded,
             } => {
-                let _ = self.store.refuse_send(session, &send);
+                let _ = self.store.refuse_send(session, &send, unrecorded);
                 self.changes.sidebar = true;
                 let unfixed = self.session(session).is_some_and(|s| !s.started());
                 let message = if login && unfixed {
@@ -4769,6 +4771,7 @@ impl AppState {
                     send,
                     message,
                     login,
+                    unrecorded,
                 }
             }
             event => event,
@@ -4782,7 +4785,12 @@ impl AppState {
             return;
         };
         let _ = if again {
-            self.store.refuse_send(session, send)
+            // Refused as it was before, still with what the host said about it.
+            let unrecorded = self
+                .session(session)
+                .and_then(|s| s.pending().iter().find(|p| p.id == *send))
+                .is_some_and(|p| p.unrecorded);
+            self.store.refuse_send(session, send, unrecorded)
         } else {
             self.store.withdraw_send(session, send)
         };
@@ -4809,6 +4817,10 @@ impl AppState {
         let Some(refused) = self.refused_send(session, send) else {
             return false;
         };
+        // Off while the machine can't be reached, as the composer's Send is.
+        if self.offline(session).is_some() {
+            return false;
+        }
         self.resending = Some(send.to_owned());
         let sent = self.send_message_from(
             ComposerDraft {

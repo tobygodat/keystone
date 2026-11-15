@@ -45,6 +45,12 @@ pub enum CopyTarget {
     TextSelection,
     /// The message row's Fork from here control.
     Fork,
+    /// A refused message's Send again control.
+    SendAgain,
+    /// A refused message's Edit control.
+    EditMessage,
+    /// A message still sending to an unreachable machine: its Discard control.
+    Discard,
     /// An open edit row's Open full edit control.
     OpenEdit,
 }

@@ -15,7 +15,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(git -C "$here" rev-parse --show-toplevel)
 
 # The commit at which the model was last confirmed to describe the code below.
-SYNC=aea4a3361
+SYNC=0e0ef69f9
 COVERED=(
   crates/keystone-agent/src/remote/link.rs
   crates/keystone-agent/src/remote/connection.rs

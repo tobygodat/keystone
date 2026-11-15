@@ -24,6 +24,14 @@ const NOT_SENT: &str = "Not sent.";
 /// The status of a message its machine refused that the user took out of its bubble to
 /// edit into a new one: a message the user declined to send again as it was.
 pub const EDITED: ItemStatus = ItemStatus::Declined;
+/// The ID suffix of the hidden row a message sent again leaves where it was: a restore
+/// finds the message's earlier row by it and hides that row, so the message's later
+/// entry puts it at the end, where it was sent again.
+const MOVED: &str = "#sent-again";
+/// The note after a message sent again, which moved to the end of the transcript.
+pub const SENT_AGAIN: &str = "Sent again";
+/// The note on a message taken out to edit whose machine's record shows it ran.
+pub const RAN_AFTER_ALL: &str = "This message ran after all.";
 /// How many sent messages the provider's copies are matched against by ID.
 const ECHOES_KEPT: usize = 64;
 
@@ -174,6 +182,12 @@ pub struct Conversation {
     /// the copy's ID, so its later events, such as its completion after its start,
     /// find that row rather than adding another.
     echo_at: HashMap<String, usize>,
+    /// Rows of messages taken out to edit that their machine's record shows ran, until a
+    /// restore shows the note logged for each in its place.
+    pub ran_after_edit: BTreeSet<usize>,
+    /// Where each row a restore made was placed, so a note logged for one of them in a
+    /// later run lands beside it.
+    restored_places: Vec<u64>,
     /// While restore applies saved recovery batches: the log position each row came
     /// from, so a batch only touches rows logged before it.
     origins: Option<Vec<usize>>,
@@ -523,7 +537,11 @@ impl Conversation {
                         if lost_count(&item).is_some() {
                             places[index] = places[index].min(place);
                         }
+                        let moved = item.id.ends_with(MOVED);
                         self.rows[index] = Row::Item(item);
+                        if moved {
+                            self.hide_followers(index);
+                        }
                         None
                     }
                     None => Some(Row::Item(item)),
@@ -633,11 +651,13 @@ impl Conversation {
             with_lost_count(kept, total);
             true
         });
+        self.restored_places = ordered.iter().map(|(place, _, _)| *place).collect();
         let (origins, rows): (Vec<usize>, Vec<Row>) = ordered
             .into_iter()
             .map(|(_, origin, row)| (origin, row))
             .unzip();
         self.rows = rows;
+        self.ran_after_edit.clear();
         let at: HashMap<usize, usize> = origins
             .iter()
             .enumerate()
@@ -1057,6 +1077,14 @@ impl Conversation {
     /// Inserts a row, keeping the indexes that point past it on the same rows.
     fn insert_row(&mut self, at: usize, row: Row, logged_at: usize) {
         self.rows.insert(at, row);
+        if let Some(&place) = self.restored_places.get(at) {
+            self.restored_places.insert(at, place);
+        }
+        self.ran_after_edit = self
+            .ran_after_edit
+            .iter()
+            .map(|&index| if index >= at { index + 1 } else { index })
+            .collect();
         let marks = self.forks.iter_mut().map(|mark| &mut mark.rows);
         for rows in marks.chain(self.checkpoints.iter_mut().map(|mark| &mut mark.rows)) {
             if at <= rows.start {
@@ -1120,8 +1148,33 @@ impl Conversation {
 
     /// Shows the refused message the app sent as `send` as sending again, under its ID,
     /// as a new message to another machine reads until its host answers.
+    /// It moves to the end of the transcript, with its images and a "Sent again" note,
+    /// so its reply follows it; a hidden marker keeps its earlier place.
     pub fn send_again(&mut self, send: &str) {
-        let _ = self.answer_sent(send, ItemStatus::InProgress);
+        let Some(index) = self
+            .rows
+            .iter()
+            .rposition(|row| matches!(row, Row::Item(item) if item.id == send))
+        else {
+            return;
+        };
+        let Row::Item(mut item) = self.rows[index].clone() else {
+            return;
+        };
+        let attachments = match self.rows.get(index + 1) {
+            Some(Row::Attachments(attachments)) => attachments.clone(),
+            _ => Vec::new(),
+        };
+        let marker = Item {
+            id: [send, MOVED].concat(),
+            kind: ItemKind::UserMessage,
+            text: String::new(),
+            status: ItemStatus::Failed,
+        };
+        self.rows[index] = Row::Item(marker.clone());
+        self.mark(index);
+        self.log_item(index, marker);
+        self.hide_followers(index);
         if self
             .error
             .as_deref()
@@ -1129,7 +1182,63 @@ impl Conversation {
         {
             self.error = None;
         }
-        self.running = true;
+        item.status = ItemStatus::InProgress;
+        self.push_message(Sent {
+            id: item.id,
+            text: item.text,
+            attachments,
+            sending: true,
+        });
+        self.push_note(SENT_AGAIN.into());
+    }
+
+    /// Hides the image row and "Sent again" note that follow the message in row `index`,
+    /// which moved to the end. They are blanked, not removed, so no row's index moves.
+    fn hide_followers(&mut self, index: usize) {
+        let mut at = index + 1;
+        if let Some(Row::Attachments(attachments)) = self.rows.get_mut(at) {
+            attachments.clear();
+            self.changed.insert(at);
+            at += 1;
+        }
+        if let Some(Row::Note(text)) = self.rows.get_mut(at)
+            && text == SENT_AGAIN
+        {
+            text.clear();
+            self.changed.insert(at);
+        }
+    }
+
+    /// The message the app sent as `send`, taken out to edit, turns out to have run:
+    /// its row says so, and a note logged where its last row is says so after a
+    /// restore.
+    fn ran_after_edit(&mut self, send: &str) {
+        let Some(index) = self
+            .rows
+            .iter()
+            .rposition(|row| matches!(row, Row::Item(item) if item.id == send))
+        else {
+            return;
+        };
+        self.ran_after_edit.insert(index);
+        let last = match self.rows.get(index + 1) {
+            Some(Row::Attachments(_)) => index + 1,
+            _ => index,
+        };
+        // A row from an earlier run is placed where that run put it.
+        let (seq, run) = if last >= self.run_start {
+            (Some(self.seq(last)), Some(self.run.0))
+        } else {
+            (self.restored_places.get(last).copied(), None)
+        };
+        self.write(
+            Entry::Note {
+                text: RAN_AFTER_ALL.into(),
+                seq,
+                run,
+            },
+            false,
+        );
     }
 
     /// Shows the refused message the app sent as `send` as taken out to edit. If its
@@ -1410,6 +1519,9 @@ impl Conversation {
             // took reads sent, and a "Not sent" line about it goes.
             Event::Taken { send } => {
                 let was = self.answer_sent(&send, ItemStatus::Completed);
+                if was == Some(EDITED) {
+                    self.ran_after_edit(&send);
+                }
                 if matches!(was, Some(ItemStatus::Failed | EDITED))
                     && self
                         .error
@@ -1698,10 +1810,12 @@ impl Conversation {
         // A message the app sent is only ever its own row: another it sent with the
         // same text is another message.
         if item.id.starts_with(LOCAL) {
-            return self
-                .rows
-                .iter()
-                .rposition(|row| matches!(row, Row::Item(local) if local.id == item.id));
+            // The marker a message sent again leaves takes the place of its earlier row.
+            let moved = item.id.strip_suffix(MOVED);
+            return self.rows.iter().rposition(|row| {
+                matches!(row, Row::Item(local)
+                    if local.id == item.id || Some(local.id.as_str()) == moved)
+            });
         }
         if let Some(&index) = self.echo_at.get(&item.id)
             && matches!(self.rows.get(index), Some(Row::Item(row)) if row.id == item.id)
@@ -1774,6 +1888,9 @@ pub fn visible(row: &Row) -> bool {
             _ => true,
         },
         Row::Decision { allowed, .. } => !allowed,
+        // What a message sent again left behind where it was.
+        Row::Attachments(attachments) => !attachments.is_empty(),
+        Row::Note(text) => !text.is_empty(),
         _ => true,
     }
 }
@@ -3216,6 +3333,7 @@ mod tests {
             send: "local:1-0".into(),
             message: "refused".into(),
             login: false,
+            unrecorded: false,
         });
         log.save(&mut reloaded);
         let again = log.restore();
@@ -3242,6 +3360,7 @@ mod tests {
             send: id.into(),
             message: "refused".into(),
             login: false,
+            unrecorded: false,
         };
         let taken = |id: &str| Event::Taken { send: id.into() };
 
@@ -3332,6 +3451,7 @@ mod tests {
             send: "local:1-0".into(),
             message: "refused".into(),
             login: true,
+            unrecorded: false,
         });
         live.send_again("local:1-0");
         let mut started = user("u1", "hello there");
@@ -3349,8 +3469,10 @@ mod tests {
                 completed(),
             ],
         );
+        // What shows: a message sent again leaves a hidden marker where it was.
         let users = |rows: &[Row]| -> Vec<(String, ItemStatus)> {
             rows.iter()
+                .filter(|row| super::visible(row))
                 .filter_map(|row| match row {
                     Row::Item(item) if item.kind == ItemKind::UserMessage => {
                         Some((item.id.clone(), item.status))
@@ -3364,6 +3486,206 @@ mod tests {
             users(&log.restore().rows),
             [("u1".into(), ItemStatus::Completed)]
         );
+    }
+
+    /// What the transcript shows, in order: each visible row as a short label.
+    fn shown_rows(conversation: &Conversation) -> Vec<String> {
+        conversation
+            .rows
+            .iter()
+            .filter(|row| super::visible(row))
+            .map(|row| match row {
+                Row::Item(item) => format!("{:?} {} {:?}", item.kind, item.text, item.status),
+                Row::Attachments(a) => format!("images {}", a.len()),
+                Row::Note(text) => format!("note {text}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn picture() -> keystone_core::Attachment {
+        keystone_core::Attachment {
+            sha256: "a".repeat(64),
+            media_type: "image/png".into(),
+            name: "picture.png".into(),
+        }
+    }
+
+    /// A message sent again moves to the end with its images and a "Sent again" note,
+    /// so its reply follows it, live and after a restart. Its `Taken` and the provider's
+    /// copy find it there, and sending it again a second time moves it once more.
+    #[test]
+    fn a_message_sent_again_moves_to_the_end_and_its_reply_follows() {
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        live.push_message(super::Sent {
+            id: "local:1-0".into(),
+            text: "refused one".into(),
+            attachments: vec![picture()],
+            sending: true,
+        });
+        feed(
+            &mut live,
+            &mut log,
+            [Event::NotSent {
+                send: "local:1-0".into(),
+                message: "refused".into(),
+                login: false,
+                unrecorded: false,
+            }],
+        );
+        live.push_message(super::Sent {
+            id: "local:2-2".into(),
+            text: "later one".into(),
+            attachments: Vec::new(),
+            sending: true,
+        });
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::Taken {
+                    send: "local:2-2".into(),
+                },
+                Event::TurnStarted,
+                Event::ItemCompleted(user("u2", "later one")),
+                Event::ItemCompleted(Item {
+                    id: "r2".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "reply to later".into(),
+                    status: ItemStatus::Completed,
+                }),
+                completed(),
+            ],
+        );
+        live.send_again("local:1-0");
+        log.save(&mut live);
+        let moved = [
+            "UserMessage later one Completed",
+            "AgentMessage reply to later Completed",
+            "UserMessage refused one InProgress",
+            "images 1",
+            "note Sent again",
+        ];
+        assert_eq!(shown_rows(&live), moved);
+        assert_eq!(
+            shown_rows(&log.restore()),
+            moved,
+            "a restore keeps the move"
+        );
+        let mut started = user("u1", "refused one");
+        started.status = ItemStatus::InProgress;
+        feed(
+            &mut live,
+            &mut log,
+            [
+                Event::Taken {
+                    send: "local:1-0".into(),
+                },
+                Event::TurnStarted,
+                Event::ItemStarted(started),
+                Event::ItemCompleted(user("u1", "refused one")),
+                Event::ItemCompleted(Item {
+                    id: "r1".into(),
+                    kind: ItemKind::AgentMessage,
+                    text: "reply to refused".into(),
+                    status: ItemStatus::Completed,
+                }),
+                completed(),
+            ],
+        );
+        let answered = [
+            "UserMessage later one Completed",
+            "AgentMessage reply to later Completed",
+            "UserMessage refused one Completed",
+            "images 1",
+            "note Sent again",
+            "AgentMessage reply to refused Completed",
+        ];
+        assert_eq!(shown_rows(&live), answered);
+        assert_eq!(shown_rows(&log.restore()), answered);
+    }
+
+    /// Refused again after it was sent again, and sent again once more, it moves once
+    /// more: nothing of it stays behind, live or after a restart.
+    #[test]
+    fn a_message_sent_again_twice_shows_once() {
+        let (mut live, mut log) = (Conversation::default(), Log::default());
+        let refuse = || Event::NotSent {
+            send: "local:1-0".into(),
+            message: "refused".into(),
+            login: false,
+            unrecorded: false,
+        };
+        live.push_message(super::Sent {
+            id: "local:1-0".into(),
+            text: "twice".into(),
+            attachments: vec![picture()],
+            sending: true,
+        });
+        feed(&mut live, &mut log, [refuse()]);
+        live.push_note("between".into());
+        live.send_again("local:1-0");
+        feed(&mut live, &mut log, [refuse()]);
+        live.send_again("local:1-0");
+        log.save(&mut live);
+        let once = [
+            "note between",
+            "UserMessage twice InProgress",
+            "images 1",
+            "note Sent again",
+        ];
+        assert_eq!(shown_rows(&live), once);
+        assert_eq!(shown_rows(&log.restore()), once);
+    }
+
+    /// A message taken out to edit whose `Taken` then comes says it ran after all, on
+    /// its row and, after a restart, as a note right after its images, also when the
+    /// message is from an earlier run.
+    #[test]
+    fn an_edited_message_that_ran_says_so_beside_it() {
+        for earlier_run in [false, true] {
+            let (mut live, mut log) = (Conversation::default(), Log::default());
+            live.push_message(super::Sent {
+                id: "local:1-0".into(),
+                text: "edit me".into(),
+                attachments: vec![picture()],
+                sending: true,
+            });
+            feed(
+                &mut live,
+                &mut log,
+                [Event::NotSent {
+                    send: "local:1-0".into(),
+                    message: "refused".into(),
+                    login: false,
+                    unrecorded: false,
+                }],
+            );
+            live.edited("local:1-0");
+            live.push_note("after it".into());
+            log.save(&mut live);
+            if earlier_run {
+                live = log.restore();
+            }
+            feed(
+                &mut live,
+                &mut log,
+                [Event::Taken {
+                    send: "local:1-0".into(),
+                }],
+            );
+            assert_eq!(live.ran_after_edit.iter().copied().collect::<Vec<_>>(), [0]);
+            assert_eq!(
+                shown_rows(&log.restore()),
+                [
+                    "UserMessage edit me Completed",
+                    "images 1",
+                    "note This message ran after all.",
+                    "note after it",
+                ],
+                "earlier run: {earlier_run}"
+            );
+        }
     }
 
     #[test]
