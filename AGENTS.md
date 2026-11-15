@@ -1,6 +1,6 @@
 # Keystone
 
-A native Rust and GPUI desktop workspace for running Claude Code and Codex sessions side by side, for developers who use both.
+A native Rust and GPUI desktop workspace for running Claude Code and Codex sessions side by side, for developers who use both. It targets Apple Silicon macOS. Linux is not a target for now ([ADR 0013](docs/adr/0013-macos-first-queue-plan-mode-multi-agent-previews-plugins.md)).
 
 - Issues: https://github.com/tobygodat/keystone/issues. Every change starts from an issue there.
 
@@ -18,7 +18,7 @@ Put cargo on `PATH` first: `export PATH=$HOME/.cargo/bin:$PATH`.
 
 - `bash scripts/check.sh` then `bash scripts/check.sh ui`. Together they run formatting, the color and shortcut checks, the UI string inventory and every test in the workspace. Both need `cargo-nextest`, and `check.sh` says where to get it when it is missing. `cargo test --workspace` runs a subset of the same tests, so it is not a separate step. Add `bash scripts/check.sh providers` when a change starts provider processes or adds tests that do.
 - `cargo clippy --workspace --locked` exits 0.
-- Prove the change in the real app: `cargo run -p keystone-desktop --locked` with `KEYSTONE_STATE_PATH` set to a scratch file, or drive it headless through the verify skill (`crates/keystone-desktop/.agents/skills/verify/SKILL.md`). Do what a user would do and attach screenshots to the PR for any visible change:
+- Prove the change in the real app: `cargo run -p keystone-desktop --locked` with `KEYSTONE_STATE_PATH` set to a scratch file, or drive it headless through the verify skill (`crates/keystone-desktop/.agents/skills/verify/SKILL.md`). The verify skill needs Linux until TOB-472 lands. On a Mac, run `python3 scripts/macos-smoke.py`. Do what a user would do and attach screenshots to the PR for any visible change:
   - Create a Claude session (Ctrl+N), type a draft, quit with Ctrl+Q, relaunch: the session and its draft come back.
   - For a changed surface, click through it with the mouse as well as its shortcut, and check the screenshot, not only the named element.
 
