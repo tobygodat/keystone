@@ -4,7 +4,7 @@
 
 ## Automatic history
 
-`bash scripts/check.sh [core|core-fast|ui|build]` records itself with the label `check <mode>`. Its checks, output and exit status are unchanged. Without `python3` it runs the checks unrecorded. Use `bash scripts/check.sh --unmeasured <mode>` to bypass recording, including when the local Python installation is broken.
+`bash scripts/check.sh [core|ui|build]` records itself with the label `check <mode>`. Its checks, output and exit status are unchanged. Use `bash scripts/check.sh --unmeasured <mode>` to bypass recording.
 
 ## Explicit commands
 
@@ -36,13 +36,13 @@ This tool does not schedule or serialize builds. Concurrent builds still slow ea
 
 The [initial baseline](dev-iteration-baseline.json) records the original checks before instrumentation. It separates the first invocation in a new worktree from five unchanged warm runs. Warm build samples are freshness checks, not edited-source rebuilds. Keep this distinction when comparing later measurements.
 
-## Faster core tests with nextest
+## Tests run under nextest
 
-`bash scripts/check.sh core-fast` runs the same formatting and color checks as `core`, then `cargo nextest run -p keystone-core -p keystone-agent --locked --test-threads 16 --retries 0`, then `cargo test -p keystone-core -p keystone-agent --locked --doc`. It is opt-in. `core` keeps the standard Cargo runner and nothing switches between them automatically.
+`check.sh core` and `check.sh ui` run their tests with `cargo nextest run --locked --retries 0`. `core` then runs the doctests with `cargo test --doc`, because nextest does not run doctests. Until 2026-11-15 nextest was the opt-in `core-fast` lane, and `core` and `ui` used `cargo test`.
 
-Install nextest from the official pre-built binaries at <https://nexte.st/docs/installation/pre-built-binaries/>. Version 0.9.148 is the tested one. `check.sh` never installs nextest automatically. When `cargo-nextest` is missing it exits with an error that names that page and the `core` fallback.
+Install nextest from the official pre-built binaries at <https://nexte.st/docs/installation/pre-built-binaries/>. Version 0.9.148 is the tested one, and CI installs that release. `check.sh` never installs nextest. When `cargo-nextest` is missing it exits with an error that names that page.
 
-Sixteen test workers suit this suite because its tests are I/O-bound rather than CPU-bound. Keep four build jobs (`CARGO_BUILD_JOBS=4`) when another build shares the machine. Retries are off so a flaky test fails the run instead of hiding. Nextest does not run doctests, which is why the second command runs them with Cargo's runner. The two commands together cover the same tests as `core`.
+Nextest runs each test in its own process and runs test binaries side by side, where `cargo test` finishes one binary before it starts the next. The worker count is nextest's default, one per logical CPU. `RUST_TEST_THREADS` no longer limits a run. To limit one, set `NEXTEST_TEST_THREADS`, for example `NEXTEST_TEST_THREADS=8 bash scripts/check.sh ui` when other builds share the machine. Retries are off so a flaky test fails the run instead of hiding.
 
 ## Measured improvements
 
@@ -62,6 +62,25 @@ A subsequent worker sweep measured 4.20 s with eight, 3.54 s with twelve, and 3.
 
 [Second-pass samples and provenance](dev-iteration-hillclimb-2.json) preserve both controlled experiments. The reported endpoints span the sequential fixture comparison and worker sweep. To reproduce the sweep, use the corrected fixture revision in that file, copy `check.sh` with only the worker count changed, then cycle through 8, 12 and 16 workers five times after warming each variant. Keep the full formatting, lint and doctest stages. Future measurements should target an actual content edit and rebuild, since the warm test check is now approaching its shutdown-test floor.
 
+## Third pass: one slow test, then nextest for every lane
+
+By 2026-11-14 the fastest recorded `check core` took 168 s. One test caused nearly all of it. `every_four_event_route_assignment_acknowledges_only_the_drained_prefix` took **141 s**, because its scripted host closed stdout once it had sent its frames. The link read that as the host dropping and reconnected after a 1 s backoff, and the test polled for the brief connected moments. Keeping the host's stdout open brought the test to **1.3 s**. Find a slow test with `cargo nextest run ... --status-level all`, which prints each test's time.
+
+With that fixed, the core tests took a median **47.5 s under `cargo test` and 16.1 s under nextest** (ranges 47.1–47.9 s and 16.1–16.3 s, five alternating runs each, all 1,030 tests passing). Sixteen workers took 21.1 s, so the lanes now use nextest's default of one worker per logical CPU. Under nextest the lane is bound by its summed test time, about 290 s of mostly waiting, spread over 24 workers.
+
+The ui tests took 42.9 s under `cargo test` and 42.1 s under nextest, so nextest does not make that lane faster yet. Nearly all 1,221 ui tests are in one binary, which both runners run in parallel, and one test takes 41.5 s. Nextest still helps there in two ways:
+
+- `RUST_TEST_THREADS=2`, which agents set on a busy machine, no longer applies. In the recorded runs since 2026-11-10 the lane's median was 4.7 minutes with that setting and 1.2 without. Those limited runs were also on a busier machine.
+- Each test is its own process. With three ui runs going at once, `cargo test` took 45–58 s and nextest 42.7–43.2 s. One `cargo test` run lost its whole binary to a SIGKILL, with 1,018 tests in it. The cause was not found.
+
+The complete lanes, measured on a busy machine (load 9–29), took a median 24.9 s for `check core` and 48.7 s for `check ui`.
+
+Later the same day the slowest desktop tests stopped waiting on real time: a test helper had waited 10 s for a host process that was already dead, and the usage-limit tests had waited on the wall clock. The ui tests then took 12.5 s under nextest (two runs, 12.50 and 12.52 s), and `check ui` took 19.3 s once built (one run).
+
+These runs were not on an idle machine, which the rule above asks for. Other agents were building and testing, and each sample records the load at its start. The core result is far larger than the spread. The ui result is no measurable difference. Four test failures and one killed binary came up across these runs, each under load. They are listed with the [samples](dev-iteration-nextest.json).
+
+`cargo test --workspace` is no longer part of the merge checks. When it was dropped, its 1,356 tests were all among the 2,255 that `check.sh core` and `check.sh ui` run, by comparing `cargo nextest list` for each. The workspace has no doctests. `core` still runs the doctest command for its two crates. `ui` does not, because that command rebuilds GPUI for a different feature set, about 44 s, to run nothing. Add it if `keystone-ui` gains a doctest.
+
 ## Native verification workflow
 
 Use the existing private headless desktop and named controls in the [native verification skill](../crates/keystone-desktop/.agents/skills/verify/SKILL.md). Build the changed app once, reuse the existing driver, then keep the desktop alive for the related journey. Wait for named elements, observe each state transition, and check the saved state. Reusing a driver does not permit reusing a stale app binary.
@@ -80,7 +99,7 @@ See [workflow research and follow-up experiments](research/dev-workflow.md) for 
 
 ## Keep the edit loop small
 
-Run formatting and the tests for the changed crate while editing. For a focused core test, record `cargo test -p keystone-core <test-name> --locked` with this wrapper. Run the full required checks on the integrated change. Use native checks for affected desktop behavior and live providers at the integration gate described in [the conventions](CONVENTIONS.md#tests).
+Run formatting and the tests for the changed crate while editing. For a focused test, run `cargo nextest run -p keystone-core --locked -E 'test(<test-name>)'`, and record it with this wrapper when the time matters. Run the full required checks on the integrated change. Use native checks for affected desktop behavior and live providers at the integration gate described in [the conventions](CONVENTIONS.md#tests).
 
 Keep separate Cargo target directories for worktrees that build concurrently. Reuse the existing compiler cache and the implementation worktree's incremental artifacts. For a native check, reuse a binary only when it represents the exact source being verified. Do not clean caches as part of ordinary iteration.
 

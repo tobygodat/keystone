@@ -214,6 +214,10 @@ class DevTimingTest(unittest.TestCase):
 
 
 class CheckScriptTest(unittest.TestCase):
+    NEXTEST_CORE = 'nextest run -p keystone-core -p keystone-agent --locked --retries 0'
+    CASE_INSENSITIVE = 'test -p keystone-agent --locked --lib --no-run --message-format=json'
+    DOCTESTS = 'test -p keystone-core -p keystone-agent --locked --doc'
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.records = self.tmp / 'records'
@@ -221,10 +225,18 @@ class CheckScriptTest(unittest.TestCase):
         self.bin.mkdir()
         self.calls = self.tmp / 'cargo-calls'
         cargo = self.bin / 'cargo'
+        # The case-insensitive lane asks cargo where the agent's test binary is and runs it.
         cargo.write_text('#!/bin/sh\necho "$*" >> "$FAKE_CARGO_CALLS"\n'
-                         '[ "$1" = test ] && exit "${FAKE_CARGO_TEST_EXIT:-0}"\n'
-                         '[ "$1" = nextest ] && exit "${FAKE_CARGO_NEXTEST_EXIT:-0}"\nexit 0\n')
+                         '[ "$1" = nextest ] && exit "${FAKE_CARGO_NEXTEST_EXIT:-0}"\n'
+                         'case "$*" in\n'
+                         '  *--doc*) exit "${FAKE_CARGO_DOC_EXIT:-0}" ;;\n'
+                         '  *--message-format=json*)\n'
+                         """    echo '{"executable":"/bin/true","target":{"name":"keystone_agent"}}' ;;\n"""
+                         'esac\nexit 0\n')
         cargo.chmod(0o755)
+        self.nextest = self.bin / 'cargo-nextest'
+        self.nextest.write_text('#!/bin/sh\nexit 0\n')
+        self.nextest.chmod(0o755)
         self.env = {**os.environ, 'KEYSTONE_DEV_TIMING_DIR': str(self.records),
                     'FAKE_CARGO_CALLS': str(self.calls),
                     'PATH': f'{self.bin}:{os.environ["PATH"]}'}
@@ -239,73 +251,53 @@ class CheckScriptTest(unittest.TestCase):
     def cargo_calls(self):
         return self.calls.read_text().splitlines()
 
-    def test_check_runs_original_steps_once_and_records_the_mode(self):
+    def test_core_runs_each_step_once_and_records_the_mode(self):
         done = self.check('core', env={**self.env, 'KEYSTONE_CACHE_STATE': 'warm'})
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(self.cargo_calls(), ['fmt --all --check',
-                                              'test -p keystone-core -p keystone-agent --locked'])
+        self.assertEqual(self.cargo_calls(), ['fmt --all --check', self.NEXTEST_CORE,
+                                              self.CASE_INSENSITIVE, self.DOCTESTS])
         [record] = [json.loads(p.read_text()) for p in self.records.glob('*.json')]
         self.assertEqual((record['label'], record['exit_code'], record['cache_state']),
                          ('check core', 0, 'warm'))
 
-    def test_check_failure_status_is_recorded_and_returned(self):
-        done = self.check('ui', env={**self.env, 'FAKE_CARGO_TEST_EXIT': '101'})
-        self.assertEqual(done.returncode, 101)
-        [record] = [json.loads(p.read_text()) for p in self.records.glob('*.json')]
-        self.assertEqual((record['label'], record['exit_code']), ('check ui', 101))
-
-    def install_fake_nextest(self):
-        nextest = self.bin / 'cargo-nextest'
-        nextest.write_text('#!/bin/sh\nexit 0\n')
-        nextest.chmod(0o755)
-
-    def test_core_fast_runs_nextest_then_doctests(self):
-        self.install_fake_nextest()
-        done = self.check('core-fast')
+    def test_ui_builds_the_fakes_then_runs_nextest_with_the_ui_features(self):
+        done = self.check('ui')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.cargo_calls(), [
             'fmt --all --check',
-            'nextest run -p keystone-core -p keystone-agent --locked --test-threads 16 --retries 0',
-            'test -p keystone-core -p keystone-agent --locked --doc'])
-        [record] = [json.loads(p.read_text()) for p in self.records.glob('*.json')]
-        self.assertEqual((record['label'], record['exit_code']), ('check core-fast', 0))
+            'build -p keystone-agent --bins --locked',
+            'nextest run -p keystone-desktop -p keystone-ui'
+            ' --features keystone-desktop/ui-tests,keystone-ui/ui-tests --locked --retries 0'])
 
-    def test_core_fast_runner_failure_skips_doctests(self):
-        self.install_fake_nextest()
-        done = self.check('core-fast', env={**self.env, 'FAKE_CARGO_NEXTEST_EXIT': '100'})
+    def test_check_failure_status_is_recorded_and_returned(self):
+        done = self.check('ui', env={**self.env, 'FAKE_CARGO_NEXTEST_EXIT': '100'})
         self.assertEqual(done.returncode, 100)
-        self.assertEqual(self.cargo_calls()[-1][:11], 'nextest run')
-        self.assertEqual(len(self.cargo_calls()), 2)
+        [record] = [json.loads(p.read_text()) for p in self.records.glob('*.json')]
+        self.assertEqual((record['label'], record['exit_code']), ('check ui', 100))
 
-    def test_core_fast_doctest_failure_propagates(self):
-        self.install_fake_nextest()
-        done = self.check('core-fast', env={**self.env, 'FAKE_CARGO_TEST_EXIT': '101'})
+    def test_a_failed_test_run_skips_the_steps_after_it(self):
+        done = self.check('core', env={**self.env, 'FAKE_CARGO_NEXTEST_EXIT': '100'})
+        self.assertEqual(done.returncode, 100)
+        self.assertEqual(self.cargo_calls(), ['fmt --all --check', self.NEXTEST_CORE])
+
+    def test_a_doctest_failure_propagates(self):
+        done = self.check('core', env={**self.env, 'FAKE_CARGO_DOC_EXIT': '101'})
         self.assertEqual(done.returncode, 101)
-        self.assertEqual(self.cargo_calls()[-1], 'test -p keystone-core -p keystone-agent --locked --doc')
+        self.assertEqual(self.cargo_calls()[-1], self.DOCTESTS)
 
-    def test_core_fast_without_nextest_points_at_install_and_core(self):
+    def test_without_nextest_the_check_says_how_to_install_it(self):
+        self.nextest.unlink()
         for tool in ('bash', 'dirname', 'grep', 'env', 'python3'):
             (self.bin / tool).symlink_to(shutil.which(tool))
-        done = self.check('core-fast', env={**self.env, 'PATH': str(self.bin)})
+        done = self.check('core', env={**self.env, 'PATH': str(self.bin)})
         self.assertEqual(done.returncode, 2)
         self.assertIn('https://nexte.st/docs/installation/pre-built-binaries/', done.stderr)
-        self.assertIn('scripts/check.sh core', done.stderr)
         self.assertEqual(self.cargo_calls(), ['fmt --all --check'])
 
     def test_check_usage_error_is_preserved(self):
         done = self.check('nope')
         self.assertEqual(done.returncode, 2)
         self.assertIn('Usage', done.stderr)
-
-    def test_check_without_python_runs_unmeasured(self):
-        for tool in ('bash', 'dirname', 'grep', 'env'):
-            (self.bin / tool).symlink_to(shutil.which(tool))
-        done = self.check('build', env={**self.env, 'PATH': str(self.bin)})
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(self.cargo_calls(), ['fmt --all --check',
-                                              'build -p keystone-desktop --locked',
-                                              'build -p keystone-ui --example gallery --locked'])
-        self.assertFalse(self.records.exists())
 
 
 if __name__ == '__main__':

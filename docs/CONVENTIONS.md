@@ -12,9 +12,8 @@ Cargo lives in `~/.cargo/bin`. Put it on `PATH` (`export PATH=$HOME/.cargo/bin:$
 
 Before a PR, run the merge checks in `AGENTS.md`. The lanes of `scripts/check.sh` are faster and narrower:
 
-- `bash scripts/check.sh` (lane `core`): formatting, the theme color check, the shortcut-hint check, the UI string inventory, and the core and agent tests.
-- `bash scripts/check.sh core-fast`: the same tests under nextest with 16 workers. Opt-in, see [development iteration timing](dev-iteration.md).
-- `bash scripts/check.sh ui`: GPUI simulated-input tests of the app and its components (`ui-tests` feature).
+- `bash scripts/check.sh` (lane `core`): formatting, the theme color check, the shortcut-hint check, the UI string inventory, and the core and agent tests with their doctests.
+- `bash scripts/check.sh ui`: every test of the app and its components, including the GPUI simulated-input tests (`ui-tests` feature).
 - `bash scripts/check.sh providers`: every workspace and UI test again, with failing `claude` and `codex` first on `PATH`. It fails if any test ran one, and lists each call. It also checks that an app build run under a test binary's name still finds `claude` on `PATH`. CI runs it too.
 - `bash scripts/check.sh build`: compiles the app and the component gallery.
 - `bash scripts/check.sh apple`: type-checks every crate for Apple Silicon macOS from Linux. On a Mac, `python3 scripts/macos-smoke.py` runs the native smoke journey. See [macOS](macos.md).

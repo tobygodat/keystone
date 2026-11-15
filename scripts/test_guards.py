@@ -54,6 +54,7 @@ class CheckScriptGuardsTest(unittest.TestCase):
         self.bin = self.repo / 'bin'
         self.bin.mkdir()
         self.shim('cargo', 'exit 0')
+        self.shim('cargo-nextest', 'exit 0')
         self.write('docs/ui-strings.txt', INVENTORY)
         self.write('crates/keystone-ui/src/theme.rs', THEME)
         self.write('crates/keystone-ui/src/color.rs', COLOR)

@@ -1,0 +1,412 @@
+{
+ "measured_at": "2026-11-15",
+ "claim": "Warm test-loop wall time for the core and ui lanes under cargo test and cargo-nextest, after the scripted remote host fix. Not compilation speed.",
+ "environment": {
+  "rustc": "1.100.0",
+  "nextest": "0.9.148",
+  "logical_cpus": 24,
+  "cache_state": "warm",
+  "retries": 0,
+  "machine": "shared with other agents' builds and tests; load_before is the 1-minute load average at each start"
+ },
+ "source": "origin/main 1c80ded38 plus the scripted host fix (PR #184)",
+ "method": "Alternating runs, one after another, in the order cargo, nextest with 16 workers, nextest with default workers. tests_s is the runner's own reported test time: nextest's Summary, or the sum of cargo test's per-binary 'finished in' times. wall_s is the whole command.",
+ "one_test": {
+  "name": "keystone-agent::remote_host every_four_event_route_assignment_acknowledges_only_the_drained_prefix",
+  "before_s": [
+   140.8,
+   122.9
+  ],
+  "after_s": [
+   1.26,
+   1.56
+  ],
+  "note": "one run per side by the author, one by an independent checker"
+ },
+ "core_tests": {
+  "cargo": [
+   {
+    "round": 1,
+    "tests_s": 47.4,
+    "load_before": 1.97,
+    "passed": 1030
+   },
+   {
+    "round": 2,
+    "tests_s": 47.6,
+    "load_before": 4.46,
+    "passed": 1030
+   },
+   {
+    "round": 3,
+    "tests_s": 47.5,
+    "load_before": 8.47,
+    "passed": 1030
+   },
+   {
+    "round": 4,
+    "tests_s": 47.9,
+    "load_before": 7.21,
+    "passed": 1030
+   },
+   {
+    "round": 5,
+    "tests_s": 47.1,
+    "load_before": 3.47,
+    "passed": 1030
+   }
+  ],
+  "nextest16": [
+   {
+    "round": 1,
+    "tests_s": 21.091,
+    "load_before": 5.09,
+    "passed": 1030
+   },
+   {
+    "round": 2,
+    "tests_s": 21.419,
+    "load_before": 4.3,
+    "passed": 1030
+   },
+   {
+    "round": 3,
+    "tests_s": 21.034,
+    "load_before": 7.9,
+    "passed": 1030
+   },
+   {
+    "round": 4,
+    "tests_s": 21.059,
+    "load_before": 4.42,
+    "passed": 1030
+   },
+   {
+    "round": 5,
+    "tests_s": 21.089,
+    "load_before": 2.85,
+    "passed": 1030
+   }
+  ],
+  "nextest": [
+   {
+    "round": 1,
+    "tests_s": 16.158,
+    "load_before": 4.19,
+    "passed": 1030
+   },
+   {
+    "round": 2,
+    "tests_s": 16.273,
+    "load_before": 5.36,
+    "passed": 1030
+   },
+   {
+    "round": 3,
+    "tests_s": 16.067,
+    "load_before": 7.16,
+    "passed": 1030
+   },
+   {
+    "round": 4,
+    "tests_s": 16.077,
+    "load_before": 3.29,
+    "passed": 1030
+   },
+   {
+    "round": 5,
+    "tests_s": 16.104,
+    "load_before": 2.59,
+    "passed": 1030
+   }
+  ]
+ },
+ "ui_tests": {
+  "cargo": [
+   {
+    "round": 1,
+    "wall_s": 47.3,
+    "exit": 0,
+    "load_before": 24.71,
+    "result": "1221 passed 0 failed"
+   },
+   {
+    "round": 2,
+    "wall_s": 42.5,
+    "exit": 0,
+    "load_before": 33.32,
+    "result": "1221 passed 0 failed"
+   },
+   {
+    "round": 3,
+    "wall_s": 43.1,
+    "exit": 0,
+    "load_before": 21.04,
+    "result": "1221 passed 0 failed"
+   },
+   {
+    "round": 4,
+    "wall_s": 42.3,
+    "exit": 0,
+    "load_before": 11.68,
+    "result": "1221 passed 0 failed"
+   },
+   {
+    "round": 5,
+    "wall_s": 42.9,
+    "exit": 0,
+    "load_before": 9.83,
+    "result": "1221 passed 0 failed"
+   }
+  ],
+  "nextest": [
+   {
+    "round": 1,
+    "wall_s": 42.0,
+    "exit": 0,
+    "load_before": 59.61,
+    "result": "1221 tests run: 1221 passed, 28 skipped"
+   },
+   {
+    "round": 2,
+    "wall_s": 42.2,
+    "exit": 100,
+    "load_before": 33.95,
+    "result": "349/1221 tests run: 348 passed, 1 failed, 28 skipped"
+   },
+   {
+    "round": 3,
+    "wall_s": 42.1,
+    "exit": 0,
+    "load_before": 19.63,
+    "result": "1221 tests run: 1221 passed, 28 skipped"
+   },
+   {
+    "round": 4,
+    "wall_s": 42.3,
+    "exit": 0,
+    "load_before": 16.47,
+    "result": "1221 tests run: 1221 passed, 28 skipped"
+   },
+   {
+    "round": 5,
+    "wall_s": 42.1,
+    "exit": 0,
+    "load_before": 9.89,
+    "result": "1221 tests run: 1221 passed, 28 skipped"
+   }
+  ]
+ },
+ "three_ui_runs_at_once": [
+  {
+   "round": 1,
+   "runner": "cargo",
+   "wall_s": 47.3,
+   "exit": 0,
+   "load_before": 5.48,
+   "result": "1221 passed 0 failed"
+  },
+  {
+   "round": 1,
+   "runner": "cargo",
+   "wall_s": 48.0,
+   "exit": 0,
+   "load_before": 5.48,
+   "result": "1221 passed 0 failed"
+  },
+  {
+   "round": 1,
+   "runner": "cargo",
+   "wall_s": 48.3,
+   "exit": 0,
+   "load_before": 5.48,
+   "result": "1221 passed 0 failed"
+  },
+  {
+   "round": 1,
+   "runner": "nextest",
+   "wall_s": 42.7,
+   "exit": 0,
+   "load_before": 42.55,
+   "result": "1221 tests run: 1221 passed, 28 skipped"
+  },
+  {
+   "round": 1,
+   "runner": "nextest",
+   "wall_s": 42.7,
+   "exit": 0,
+   "load_before": 42.55,
+   "result": "1221 tests run: 1221 passed, 28 skipped"
+  },
+  {
+   "round": 1,
+   "runner": "nextest",
+   "wall_s": 43.0,
+   "exit": 0,
+   "load_before": 42.55,
+   "result": "1221 tests run: 1221 passed, 28 skipped"
+  },
+  {
+   "round": 2,
+   "runner": "cargo",
+   "wall_s": 57.4,
+   "exit": 0,
+   "load_before": 31.38,
+   "result": "1221 passed 0 failed"
+  },
+  {
+   "round": 2,
+   "runner": "cargo",
+   "wall_s": 57.8,
+   "exit": 101,
+   "load_before": 31.38,
+   "result": "1220 passed 1 failed"
+  },
+  {
+   "round": 2,
+   "runner": "cargo",
+   "wall_s": 58.1,
+   "exit": 0,
+   "load_before": 31.38,
+   "result": "1221 passed 0 failed"
+  },
+  {
+   "round": 2,
+   "runner": "nextest",
+   "wall_s": 42.5,
+   "exit": 100,
+   "load_before": 74.79,
+   "result": "1221 tests run: 1220 passed, 1 failed, 28 skipped"
+  },
+  {
+   "round": 2,
+   "runner": "nextest",
+   "wall_s": 43.2,
+   "exit": 0,
+   "load_before": 74.79,
+   "result": "1221 tests run: 1221 passed, 28 skipped"
+  },
+  {
+   "round": 2,
+   "runner": "nextest",
+   "wall_s": 43.2,
+   "exit": 0,
+   "load_before": 74.79,
+   "result": "1221 tests run: 1221 passed, 28 skipped"
+  },
+  {
+   "round": 3,
+   "runner": "cargo",
+   "wall_s": 4.7,
+   "exit": 101,
+   "load_before": 40.44,
+   "result": "203 passed 0 failed"
+  },
+  {
+   "round": 3,
+   "runner": "cargo",
+   "wall_s": 45.3,
+   "exit": 0,
+   "load_before": 40.44,
+   "result": "1221 passed 0 failed"
+  },
+  {
+   "round": 3,
+   "runner": "cargo",
+   "wall_s": 45.4,
+   "exit": 0,
+   "load_before": 40.44,
+   "result": "1221 passed 0 failed"
+  },
+  {
+   "round": 3,
+   "runner": "nextest",
+   "wall_s": 42.7,
+   "exit": 0,
+   "load_before": 51.08,
+   "result": "1221 tests run: 1221 passed, 28 skipped"
+  },
+  {
+   "round": 3,
+   "runner": "nextest",
+   "wall_s": 43.2,
+   "exit": 0,
+   "load_before": 51.08,
+   "result": "1221 tests run: 1221 passed, 28 skipped"
+  },
+  {
+   "round": 3,
+   "runner": "nextest",
+   "wall_s": 43.2,
+   "exit": 0,
+   "load_before": 51.08,
+   "result": "1221 tests run: 1221 passed, 28 skipped"
+  }
+ ],
+ "check_sh_lanes_on_nextest": [
+  {
+   "round": 1,
+   "lane": "core",
+   "wall_s": 26.1,
+   "exit": 0,
+   "load_before": 29.06
+  },
+  {
+   "round": 1,
+   "lane": "ui",
+   "wall_s": 47.9,
+   "exit": 100,
+   "load_before": 23.22
+  },
+  {
+   "round": 2,
+   "lane": "core",
+   "wall_s": 24.9,
+   "exit": 0,
+   "load_before": 22.19
+  },
+  {
+   "round": 2,
+   "lane": "ui",
+   "wall_s": 48.7,
+   "exit": 0,
+   "load_before": 15.49
+  },
+  {
+   "round": 3,
+   "lane": "core",
+   "wall_s": 23.7,
+   "exit": 0,
+   "load_before": 11.44
+  },
+  {
+   "round": 3,
+   "lane": "ui",
+   "wall_s": 48.9,
+   "exit": 0,
+   "load_before": 9.06
+  }
+ ],
+ "failures": [
+  {
+   "where": "ui_tests nextest round 2",
+   "test": "device::tests::lifecycle::a_close_that_outlasts_a_slow_start_says_closing_and_goes_through"
+  },
+  {
+   "where": "three_ui_runs_at_once cargo round 2",
+   "test": "tests::claude_sessions_apply_approval_modes_from_the_menu"
+  },
+  {
+   "where": "three_ui_runs_at_once nextest round 2",
+   "test": "app_state::remote_tests::a_message_shown_not_sent_that_ran_is_corrected_in_place"
+  },
+  {
+   "where": "three_ui_runs_at_once cargo round 3",
+   "test": "the keystone-desktop test binary ended on SIGKILL after 4.7 s with 203 tests passed; cause not found"
+  },
+  {
+   "where": "check_sh_lanes_on_nextest ui round 1",
+   "test": "terminal::tests::input::option_types_the_layout_character_on_macos_unless_it_is_meta"
+  }
+ ]
+}

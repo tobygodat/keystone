@@ -52,12 +52,18 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: cargo test --workspace
-        run: cargo test --workspace --locked
+      # The pinned release check.sh was measured with. The URL is nextest's own.
+      - name: Install cargo-nextest
+        run: |
+          curl -LsSf https://get.nexte.st/0.9.148/linux | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
 
       - name: cargo clippy --workspace
-        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         run: cargo clippy --workspace --locked
+
+      - name: scripts/test_dev_timing.py
+        if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
+        run: python3 scripts/test_dev_timing.py
 
       - name: scripts/check.sh
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}

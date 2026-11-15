@@ -14,22 +14,24 @@ python3 scripts/test_ui_strings.py
 python3 scripts/ui-strings.py --check
 python3 scripts/guards.py hints
 python3 scripts/guards.py executables
+# Nextest runs test binaries side by side, where `cargo test` runs them one after another.
+# Retries stay off so a flaky test fails the run instead of hiding.
+nextest() {
+  if ! command -v cargo-nextest >/dev/null; then
+    echo 'check.sh needs cargo-nextest, which is not on PATH. Install it from https://nexte.st/docs/installation/pre-built-binaries/ (0.9.148 is the tested version).' >&2
+    exit 2
+  fi
+  cargo nextest run "$@" --locked --retries 0
+}
 case "${1:-core}" in
   core)
-    cargo test -p keystone-core -p keystone-agent --locked
-    bash scripts/case-insensitive-tests.sh ;;
-  core-fast)
-    if ! command -v cargo-nextest >/dev/null; then
-      echo 'core-fast needs cargo-nextest, which is not on PATH. Install it from https://nexte.st/docs/installation/pre-built-binaries/ or run `bash scripts/check.sh core`.' >&2
-      exit 2
-    fi
-    cargo nextest run -p keystone-core -p keystone-agent --locked --test-threads 16 --retries 0
+    nextest -p keystone-core -p keystone-agent
     bash scripts/case-insensitive-tests.sh
     cargo test -p keystone-core -p keystone-agent --locked --doc
     ;;
   ui)
     cargo build -p keystone-agent --bins --locked
-    cargo test -p keystone-desktop -p keystone-ui --features keystone-desktop/ui-tests,keystone-ui/ui-tests --locked ;;
+    nextest -p keystone-desktop -p keystone-ui --features keystone-desktop/ui-tests,keystone-ui/ui-tests ;;
   providers)
     # Every test with failing `claude` and `codex` first on PATH. Each logs its call and
     # exits 1, so a test that runs the CLI on PATH, which on a developer's machine is the
@@ -86,5 +88,5 @@ EOF
     ;;
   apple) bash scripts/apple-check.sh ;;
   linux) bash scripts/linux-check.sh ;;
-  *) echo 'Usage: bash scripts/check.sh [core|core-fast|ui|providers|build|apple|linux]' >&2; exit 2 ;;
+  *) echo 'Usage: bash scripts/check.sh [core|ui|providers|build|apple|linux]' >&2; exit 2 ;;
 esac
